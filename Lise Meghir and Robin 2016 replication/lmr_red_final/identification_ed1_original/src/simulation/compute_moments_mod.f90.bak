@@ -1,0 +1,1029 @@
+module compute_moments_mod
+
+  use glob
+  use modeldef
+  use params
+  use stat_helper
+  use array_helper
+  use output
+  use simulate_wages_mod
+  use moments_mod
+  use sort_mod
+
+contains
+
+subroutine computeMoments(s,p,moms,line_mask)
+    implicit none
+    type (Moments) , intent(INOUT) :: moms
+    type (SimulationWorkerPanel) , intent(IN) :: s
+    type (ExogenousParameters),    intent(in)    :: p
+    logical, intent(in) :: line_mask(:) !allows to select only some lines of the simulated panel
+    integer :: nr, nt ,ns, ntmp        ! R individuals, T time periods
+    integer :: years
+    integer :: i,j,k
+    real(wp),allocatable :: W_monthly(:,:), merror(:,:)
+    integer,allocatable  ::  E_monthly(:,:), F_monthly(:,:),  E_monthly_all(:,:)
+    logical,allocatable :: DJ(:,:), E2E(:,:)
+
+    real(wp),allocatable :: w_t(:,:) 
+    integer,allocatable :: empl_t(:,:) 
+    real(wp),allocatable :: w_year(:,:), Dw_year(:,:) 
+    real(wp),allocatable :: tmp_den(:) , tmp_num(:)
+    real(wp) :: tmp_var
+
+    real(wp), allocatable :: max_wage(:), worker_type(:)
+
+    real(wp) :: total_local_sum_of_square, total_local_sum, tmp_local_mean ,tmp_local_var, tmp_local_sum_of_square
+    integer ::  total_local_count , tmp_local_count
+
+    logical, allocatable :: usable(:,:)
+
+    real(wp) :: x1,x2,x3,x4,x5,x6,x7,x8,x9,x10, x11,x12,x13,x14,x15,x16,x17,x18,x19,x20
+    real(wp) :: x21,x22,x23,x24,x25,x26,x27,x28,x29,x30, x31,x32,x33,x34,x35,x36,x37,x38,x39,x40
+    real(wp) :: x41,x42,x43,x44,x45,x46,x47,x48,x49,x50, x51,x52,x53,x54,x55,x56,x57,x58,x59,x60
+    real(wp) :: x61,x62,x63,x64,x65,x66,x67,x68,x69,x70, x71,x72,x73,x74,x75,x76,x77,x78
+
+    real(wp) :: sigma2, covar
+
+    nr = p%nWorkerSimulation
+    nt = p%nPeriodSimulation
+    ns = p%momentsMonths
+
+    years = floor(ns / 12.0_wp)
+
+    ! Allocate array for worker type and max wage
+    allocate( max_wage(nr) )
+    allocate( worker_type(nr) )
+
+    allocate( W_monthly(nr,ns))
+    allocate( merror(nr,ns))
+    allocate( E_monthly(nr,ns))
+    allocate( E_monthly_all(nr,ns))
+    allocate( F_monthly(nr,ns))
+
+    allocate( DJ(nr,ns-1)) ! must be ns-1 because represents a change
+
+    allocate( E2E(nr,ns) )
+
+    allocate( w_t(nr,years) )
+    allocate( empl_t(nr,years) )
+
+    allocate( usable(nr,years))
+
+    allocate( tmp_den(ns-1))
+    allocate( tmp_num(ns-1))
+
+    allocate( w_year(nr,years))
+
+    allocate( Dw_year(nr,(years-1)))
+
+    !call computeDiscreteHistogram(s%worker_type_r,hist)
+    ! the the last ns months fromthe total nt simulated months
+
+    ! create matrix of measurement error
+    call initSeed(1234567)
+    call randMat( merror )
+
+
+    sigma2 = p%sigma**2
+    covar  = p%corr * sigma2
+
+    x1  = SQRT(sigma2) 
+    x2  = covar/x1 
+    x3  = covar/x1 
+    x4  = covar/x1 
+    x5  = covar/x1 
+    x6  = covar/x1 
+    x7  = covar/x1 
+    x8  = covar/x1 
+    x9  = covar/x1 
+    x10 = covar/x1 
+    x11 = covar/x1 
+    x12 = covar/x1 
+    x13 = SQRT(sigma2- x2**2) 
+    x14 = (covar- x2*x3 )/ x13  
+    x15 = (covar- x2*x4 )/ x13  
+    x16 = (covar- x2*x5 )/ x13  
+    x17 = (covar- x2*x6 )/ x13  
+    x18 = (covar- x2*x7 )/ x13  
+    x19 = (covar- x2*x8 )/ x13  
+    x20 = (covar- x2*x9 )/ x13  
+    x21 = (covar- x2*x10 )/ x13  
+    x22 = (covar- x2*x11 )/ x13  
+    x23 = (covar- x2*x12 )/ x13  
+    x24 = SQRT(sigma2- x3**2 - x14**2) 
+    x25 = (covar- x3*x4 - x14*x15 )/ x24  
+    x26 = (covar- x3*x5 - x14*x16 )/ x24  
+    x27 = (covar- x3*x6 - x14*x17 )/ x24  
+    x28 = (covar- x3*x7 - x14*x18 )/ x24  
+    x29 = (covar- x3*x8 - x14*x19 )/ x24  
+    x30 = (covar- x3*x9 - x14*x20 )/ x24  
+    x31 = (covar- x3*x10 - x14*x21 )/ x24  
+    x32 = (covar- x3*x11 - x14*x22 )/ x24  
+    x33 = (covar- x3*x12 - x14*x23 )/ x24  
+    x34 = SQRT(sigma2- x4**2 - x15**2 - x25**2) 
+    x35 = (covar- x4*x5 - x15*x16 - x25*x26 )/ x34  
+    x36 = (covar- x4*x6 - x15*x17 - x25*x27 )/ x34  
+    x37 = (covar- x4*x7 - x15*x18 - x25*x28 )/ x34  
+    x38 = (covar- x4*x8 - x15*x19 - x25*x29 )/ x34  
+    x39 = (covar- x4*x9 - x15*x20 - x25*x30 )/ x34  
+    x40 = (covar- x4*x10 - x15*x21 - x25*x31 )/ x34  
+    x41 = (covar- x4*x11 - x15*x22 - x25*x32 )/ x34  
+    x42 = (covar- x4*x12 - x15*x23 - x25*x33 )/ x34  
+    x43 = SQRT(sigma2- x16**2 - x26**2 - x35**2 - x5**2) 
+    x44 = (covar- x5*x6 - x16*x17 - x26*x27 - x35*x36 )/ x43  
+    x45 = (covar- x5*x7 - x16*x18 - x26*x28 - x35*x37 )/ x43  
+    x46 = (covar- x5*x8 - x16*x19 - x26*x29 - x35*x38 )/ x43  
+    x47 = (covar- x5*x9 - x16*x20 - x26*x30 - x35*x39 )/ x43  
+    x48 = (covar- x5*x10 - x16*x21 - x26*x31 - x35*x40 )/ x43  
+    x49 = (covar- x5*x11 - x16*x22 - x26*x32 - x35*x41 )/ x43  
+    x50 = (covar- x5*x12 - x16*x23 - x26*x33 - x35*x42 )/ x43  
+    x51 = SQRT(sigma2- x6**2 - x17**2 - x27**2 - x36**2 - x44**2) 
+    x52 = (covar- x6*x7 - x17*x18 - x27*x28 - x36*x37 - x44*x45 )/ x51  
+    x53 = (covar- x6*x8 - x17*x18 - x27*x29 - x36*x38 - x44*x46 )/ x51  
+    x54 = (covar- x6*x9 - x17*x18 - x27*x30 - x36*x39 - x44*x47 )/ x51  
+    x55 = (covar- x6*x10 - x17*x18 - x27*x31 - x36*x40 - x44*x48 )/ x51  
+    x56 = (covar- x6*x11 - x17*x18 - x27*x32 - x36*x41 - x44*x49 )/ x51  
+    x57 = (covar- x6*x12 - x17*x18 - x27*x33 - x36*x42 - x44*x50 )/ x51  
+    x58 = SQRT(sigma2- x7**2 - x18**2 - x28**2 - x37**2 - x45**2 - x52**2) 
+    x59 = (covar- x7*x8 - x18*x19 - x28*x29 - x37*x38 - x45*x46 - x52*x53 )/ x58  
+    x60 = (covar- x7*x9 - x18*x20 - x28*x30 - x37*x39 - x45*x47 - x52*x54 )/ x58  
+    x61 = (covar- x7*x10 - x18*x21 - x28*x31 - x37*x40 - x45*x48 - x52*x55 )/ x58  
+    x62 = (covar- x7*x11 - x18*x22 - x28*x32 - x37*x41 - x45*x49 - x52*x56 )/ x58  
+    x63 = (covar- x7*x12 - x18*x23 - x28*x33 - x37*x42 - x45*x50 - x52*x57 )/ x58  
+    x64 = SQRT(sigma2- x8**2 - x19**2 - x29**2 - x38**2 - x46**2 - x53**2 - x59**2) 
+    x65 = (covar- x8*x9 - x19*x20 - x29*x30 - x38*x39 - x46*x47 - x53*x54 - x59*x60 )/ x64  
+    x66 = (covar- x8*x10 - x19*x21 - x29*x31 - x38*x40 - x46*x48 - x53*x55 - x59*x61 )/ x64  
+    x67 = (covar- x8*x11 - x19*x22 - x29*x32 - x38*x41 - x46*x49 - x53*x56 - x59*x62 )/ x64  
+    x68 = (covar- x8*x12 - x19*x23 - x29*x33 - x38*x42 - x46*x50 - x53*x57 - x59*x63 )/ x64  
+    x69 = SQRT(sigma2- x9**2 - x20**2 - x30**2 - x39**2 - x47**2 - x54**2 - x60**2 - x65**2) 
+    x70 = (covar- x10*x9 - x20*x21 - x30*x31 - x39*x40 - x47*x48 - x54*x55 - x60*x61 - x65*x66 )/ x69  
+    x71 = (covar- x11*x9 - x20*x22 - x30*x32 - x39*x41 - x47*x49 - x54*x56 - x60*x62 - x65*x67 )/ x69  
+    x72 = (covar- x12*x9 - x20*x23 - x30*x33 - x39*x42 - x47*x50 - x54*x57 - x60*x63 - x65*x68 )/ x69  
+    x73 = SQRT(sigma2- x10**2 - x21**2 - x31**2 - x40**2 - x48**2 - x55**2 - x61**2 - x66**2 - x70**2) 
+    x74 = (covar- x10*x11 - x21*x22 - x31*x32 - x40*x41 - x48*x49 - x55*x56 - x61*x62 - x66*x67 - x70*x71 )/ x73  
+    x75 = (covar- x10*x12 - x21*x23 - x31*x33 - x40*x42 - x48*x50 - x55*x57 - x61*x63 - x66*x68 - x70*x72 )/ x73  
+    x76 = SQRT(sigma2- x11**2 - x22**2 - x32**2 - x41**2 - x49**2 - x56**2 - x62**2 - x67**2 - x71**2 - x74**2) 
+    x77 = (covar- x11*x12 - x22*x23 - x32*x33 - x41*x42 - x49*x50 - x56*x57 - x62*x63 - x67*x68 - x71*x72 - x74*x75 )/ x76  
+    x78 = SQRT(sigma2- x12**2 - x23**2 - x33**2 - x42**2 - x50**2 - x57**2 - x63**2 - x68**2 - x72**2 - x75**2 - x77**2)
+    
+
+    ! transform uniform draw to standard normal
+    do i=1,nr
+       do j=1,ns
+          merror(i,j) = norminv( merror(i,j) )
+       end do
+    end do
+          
+
+    ! create measurement error where all months within a year have covariance of covar and are iid across years.
+    do i=1,nr
+       do j=1,ns/12
+          W_monthly(i,1+(j-1)*12) = x1 * merror(i,1+(j-1)*12)
+          W_monthly(i,2+(j-1)*12) = x2 * merror(i,1+(j-1)*12) + x13 * merror(i,2+(j-1)*12)
+          W_monthly(i,3+(j-1)*12) = x3 * merror(i,1+(j-1)*12) + x14 * merror(i,2+(j-1)*12) + x24 * merror(i,3+(j-1)*12) 
+          W_monthly(i,4+(j-1)*12) = x4 * merror(i,1+(j-1)*12) + x15 * merror(i,2+(j-1)*12) + x25 * merror(i,3+(j-1)*12) + x34 * merror(i,4+(j-1)*12) 
+          W_monthly(i,5+(j-1)*12) = x5 * merror(i,1+(j-1)*12) + x16 * merror(i,2+(j-1)*12) + x26 * merror(i,3+(j-1)*12) + x35 * merror(i,4+(j-1)*12) + x43 * merror(i,5+(j-1)*12) 
+          W_monthly(i,6+(j-1)*12) = x6 * merror(i,1+(j-1)*12) + x17 * merror(i,2+(j-1)*12) + x27 * merror(i,3+(j-1)*12) + x36 * merror(i,4+(j-1)*12) + x44 * merror(i,5+(j-1)*12) + x51 * merror(i,6+(j-1)*12) 
+          W_monthly(i,7+(j-1)*12) = x7 * merror(i,1+(j-1)*12) + x18 * merror(i,2+(j-1)*12) + x28 * merror(i,3+(j-1)*12) + x37 * merror(i,4+(j-1)*12) + x45 * merror(i,5+(j-1)*12) + x52 * merror(i,6+(j-1)*12) + x58 * merror(i,7+(j-1)*12)
+          W_monthly(i,8+(j-1)*12) = x8 * merror(i,1+(j-1)*12) + x19 * merror(i,2+(j-1)*12) + x29 * merror(i,3+(j-1)*12) + x38 * merror(i,4+(j-1)*12) + x46 * merror(i,5+(j-1)*12) + x53 * merror(i,6+(j-1)*12) + x59 * merror(i,7+(j-1)*12) + x64 * merror(i,8+(j-1)*12)
+          W_monthly(i,9+(j-1)*12) = x9 * merror(i,1+(j-1)*12) + x20 * merror(i,2+(j-1)*12) + x30 * merror(i,3+(j-1)*12) + x39 * merror(i,4+(j-1)*12) + x47 * merror(i,5+(j-1)*12) + x54 * merror(i,6+(j-1)*12) + x60 * merror(i,7+(j-1)*12) + x65 * merror(i,8+(j-1)*12) + x69 * merror(i,9+(j-1)*12)
+          W_monthly(i,10+(j-1)*12) = x10 * merror(i,1+(j-1)*12) + x21 * merror(i,2+(j-1)*12) + x31 * merror(i,3+(j-1)*12) + x40 * merror(i,4+(j-1)*12) + x48 * merror(i,5+(j-1)*12) + x55 * merror(i,6+(j-1)*12) + x61 * merror(i,7+(j-1)*12) + x66 * merror(i,8+(j-1)*12) + x70 * merror(i,9+(j-1)*12) + x73 * merror(i,10+(j-1)*12)
+          W_monthly(i,11+(j-1)*12) = x11 * merror(i,1+(j-1)*12) + x22 * merror(i,2+(j-1)*12) + x32 * merror(i,3+(j-1)*12) + x41 * merror(i,4+(j-1)*12) + x49 * merror(i,5+(j-1)*12) + x56 * merror(i,6+(j-1)*12) + x62 * merror(i,7+(j-1)*12) + x67 * merror(i,8+(j-1)*12) + x71 * merror(i,9+(j-1)*12) + x74 * merror(i,10+(j-1)*12) + x76 * merror(i,11+(j-1)*12)
+          W_monthly(i,12+(j-1)*12) = x12 * merror(i,1+(j-1)*12) + x23 * merror(i,2+(j-1)*12) + x33 * merror(i,3+(j-1)*12) + x42 * merror(i,4+(j-1)*12) + x50 * merror(i,5+(j-1)*12) + x57 * merror(i,6+(j-1)*12) + x63 * merror(i,7+(j-1)*12) + x68 * merror(i,8+(j-1)*12) + x72 * merror(i,9+(j-1)*12) + x75 * merror(i,10+(j-1)*12) + x77 * merror(i,11+(j-1)*12) + x78 * merror(i,12+(j-1)*12)
+       end do
+    end do
+
+    W_monthly = max(0.0_wp , exp(W_monthly) * s%wage_rt (:,(nt - ns + 1):nt))
+
+    E_monthly_all = merge(1, 0 , s%status_rt(:,(nt - ns + 1):nt) .eq. 1 )
+    E_monthly =     s%status_rt(:,(nt - ns + 1):nt)
+    F_monthly =     s%firm_id_rt(:,(nt - ns + 1):nt)
+
+    !--------------------------------------
+    !       simulated transitions
+    !--------------------------------------
+    ! write(*,*) "Computing transitions"
+    ! Only compute using months 60 to 240
+
+    total_local_sum = 0.0_wp
+    total_local_count = 0
+
+    ! find the transition rate into unemployment
+    do i=1,nr
+       do j=1,ns-1
+          if ( (E_monthly(i,j) .eq. 1) ) then
+             total_local_count = total_local_count + 1
+             if ( (E_monthly(i,j) .eq. 1) .and. (E_monthly(i,j+1) .eq. 0)  ) then 
+                total_local_sum = total_local_sum + 1.0_wp
+             end if
+          end if          
+       end do
+    end do
+    moms%EtoU_sim = total_local_sum / real(total_local_count, wp)
+
+!!$    tmp_num = sum( merge(1.0_wp , 0.0_wp , (E_monthly(:,60:ns-1)  .eq.  1) .and. (E_monthly(:,61:ns)  .eq.  0) ) , 1 )
+!!$    tmp_den = sum( merge(1.0_wp ,0.0_wp , E_monthly(:,60:ns-1)  .eq.  1) , 1 )
+!!$    call momentsVecWithMask( tmp_num / tmp_den,  (tmp_den .ne. 0.0_wp),  moms%EtoU_sim , tmp_var)
+
+    tmp_num = sum( merge(1.0_wp , 0.0_wp , (E_monthly(:,1:ns-1)  .eq.  0) .and. (E_monthly(:,2:ns)  .eq.  1) ) , 1 )
+    tmp_den = sum( merge(1.0_wp ,0.0_wp , E_monthly(:,1:ns-1)  .eq.  0) , 1 )
+    call momentsVecWithMask( tmp_num / tmp_den,  tmp_den .ne. 0.0_wp,  moms%UtoE_sim , tmp_var)
+
+    tmp_num = sum( merge(1.0_wp , 0.0_wp , (E_monthly(:,1:ns-1)  .eq.  1) .and. (E_monthly(:,2:ns)  .eq.  1) .and. &
+      (F_monthly(:,2:ns) .ne. F_monthly(:,1:ns-1) )) ,1 )
+    tmp_den = sum( merge(1.0_wp ,0.0_wp , E_monthly(:,1:ns-1)  .eq.  1 ) , 1)
+    call momentsVecWithMask( tmp_num / tmp_den,  tmp_den .ne. 0.0_wp ,  moms%JtoJ_sim , tmp_var)
+
+    !--------------------------------------
+    ! find months where there is a job change
+    !--------------------------------------
+    ! write(*,*) "Computing job changes"
+
+    DJ = .FALSE.
+    DJ = ( (E_monthly(:,1:ns-1)  .eq.  1) .and. (E_monthly(:,2:ns)  .eq.  1) .and. &
+      (F_monthly(:,2:ns) .ne. F_monthly(:,1:ns-1) ) )
+
+    ! DJ = DJ .and. (w_monthly(:,1:ns-1) .gt. 0.0_wp) .and.(w_monthly(:,2:ns) .gt. 0.0_wp) ! since we will take log
+    ! ONLY USE THE NEXT LINE IF WANT TO DONDITION ON QUANTILE
+    ! DJ = DJ .and. spread(line_mask,1,ns-1)
+    
+   
+    call computeWageMomentsWithMask(DJ , 1 , W_monthly , moms%DwJ2J_bar , moms%DwJ2J_var)
+	! write(*,*) "DJ", moms%DwJ2J_bar
+
+
+    !--------------------------------------
+    ! Indicate continuously employed at same job for last 13 months
+    !--------------------------------------
+    ! write(*,*) "Computing 13 months on the job"
+    total_local_sum_of_square = 0.0_wp
+    total_local_sum = 0.0_wp
+    total_local_count = 0
+    tmp_local_mean=0.0_wp
+    tmp_local_var=0.0_wp
+    tmp_local_count=0
+    tmp_local_sum_of_square=0.0_wp
+
+    ! calculate the mean
+    E2E = .FALSE.
+    do i=1,years-1
+       E2E(:,12*i) = ( (E_monthly(:,12*i) .eq. 1) .and. (E_monthly(:,12*(i+1)) .eq. 1) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+1)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+2)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+3)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+4)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+5)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+6)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+7)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+8)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+9)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+10)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+11)) &
+            .and. (f_monthly(:,12*i)  .eq.  f_monthly(:,12*i+12)) ) ;
+    end do
+    
+    ! ONLY USE THE NEXT LINE IF WANT TO CONDITION ON QUANTILE
+    !    E2E = E2E .and. spread(line_mask,1,ns)
+    
+    call computeWageMomentsWithMask(E2E , 12 , W_monthly , moms%DwE2E_bar , moms%DwE2E_var )
+    
+    !--------------------------------------
+    ! Create wage changes for job losers
+    ! 1 to 12 month unemployed
+    !--------------------------------------
+    total_local_sum_of_square = 0.0_wp
+    total_local_sum = 0.0_wp
+    total_local_count = 0
+    tmp_local_mean=0.0_wp
+    tmp_local_var=0.0_wp
+    tmp_local_count=0
+
+    !! Mean wage changes given unemployment spell
+    ! twelve months of unemployment
+    do i = 1,nr
+       do j = 1,ns-13
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 0) &
+               .and.( E_monthly(i,j+10) .eq. 0) &
+               .and.( E_monthly(i,j+11) .eq. 0) &
+               .and.( E_monthly(i,j+12) .eq. 0) &
+               .and. ( E_monthly(i,j+13) .eq. 1) &
+               .and. ( W_monthly(i,j+13) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+13)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+
+    ! 11 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-12
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 0) &
+               .and.( E_monthly(i,j+10) .eq. 0) &
+               .and.( E_monthly(i,j+11) .eq. 0) &
+               .and.( E_monthly(i,j+12) .eq. 1) &
+               .and. ( W_monthly(i,j+12) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+12)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+
+    ! 10 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-11
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 0) &
+               .and.( E_monthly(i,j+10) .eq. 0) &
+               .and.( E_monthly(i,j+11) .eq. 1) &
+               .and. ( W_monthly(i,j+11) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+11)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+
+    ! 9 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-10
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 0) &
+               .and.( E_monthly(i,j+10) .eq. 1) &
+               .and. ( W_monthly(i,j+10) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+10)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! 8 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-9
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 1) &
+               .and. ( W_monthly(i,j+9) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+9)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! 7 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-8
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 1) &
+               .and. ( W_monthly(i,j+8) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+8)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! 6 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-7
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 1) &
+               .and. ( W_monthly(i,j+7) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+7)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! 5 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-6
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 1) &
+               .and. ( W_monthly(i,j+6) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+6)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! 4 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-5
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 1) &
+               .and. ( W_monthly(i,j+5) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+5)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! 3 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-4
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 1) &
+               .and. ( W_monthly(i,j+4) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+4)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! 2 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-3
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 1) &
+               .and. ( W_monthly(i,j+3) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+3)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! 1 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-2
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 1) &
+               .and. ( W_monthly(i,j+2) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum = total_local_sum + ( log(W_monthly(i,j+2)) - log(W_monthly(i,j))  )
+             total_local_count = total_local_count + 1
+          end if
+       end do
+    end do
+    
+    ! Mean Wage Changes via unemployment
+    tmp_local_mean = total_local_sum / real(total_local_count, wp)
+
+    !!! Variance of wage change via unemployment
+    !! Mean wage changes given unemployment spell
+    ! twelve months of unemployment
+    do i = 1,nr
+       do j = 1,ns-13
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 0) &
+               .and.( E_monthly(i,j+10) .eq. 0) &
+               .and.( E_monthly(i,j+11) .eq. 0) &
+               .and.( E_monthly(i,j+12) .eq. 0) &
+               .and. ( E_monthly(i,j+13) .eq. 1) &
+               .and. ( W_monthly(i,j+13) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square  = total_local_sum_of_square + ( log(W_monthly(i,j+13)) - log(W_monthly(i,j)) - tmp_local_mean )**2
+          end if
+       end do
+    end do
+
+    ! 11 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-12
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 0) &
+               .and.( E_monthly(i,j+10) .eq. 0) &
+               .and.( E_monthly(i,j+11) .eq. 0) &
+               .and.( E_monthly(i,j+12) .eq. 1) &
+               .and. ( W_monthly(i,j+12) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+12)) - log(W_monthly(i,j))   - tmp_local_mean )**2
+          end if
+       end do
+    end do
+
+    ! 10 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-11
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 0) &
+               .and.( E_monthly(i,j+10) .eq. 0) &
+               .and.( E_monthly(i,j+11) .eq. 1) &
+               .and. ( W_monthly(i,j+11) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+11)) - log(W_monthly(i,j)) - tmp_local_mean )**2
+          end if
+       end do
+    end do
+
+    ! 9 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-10
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 0) &
+               .and.( E_monthly(i,j+10) .eq. 1) &
+               .and. ( W_monthly(i,j+10) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+10)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! 8 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-9
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 0) &
+               .and.( E_monthly(i,j+9) .eq. 1) &
+               .and. ( W_monthly(i,j+9) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+9)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! 7 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-8
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 0) &
+               .and.( E_monthly(i,j+8) .eq. 1) &
+               .and. ( W_monthly(i,j+8) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+8)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! 6 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-7
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 0) &
+               .and.( E_monthly(i,j+7) .eq. 1) &
+               .and. ( W_monthly(i,j+7) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+7)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! 5 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-6
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 0) &
+               .and.( E_monthly(i,j+6) .eq. 1) &
+               .and. ( W_monthly(i,j+6) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+6)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! 4 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-5
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 0) &
+               .and.( E_monthly(i,j+5) .eq. 1) &
+               .and. ( W_monthly(i,j+5) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+5)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! 3 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-4
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 0) &
+               .and.( E_monthly(i,j+4) .eq. 1) &
+               .and. ( W_monthly(i,j+4) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+4)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! 2 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-3
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 0) &
+               .and.( E_monthly(i,j+3) .eq. 1) &
+               .and. ( W_monthly(i,j+3) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+3)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! 1 months of unemployment
+    do i = 1,nr
+       do j = 1,ns-2
+          if ( ( E_monthly(i,j) .eq. 1) &
+               .and. ( E_monthly(i,j+1) .eq. 0) &
+               .and. ( E_monthly(i,j+2) .eq. 1) &
+               .and. ( W_monthly(i,j+2) .gt. 0.0_wp) &
+               .and. (W_monthly(i,j) .gt. 0.0_wp) ) then
+             total_local_sum_of_square = total_local_sum_of_square + ( log(W_monthly(i,j+2)) - log(W_monthly(i,j))  - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    
+    ! Mean Wage Changes via unemployment
+    tmp_local_var = total_local_sum_of_square / real(total_local_count, wp)
+
+    moms%DwEUE_var = tmp_local_var
+    moms%DwEUE_bar = tmp_local_mean 
+
+    ! Create year over year change in average monthly earnings over the
+    ! year (total earnings over the year divided by the number of months
+    ! worked )
+    ! write(*,*) "Computing final moments"
+
+    ! Now, calculate the UNCONDITIONAL mean, variance, growth , varianc ofo growwha nd 1st and 2nd autocovariances of growth.
+    ! Use the year 11,12,13,14 (ie, the years just aftet the first 10 in teh labour markket)
+
+    w_monthly = merge(w_monthly, 0.0_wp, E_monthly .eq. 1)
+
+    do j = 1,years
+       w_t(:,j) = sum(w_monthly(:,(1+12*(j-1)) : 12*j) ,2)
+       empl_t(:,j) =  sum(E_monthly(:,(1+12*(j-1)) : 12*j) ,2)
+    end do
+
+    !! only use the next line with conditioning on quantile
+    !    usable = usable .and. line_mask
+
+! Calculate the first 4 moments of the crossectional distrubution of
+! wages in first, middle and last year of simulation
+    usable = .FALSE.
+    usable = ( (empl_t .gt. 0) .and. (w_t .gt. 0.0_wp))
+    w_year =   merge(log(w_t   / real(empl_t   ,wp)), 0.0_wp ,  usable)
+    call momentsVecWithMask(w_year(:,2) , usable(:,2),  moms%y1_mean_w , moms%y1_var_w)
+    call SkewKurtVecWithMask(w_year(:,2) ,usable(:,2), moms%y1_mean_w , moms%y1_var_w, moms%y1_skewness, moms%y1_kurtosis)
+
+    call momentsVecWithMask(w_year(:,12) , usable(:,12),  moms%y11_mean_w , moms%y11_var_w)
+    call SkewKurtVecWithMask(w_year(:,12) ,usable(:,12), moms%y11_mean_w , moms%y11_var_w, moms%y11_skewness, moms%y11_kurtosis)
+
+    call momentsVecWithMask(w_year(:,22) , usable(:,22),  moms%y21_mean_w , moms%y21_var_w)
+    call SkewKurtVecWithMask(w_year(:,22) ,usable(:,22), moms%y21_mean_w , moms%y21_var_w, moms%y21_skewness, moms%y21_kurtosis)
+
+! Centre wage data to have zero mean each year (remove age effect)
+    do j = 1,years
+       call momentsVecWithMask(w_year(:,j) , usable(:,j),  tmp_local_mean , tmp_local_var )
+       w_year(:,j) = w_year(:,j) - tmp_local_mean
+    end do
+
+    ! Calculate first differences
+    deallocate ( usable )
+    allocate ( usable(nr, years-1 ))
+    
+    usable = .FALSE.
+    do j=1,years-1
+       usable(:,j) = ( (empl_t(:,j+1) .gt. 0) .and. (empl_t(:,j) .gt. 0) )
+    end do
+    
+    do j=1,years-1
+       Dw_year(:,j) = merge(w_year(:,j+1)-w_year(:,j), 0.0_wp, usable(:,j))
+    end do
+! given the panel structure of the data it is easier to calculate the
+! covariances in the following "messy" way rather than calling the
+! moments function
+
+    total_local_count = 0
+    total_local_sum = 0.0_wp
+    total_local_sum_of_square = 0.0_wp
+    tmp_local_mean = 0.0_wp
+
+    ! calculate mean
+    do i=1,nr
+       do j=1,years-1
+          if ( usable(i,j) ) then
+             total_local_count = total_local_count + 1
+             total_local_sum = total_local_sum + Dw_year(i,j)
+          end if
+       end do
+    end do
+    tmp_local_mean = total_local_sum / real(total_local_count, wp)
+
+    total_local_count = 0
+    total_local_sum = 0.0_wp
+    total_local_sum_of_square = 0.0_wp
+
+    ! calculate variance
+    do i=1,nr
+       do j=1,years-1
+          if ( usable(i,j) ) then
+             total_local_count = total_local_count + 1
+             total_local_sum_of_square = total_local_sum_of_square + (Dw_year(i,j) - tmp_local_mean )**2
+          end if
+       end do
+    end do
+    moms%ALL_var_Dw = total_local_sum_of_square / real(total_local_count, wp)
+
+    total_local_count = 0
+    total_local_sum = 0.0_wp
+    total_local_sum_of_square = 0.0_wp
+
+    ! calculate cov(Dw, L.Dw)
+    do i=1,nr
+       do j=1,years-2
+          if ( usable(i,j) .and. usable(i,j+1) ) then
+             total_local_count = total_local_count + 1
+             total_local_sum_of_square = total_local_sum_of_square + (Dw_year(i,j) - tmp_local_mean )*(Dw_year(i,j+1) - tmp_local_mean )
+          end if
+       end do
+    end do
+    moms%ALL_cov_DwDwL1 = total_local_sum_of_square / real(total_local_count, wp)
+
+    total_local_count = 0
+    total_local_sum = 0.0_wp
+    total_local_sum_of_square = 0.0_wp
+
+    ! calculate cov(Dw, L2.Dw)
+    do i=1,nr
+       do j=1,years-3
+          if ( usable(i,j) .and. usable(i,j+2) ) then
+             total_local_count = total_local_count + 1
+             total_local_sum_of_square = total_local_sum_of_square + (Dw_year(i,j) - tmp_local_mean )*(Dw_year(i,j+2) - tmp_local_mean )
+          end if
+       end do
+    end do
+    moms%ALL_cov_DwDwL2 = total_local_sum_of_square / real(total_local_count, wp)
+
+
+    ! clean up
+        deallocate( max_wage  )
+        deallocate( worker_type  )
+        deallocate( W_monthly )
+        deallocate( E_monthly )
+        deallocate( E_monthly_all )
+        deallocate( F_monthly )
+        deallocate( DJ )
+        deallocate( E2E  )
+        deallocate( w_t )
+        deallocate( empl_t )
+        deallocate( usable )
+        deallocate( tmp_den )
+        deallocate( tmp_num )
+        deallocate( w_year )
+        deallocate( Dw_year )
+
+end subroutine computemoments
+
+    !----------------------------------------
+    ! HELPERS
+    !----------------------------------------
+
+    subroutine computeMeanLogWageChangeWithMask(E_Status, unemployment_span, wages, lmean, lvar, lcount, line_mask)
+      implicit none
+      logical,allocatable :: time_index(:,:)
+      logical, intent(IN) :: line_mask(:)
+      integer, intent(in) :: unemployment_span
+      integer, intent(IN) :: E_Status(:,:)
+      real(wp), intent(IN) :: wages(:,:)
+      integer :: n,end,nr
+      real(wp) , intent(OUT) :: lmean,lvar
+      integer :: ir, it ,i
+	  integer, optional :: lcount
+
+      !--------------------------------------
+      ! Create wage changes for job losers
+      ! unemployment_span months unemployed
+      !--------------------------------------
+      n = size(E_status,2)
+      nr = size(E_status , 1)
+      end = n - unemployment_span -1  ! we need the -1 to have EUUUUUUUUUUUUE (up to 12 periods of unemployment then employment)
+
+      allocate( time_index(nr , end) )
+
+      !EMPLOYED AT FIRST
+      time_index = (E_Status(:,1:end) .eq. 1)
+
+      !UNEMPLOYED FOR unemployment_span PERIODS
+      do i=1,unemployment_span
+         time_index = time_index .and. (E_Status(:, (1 + i):(end + i) )  .eq.  0)
+      end do
+
+      !EMPLOYED AT LAST
+      time_index = time_index .and. (E_Status(:,(1 + unemployment_span+1):(end + unemployment_span+1))  .eq.  1)
+	  time_index = time_index .and. spread(line_mask,2,end)
+
+      call computeWageMomentsWithMask(time_index , unemployment_span + 1 , wages, lmean , lvar,lcount)
+
+      !CLEANING UP
+      deallocate( time_index )
+
+    end subroutine computeMeanLogWageChangeWithMask
+
+    subroutine computeWageMomentsWithMask(mask , lag , wages , lmean , lvar, elcount)
+        implicit none
+        logical, intent(IN) :: mask(:,:)
+        real(wp), intent(IN) :: wages(:,:)
+        real(wp), intent(OUT) :: lmean, lvar
+        integer, intent(IN) :: lag
+        integer :: nr , end , ir ,it ,nt
+        integer,intent(out),optional :: elcount
+        integer :: lcount
+        real(wp) :: val
+
+        lcount = 0
+        nr = size(mask,1)
+        nt = size(mask,2)
+        val   = 0.0_wp
+        lmean = 0.0_wp
+        lvar = 0.0_wp
+
+        do ir = 1,nr
+            do it = 1,nt
+                if (mask(ir,it))  then
+                    val = log( wages(ir, it + lag)) - log( wages(ir, it))
+                    lmean = lmean + val
+                    lcount = lcount +1
+                end if
+            end do
+        end do
+
+        lmean = lmean / real(lcount, wp)
+
+        do ir = 1,nr
+            do it = 1,nt
+                if (mask(ir,it))  then
+                    val = ((log( wages(ir, it + lag)) - log( wages(ir, it))) - lmean )**2
+                    lvar = lvar + val
+                end if
+            end do
+        end do
+
+        lvar = lvar / real(lcount, wp) 
+
+        if (present(elcount)) then
+           elcount = lcount
+        end if
+
+    end subroutine computeWageMomentsWithMask
+
+	subroutine computeMatchDistribution(s,p,h_xy,l,b)
+	    implicit none
+    	type (SimulationWorkerPanel) , intent(IN) :: s
+    	type (ExogenousParameters),    intent(in)    :: p
+		integer, intent(IN) :: l,b
+		real(wp), intent(INOUT) :: h_xy(:,:)
+
+		integer :: nr, nt , lcount
+		integer :: ir , it
+
+		nr = size(s%status_rt , 1)
+		nt = size(s%status_rt , 2)
+
+		h_xy = 0.0_wp
+		lcount = 0
+
+		do it = l, b
+			do ir= 1, nr
+				if (s%status_rt(ir,it) .eq. 1) then
+					h_xy(s%worker_type_r(ir) , s%firm_type_rt(ir,it)) = h_xy(s%worker_type_r(ir) , s%firm_type_rt(ir,it)) +1
+					lcount = lcount +1
+				end if
+			end do
+		end do
+
+		h_xy = h_xy / real(lcount,wp)
+
+	end subroutine computeMatchDistribution
+
+
+
+end module compute_moments_mod
+

@@ -1,0 +1,42 @@
+ Starting Values: 
+    9.51999997E-03     9.51999997E-03
+ Baseline Version
+ starting the program
+ loading the moments into common block
+Planner's Labour Market Tightness: 
+kappa =  8.11E-04
+U     =  7.40E+02
+V     =  1.68E+02
+ NOTE, THESE NUBERS DO NOT INCLUDE THE TRANSFERS
+ UI policy steady-state output=    3631127.22913394     
+ Market Production                =    3613256.09940139     
+ Home Production                  =    171015.763455138     
+ Recruiting costs                 =   -153144.633722591     
+ R & D costs                      =   0.000000000000000E+000
+  
+ Employment Rate                  =    92.6022082108201     
+ Unemployment Rate                =    7.39779178917991     
+  
+ Some additonal Checks:
+ Measure of employed workers:   =    9260.15696411316     
+ Measure of unemployed workers: =    739.779178917991     
+ Measure of workers:            =    9999.93614303115     
+ Measure of filled jobs:        =    9260.15696411316     
+ Measure of vacancies:          =    168.306492369227     
+ Measure of idle posts:         =   0.000000000000000E+000
+ Measure of potential jobs:     =    9428.46345648239     
+ Expected Profit at y(0)        =    40978.5898197964     
+  
+  
+ Prob of shock to y             =   1.743159060077792E-002
+ Prob of separation | y-shock   =   0.000000000000000E+000
+ Prob of job contact when unempl=   0.136454284419431     
+ Prob of match | contact        =  0.999999999999996     
+ Prob of job contact when empl  =  4.532841850460956E-002
+ Prob of match | contact        =  0.297124933129132     
+ --- Worker-Firm Correlation ---
+ Corr(x,y):   0.238279244266030     
+ Tax Rate:        9.519999970495702E-003
+ Benefit Rate:    0.110914498773716     
+ objective function at current values=    3631127.22913394     
+ Finished

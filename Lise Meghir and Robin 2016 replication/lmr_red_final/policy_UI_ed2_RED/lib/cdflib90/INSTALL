@@ -1,0 +1,93 @@
+          INSTALLATION SUGGESTIONS FOR THE LIBRARY cdflib90
+
+
+The  Fortran 95  source for  this  library is  found in  the files  in
+directory  'SOURCE' that  have  the suffix  .f90.   Fortran 95  places
+constraints on  the order in  which routines are compiled  (Fortran 77
+did not).
+
+We have provided two files to assist with compilation.
+
+Makefile:  A make file that may be useful if your system has a 'make'
+utility available.
+
+compile.cdflib90: Compilation directives as a Unix shell script.
+
+Both files make assumptions about your machine.
+
+(1) The  name  of  the  Fortran  95  compiler is  f95.   This  is  not
+    necessarily the case.  CVF  Fortran's compiler is called f90.  Use
+    a text editor to modify this as needed.
+
+(2) The  appropriate  flags to  the  compiler  are  '-c -O'.   On  our
+    machine, DEC/Compaq/Intel  Alpha running True64 Unix,  and on most
+    other  Unix machines,  -c means  produce  *.o files  and -O  means
+    optimize for  speed.  You may need  to adjust these  flags to suit
+    your compiler.
+
+My   compiler    gives   the   following    warning   when   compiling
+zero_finder.f90:
+
+f90: Warning: zero_finder.f90, line 1001: Variable X is used before its value has been defined
+        local%step_xsave = x
+---------------------------^
+
+The warning is spurious (but was worth checking out).
+
+          ++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Once you have successfully compiled  all of the .f90 files, you should
+have a .o file for each .f90 file.  Probably, you want to place the .o
+in a library  for use by other programs.  How you  do this will depend
+on your particular system.
+
+On most Unices, the command
+                       ar cr  libcdflib90.a *.o
+will create a  library named 'libcdflib90.a' containing all  of the .o
+files.   This library  should be  placed  where users  can access  it.
+perhaps in  /usr/lib (although a system administrator  may be required
+to install files in this directory).  The strange name for the library
+was chosen so that the usual Unix linkage convention of the arguments
+                        -lcdflib90 -L/usr/lib
+can be used in linking the library into an object file.
+
+Implementors should  consult local  documentation to determine  how to
+create libraries (and perhaps where to place them).
+
+          ++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Once you have successfully compiled  all of the .f90 files, you should
+have a  module information file for  each .f90 file.  The  name of the
+module  information file  differs by  system (even  within  flavors of
+Unix).  Our  system calls them '.mod',  but at least  one other system
+calls them '.module' and there may  easily be other names that I don't
+know.
+
+These files contain  information that the COMPILER of  a program using
+one or  more cdflib90 routines needs  to know in order  to compile the
+using program.  This information includes the calling sequence of each
+routine in a module and more.
+
+The .mod files should be moved or copied to a directory where they are
+generally  accessible,  perhaps  /usr/mod/cdflib90.  On  our  machine,
+these files are made accessible by using the f95 flag:
+                         -I/usr/mod/cdflib90
+
+Again, consult your local documentation or system administrator.
+
+          ++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Good luck.
+
+                                       Barry W. Brown
+                                       Department of Biomathematics, 
+                                            Box 237
+                                       University of Texas M. D.
+                                            Anderson Cancer Center
+                                       1515 Holcombe Blvd
+                                       Houston, TX 77030
+
+
+                                       bwb@mdanderson.org
+
+

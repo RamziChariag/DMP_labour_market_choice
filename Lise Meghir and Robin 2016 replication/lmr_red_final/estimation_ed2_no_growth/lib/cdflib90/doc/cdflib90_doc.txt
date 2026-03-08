@@ -1,0 +1,1643 @@
+
+                                 CDFLIB90
+        Fortran 95 Routines for Cumulative Distribution Functions,
+                        Their Inverses, and More.
+                               User's Guide
+                                     
+                                     
+                                     
+                                     
+                                     
+                                     
+                              Barry W. Brown
+                               James Lovato
+                              Kathy Russell
+                                     
+                                     
+                                     
+                                     
+                                     
+                                     
+                         Conversion to Fortran 95
+                             Dan Serachitopol
+                                     
+                                     
+                                     
+                                     
+                                     
+                                     
+                                     
+      This work supported by grant CA11672 from the National Cancer
+                     Institute. Copyright 2002 to:
+                The University of Texas M. D. Anderson Cancer Center
+              Department of Biomathematics, Box 237
+              1515 Holcombe Boulevard
+              Houston, TX 77030
+                                     
+                                     
+                                     
+                                     
+                                     
+                                     
+               Contact: Barry W. Brown, bwb@mdanderson.org
+                                    
+                                    
+                           1  Technicalities
+                           *=*=*=*=*=*=*=*=*
+                                    
+                                     
+                                    
+                                    
+                        1.1  Obtaining the Code
+                        =======================
+                                     
+   The source for this code (and all code written by this group) can be
+                    obtained from the following URL:
+                    http://odin.mdacc.tmc.edu/anonftp/
+                                     
+                                    
+                                    
+                            1.2  Legalities
+                            ===============
+                                     
+    We place our efforts in writing this package in the public domain.
+    However, code from ACM publications is subject to the ACM policy
+                                (below).
+                                    
+                                    
+                            1.3  References
+                            ===============
+                                     
+                                    
+                                    
+                         1.3.1  Incomplete Beta
+                         ----------------------
+                                     
+  DiDinato, A. R. and Morris, A. H. (1993) ``Algorithm 708: Significant
+ Digit Computation of the Incomplete Beta Function Ratios.'' ACM Trans.
+                       Math. Softw. 18, 360-373.
+                                    
+                                    
+                        1.3.2  Incomplete Gamma
+                        -----------------------
+                                     
+      DiDinato, A. R. and Morris, A. H. (1986) ``Computation of the
+ incomplete gamma function ratios and their inverse.'' ACM Trans. Math.
+                          Softw. 12, 377-393.
+                                    
+                                    
+                        1.3.3  Cumulative Normal
+                        ------------------------
+                                     
+     Cody, W.D. (1993). ``ALGORITHM 715: SPECFUN - A Portable FORTRAN
+Package of Special Function Routines and Test Drivers'' ACM Trans. Math.
+                           Softw. 19, 22-32.
+                                    
+                                    
+                         1.3.4  Inverse Normal
+                         ---------------------
+                                     
+      ``Algorithm AS241'' (1988) Appl. Statist. 37, NO. 3, 477-484.
+                                    
+                                    
+              1.3.5  Finding a Zero of a Monotone Function
+              --------------------------------------------
+                                     
+      Alefeld, G. E., Potra, F. A., Shi, Y. (1995) ``Algorithm 748:
+  Enclosing Zeros of Continuous Functions.'', by G. E. Alefeld, F. A.
+     Potra, YiXun Shi, ACM Trans. Math. Softw., 21, No. 3, 327-344
+                                    
+                                    
+                     1.4  ACM Policy on Use of Code
+                     ==============================
+                                     
+                 Here is the software Policy of the ACM.
+              
+              Submittal of an algorithm for publication in one of the
+              ACM  Transactions implies that unrestricted use of the
+              algorithm within a  computer is permissible. General
+              permission to copy and distribute  the algorithm without
+              fee is granted provided that the copies are not  made or
+              distributed for direct commercial advantage. The ACM 
+              copyright notice and the title of the publication and its
+              date appear,  and notice is given that copying is by
+              permission of the Association  for Computing Machinery. To
+              copy otherwise, or to republish, requires  a fee and/or
+              specific permission.
+              Krogh, F. (1997) ``Algorithms Policy.'' ACM Tran. Math. 
+              Softw. 13, 183-186.
+                                     
+  We do not know the policy of the Royal Statistical Society; they have
+discontinued publishing algorithms. However, they made a number of these
+ programs available on Statlib on condition that there be no charge for
+                          their distribution.
+                     Here is our standard disclaimer.
+              
+                                     NO WARRANTY
+                                           
+                 WE PROVIDE ABSOLUTELY NO WARRANTY OF ANY KIND EITHER
+               EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO, THE
+               IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+              PARTICULAR PURPOSE. THE ENTIRE RISK AS TO THE QUALITY AND
+                 PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THIS
+                 PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL
+                      NECESSARY SERVICING, REPAIR OR CORRECTION.
+               IN NO EVENT SHALL THE UNIVERSITY OF TEXAS OR ANY OF ITS
+               COMPONENT INSTITUTIONS INCLUDING M. D. ANDERSON HOSPITAL
+              BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY LOST PROFITS,
+              LOST MONIES, OR OTHER SPECIAL, INCIDENTAL OR CONSEQUENTIAL
+                  DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE
+              (INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA OR ITS
+              ANALYSIS BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY
+                             THIRD PARTIES) THE PROGRAM.
+                 (Above NO WARRANTY modified from the GNU NO WARRANTY
+                                     statement.) 
+                                     
+                                    
+                                    
+                      2  Introduction to CDFLIB90
+                      *=*=*=*=*=*=*=*=*=*=*=*=*=*
+                                    
+                                     
+                                    
+                                    
+                              2.1  Modules
+                              ============
+                                     
+  CDFLIB90 contains routines that calculate the cumulative distribution
+function (CDF), the inverse CDF, and the values of one parameter of the
+  distribution given the value of the CDF and of the other parameters.
+     REAL TYPE. The only type of Fortran REAL used in this library is
+                DOUBLE PRECISION, which we term dpkind.
+        CDFLIB90 consists of Fortran 95 modules, named as follows:
+                          cdf_<distribution>_mod
+                                     
+    Each program unit using one or more of these module must have the
+                     appropriate USE statement(s).
+   The following table shows the possible values of <distribution> and
+            the corresponding statistical distribution.     
+                                     
+                     -----------------------------
+                      <distribution> Statistical  
+                                     Distribution 
+                     -----------------------------
+                      beta           beta         
+                     -----------------------------
+                      binomial       binomial     
+                     -----------------------------
+                      chisq          chi-squared  
+                     -----------------------------
+                      f              f            
+                     -----------------------------
+                      gamma          gamma        
+                     -----------------------------
+                      nc_chisq       noncentral   
+                                     chi-squared  
+                     -----------------------------
+                      nc_f           noncentral f 
+                     -----------------------------
+                      nc_t           noncentral t 
+                     -----------------------------
+                      neg_binomial   negative     
+                                     binomial     
+                     -----------------------------
+                      normal         normal       
+                     -----------------------------
+                      poisson        poisson      
+                     -----------------------------
+                      t              t            
+                     -----------------------------
+                                     
+                                     
+                                    
+                                    
+                             2.2  Routines
+                             =============
+                                     
+       Each module contains four user accessible (PUBLIC) routines:
+                                     
+ 
+  SUBROUTINE CDF_<distribution>( WHICH, CUM, CCUM, X, <PARAMS>, STATUS,
+   CHECK_INPUT.) Calculates the value of any one of its parameters from
+   the values of the others.
+ 
+  REAL (dpkind) FUNCTION CUM_<distribution>(X, <PARAMS>, STATUS,
+   CHECK_INPUT.) Calculates argument CUM.
+ 
+  REAL (dpkind) FUNCTION CCUM_<distribution>(X, <PARAMS>, STATUS,
+   CHECK_INPUT) Calculates argument CCUM.
+ 
+  REAL (dpkind) FUNCTION INV_<distribution>( CUM, CCUM, <PARAMS>,
+   STATUS, CHECK_INPUT)
+                                     
+                                    
+                                    
+                             2.3  Arguments
+                             ==============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN):: WHICH.  Determines which parameter is to be
+   calculated from the values of the other.
+ 
+   REAL (dpkind) :: CUM, CCUM.  The CDF and complement of the CDF,
+   1-CUM.
+ 
+   REAL (dpkind) :: X.  The name of this argument varies with the
+   distribution.
+ The upper limit of integration or summation for the CDF. The lower
+   limit is the lower limit of the support of the distribution.
+ Note that X is always DOUBLE PRECISION, even when it appears that it
+   should take only integer values, as in the binomial distribution.
+   This is because discrete distribution is embedded in continuous
+   distributions. The binomial and negative binomial are calculated as a
+   special case of the beta distribution; the Poisson distribution is
+   calculated as a special case of the gamma distribution.
+ One consequence: when X is computed, it need not and usually does not
+   take on an integer value for discrete distributions.
+ 
+   REAL (dpkind) :: <PARAMS>.  The parameters of the distribution, e.g.,
+   the mean and variance of the normal distribution or the degrees of
+   freedom of the t distribution.
+ 
+   INTEGER, INTENT(OUT), OPTIONAL :: STATUS.  The status of the
+   calculation. Although this argument is optional, it is strongly 
+   recommended that all code include it and its value checked by the 
+   calling program.
+ Zero indicates success. 
+ A small negative number indicates that the argument whose order is the
+   absolute value of status is out of bounds.
+ A small positive value generally indicates that input arguments that
+   should add (approximately) to one don't.
+ The value `10' indicates that the cumulative function is obtained from
+   another distribution (e.g., the binomial is calculated as an
+   incomplete beta) and there was an error in the other distribution. 
+   This really should not occur.
+ Should the status be any of the values above and the argument STATUS is
+   not present, then the program aborts (STOP) with an error message.
+ A value of 50 indicates that the answer, should it exist exceeds the
+   upper search bound of the routine; a value of -50 indicates that the
+   lower search bound is exceeded. In either case, the upper or lower
+   search bound respectively is returned as the answer. The program does
+   not abort in this case should STATUS not be present in the calling
+   sequence.
+ Out of bound errors are the ones most commonly encountered because for
+   the discrete distributions (binomial, negative binomial, and
+   Poisson), the cdf at 0 is positive not zero. Hence the inverse cdf
+   does not exist for sufficiently small values of the cdf.
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If this argument is
+   present and has the value .FALSE. then input values are not checked
+   for legality. Generally, this is a bad idea and can lead to difficult
+   to find errors. The argument is included for those cases in which
+   arguments are checked at a higher level.
+                                     
+     INPUT AND SEARCH RANGES. Each input argument to one of the CDF90
+ routines must be in the range of values. Values outside the range will
+  be signalled as an error in the STATUS variable or cause an abort if
+ STATUS is not present. NOTE: We show the range as input range for the
+   argument WHICH because WHICH is always input and never calculated.
+   For most distributions (exceptions, the normal and gamma), finding a
+  parameter value producing a specified cdf value is done by a search
+ within the range of allowable values. If an answer is not found within
+this range, an error is signalled in the STATUS variable, or the program
+        aborts if STATUS is not present in the calling sequence.
+     Generally, the allowable range of the CUM and CCUM arguments is:
+10^10:1-10^10. Exceptions occur when one or both sides of the support of
+  the distribution is finite. Then the search range includes 0 or 1 or
+       both (depending on which end(s) of the support is finite).
+     We somewhat arbitrarily limit the range of values of the various
+                    degrees of freedom arguments to
+                                 Range: 
+                              [          ]
+                              [  -3   10 ]
+                              [10  :10   ]
+                                     
+  A degrees of freedom argument of zero frequently leads to an undefined
+                             distribution.
+     The noncentrality parameters of the noncentral distributions are
+                               limited to
+                                 Range: 
+                               [        ]
+                               [    4:T ]
+                               [0,10    ]
+                                     
+  he upper limit is imposed because the cdfs of these distributions are
+calculated as infinite series in the noncentrality parameter. The number
+      of terms to be evaluated becomes large with this parameter.
+                                    
+                                    
+                            3  cdf_beta_mod
+                            *=*=*=*=*=*=*=*
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_BETA( WHICH, CUM, CCUM, X, CX, A, B, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_BETA(X, A, B, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind)FUNCTION CCUM_BETA(X, A, B, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_BETA( CUM, CCUM, A, B, STATUS, CHECK_INPUT)
+                                     
+                                    
+                                    
+                         3.1  The Distribution
+                         =====================
+                                     
+   The density of the beta distribution is defined on x in [0,1] and is
+                            proportional to 
+                                a      b 
+                               x  (1-x)  
+                                     
+                                    
+                                    
+                             3.2  Arguments
+                             ==============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   four arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:4 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. X and CX 
+    3. A 
+    4. B 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the beta distribution.
+ Range: 
+   [    ]
+   [0:1 ]
+   [    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the beta
+   distribution.
+ Range: 
+   [    ]
+   [0:1 ]
+   [    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: X.  The upper limit of integration of the
+   beta density. The lower limit is 0.
+ Range: 
+   [    ]
+   [0:1 ]
+   [    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CX.  One minus the upper limit of
+   integration of the beta density. The lower limit is 0.
+ Range: 
+   [    ]
+   [0:1 ]
+   [    ]
+ 
+ 
+   REAL (dpkind) :: A.  The first parameter of the beta density.
+ Range: 
+   [           ]
+   [  -10   10 ]
+   [10   :10   ]
+ 
+ 
+   REAL (dpkind) :: B.  The second parameter of the beta density.
+ Range: 
+   [           ]
+   [  -10   10 ]
+   [10   :10   ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 X outside range 
+     -5 CX outside range 
+     -6 A outside range 
+     -7 B outside range 
+     3 CUM + CCUM is not nearly one 
+     4 X + CX is not nearly one 
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+      NOTE: CUM and CCUM and also X and CX must add to (nearly) one.
+                                    
+                                    
+                          4  cdf_binomial_mod
+                          *=*=*=*=*=*=*=*=*=*
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_BINOMIAL( WHICH, CUM, CCUM, S, N, PR, CPR, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_BINOMIAL(S, N, PR, CPR, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind)FUNCTION CCUM_BINOMIAL(S, N, PR, CPR, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_BINOMIAL( CUM, CCUM, N, PR, CPR, STATUS,
+   CHECK_INPUT)
+                                     
+                                    
+                                    
+                         4.1  The Distribution
+                         =====================
+                                     
+  The density of the binomial distribution provides the probability of S
+successes in N independent trials, each with probability of success PR.
+                     The density is proportional to 
+                               S       N-S 
+                             PR  (1-PR)    
+                                     
+    The binomial is extended to non-integer values via the connection
+        between the cumulative binomial and the incomplete beta.
+                                    
+                                    
+                             4.2  Arguments
+                             ==============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   four arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:4 ]
+   [    ]
+ 
+ 
+     
+     1 CUM and CCUM 
+     2 S 
+     3 N 
+     4 PR and CPR 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the binomial
+   distribution, i.e., the probability of 0 to S successes in N trials.
+ Range: 
+   [          ]
+   [      -10 ]
+   [0:1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the binomial
+   distribution.
+ Range: 
+   [        ]
+   [  -10:1 ]
+   [10      ]
+ 
+ 
+   REAL (dpkind) :: S.  The upper limit of summation of the binomial
+   density. Note that S must be less than or equal to N.
+ Range: 
+   [       ]
+   [    10 ]
+   [0:10   ]
+ 
+ 
+   REAL (dpkind) :: N.  The number of independent trials generating the
+   binomial density. N must be greater than or equal to S.
+ Range: 
+   [       ]
+   [    10 ]
+   [0:10   ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: PR.  The probability of success in each
+   independent trial.
+ Range: 
+   [    ]
+   [0:1 ]
+   [    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CPR.  One minus the probability of success
+   in each independent trial; the probability of failure in each trial.
+ Range: 
+   [    ]
+   [0:1 ]
+   [    ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 S outside range 
+     -5 N outside range 
+     -6 PR outside range 
+     -7 CPR outside range 
+     3 CUM + CCUM is not nearly one 
+     4 PR + CPR is not nearly one 
+     5 S not between 0 and N. 
+     10 The cumulative binomial is calculated as an incomplete beta.
+      This error indicates an error in the incomplete beta. This should
+      not happen.  
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+ NOTE: CUM and CCUM and also PR and CPR must add to (nearly) one.
+                                     
+                                    
+                                    
+                            5  cdf_chisq_mod
+                            *=*=*=*=*=*=*=*=
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_CHISQ( WHICH, CUM, CCUM, X, DF, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_CHISQ(X, DF, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind)FUNCTION CCUM_CHISQ(X, DF, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_CHISQ( CUM, CCUM, DF, STATUS, CHECK_INPUT)
+                                     
+                                    
+                                    
+                         5.1  The Distribution
+                         =====================
+                                     
+  The chi-squared distribution is the distribution of the sum of squares
+         of DF independent unit (mean=0, sd=1) normal deviates.
+      The density is defined on x in [0,oo) and is proportional to 
+                           (DF-2)/2           
+                          x         exp(-x/2) 
+                                     
+                                    
+                                    
+                             5.2  Arguments
+                             ==============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   three arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:3 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. X 
+    3. DF 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the chi-squared
+   distribution.
+ Range: 
+   [          ]
+   [      -10 ]
+   [0:1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the
+   chi-squared distribution.
+ Range: 
+   [        ]
+   [  -10:1 ]
+   [10      ]
+ 
+ 
+   REAL (dpkind) :: X.  The upper limit of integration of the
+   chi-squared density. The lower limit is 0.
+ Range: 
+   [        ]
+   [    100 ]
+   [0:10    ]
+ 
+ 
+   REAL (dpkind) :: DF.  The degrees of freedom of the chi-squared
+   distribution.
+ Range: 
+   [          ]
+   [  -3   10 ]
+   [10  :10   ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 X outside range 
+     -5 DF outside range 
+     3 CUM + CCUM is not nearly one 
+     4 X + CX is not nearly one 
+     10 The cumulative chi-squared is computed as an incomplete beta
+      distribution. This value indicates an error in the incomplete beta
+      code. It really shouldn't happen. 
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+      NOTE: CUM and CCUM and also X and CX must add to (nearly) one.
+                                    
+                                    
+                              6  cdf_f_mod
+                              *=*=*=*=*=*=
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_F( WHICH, CUM, CCUM, F, DFN, DFD, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_F(F, DFN, DFD, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind)FUNCTION CCUM_F(F, DFN, DFD, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_F( CUM, CCUM, DFN, DFD, STATUS,
+   CHECK_INPUT)
+                                     
+                                    
+                                    
+                         6.1  The Distribution
+                         =====================
+                                     
+       F is the distribution of the ratio of two independent random
+ variables. The numerator random variable is distributed as chi-squared
+    with DF degrees of freedom divided by DF. The denominator random
+   variable is distributed as chi-squared with DFD degrees of freedom
+                            divided by DFD.
+    The density of the f distribution is defined on x in [0,oo] and is
+                            proportional to 
+                               (DFN-2)/2)        
+                              x                  
+                       ------------------------- 
+                       [            ](DFN+DFD)/2 
+                       [1+(DFN/DFD)x]            
+                       [            ]            
+                                     
+                                    
+                                    
+                             6.2  Arguments
+                             ==============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   four arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:2 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. F 
+ 
+ NOTE: DFN and DFD will not be computed because CUM is not monotone in
+   either argument.
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the f distribution.
+ Range: 
+   [          ]
+   [      -10 ]
+   [0:1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the f
+   distribution.
+ Range: 
+   [        ]
+   [  -10:1 ]
+   [10      ]
+ 
+ 
+   REAL (dpkind) :: F.  The upper limit of integration of the f density.
+   The lower limit is 0.
+ Input Range: 
+   [        ]
+   [    100 ]
+   [0:10    ]
+ 
+ 
+   REAL (dpkind) :: DFN.  The numerator degrees of freedom.
+ Range: 
+   [          ]
+   [  -3   10 ]
+   [10  :10   ]
+ 
+ 
+   REAL (dpkind) :: DFD.  The denominator degrees of freedom.
+ Range: 
+   [          ]
+   [  -3   10 ]
+   [10  :10   ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 F outside range 
+     -5 DFN outside range 
+     -6 DFD outside range 
+     3 CUM + CCUM is not nearly one 
+     10 The cumulative F is computed as an incomplete beta distribution.
+      This value indicates an error in the incomplete beta code. It
+      really shouldn't happen. 
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+               NOTE: CUM and CCUM must add to (nearly) one.
+   NOTE: The value of the CDF of the f distribution is not necessarily
+  monotone in either degree of freedom argument. There may thus be two
+values that provide a given DCF value. This routine assumes monotonicity
+           and will find an arbitrary one of the two values.
+                                    
+                                    
+                            7  cdf_gamma_mod
+                            *=*=*=*=*=*=*=*=
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_GAMMA( WHICH, CUM, CCUM, X, SHAPE, SCALE, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_GAMMA(X, SHAPE, SCALE, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind)FUNCTION CCUM_GAMMA(X, SHAPE, SCALE, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_GAMMA( CUM, CCUM, SHAPE, SCALE, STATUS,
+   CHECK_INPUT)
+                                     
+                                    
+                                    
+                         7.1  The Distribution
+                         =====================
+                                     
+        The density of the GAMMA distribution is proportional to:
+                              SHAPE-1               
+                     (x/SCALE)        exp(-x/SCALE) 
+                                     
+                                    
+                                    
+                             7.2  Arguments
+                             ==============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   four arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:4 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. X 
+    3. SHAPE 
+    4. SCALE 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the gamma distribution.
+ Range: 
+   [          ]
+   [      -10 ]
+   [0:1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the gamma
+   distribution.
+ Range: 
+   [        ]
+   [  -10:1 ]
+   [10      ]
+ 
+ 
+   REAL (dpkind) :: X.  The upper limit of integration of the gamma
+   density. The lower limit is 0.
+ Range: 
+   [        ]
+   [    100 ]
+   [0:10    ]
+ 
+ 
+   REAL (dpkind) :: SHAPE.  The shape parameter of the distribution.
+ Range: 
+   [            ]
+   [  -10   100 ]
+   [10   :10    ]
+ 
+ 
+   REAL (dpkind) :: SCALE.  The scale parameter of the distribution.
+ Range: 
+   [            ]
+   [  -10   100 ]
+   [10   :10    ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 X outside range 
+     -5 SHAPE outside range 
+     -6 SCALE outside range 
+     3 CUM + CCUM is not nearly one 
+     5 Some error in inverse gamma routine 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+               NOTE: CUM and CCUM must add to (nearly) one.
+                                    
+                                    
+                        8  cdf_neg_binomial_mod
+                        *=*=*=*=*=*=*=*=*=*=*=*
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_NEG_BINOMIAL( WHICH, CUM, CCUM, F, S, PR, CPR, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_NEG_BINOMIAL(F, S, N, PR, CPR, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind)FUNCTION CCUM_NEG_BINOMIAL(F, S, N, PR, CPR, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_NEG_BINOMIAL( CUM, CCUM, N, PR, CPR,
+   STATUS, CHECK_INPUT)
+                                     
+                                    
+                                    
+                         8.1  The Distribution
+                         =====================
+                                     
+      The density of the negative binomial distribution provides the
+     probability of precisely F failures before the S'th success in
+   independent binomial trials, each with probability of success PR.
+                              The density is
+                         (        )            
+                         ( F+S-1  )  S       F 
+                         (  S-1   )PR  (1-PR)  
+                                     
+  The cumulative distribution function is the probability of F or fewer
+                   failures before the F'th success.
+   The negative binomial is extended to non-integer values of F via the
+ relation between the cumulative distribution function of the negative
+               binomial and the incomplete beta function.
+                                    
+                                    
+                             8.2  Arguments
+                             ==============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   four arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:4 ]
+   [    ]
+ 
+ 
+     
+     1 CUM and CCUM 
+     2 F 
+     3 S 
+     4 PR and CPR 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the negative-binomial
+   distribution.
+ Range: 
+   [          ]
+   [      -10 ]
+   [0:1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL  : CCUM. One minus the CDF of the binomial
+   distribution.
+ Range: 
+   [        ]
+   [  -10:1 ]
+   [10      ]
+ 
+ 
+   REAL (dpkind) :: F.  The number of failures before the S'th success.
+ Range: 
+   [       ]
+   [    10 ]
+   [0:10   ]
+ 
+ 
+   REAL (dpkind) :: S.  The number of successes to occur.
+ Input Range: 
+   [       ]
+   [    10 ]
+   [0:10   ]
+ 
+ 
+   REAL (dpkind) :: PR.  The probability of success in each independent
+   trial.
+ Range: 
+   [    ]
+   [0:1 ]
+   [    ]
+ 
+ 
+   REAL (dpkind) :: CPR.  One minus the probability of success in each
+   independent trial; the probability of failure in each trial.
+ Range: 
+   [    ]
+   [0:1 ]
+   [    ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 F outside range 
+     -5 S outside range 
+     -6 PR outside range 
+     -7 CPR outside range 
+     3 CUM + CCUM is not nearly one 
+     4 PR + CPR is not nearly one 
+     10 The cumulative negative binomial is computed as an  incomplete
+      beta. This value of STATUS indicates an error in the  incomplete
+      beta routine. It really shouldn't happen. 
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+     NOTE: CUM and CCUM and also PR and CPR must add to (nearly) one.
+                                    
+                                    
+                          9  cdf_nc_chisq_mod
+                          *=*=*=*=*=*=*=*=*=*
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_NC_CHISQ( WHICH, CUM, CCUM, X, DF, PNONC, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_NC_CHISQ(X, DF, PNONC, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CCUM_NC_CHISQ(X, DF, PNONC, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_NC_CHISQ( CUM, CCUM, DF, PNONC, STATUS,
+   CHECK_INPUT)
+                                     
+                                    
+                                    
+                         9.1  The Distribution
+                         =====================
+                                     
+   The noncentral chi-squared distribution is the sum of DF independent
+    normal distributions with unit standard deviations, but possibly
+non-zero means . Let the mean of the ith normal be delta_i. Then PNONC =
+                             sum_i delta_i.
+                                    
+                                    
+                             9.2  Arguments
+                             ==============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   three arguments is to be calculated.
+ 
+     
+    1. CUM and CCUM 
+    2. DF 
+    3. PNONC 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the noncentral
+   chi-squared distribution.
+ Range: 
+   [          ]
+   [      -10 ]
+   [0:1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the noncentral
+   chi-squared distribution.
+ Range: 
+   [        ]
+   [  -10:1 ]
+   [10      ]
+ 
+ 
+   REAL (dpkind) :: X.  The upper limit of integration of the noncentral
+   chi-squared distribution. (The lower limit is 0.) Range: 
+   [        ]
+   [    100 ]
+   [0:10    ]
+ 
+ 
+   REAL (dpkind) :: DF.  The degrees of freedom of the noncentral
+   chi-squared distribution.
+ Input Range: 
+   [          ]
+   [  -3   10 ]
+   [10  :10   ]
+ 
+ 
+   REAL (dpkind) :: PNONC.  The noncentrality parameter.
+ Range: 
+   [      ]
+   [    4 ]
+   [0:10  ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 X outside range 
+     -5 DF outside range 
+     -6 PNONC outside range 
+     3 CUM + CCUM is not nearly one 
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+               NOTE: CUM and CCUM must add to (nearly) one.
+                                    
+                                    
+                            10  cdf_nc_f_mod
+                            *=*=*=*=*=*=*=*=
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_F( WHICH, CUM, CCUM, F, DFN, DFD, PNONC, STATUS,
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_F(F, DFN, DFD, PNONC, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind)FUNCTION CCUM_F(F, DFN, DFD, PNONC, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_F( CUM, CCUM, DFN, DFD, PNONC, STATUS,
+   CHECK_INPUT)
+                                     
+                                    
+                                    
+                         10.1  The Distribution
+                         ======================
+                                     
+   The noncentral F is the distribution of the ratio of two independent
+  random variables. The numerator random variable is distributed as a
+  noncentral chi-squared with DFN degrees of freedom and noncentrality
+   parameter PNONC divided by DFN. The denominator random variable is
+   distributed as a (central) chi-squared with DFD degrees of freedom
+                            divided by DFD.
+                                    
+                                    
+                            10.2  Arguments
+                            ===============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   five arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:2 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. F 
+ 
+ NOTE: DFN and DFD will not be computed because CUM is not monotone in
+   either argument.
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the noncentral f
+   distribution.
+ Range: 
+   [          ]
+   [      -10 ]
+   [0:1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the noncentral
+   f distribution.
+ Range: 
+   [        ]
+   [  -10:1 ]
+   [10      ]
+ 
+ 
+   REAL (dpkind) :: F.  The upper limit of integration of the noncentral
+   f density. The lower limit is 0.
+ Range: 
+   [        ]
+   [    100 ]
+   [0:10    ]
+ 
+ 
+   REAL (dpkind) :: DFN.  The numerator degrees of freedom.
+ Range: 
+   [          ]
+   [  -3   10 ]
+   [10  :10   ]
+ 
+ 
+   REAL (dpkind) :: DFD.  The denominator degrees of freedom.
+ Range: 
+   [          ]
+   [  -3   10 ]
+   [10  :10   ]
+ 
+ 
+   REAL (dpkind) :: PNONC.  The noncentrality parameter.
+ Range: 
+   [      ]
+   [    4 ]
+   [0:10  ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 F outside range 
+     -5 DFN outside range 
+     -6 DFD outside range 
+     3 CUM + CCUM is not nearly one 
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+               NOTE: CUM and CCUM must add to (nearly) one.
+                                    
+                                    
+                            11  cdf_nc_t_mod
+                            *=*=*=*=*=*=*=*=
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_T( WHICH, CUM, CCUM, T, DF, PNONC, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_T(T, DF, PNONC, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind)FUNCTION CCUM_T(T, DF, PNONC, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_T( CUM, CCUM, DF, PNONC, STATUS,
+   CHECK_INPUT)
+                                     
+                                    
+                                    
+                         11.1  The Distribution
+                         ======================
+                                     
+   The noncentral T is the distribution of the ratio of two independent
+  random variables. The numerator random variable is distributed as a
+  normal distribution with mean PNONC and variance 1. The denominator
+   random variable is distributed as a the square root of a (central)
+         chi-squared with DF degrees of freedom divided by DF.
+                                    
+                                    
+                            11.2  Arguments
+                            ===============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:4 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. T 
+    3. DF 
+    4. PNONC 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the noncentral t
+   distribution.
+ Range: 
+   [              ]
+   [  -10     -10 ]
+   [10   :1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the noncentral
+   t distribution.
+ Range: 
+   [              ]
+   [  -10     -10 ]
+   [10   :1-10    ]
+ 
+ 
+   REAL (dpkind) :: T.  The upper limit of integration of the noncentral
+   t density. The lower limit is -oo.
+ Range: 
+   [             ]
+   [   100   100 ]
+   [-10   :10    ]
+ 
+ 
+   REAL (dpkind) :: DF.  The degrees of freedom.
+ Range: 
+   [          ]
+   [  -3   10 ]
+   [10  :10   ]
+ 
+ 
+   REAL (dpkind) :: PNONC.  The noncentrality parameter.
+ Range: 
+   [      ]
+   [    4 ]
+   [0:10  ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 T outside range 
+     -5 DF outside range 
+     -6 PNONC outside range 
+     3 CUM + CCUM is not nearly one 
+     10 The noncentral t calculation uses the central t calculation
+      which is reduced to the calculation of an incomplete beta. This
+      value of STATUS indicates an error in the incomplete beta
+      calculation. It really shouldn't happen. 
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+                                    
+                                    
+                           12  cdf_normal_mod
+                           *=*=*=*=*=*=*=*=*=
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_NORMAL( WHICH, CUM, CCUM, X, MEAN, SD, STATUS,
+   CHECK_INPUT )
+ 
+  REAL (dpkind) FUNCTION CUM_NORMAL(X, MEAN, SD,  STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CCUM_NORMAL(X, MEAN, SD, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_NORMAL(CUM, CCUM, MEAN, SD, STATUS,
+   CHECK_INPUT)
+                                     
+                                    
+                                    
+                         12.1  The Distribution
+                         ======================
+                                     
+        The density of the normal distribution is proportional to
+                                (         2)
+                                ( (X-MEAN) )
+                             exp(----------)
+                                (       2  )
+                                (   2 SD   )
+                                     
+                                    
+                                    
+                            12.2  Arguments
+                            ===============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:4 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. X 
+    3. MEAN 
+    4. SD 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the normal distribution.
+ Range: 
+   [              ]
+   [  -10     -10 ]
+   [10   :1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the normal
+   distribution.
+ Range: 
+   [              ]
+   [  -10     -10 ]
+   [10   :1-10    ]
+ 
+ 
+   REAL (dpkind) :: X.  The upper limit of integration of the normal
+   density. The lower limit is -oo.
+ Range: 
+   [             ]
+   [   100   100 ]
+   [-10   :10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL:: MEAN.  The mean of the normal distribution.
+   If omitted, the value 0 is used.
+ Range: 
+   [             ]
+   [   100   100 ]
+   [-10   :10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL:: SD.  The standard deviation of the normal
+   distribution. If omitted, the value 1 is used.
+ Range: 
+   [            ]
+   [  -10   100 ]
+   [10   :10    ]
+ 
+ 
+   INTEGER, INTENT(OUT), OPTIONAL :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 X outside range 
+     -5 MEAN outside range 
+     -6 SD outside range 
+     3 CUM + CCUM is not nearly one 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+                                    
+                                    
+                          13  cdf_poisson_mod
+                          *=*=*=*=*=*=*=*=*=*
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_POISSON( WHICH, CUM, CCUM, S, LAMBDA, STATUS, 
+   CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CUM_POISSON(S, LAMBDA, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CCUM_POISSON(S, LAMBDA, STATUS, CHECK_INPUT)
+ 
+  FUNCTION INV_POISSON( CUM, CCUM, LAMBDA, STATUS, CHECK_INPUT)
+                                     
+                                    
+                                    
+                         13.1  The Distribution
+                         ======================
+                                     
+   The density of the Poisson distribution (probability of observing S
+                              events) is:
+                                S              
+                          LAMBDA               
+                          ------- exp(-LAMBDA) 
+                            S!                 
+                                     
+  The Poisson distribution is extended to non-integer values of S using
+the relation between the cumulative distribution function of the Poisson
+                distribution and the gamma distribution.
+                                    
+                                    
+                            13.2  Arguments
+                            ===============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:3 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. S 
+    3. LAMBDA 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the Poisson distribution.
+ Range: 
+   [          ]
+   [      -10 ]
+   [0:1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the Poisson
+   distribution.
+ Range: 
+   [        ]
+   [  -10:1 ]
+   [10      ]
+ 
+ 
+   REAL (dpkind) :: S.  The upper limit of summation of the Poisson
+   density. The lower limit is 0.
+ Range: 
+   [        ]
+   [    100 ]
+   [0:10    ]
+ 
+ 
+   REAL (dpkind) :: LAMBDA.  The mean of the Poisson distribution.
+   Range: 
+   [            ]
+   [  -10   100 ]
+   [10   :10    ]
+ 
+ 
+   INTEGER, INTENT(OUT), OPTIONAL :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 X outside range 
+     -5 MEAN outside range 
+     -6 SD outside range 
+     3 CUM + CCUM is not nearly one 
+     10 The cumulative Poisson is calculated as an incomplete gamma
+      distribution. This status indicates that an error occurred in the
+      incomplete gamma code. It really shouldn't happen. 
+     -50 Answer (if any) is below lower bound on range 
+     50 Answer (if any) is above upper bound on range 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+                                    
+                                    
+                             14  cdf_t_mod
+                             *=*=*=*=*=*=*
+                                    
+                                     
+                                     
+ 
+  SUBROUTINE CDF_T( WHICH, CUM, CCUM, T, DF,  STATUS, CHECK_INPUT )
+ 
+  REAL (dpkind) FUNCTION CUM_T(T, DF, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION CCUM_T(T, DF, STATUS, CHECK_INPUT)
+ 
+  REAL (dpkind) FUNCTION INV_T(CUM, CCUM, T, DF, STATUS, CHECK_INPUT)
+                                     
+                                    
+                                    
+                         14.1  The Distribution
+                         ======================
+                                     
+                      The density is proportional to
+                           [     2 ]         
+                           [    T  ](DF+1)/2 
+                           [1 + -- ]         
+                           [    DF ]         
+                                     
+                                    
+                                    
+                            14.2  Arguments
+                            ===============
+                                     
+                                     
+ 
+   INTEGER, INTENT(IN) :: WHICH.  Integer indicating which of the next
+   arguments is to be calculated.
+ Input Range: 
+   [    ]
+   [1:3 ]
+   [    ]
+ 
+ 
+     
+    1. CUM and CCUM 
+    2. T 
+    3. DF 
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CUM.  The CDF of the noncentral t
+   distribution.
+ Range: 
+   [              ]
+   [  -10     -10 ]
+   [10   :1-10    ]
+ 
+ 
+   REAL (dpkind), OPTIONAL :: CCUM.  One minus the CDF of the noncentral
+   t distribution.
+ Range: 
+   [              ]
+   [  -10     -10 ]
+   [10   :1-10    ]
+ 
+ 
+   REAL (dpkind) :: T.  The upper limit of integration of the noncentral
+   t density. The lower limit is -oo.
+ Range: 
+   [             ]
+   [   100   100 ]
+   [-10   :10    ]
+ 
+ 
+   REAL (dpkind) :: DF.  The degrees of freedom.
+ Range: 
+   [          ]
+   [  -3   10 ]
+   [10  :10   ]
+ 
+ 
+   INTEGER, INTENT(OUT) :: STATUS.  Return code. 
+     
+     -1 WHICH outside input range 
+     -2 CUM outside range 
+     -3 CCUM outside range 
+     -4 T outside range 
+     -5 DF outside range 
+     3 CUM + CCUM is not nearly one 
+     10 The cumulative t is computed as an incomplete beta distribution.
+      This value indicates an error in the incomplete beta code. It
+      really shouldn't happen. 
+     -50 Answer (if any) is below the lower search bound 
+     50 Answer (if any) is above the upper search bound 
+ 
+ 
+   LOGICAL, INTENT(IN), OPTIONAL :: CHECK_INPUT.  If PRESENT and .TRUE.
+   input argument values are not checked for validity.
+                                     
+-----------------------------------------------------------------------
+                                     
+                                     
+              This document was translated from LaTeX by HeVeA
+              (http://pauillac.inria.fr/~maranget/hevea/index.html). 

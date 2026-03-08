@@ -1,0 +1,344 @@
+############################################################
+# equilibrium.jl — Post-solution equilibrium objects
+#
+# compute_equilibrium_objects(model)
+#   Returns a NamedTuple with all stationary densities,
+#   value/surplus/firm surfaces, wages, and population accounting.
+#
+# print_accounting(obj)
+#   Prints a formatted table of population accounting.
+############################################################
+
+"""
+    compute_equilibrium_objects(model) → NamedTuple
+
+Derive all equilibrium objects from a solved `Model`:
+  - stationary densities (u_U, t, e_U, u_S, e_S, …)
+  - value and surplus surfaces (S_U, J_U, E_U, S0/S1_S, …)
+  - wage surfaces and densities
+  - population accounting aggregates
+"""
+function compute_equilibrium_objects(model::Model)
+
+    cp  = model.common
+    rp  = model.regime
+    uc  = model.unsk_cache
+    sc  = model.skl_cache
+    up  = model.unsk_par
+    sp  = model.skl_par
+    pre = model.skl_pre
+
+    xg  = model.grids.x
+    wx  = model.grids.wx
+    ell = model.grids.ℓ
+    pgU = model.unsk_grids.p
+    wpU = model.unsk_grids.wp
+    pg  = model.skl_grids.p
+    wpS = model.skl_grids.wp
+
+    Nx  = length(xg)
+    NpU = length(pgU)
+    NpS = length(pg)
+
+    r  = cp.r;  ν  = cp.ν;  φ  = cp.φ
+    βU = up.β;  λU = up.λ
+    βS = sp.β;  λS = sp.λ;  σS = sp.σ
+
+    PU = rp.PU;  PS = rp.PS;  bS = rp.bS;  αU = rp.α_U
+
+    c_of_x = x -> cp.c * exp(-6.0 * x)
+
+    # ── dG quadrature weights ──────────────────────────────────────────────
+    wGU = build_unskilled_G_weights(pgU, wpU, αU)
+
+    # ── Stationary densities ───────────────────────────────────────────────
+    uU     = copy(uc.u)
+    tU     = copy(uc.t)
+    mU_x   = max.(ell .- (φ / ν) .* tU, 0.0)
+    eU_vec = max.(mU_x .- uU .- tU, 0.0)
+    mS_vec = [(φ / ν) * tU[ix] for ix in 1:Nx]
+
+    uS     = copy(sc.u)
+    eS_mat = copy(sc.e)
+    eS_tot = [dot(eS_mat[ix, :], wpS) for ix in 1:Nx]
+
+    # ── Unskilled employment surface (Nx × NpU) ───────────────────────────
+    θU  = uc.θ
+    f_U = θU * q_from_theta(θU, up.μ, up.η)
+
+    eU_surface = zeros(Nx, NpU)
+    for ix in 1:Nx
+        pstar_x    = clamp01(uc.pstar[ix])
+        eU_total_x = eU_vec[ix]
+        denom_eU   = ν + λU
+
+        for jp in 1:NpU
+            p = pgU[jp]
+            if p >= pstar_x
+                g_p = αU * p^(αU - 1.0)
+                eU_surface[ix, jp] = λU * g_p / denom_eU * eU_total_x
+            end
+        end
+        eU_surface[ix, end] += f_U * uU[ix] / (ν + λU)
+    end
+
+    # ── Unskilled values and policy ────────────────────────────────────────
+    Usearch     = copy(uc.Usearch)
+    Tv          = copy(uc.T)
+    UU          = copy(uc.U)
+    tauT        = copy(uc.τT)
+    net_T       = [-c_of_x(xg[ix]) + Tv[ix] for ix in 1:Nx]
+    JU_frontier = copy(uc.Jfrontier)
+    SU1         = JU_frontier ./ max(1.0 - βU, 1e-14)
+    EU1         = UU .+ βU .* SU1
+    pstar_U     = copy(uc.pstar)
+
+    # ── Unskilled surplus / firm / worker surfaces ─────────────────────────
+    SU_surface = zeros(Nx, NpU)
+    for ix in 1:Nx
+        Svec = zeros(NpU)
+        solve_unskilled_surplus_on_grid!(
+            Svec, pgU, wGU, PU, xg[ix], r, ν, λU, UU[ix], uc.pstar[ix]
+        )
+        SU_surface[ix, :] = Svec
+    end
+    JU_surface = (1.0 - βU) .* SU_surface
+    EU_surface = UU .+ βU .* SU_surface
+
+    # ── Skilled value / surplus surfaces ──────────────────────────────────
+    denom_nb     = max(1.0 - βS, 1e-14)
+    S0_surface   = sc.J0 ./ denom_nb
+    S1_surface   = sc.J1 ./ denom_nb
+    E0_surface   = copy(sc.E0)
+    E1_surface   = copy(sc.E1)
+    J0_surface   = copy(sc.J0)
+    J1_surface   = copy(sc.J1)
+    Smax_surface = max.(S0_surface, S1_surface)
+    Jskl_surface = ifelse.(E1_surface .>= E0_surface, J1_surface, J0_surface)
+
+    pstar_S = copy(sc.pstar)
+    poj     = copy(sc.poj)
+    US      = copy(sc.U)
+
+    # ── Total employment surface on skilled p-grid ─────────────────────────
+    eU_on_pg = zeros(Nx, NpS)
+    for ix in 1:Nx
+        itp = linear_interpolation(pgU, eU_surface[ix, :], extrapolation_bc = 0.0)
+        eU_on_pg[ix, :] = max.(itp.(pg), 0.0)
+    end
+    e_total_surface = eU_on_pg .+ eS_mat
+
+    # ── Wages ──────────────────────────────────────────────────────────────
+    θS = sc.θ
+    κS = θS * q_from_theta(θS, sp.μ, sp.η)
+    wΓ = pre.γvals .* wpS
+
+    tailS = zeros(Nx, NpS)
+    for ix in 1:Nx
+        acc = 0.0
+        for jp in NpS:-1:1
+            acc += Smax_surface[ix, jp] * wΓ[jp]
+            tailS[ix, jp] = acc
+        end
+    end
+
+    I_full = zeros(Nx)
+    for ix in 1:Nx
+        j0         = pcut_index(pg, clamp01(pstar_S[ix]))
+        I_full[ix] = tailS[ix, j0]
+    end
+
+    # w_U(x,p)
+    wU_surface = fill(NaN, Nx, NpU)
+    for ix in 1:Nx
+        pst     = clamp01(pstar_U[ix])
+        outside = (1.0 - βU) * (r + ν) * UU[ix]
+        for jp in 1:NpU
+            if pgU[jp] >= pst
+                wU_surface[ix, jp] = βU * PU * xg[ix] * pgU[jp] + outside
+            end
+        end
+    end
+
+    # w_S^0(x,p)
+    wS0_surface = fill(NaN, Nx, NpS)
+    for ix in 1:Nx
+        pst         = clamp01(pstar_S[ix])
+        flow_out    = (1.0 - βS) * bS
+        ladder_term = βS * (1.0 - βS) * κS * I_full[ix]
+        for jp in 1:NpS
+            if pg[jp] >= pst
+                wS0_surface[ix, jp] = βS * PS * xg[ix] * pg[jp] + flow_out + ladder_term
+            end
+        end
+    end
+
+    # w_S^1(x,p)
+    wS1_surface = fill(NaN, Nx, NpS)
+    for ix in 1:Nx
+        pst      = clamp01(pstar_S[ix])
+        flow_out = (1.0 - βS) * (bS + σS)
+        for jp in 1:NpS
+            if pg[jp] >= pst
+                I_low = max(I_full[ix] - tailS[ix, jp], 0.0)
+                wS1_surface[ix, jp] =
+                    βS * PS * xg[ix] * pg[jp] +
+                    flow_out +
+                    βS * (1.0 - βS) * κS * I_low
+            end
+        end
+    end
+
+    Δw_surface = wS1_surface .- wS0_surface
+
+    # ── Wage densities ─────────────────────────────────────────────────────
+    function _wage_density(wages, weights, wgrid)
+        Nb   = length(wgrid) - 1
+        bw   = step(wgrid)
+        dens = zeros(Nb)
+        for (w, m) in zip(wages, weights)
+            ib = searchsortedlast(wgrid, w)
+            if 1 <= ib <= Nb
+                dens[ib] += m
+            end
+        end
+        total = sum(dens) * bw
+        return total > 0.0 ? dens ./ total : dens
+    end
+
+    wages_U  = Float64[];  mass_U  = Float64[]
+    wages_S0 = Float64[];  mass_S0 = Float64[]
+    wages_S1 = Float64[];  mass_S1 = Float64[]
+
+    for ix in 1:Nx
+        wx_ix  = wx[ix]
+        poj_ix = clamp01(poj[ix])
+
+        for jp in 1:NpU
+            w = wU_surface[ix, jp]
+            e = eU_surface[ix, jp]
+            if !isnan(w) && e > 1e-16
+                push!(wages_U, w)
+                push!(mass_U, e * wx_ix * wpU[jp])
+            end
+        end
+
+        for jp in 1:NpS
+            e = eS_mat[ix, jp]
+            e <= 1e-16 && continue
+            m = e * wx_ix * wpS[jp]
+            if pg[jp] < poj_ix
+                w = wS1_surface[ix, jp]
+                if !isnan(w);  push!(wages_S1, w);  push!(mass_S1, m)  end
+            else
+                w = wS0_surface[ix, jp]
+                if !isnan(w);  push!(wages_S0, w);  push!(mass_S0, m)  end
+            end
+        end
+    end
+
+    all_wages = [wages_U; wages_S0; wages_S1]
+    w_lo      = quantile(all_wages, 0.002)
+    w_hi      = quantile(all_wages, 0.998)
+    Nbins     = 120
+    wgrid     = range(w_lo, w_hi; length = Nbins + 1)
+    wmid      = collect(wgrid[1:end-1] .+ step(wgrid) / 2)
+
+    dens_U  = _wage_density(wages_U,  mass_U,  wgrid)
+    dens_S0 = _wage_density(wages_S0, mass_S0, wgrid)
+    dens_S1 = _wage_density(wages_S1, mass_S1, wgrid)
+    dens_S  = _wage_density([wages_S0; wages_S1], [mass_S0; mass_S1], wgrid)
+
+    # ── Population accounting ──────────────────────────────────────────────
+    agg_uU      = dot(uU, wx)
+    agg_t       = dot(tU, wx)
+    agg_eU      = dot(eU_vec, wx)
+    agg_mU      = dot(mU_x, wx)
+
+    agg_uS      = dot(uS, wx)
+    agg_eS      = sum(eS_mat .* wpS' .* reshape(wx, :, 1))
+    agg_mS      = agg_uS + agg_eS
+    agg_mS_flow = (φ / ν) * agg_t
+
+    total_pop   = agg_mU + agg_mS
+    ur_U        = agg_uU / max(agg_mU, 1e-14)
+    ur_S        = agg_uS / max(agg_mS, 1e-14)
+    ur_total    = (agg_uU + agg_uS) / max(total_pop, 1e-14)
+
+    return (
+        # grids
+        xg = xg, pgU = pgU, pg = pg, wx = wx, wpU = wpU, wpS = wpS,
+        Nx = Nx, NpU = NpU, NpS = NpS,
+
+        # stationary densities
+        uU = uU, tU = tU, eU_vec = eU_vec, mU_x = mU_x, mS_vec = mS_vec,
+        uS = uS, eS_mat = eS_mat, eS_tot = eS_tot,
+
+        # employment surfaces
+        eU_surface      = eU_surface,
+        e_total_surface = e_total_surface,
+
+        # unskilled values & policy
+        Usearch     = Usearch, Tv = Tv, UU = UU, net_T = net_T, tauT = tauT,
+        JU_frontier = JU_frontier, SU1 = SU1, EU1 = EU1,
+        pstar_U     = pstar_U,
+
+        # unskilled value surfaces
+        SU_surface = SU_surface, JU_surface = JU_surface, EU_surface = EU_surface,
+
+        # skilled values & policy
+        US = US, pstar_S = pstar_S, poj = poj,
+
+        # skilled value surfaces
+        S0_surface   = S0_surface,   S1_surface  = S1_surface,
+        Smax_surface = Smax_surface,
+        E0_surface   = E0_surface,   E1_surface  = E1_surface,
+        J0_surface   = J0_surface,   J1_surface  = J1_surface,
+        Jskl_surface = Jskl_surface,
+
+        # wages
+        wU_surface  = wU_surface,
+        wS0_surface = wS0_surface,   wS1_surface = wS1_surface,
+        Δw_surface  = Δw_surface,
+
+        # wage densities
+        wmid    = wmid,   dens_U  = dens_U,
+        dens_S  = dens_S, dens_S0 = dens_S0, dens_S1 = dens_S1,
+
+        # population accounting
+        agg_uU  = agg_uU, agg_t   = agg_t,   agg_eU  = agg_eU, agg_mU = agg_mU,
+        agg_uS  = agg_uS, agg_eS  = agg_eS,  agg_mS  = agg_mS,
+        agg_mS_flow = agg_mS_flow, total_pop = total_pop,
+        ur_U    = ur_U,   ur_S    = ur_S,     ur_total = ur_total,
+        thetaU  = uc.θ,   thetaS  = sc.θ,
+        f_U     = f_U,
+    )
+end
+
+
+"""
+    print_accounting(obj)
+
+Print a formatted population accounting table from the output of
+`compute_equilibrium_objects`.
+"""
+function print_accounting(obj)
+    @printf("\n╔═════════════════════════════════════════════════════╗\n")
+    @printf("║  Equilibrium accounting                             ║\n")
+    @printf("╠═════════════════════════════════════════════════════╣\n")
+    @printf("║  UNSKILLED SEGMENT  (share of pop = %6.4f)         ║\n", obj.agg_mU)
+    @printf("║    unemployed  u_U   %6.4f  (%5.1f%% of seg)        ║\n", obj.agg_uU, 100 * obj.ur_U)
+    @printf("║    employed    e_U   %6.4f                         ║\n", obj.agg_eU)
+    @printf("║    training    t     %6.4f                         ║\n", obj.agg_t)
+    @printf("║    m_U (flow)        %6.4f                         ║\n", obj.agg_mU)
+    @printf("╠═════════════════════════════════════════════════════╣\n")
+    @printf("║  SKILLED SEGMENT    (share of pop = %6.4f)         ║\n", obj.agg_mS)
+    @printf("║    unemployed  u_S   %6.4f  (%5.1f%% of seg)        ║\n", obj.agg_uS, 100 * obj.ur_S)
+    @printf("║    employed    e_S   %6.4f                         ║\n", obj.agg_eS)
+    @printf("║    m_S (flow)        %6.4f                         ║\n", obj.agg_mS_flow)
+    @printf("╠═════════════════════════════════════════════════════╣\n")
+    @printf("║  TOTAL POPULATION    %6.4f  (should be 1.000)      ║\n", obj.total_pop)
+    @printf("║  Global u-rate       %6.4f                         ║\n", obj.ur_total)
+    @printf("║  θ_U = %6.4f        θ_S = %6.4f                   ║\n", obj.thetaU, obj.thetaS)
+    @printf("╚═════════════════════════════════════════════════════╝\n")
+end

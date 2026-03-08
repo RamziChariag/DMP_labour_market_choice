@@ -1,0 +1,1170 @@
+% Uncomment next line for pdflatex
+%\documentclass[12pt,pdftex]{article}
+
+% Comment next line for pdftex
+\documentclass[12pt,dvips]{article}
+
+\usepackage{xspace}
+\usepackage{color}
+%uncomment next two lines for pdflatex
+%\usepackage[bookmarks,bookmarksopen,
+%    pdftex=true]{hyperref}
+
+\definecolor{Orange}{cmyk}{0,0.61,0.87,0}
+
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\textheight}{1.0in}
+\addtolength{\textwidth}{0.5in}
+\setlength{\parindent}{0in}
+\setlength{\parskip}{0.1in}
+\newcommand{\meta}[1]{{\ensuremath{<}}#1{\ensuremath{{>}}}}
+\newcommand{\us}{\underline{ }}
+\newcommand{\po}{\ensuremath{p_{h0}}\xspace}
+\newcommand{\thet}{\ensuremath{\theta}}
+
+\newcommand{\mysection}[1]
+    {\color{blue} \section{#1} \color{black}}
+\newcommand{\mysubsection}[1]
+    {\color{green}\subsection{#1}\color{black}}
+\newcommand{\mysubsubsection}[1]
+    {\color{Orange}\subsubsection{#1}\color{black}}
+\newcommand{\vs}{\vspace*{\fill}}
+\newcommand{\CR}{\ensuremath{>} \meta{CR}\\}
+\newcommand{\Input}[1]{\ensuremath{>}{\ttfamily #1\\}}
+\newenvironment{commentary}{\begin{quote} \color{Orange}
+\begin{center} Begin Commentary\\ \vspace{0.1in} 
+\end{center} \color{black} }
+{\color{Orange} \begin{center} End Commentary\\ \end{center} \color{black}
+      \end{quote} \normalsize }
+\newcommand{\commentaryhead}[1]
+{\begin{center} \large \color{green} #1\\ 
+    \normalsize \color{black} \end{center} }
+
+\begin{document}
+
+\Large \bfseries
+     
+{\centering \color{blue}     
+                                    STATTAB\\
+                          Version 2.0: March, 2002\\
+\vspace{0.1in}
+
+
+     Calculates Cumulative Distribution Functions,\\
+               Inverses, and Parameters of Distributions.\\
+
+\vspace{0.1in}
+
+}
+
+
+
+{\centering \color{green}
+                  Barry W. Brown  \hfill             David Gutierrez\\
+                  James Lovato    \hfill            Dan Serachitopol\\
+                  Marty Spears    \hfill            John Venier\\}
+
+\vs
+
+     This  work supported  by   grant CA-16672   from the  National  Cancer
+     Institute.\\
+
+  Copyright 1989-2002 for:
+\begin{quote}            
+         The University of Texas, M.D. Anderson Cancer Center
+                    Department of Biomathematics, Box 237
+                    1515 Holcombe Boulevard
+                    Houston, TX      77030
+\end{quote}
+     Contact: BWB at above address or bwb@mdanderson.org
+
+     This program may be freely copied and (noncommercially) distributed.
+
+     This program can be obtained from\\
+{\centering http://odin.mdacc.tmc.edu/anonftp/}
+
+\normalsize \normalfont
+
+\vs
+
+\pagebreak
+
+\mysection{Legalities}
+
+We   want our  computer  programs to  be  as  widely used as possible,
+consequently    unrestricted  use   of  them  within     a computer is
+permissible.    Use   within commercial  enterprises   for  commercial
+purposes  is explicitly allowed   as    is academic, research,     and
+government or any other use.  
+
+Copies of any   form of  the   code (source  or  executable)  and  the
+documentation can  be made and   redistributed  freely.  You may  give
+copies  to students, coworkers, friends,  and  enemies.  We do require
+that   the  copyright   and  LEGALITIES  section   of   the code   and
+documentation be preserved in  such copies.
+
+Modifications   and improvements to the  code  can similarly be freely
+copied and  distributed.  Modified code be clearly   marked as such so
+that we are not  requested to fix it.   We would appreciate a copy  of
+any improvements   for   incorporation into  later   versions  of  our
+programs.
+
+Inclusion of  our code in   software archives and its distribution  as
+freeware is encouraged.
+
+Incorporation into Commercial Packages
+
+Incorporation of our code into a commercial package  that will be sold
+requires   written permission  from  an administrative  officer of the
+Department of Biomathematics.   Our  current policy is to  grant  such
+permission without payment providing:
+
+(1)  We are informed  of and approve  the nature of  the product being
+developed or prepared for   distribution.  
+
+(2) Appropriate  acknowledgment    of  our   code   is   made   in the
+documentation accompanying the product.
+
+This program  contains code from  the following publications, and code
+from ACM publications is subject to the ACM policy (below).
+
+\mysubsection{References}
+
+\mysubsubsection{Incomplete Beta}
+
+DiDinato, A. R. and Morris,  A.   H. (1993)  ``Algorithm 708: Significant
+Digit Computation of the Incomplete  Beta  Function Ratios.''  {\em ACM
+Trans. Math.  Softw. 18}, 360-373.
+
+\mysubsubsection{Incomplete Gamma}
+
+DiDinato, A. R. and Morris, A. H. (1986) ``Computation of the  incomplete
+gamma function  ratios  and their  inverse.''   {\em ACM  Trans.  Math.
+Softw. 12}, 377-393.
+
+\mysubsubsection{Cumulative Normal}
+
+Cody, W.D. (1993). ``ALGORITHM 715: SPECFUN - A Portable FORTRAN
+Package of Special Function Routines and Test Drivers''
+{\em ACM Trans. Math. Softw. 19}, 22-32.
+
+\mysubsubsection{Inverse Normal}
+
+``Algorithm AS241'' (1988) {\em Appl. Statist. 37}, NO. 3, 477-484.
+
+\mysubsubsection{Finding a Zero of a Monotone Function}
+
+Alefeld,  G.  E.,  Potra,  F.  A., Shi,  Y.  (1995)  ``Algorithm  748:
+Enclosing  Zeros  of  Continuous   Functions.'',  by  G.  E.  Alefeld,
+F.  A. Potra, YiXun  Shi, {\em ACM  Trans.  Math. Softw.,
+21}, No. 3, 327-344
+
+\mysubsection{ACM Policy on Use of Code}
+
+Here  is the  software Policy of  the  ACM.
+
+\begin{quote}
+
+     Submittal of  an  algorithm    for publication  in   one of   the  ACM
+     Transactions implies that unrestricted use  of the algorithm within  a
+     computer is permissible.   General permission  to copy and  distribute
+     the algorithm without fee is granted provided that the copies  are not
+     made  or   distributed for  direct   commercial  advantage.    The ACM
+     copyright notice and the title of the publication and its date appear,
+     and  notice is given that copying  is by permission of the Association
+     for Computing Machinery.  To copy otherwise, or to republish, requires
+     a fee and/or specific permission.
+
+     Krogh, F.  (1997) ``Algorithms  Policy.''  {\em ACM  Tran.  Math.
+     Softw.  13}, 183-186.
+
+\end{quote}
+
+We do not know the policy  of the Royal Statistical Society; they have
+discontinued publishing  algorithms.  However,  they made a  number of
+these  programs available  on Statlib  on condition  that there  be no
+charge for their distribution.
+
+Here is our standard disclaimer.
+
+\begin{quote}
+
+{\centering NO WARRANTY\\}
+
+WE PROVIDE ABSOLUTELY  NO WARRANTY  OF ANY  KIND  EITHER  EXPRESSED OR
+IMPLIED,  INCLUDING BUT   NOT LIMITED TO,  THE  IMPLIED  WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.  THE ENTIRE RISK
+AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS  WITH YOU.  SHOULD
+THIS PROGRAM PROVE  DEFECTIVE, YOU ASSUME  THE COST  OF  ALL NECESSARY
+SERVICING, REPAIR OR CORRECTION.
+
+IN NO  EVENT  SHALL THE UNIVERSITY  OF TEXAS OR  ANY  OF ITS COMPONENT
+INSTITUTIONS INCLUDING M. D.   ANDERSON HOSPITAL BE LIABLE  TO YOU FOR
+DAMAGES, INCLUDING ANY  LOST PROFITS, LOST MONIES,   OR OTHER SPECIAL,
+INCIDENTAL   OR  CONSEQUENTIAL DAMAGES   ARISING   OUT  OF  THE USE OR
+INABILITY TO USE (INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA OR
+ITS ANALYSIS BEING  RENDERED INACCURATE OR  LOSSES SUSTAINED  BY THIRD
+PARTIES) THE PROGRAM.
+
+(Above NO WARRANTY modified from the GNU NO WARRANTY statement.)
+\end{quote}
+
+\mysubsection{Thanks to Our Supporters}
+     
+The creation  of this  code was  supported in part  by the  Core Grant
+CA11672 of  the National  Cancer Institute of  NIH to M.   D. Anderson
+Hospital.  Other  support was provided by  the State of  Texas and the
+Robert R. Herring Professorship in Cancer Research held by Dr.  Brown.
+     
+\pagebreak
+
+\mysection{Introduction}
+
+     STATTAB    calculates    cumulative functions,  their   inverses,  and
+     parameters of the following distributions:
+
+\begin{enumerate}
+\item{Incomplete Beta}
+\item{Binomial}
+\item{Negative Binomial}
+\item{Chi-square}
+\item{Non-central chi-square}
+\item{Variance Ratio - F}
+\item{Non-central F}
+\item{Incomplete Gamma}
+\item{Normal}
+\item{Poisson}
+\item{T}
+\item{Non-central T}
+\end{enumerate}
+     
+     When normal or T cdfs are being  computed, STATTAB also
+     calculates  the associated two-sided  p-value.  When  chi-square  or F
+     cdfs  are calculated,  the associated  many sided   p-values are  also
+     printed.
+     
+     The probability of exactly n events is calculated and printed with the
+     cumulative distribution for the binomial and Poisson distributions.
+     
+     Calculations  can be  performed  on a list  of  values  for  producing
+     customized tables used for power or other calculations.  A report file
+     may be specified to contain all answers calculated by STATTAB.
+     
+\mysubsection{ Notes on the Calculations}
+     
+     The  cumulative distribution functions   for the binomial  and Poisson
+     distributions  are   calculated at  non-integral  arguments  using the
+     relation between the cumulative binomial and the beta distribution and
+     between the Poisson and the chi-square.
+     
+     The  individual terms for the  binomial  and  Poisson distribution are
+     calculated for  integer values obtained  by truncating   the arguments
+     given.
+     
+\mysubsection{Notes on the Use of the Program}
+
+     STATTAB  allows the user to  choose a distribution from a menu.
+     It  then prompts the user for  all the parameters  needed.  
+     
+\begin{enumerate}
+
+\item NOTE: Within a distribution specific menu, you can type 'help'
+  to obtain both a description of the distribution and of the
+  parameters that must be entered.
+
+\item There are several valid  methods of entering values for parameters.
+     These include an integer,  a decimal number specified  by X.X (where X
+     is an integer)  or an exponential  number specified by X.XeNN, X.XdNN,
+     or  XeNN.   (The  letters  'e' and  'd'  are  interchangeable in  this
+     context.  In these  forms, NN  is  an integer,  with  a minus sign  if
+     necessary.  X.XeNN means X.X multiplied by 10  raised to the power NN.
+     Thus, 0.0123 and 123e-4 represent the same number.
+
+     Many machines   including  most  Unix   machines, PCs   and  Macintosh
+     computers use IEEE  representation.  This   means that the    smallest
+     absolute magnitudes   that can be   handled are approximately -1e-308,
+     +1e-308.  Numbers smaller than this are set to 0.  The largest numbers
+     in absolute magnitude are approximately -1e308, 1e308.  Numbers larger
+     than this cause some abnormal condition, perhaps a program crash.
+
+\item Some of the parameters are complementary parameters,  i.e. they sum
+     to one.  For  example,  C , the  cumulative  probablity, and  1-C  are
+     complementary  parameters.  Enter only  ONE  of the  two complementary
+     parameters and enter a '.' to skip the other.
+
+     All  complementary  parameters are specified in the form  X  and  1-X.
+     Complementary  parameters allow for  more accurate computations of the
+     parameter  X in the case that X is  close to one.  This is because the
+     computer  will  "round off"  numbers  close  to one.  For example,  if
+     X = 1.0 - 1.0e-50,   the   computer  will   store   X = 1.0   so  that
+     calculations involving  X  can not be done accurately.  However, if we
+     define  1-X = 1.0e-50,  we  can  use  this  value  and  the  fact that 
+     X + 1-X = 1 to make accurate calculations.
+
+\item The user must always enter EXACTLY one '?'.  The '?' indicates that
+     the corresponding parameter value is to  be calculated from the values
+     of the other parameters.
+     
+\item The user can enter one 'T' for a parameter which allows the user to
+     specify a list of values.  The  answer is  calculated for each item on
+     the list.
+     
+\item Either commas or spaces can be used to separate values.
+     
+\item  Parameters whose value is  to remain  the same as  in the previous
+     calculation are indicated by the sign, "=".
+    
+\end{enumerate}
+
+
+\mysection{ AN ANNOTATED RUN}    
+ 
+\begin{verbatim}
+
+
+
+
+                                    STATTAB
+                          Version 2.0: March, 2002
+
+     Calculates Statistical Cumulative Distribution Functions  (P-Values),
+              Their Inverses, and Parameters of the Distributions.
+
+                  Barry W. Brown              David Gutierrez
+                  James Lovato                Dan Serachitopol
+                  Marty Spears                John Venier
+
+     This  work supported  by   grant CA-16672   from the  National  Cancer
+     Institute.  Copyright 1989-2002 for:
+                    The University of Texas, M.D. Anderson Cancer Center
+                    Department of Biomathematics, Box 237
+                    1515 Holcombe Boulevard
+                    Houston, TX      77030
+     Contact: BWB at above address or bwb@mdanderson.org
+
+     This program may be freely copied and (noncommercially) distributed.
+
+     This program can be obtained from
+                    http://odin.mdacc.tmc.edu/anonftp/
+
+
+
+ Press the Return or Enter key to continue ...
+
+\end{verbatim}
+
+\begin{commentary}
+
+A REPORT file contains your input plus the results of calculations
+made.  If you want to refer to the results of the program after you
+have finished running it, then you want a REPORT file.
+
+The name of the report file must be a legal file name on your computer
+system. 
+
+\end{commentary}
+
+\begin{verbatim}
+
+Do you want a REPORT file (y/n)?
+ Please enter one of [yn]: > y
+
+     Enter the  name  of the report file
+
+ > bwb,rep
+
+ Enter 0 to quit or  the number of a distribution.  Distribution number
+ then 'HELP' provides info on that distribution.
+
+
+  0 - EXIT Program
+  1 - Beta
+  2 - Binomial
+  3 - Negative Binomial
+  4 - Chi Square
+  5 - Non-central Chi-squared
+  6 - F
+  7 - Non-Central-F
+  8 - Gamma
+  9 - Normal
+ 10 - Poisson
+ 11 - T
+ 12 - Non-Central-T
+ Enter Distribution:
+ > 11
+
+          T(TVAL,DF) = C,1-C          (T)
+  Input TVAL, DF, and C or 1-C for t distribution.
+    OR: type HELP then press ENTER key for help
+    OR: Press ENTER key to change the distribution
+
+> help
+
+\end{verbatim}
+
+\begin{commentary}
+
+Typing   'help' within a distribution context causes a printout of
+a brief description of the distribution and its parameters.  The 
+description of the distribution is probably useful only to those
+knowedgeable about statistics and even then only in cases (such as
+the gamma or exponential) in which there are alternative
+parameterizations
+in the literature.
+
+\end{commentary}
+
+\begin{verbatim}
+
+
+     The T Density is proportional to:
+               (1+t**2/DF) ** (-(DF+1)/2)
+
+  TVAL - Upper Limit of Integration of T Density
+    DF - Degrees of Freedom
+     C - Cumulative Distribution Function at X
+   1-C - Complement of C
+
+ Press the Return or Enter key to continue ...
+
+>
+
+          T(TVAL,DF) = C,1-C          (T)
+  Input TVAL, DF, and C or 1-C for t distribution.
+    OR: type HELP then press ENTER key for help
+    OR: Press ENTER key to change the distribution
+
+1.97 9 ? .
+
+   ---- Parameters ---      ----- Answer ------      - P-val -
+    TVAL        DF             C        1-C           2 Sided
+    1.970000   9.000000      0.959829   0.040171      0.080342
+
+          T(TVAL,DF) = C,1-C          (T)
+  Input TVAL, DF, and C or 1-C for t distribution.
+    OR: type HELP then press ENTER key for help
+    OR: Press ENTER key to change the distribution
+
+\end{verbatim}
+
+\begin{commentary}
+
+     The question mark in the third position indicates that C and 1-C
+     are being calculated. The period in the fourth position indicates
+     that C was entered and 1-C should be skipped. In this case
+     1.97 9 . ? would have been equivalent.
+
+\end{commentary}
+
+\mysubsection{An Example of Tables of Values}
+
+We continue  with the  t-distribution example showing  how a  table of
+values can be created.
+
+\begin{verbatim}
+
+          T(TVAL,DF) = C,1-C          (T)
+  Input TVAL, DF, and C or 1-C for t distribution.
+    OR: type HELP then press ENTER key for help
+    OR: Press ENTER key to change the distribution
+
+> ? 9 t .
+
+\end{verbatim}
+
+\begin{commentary}
+
+     The question mark as the first item indicates that TVAL is to be
+     calculated. The equals sign indicates that the previous value of DF
+     is to be used. The t indicates that a list of C values is to be 
+     created and TVAL is to be calculated for each number on the list.
+     The . indicates that the parameter C was entered and 1-C should be
+     skipped.
+
+\end{commentary}
+                                   
+\begin{verbatim}
+
+Build List for C
+
+ The list currently contains 0 values.
+ The maximum number allowed is 100.
+
+     Select an option:
+        1 - ADD individually specified values to the list
+        2 - ADD equally spaced values to the list
+        3 - ADD logarithmically spaced values to the list
+        4 - PRINT the list
+        5 - DELETE a single element of the list
+        6 - DELETE consecutive elements of the list
+        7 - SORT the list in ascending order and eliminate duplicate values
+        8 - QUIT modifying the list
+ > 2
+
+\end{verbatim}
+
+\begin{commentary}
+
+In order to have ``nice'' values, the number of intervals should
+divide the high value minus the low evalue evenly.  In our example
+8 divides (0.9-0.8).
+
+\end{commentary}
+
+\begin{verbatim}
+
+ Enter beginning bound, ending bound and number of intervals.
+ > 0.1 0.9 8
+Build List for C
+
+ The list currently contains 9 values.
+ The maximum number allowed is 100.
+
+     Select an option:
+        1 - ADD individually specified values to the list
+        2 - ADD equally spaced values to the list
+        3 - ADD logarithmically spaced values to the list
+        4 - PRINT the list
+        5 - DELETE a single element of the list
+        6 - DELETE consecutive elements of the list
+        7 - SORT the list in ascending order and eliminate duplicate values
+        8 - QUIT modifying the list
+ > 8
+   --------- Parameters ---------    - Answer -
+      C         1-C        DF            TVAL
+    0.100000   0.900000   9.000000     -1.383029
+    0.200000   0.800000   9.000000     -0.883404
+    0.300000   0.700000   9.000000     -0.543480
+    0.400000   0.600000   9.000000     -0.260955
+    0.500000   0.500000   9.000000     0.000E+00
+    0.600000   0.400000   9.000000      0.260955
+    0.700000   0.300000   9.000000      0.543480
+    0.800000   0.200000   9.000000      0.883404
+    0.900000   0.100000   9.000000      1.383029
+
+\end{verbatim}
+
+\mysection{Comments on Calulations for Discrete Distributions}
+
+The binomial, negative binomial, and Poisson distributions are defined
+on the integers.  That is:
+
+\begin{itemize}
+
+\item In the binomial distribution, the number of successes (S) and
+the number of trials (N) take on integer values.
+
+\item In the negative binomial distribution, the number of
+  successes(S) and the number of failures (F) take on integer values.
+
+\item In the Poisson distribution, the number of events takes on
+integer values.
+
+\end{itemize}
+
+When any  of these discrete quantities  are calculated, it  is done by
+embedding the distribution in  a continuous distribution: the binomial
+and negative binomial are special  cases of the beta distribution; the
+Poisson  distribution is  a special  case of  the gamma  distribution. 
+These continuous distributions are  solved for the relevent quantities
+which are converted  back to values for the  integer valued parameter. 
+These values are ususally {\bf  not} integers but contain a fractional
+part.   Since an  integer answer  is usually  desired,  STATTAB prints
+three  lines of answers  for these  cases.  The  first line  shows the
+non-integer  result; the second,  the result  for the  largest integer
+smaller than the value; the third, the result for the smallest integer
+larger  than  the   value.   Here  is  an  example   for  the  Poisson
+distribution.
+
+\begin{verbatim}
+
+          P(N,MEAN) = C,1-C           (Poisson)
+  Input N, MEAN, and C or 1-C for Poisson distribution.
+    OR: type HELP then press ENTER key for help
+    OR: Press ENTER key to change the distribution
+
+? 10 t .
+
+Build List for C
+
+ The list currently contains 0 values.
+ The maximum number allowed is 100.
+
+     Select an option:
+        1 - ADD individually specified values to the list
+        2 - ADD equally spaced values to the list
+        3 - ADD logarithmically spaced values to the list
+        4 - PRINT the list
+        5 - DELETE a single element of the list
+        6 - DELETE consecutive elements of the list
+        7 - SORT the list in ascending order and eliminate duplicate values
+        8 - QUIT modifying the list
+ > 2
+
+ Enter beginning bound, ending bound and number of intervals.
+ > 0.2 0.8 6
+Build List for C
+
+ The list currently contains 7 values.
+ The maximum number allowed is 100.
+
+     Select an option:
+        1 - ADD individually specified values to the list
+        2 - ADD equally spaced values to the list
+        3 - ADD logarithmically spaced values to the list
+        4 - PRINT the list
+        5 - DELETE a single element of the list
+        6 - DELETE consecutive elements of the list
+        7 - SORT the list in ascending order and eliminate duplicate values
+        8 - QUIT modifying the list
+ > 8
+   ---------- Parameters --------     - Answer -
+      C         1-C        MEAN           N
+    0.200000   0.800000  10.000000      6.798297
+    0.130141   0.869859  10.000000      6.000000
+    0.220221   0.779779  10.000000      7.000000
+ ------------------------------------------------
+    0.300000   0.700000  10.000000      7.724082
+    0.220221   0.779779  10.000000      7.000000
+    0.332820   0.667180  10.000000      8.000000
+ ------------------------------------------------
+    0.400000   0.600000  10.000000      8.543104
+    0.332820   0.667180  10.000000      8.000000
+    0.457930   0.542070  10.000000      9.000000
+ ------------------------------------------------
+    0.500000   0.500000  10.000000      9.331353
+    0.457930   0.542070  10.000000      9.000000
+    0.583040   0.416960  10.000000     10.000000
+ ------------------------------------------------
+    0.600000   0.400000  10.000000     10.141095
+    0.583040   0.416960  10.000000     10.000000
+    0.696776   0.303224  10.000000     11.000000
+ ------------------------------------------------
+    0.700000   0.300000  10.000000     11.030752
+    0.696776   0.303224  10.000000     11.000000
+    0.791556   0.208444  10.000000     12.000000
+ ------------------------------------------------
+    0.800000   0.200000  10.000000     12.101946
+    0.791556   0.208444  10.000000     12.000000
+    0.864464   0.135536  10.000000     13.000000
+ ------------------------------------------------
+
+\end{verbatim}
+
+\mysection{Error Notification}
+
+Stattab notifies the user of errors either in legal input values or if
+the program cannot the requested  value.  A commonly occurring not too
+obvious  case is  the  inverse of  a  discrete cdf  where the  desired
+cumulative probabability  is too  small.  Because the  distribution is
+discrete, the probability of 0 or fewer events (equals the probability
+of 0  events) is positive, not  zero.  Hence, there is  no inverse cdf
+for probabilities smaller than this value.  Here is an example of what
+happens when such a value is requested.  The process of getting to the
+binomial calculation is ommitted.
+
+\begin{verbatim}
+
+ Enter Distribution: 
+ > 2
+ 
+          Bin(S,N,P,1-P) = C,1-C      (Binomial)                               
+  Input S, N, P or 1-P, and C or 1-C for binomial distribution.                
+    OR: type HELP then press ENTER key for help
+    OR: Press ENTER key to change the distribution
+ 
+? 5 0.5 . 0.01 .
+ 
+ --------------------- Parameters ---------------------    -- Answer --        
+      C         1-C         N          P         1-P            S              
+************************************************************************
+    0.010000   0.990000   5.000000   0.500000   0.500000     0.000E+00          
+Answer (if any) is BELOW the LOWER search bound
+************************************************************************
+
+\end{verbatim}
+
+The probability of zero events  in five trials when the probability of
+successs is 0.5 is 0.03125.  The number of successes needed to achieve
+a smaller probability makes no sense.
+
+The  program  returns 0  which  is the  lower  bound  of the  interval
+searched for an  answer.  However, the error message  informs the user
+that 0 is not a correct answer.
+
+In some  (rare) cases an  answer may exist  but be above or  below the
+endpoint  of the  interval searched.   The right  endpoint  is usually
+$10^{10}$ if the distribution has an infinite range.
+
+\mysection{Creating a Table of the Binomial Distribution}
+
+We  illustrate the creation  of a  table of  the individual  terms and
+cumulative distribution of the binomial distribution.
+
+\begin{verbatim}
+
+          Bin(S,N,P,1-P) = C,1-C      (Binomial)
+  Input S, N, P or 1-P, and C or 1-C for binomial distribution.
+    OR: type HELP then press ENTER key for help
+    OR: Press ENTER key to change the distribution
+
+t 10 0.5 . ? .
+
+Build List for S
+
+ The list currently contains 0 values.
+ The maximum number allowed is 100.
+
+     Select an option:
+        1 - ADD individually specified values to the list
+        2 - ADD equally spaced values to the list
+        3 - ADD logarithmically spaced values to the list
+        4 - PRINT the list
+        5 - DELETE a single element of the list
+        6 - DELETE consecutive elements of the list
+        7 - SORT the list in ascending order and eliminate duplicate values
+        8 - QUIT modifying the list
+ > 2
+
+ Enter beginning bound, ending bound and number of intervals.
+ > 0 10 10
+Build List for S
+
+ The list currently contains 11 values.
+ The maximum number allowed is 100.
+
+     Select an option:
+        1 - ADD individually specified values to the list
+        2 - ADD equally spaced values to the list
+        3 - ADD logarithmically spaced values to the list
+        4 - PRINT the list
+        5 - DELETE a single element of the list
+        6 - DELETE consecutive elements of the list
+        7 - SORT the list in ascending order and eliminate duplicate values
+        8 - QUIT modifying the list
+ > 8
+  ------------- Parameters -------------   ------ Answer ------    -- Pdf --
+     S         N         P        1-P          C        1-C          Term
+  0.000E+00 10.000000  0.500000  0.500000    0.977E-03  0.999023    0.977E-03
+   1.000000 10.000000  0.500000  0.500000     0.010742  0.989258     0.009766
+   2.000000 10.000000  0.500000  0.500000     0.054687  0.945312     0.043945
+   3.000000 10.000000  0.500000  0.500000     0.171875  0.828125     0.117188
+   4.000000 10.000000  0.500000  0.500000     0.376953  0.623047     0.205078
+   5.000000 10.000000  0.500000  0.500000     0.623047  0.376953     0.246094
+   6.000000 10.000000  0.500000  0.500000     0.828125  0.171875     0.205078
+   7.000000 10.000000  0.500000  0.500000     0.945312  0.054687     0.117188
+   8.000000 10.000000  0.500000  0.500000     0.989258  0.010742     0.043945
+   9.000000 10.000000  0.500000  0.500000     0.999023 0.977E-03     0.009766
+  10.000000 10.000000  0.500000  0.500000     1.000000 0.000E+00    0.977E-03
+
+\end{verbatim}
+
+\mysection{ USING DSTATTAB TO OBTAIN P-VALUES}
+     
+\mysubsection{Introduction}
+     
+     Those using DSTATTAB to find p-values  will primarily be interested in
+     the t (T),  normal  (N), chi-square (Chi),  and   variance  ratio  (F)
+     distributions.  For  each of  these distributions, p-value information
+     is printed when the user chooses the cumulative  distribution function
+     (C) to be calculated.  A brief discussion  of  each of the use of each
+     of  these distributions and  the printed p-value information  is given
+     below.
+     
+\mysubsection{T Distribution}
+     
+     The t-test is used to test  (1)  whether the mean  of a sample from an
+     assumed normal distribution is consistent with some specified value of
+     the population mean, (2) whether there is evidence for a difference in
+     the  population means  of  two  normally  distributed populations from
+     which samples  have been obtained, or  (3)  whether there  is evidence
+     that a  linear regression slope (again assuming  a normal distribution
+     about the population line) differs from a predetermined value.
+          
+     Different experiments to the same  point can  illustrate these usages.
+     Suppose that we are concerned with the effect of a  drug on the weight
+     of animals.  The following three  experiments would shed some light on
+     this issue.  (1) Take  a group of adult animals  whose weight will not
+     vary greatly due  to  growth.  Weigh  them before they  are given  the
+     drug, then put them on the drug for a month and weigh them again.  The
+     difference after drug  weight  minus before drug  weight is the number
+     recorded  for  each animal.   If   the drug  has no  effect  then  the
+     population (infinite  sample size) mean is zero.   Testing whether the
+     data is consistent with a mean of zero is the point of the experiment.
+     (2) Two equal sized groups of animals  are used.  One group is  put on
+     the drug for a month, the other is not.  The  difference in weights is
+     again  recorded.  If  the  drug has no   effect,  the population  mean
+     difference should be  zero.  (3) Several  groups of animals are placed
+     on  different  doses of the  drug  for a month   and the difference in
+     weights recorded.  This  difference is  regressed on  the dose to test
+     for a dose effect.  If there is no effect, the population slope of the
+     regression line is zero.
+     
+
+     In determining the p-value, the user has to  know whether  a one-sided
+     or two-sided test is being conducted.  A two-sided test is appropriate
+     when a change in either direction is  of interest  (i.e., it is  to be
+     determined whether the drug causes weight loss, weight gain, or has no
+     effect  on weight).  This  might be the case  were the drug  found  to
+     contaminate animal feed.  A  one-sided test is appropriate when either
+     a change in only one  direction is of interest or  when it  is known a
+     priori that the  change can only be  in one  direction if there is any
+     change  at all.  If a drug  were to  be marketed as a weight reduction
+     potion for  humans and was undergoing tests   in animals, only  weight
+     reduction would be  of interest.  No effect  or weight gain would both
+     cause the drug not to be marketed.  Alternatively, the drug might be a
+     slight modification of another drug known to  cause weight loss and it
+     is known that it  can't cause weight  gain although it might   have no
+     effect.
+     
+     Suppose experiment  (1) were performed  using 10 animals  and the mean
+     before minus after value was 5.2  with an estimated  standard error of
+     the  mean of 2.64; then  the  t value  is  5.2/2.64 = 1.97.   We  tell
+     DSTATTAB that the TVAL is 1.97 and the degrees of freedom (DF) is 9 --
+     one  less than  the  number  of  animals --  and  that  the cumulative
+     distribution function (CDF) is  to be calculated. DSTATTAB returns the
+     value  of the CDF   as 0.96  (or very  close to it)  and the Two-Sided
+     P-Value as 0.08.  If  a  two-sided test is  being  used, 0.08  is  the
+     p-value.
+     
+     If  a  one-sided test  is   being used and   the answer points  in the
+     expected direction, then the p-value is half of the two-sided p-value,
+     i.e., 0.04. If you don't want to bother with dividing a number by two,
+     give DSTATTAB the value  of t  with a negative  sign, i.e.,  -1.97 and
+     DSTATTAB returns C as the desired p-value, 0.04.
+     
+     If a one-sided  test  is being  used,  but the answer   points in  the
+     opposite direction of that expected, then the p-value is one minus the
+     value calculated in the previous paragraph,  or 0.96.  To avoid having
+     to do these  calculations by hand,  enter  the  t value as a  positive
+     number.
+     
+     The rule that  follows provides a  consistency   check on the  p-value
+     obtained when a one-sided test is being used.  If the result points in
+     the  expected direction, the  p-value is always  less than or equal to
+     one-half; if the   result   points in the   unexpected direction,  the
+     p-value is greater than or equal  to one-half.  If  your p-value is in
+     the wrong half of the  0 to 1 interval,   try again with the  opposite
+     sign on the t and take the value from C.
+
+\mysubsection{Normal}
+     
+     
+     The normal distribution is generally used for  p-values when assessing
+     the  significance of  a  slope in   a  non-linear  regression  such as
+     logistic     regression   or     Cox's  proportional  hazards   model.
+     Asymptotically, the estimate of  the slope  divided by   its  standard
+     error is normal.  When  only one independent  variable is used  in the
+     regression, the above discussion for the t distribution  holds exactly
+     for the normal  distribution.  If there  is more  than one independent
+     variable, then individual coefficients  should always be assessed with
+     a two-sided   test.   However, the likelihood   ratio test  is   to be
+     preferred to   this normal  approximation,  although  several  popular
+     computer programs  do  not  print enough information   to perform  the
+     likelihood ratio test.
+     
+     The normal distribution is more often used to calculate the proportion
+     of extreme values in a population than it is  to obtain p-values.  For
+     example, suppose that a  large study  has shown  the average height of
+     American men   to be  5'  10"  (=70")  with  a standard deviation (NOT
+     standard  error  of  the mean)  of   7.3".  If  heights  are  normally
+     distributed, what proportion of the population can be expected to have
+     a height of  7'  1" (=85") or more.   Entering X=85, MEAN=70,  SD=7.3,
+     DSTATTAB yields  0.98  as  the value  of  the cumulative  distribution
+     function.  But  the cdf is  the  proportion less than the  specified X
+     value, so 0.02 of the population is taller than 7' 1".
+     
+     
+\mysubsection{ Chi-Square}
+     
+     The chi-square  distribution is popularly  used for two purposes.  (1)
+     In a  table of counts  of individuals cross-tabulated according to two
+     characteristics   to  assess the    acceptability  of  the  equivalent
+     hypotheses:  (a) the  proportion of each  entry in  the  table  is the
+     product of  the two marginal  frequencies  of that entry;  (b) the row
+     proportions are the same; and (c) the column proportions are the same.
+     Usually, only  one of these three equivalent   formulations  will make
+     sense in a  given experimental situation.  (2)  The second popular use
+     for   the  chi-square distribution   is  to assess   agreement between
+     categorized data and frequencies  predicted  by  some model.   STATTAB
+     prints p-values whenever   the  cumulative distribution  function   is
+     calculated for  the chi-square  statistic.   The chi-square  statistic
+     assesses  deviations in  any  direction from  equality,  and there are
+     generally many such  directions.    The  p-value provided  by  STATTAB
+     applies to  these many directions.   Only in the  two by  two table in
+     which one proportion is being tested against another is it possible to
+     speak of a one-sided test.
+     
+     The chi-square distribution has  the   property  that  the larger  the
+     value, the smaller the  p-value.  The p-value  is,  in fact, one minus
+     the cumulative distribution function.
+     
+     If  the proportions  are in the  expected  direction, then a one-sided
+     test would yield a p-value that  is half that listed by DSTATTAB.   If
+     the proportions  are in the  unexpected direction, then the p-value is
+     one minus half the p-value printed  by DSTATTAB.  The rule given above
+     still holds:  if  the evidence points in  the  expected direction, the
+     p-value is less than or  equal to 0.5; if  the evidence points  in the
+     other direction the p-value is at least 0.5.
+     
+\mysubsection{ Variance Ratio (F)}
+     
+     The F  distribution is used in the  analysis of variance  to  test the
+     hypothesis of  equality  of means of  several groups drawn from normal
+     distributions  with the same  standard deviation.  It is also  used to
+     assess  the  significance  of one   or more  variables in   a   linear
+     regression (again assuming a normal  distribution of values about  the
+     line).  When   there   are more than two  groups   or more   than  one
+     independent variable being assessed in a regression, the assessment is
+     inherently  multi-directional  and    no simple  calculation    yields
+     one-sided p-values.
+     
+     As is the case  with  the chi-square  distribution, the p-value is one
+     minus the cumulative distribution function.
+   
+     If the slope of only one independent  variable is  being assessed in a
+     regression or if  only   two  groups are  compared in   an analysis of
+     variance then a one-sided test makes sense.  (In these cases, the test
+     is precisely the same as that provided by the t.)   If the results are
+     in the  expected direction  and a one-sided  test is   used,  then the
+     appropriate p-value is  half that printed by  DSTATTAB. If the results
+     are in  the opposite of  the  expected direction, the  p-value  is one
+     minus one-half of the value printed by DSTATTAB.  The same  rule about
+     p-values being greater or less than one-half applies here.
+
+\mysection{A BRIEF GUIDE TO THE AVAILABLE DISTRIBUTIONS}
+     
+         The  parameters and  densities of  the  various distributions  are
+     listed  here  for reference by  the knowledgeable.  This is  necessary
+     because there are several different ways of  parameterizing several of
+     these distributions, particularly the beta and gamma.  The information
+     contained in  this section  is  also  available  in the   Stattab help
+     facility.
+     
+\mysubsection{Beta Distribution}
+
+{\bf \centering Beta(X,1-X,A,B)=C,1-C.\\}
+
+\begin{center}
+\begin{tabular}{rl}
+           X & Upper Limit of Integration of Beta Density\\
+         1-X & Complement of X\\
+           A & First Parameter of Beta Distribution\\
+           B & Second Parameter of Beta Distribution\\
+           C & Cumulative Distribution Function at X\\
+         1-C & Complement of C\\
+\end{tabular}
+\end{center}
+     The beta density in t is proportional to
+\[ t^{A-1} (1-t)^{B-1} \]
+
+\mysubsection{Binomial Distribution}
+     
+{\bf \centering Bin(S,N,P,1-P)=C,1-C.\\}
+\begin{center}
+\begin{tabular}{rl}
+           S & Number of Successes\\
+           N & Number of Trials\\
+           P & Probability of Success Each Trial\\
+         1-P & Probability of Failure Each Trial (1-P)\\
+           C & Probability of 0 to S Successes\\
+         1-C & Complement of C\\
+\end{tabular}
+\end{center}
+
+     The binomial density in S is proportional to 
+\[ P^S (1-P)^{N-S} \].
+
+
+\mysubsection{Negative Binomial Distribution}
+     
+{\bf \centering Negbin(X,S,P,1-P)=C,1-C.\\}
+
+\begin{center}
+\begin{tabular}{rl}
+            X & Number of Failures\\
+            S & Number of Successes\\
+            P & Probability of Success Each Trial\\
+          1-P & Probability of Failure Each Trial (1-P)\\
+            C & Probability of 0 to M Failures Before S Successes\\
+          1-C & Complement of C\\
+\end{tabular}
+\end{center}
+
+     The individual term of the negative binomial is the probability of
+     X failures before S successes and is proportional to
+          \[ P^S  (1-P)^X \]
+  
+   
+\mysubsection{Chi-Square Distribution}
+     
+{\bf \centering Chi(X,DF)=C,1-C.\\}
+
+\begin{center}
+\begin{tabular}{rl}
+          X  & Upper Limit of Integration of Chi-Square Density\\
+          DF & Degrees of Freedom\\
+          C  & Cumulative Distribution Function at X\\
+         1-C & Complement of C\\
+\end{tabular}
+\end{center}
+     
+     The Chi-Square Density in t is proportional to 
+\[t^{df/2 - 1}  \exp(-t/2).\]
+     
+  
+\mysubsection{Noncentral Chi-square Distribution}
+     
+{\bf \centering Chn(X,DF,PNONC)=C,1-C.\\}
+
+\begin{center}
+\begin{tabular}{rl}
+       X     & Upper Limit of Integration of Non-Central Chi-Square Density\\
+       DF    & Degrees of Freedom\\
+       PNONC & Noncentrality Parameter\\
+       C     & Cumulative Distribution Function at X\\
+       1-C   & Complement of C\\
+\end{tabular}
+\end{center}
+
+The noncentral chi-square distribution can be explained as follows.
+Let $d_1, d_2, \ldots, d_{DF}$ be numbers such that
+\[ PNONC = \sum_{i=1}^{DF} d_{i}^{2}. \]
+Let $N_1, N_2, \ldots, N_{DF}$ be independent unit normal deviates.
+Then the noncentral chi-square distribution is the distribution of
+\[ \sum_{i=1}^{DF} ( N_i + d_i ).\]
+The density can only be written as an infinite series.
+     
+\mysubsection{Variance Ratio (F) Distribution}
+     
+{\bf \centering F(X,DFN,DFD)=C,1-C.\\}
+
+\begin{center}
+\begin{tabular}{rl}
+         X   & Upper Limit of Integration of the F Density\\
+         DFN & Degrees of Freedom of the Numerator\\
+         DFD & Degrees of Freedom of the Denominator\\
+         C   & Cumulative Distribution Function at X\\
+         1-C & Complement of C\\
+\end{tabular}
+\end{center}
+     
+     The F Density in t is proportional to
+\[ t^{(DFN-2)/2} (DFD+DFN*t)^{-(DFN+DFD)/2}. \]
+     
+     
+\mysubsection{Non-Central Variance Ratio (F) Distribution}
+
+
+{\bf \centering F(X,DFN,DFD,PNONC)=C,1-C.\\}
+
+\begin{center}
+\begin{tabular}{rl}
+          X     & Upper Limit of Integration of the Non-central F Density\\
+          DFN   & Degrees of Freedom of the Numerator\\
+          DFD   & Degrees of Freedom of the Denominator\\
+          PNONC & Noncentrality Parameter\\
+          C     & Cumulative Distribution Function at X\\
+          1-C   & Complement of C\\
+\end{tabular}
+\end{center}
+
+The   non-central  F   distribution   is   the   distribution of    \[
+\frac{\chi^{'2}_{DFN}(PNONC)}{DFN} (\frac{\chi^{2}_{DFD}}{DFD})^{-1} \] where
+$\chi^{'2}_{DFN}(PNONC)$   is distributed as  a  non-central chisquare
+with degrees of freedom, DFN,  and noncentrality parameter PNONC and $
+\chi^{2}_{DFD} $ is distributed as a  central chisquare with DFD degrees
+of freedom.  The density is usually expressed as an infinite series.
+
+\mysubsection{Gamma Distribution}
+     
+{\bf \centering Gamma(X,A,B)=C,1-C.\\}
+
+\begin{center}
+\begin{tabular}{rl}
+         X  & Upper Limit of Integration of the Gamma Density\\
+         A  & Scale\\
+         B  & Shape\\
+         C  & Cumulative Distribution Function at X\\
+       1-C  & Complement of C\\
+\end{tabular}
+\end{center}
+     
+     The Gamma Density in t is proportional to
+\[ t^{R-1}  \exp(-A*t) \] 
+     
+     
+\mysubsection{Normal Distribution}
+     
+{\bf \centering N(X,MEAN,SD)=C,1-C\\}
+
+\begin{center}
+\begin{tabular}{rl}
+        X    & Upper Limit of Integration of Normal Density\\
+        MEAN & Mean of Normal Distribution\\
+        SD   & Standard Deviation of Normal Distribution\\
+        C    & Cumulative Distribution Function at X\\
+        1-C  & Complement of C\\
+\end{tabular}
+\end{center}
+     
+     The Normal Density is Proportional to
+\[     /exp( - 0.5  (\frac{X-MEAN}{SD})^2). \] 
+
+     
+     
+\mysubsection{Poisson Distribution}
+
+{\bf \centering P(N,MEAN)=C,1-C\\}
+
+\begin{center}
+\begin{tabular}{rl}
+        N    & Number of Events\\
+        MEAN & Average Number of Events\\
+        C    & Probability of 0 to N Events\\
+        1-C  & Complement of C\\
+\end{tabular}
+\end{center}
+
+     The Poisson density is proportional to 
+\[ \frac{MEAN^N}{N!}  \]
+     
+     
+\mysubsection{Student's t Distribution}
+
+{\bf \centering T(TVAL,DF)=C,1-C\\}
+
+\begin{center}
+\begin{tabular}{rl}
+        TVAL & Upper Limit of Integration of T Density\\
+        DF   & Degrees of Freedom\\
+        C    & Cumulative Distribution Function at X\\
+        1-C  & Complement of C\\
+\end{tabular}
+\end{center}
+
+     The T Density is proportional to
+\[     (1+\frac{t^2}{DF})^{(-(DF+1)/2)} \]
+
+\mysubsection{Non-central T}
+
+{\bf \centering TNC(TVAL,DF,PNONC)=C,1-C}
+
+\begin{center}
+\begin{tabular}{rl}
+        TVAL & Upper Limit of Integration of T Density\\
+        DF   & Degrees of Freedom\\
+        PNONC&Noncentrality parameter\\
+        C    & Cumulative Distribution Function at X\\
+        1-C  & Complement of C\\
+\end{tabular}
+\end{center}
+
+The noncentral T distribution is the distribution of
+\[ \frac{N+PNONC}{\chi_{DF} DF^{-1/2}} \]
+where $\chi_{DF}$ is distributed as the square root of 
+a central chi-square with DF degrees of freedom.
+
+\end{document}
+
+

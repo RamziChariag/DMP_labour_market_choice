@@ -1,0 +1,32 @@
+The files: 
+
+mom_ed#.raw and se_ed#.raw
+
+contain the data moments, by quintile, and standard errors, for each
+education group ed#, (1-4)
+
+The 5 colums refer to the five quintiles of the type distribution
+(estimated by max observed wage)
+
+The 15 rows refer to the following moments:
+
+1  E2U - Employed to Unemployed transition rate (weekly)
+2  U2E - Unemployed to Employed transition rate (weekly)
+3  J2J - Job to Job transition rate (weekly)
+4  DwEUE - Mean wage change via unemployment
+5  DwEE  - Mean annual wage growth at same job
+6  DwJ2J - Mean Wage change at job change
+7  variance of DwEUE
+8  variance of DwEE
+9  variance of DwJ2J
+10 mean log wage (average annual wage)
+11 var log wage
+12 mean change in log wage (year over year)
+13 variance of change in log wage
+14 covariance of change in log wage and lagged change in log wage
+15 covariance of change in log wage and second lagged change in log
+   wage
+
+
+
+ 

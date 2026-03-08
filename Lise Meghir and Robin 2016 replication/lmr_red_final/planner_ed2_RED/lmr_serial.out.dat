@@ -1,0 +1,39 @@
+ Starting Values: 
+    9.85414357E-01    -8.30141176E+00    -1.42844196E+01    -1.77872590E+00    -1.38223936E+01     6.00696439E+00     9.74166484E+00
+ Planner Version
+ starting the program
+ calling objective function
+Planner's Labour Market Tightness: 
+kappa =  4.60E-04
+U     =  5.63E+02
+V     =  4.17E+02
+ Planner's steady-state output=    6509947.96367337     
+ Market Production                =    6887962.88148042     
+ Home Production                  =   1.107289419180817E-007
+ Recruiting costs                 =   -378014.917807160     
+ R & D costs                      =   0.000000000000000E+000
+  
+ Employment Rate                  =    94.3683831668931     
+ Unemployment Rate                =    5.63161683310689     
+  
+ Some additonal Checks:
+ Measure of employed workers:   =    9436.84744069949     
+ Measure of unemployed workers: =    563.161683310689     
+ Measure of workers:            =    10000.0091240102     
+ Measure of filled jobs:        =    9436.84744069949     
+ Measure of vacancies:          =    417.305253382454     
+ Measure of idle posts:         =   0.000000000000000E+000
+ Measure of potential jobs:     =    9854.15269408194     
+ Expected Profit at y(0)        =    170672.006379388     
+  
+  
+ Prob of shock to y             =   7.616379526854385E-003
+ Prob of separation | y-shock   =   0.327258013722645     
+ Prob of job contact when unempl=   0.191921691980081     
+ Prob of match | contact        =  0.556204935928404     
+ Prob of job contact when empl  =  3.011559562236312E-002
+ Prob of match | contact        =  0.215917757610663     
+ \nn\n--- Worker-Firm Correlation ---
+ \nCorr(x,y):   0.815216873780596     
+ Value=    6509948.00000000     
+ Finished
