@@ -458,21 +458,20 @@ end
 # ============================================================
 
 """
-    multistart_smm(spec, n_starts; method=:sa, max_iter=5000, seed=42)
-        -> SMMResult
+    multistart_smm(spec, n_starts; method=:de, seed=42) -> SMMResult
 
-Run n_starts searches from randomly perturbed starting points.
-Returns the best result across all starts.
+Run `n_starts` searches from randomly perturbed starting points
+and return the best result.  All optimiser settings come from
+`spec.run` as usual — only the starting point differs across starts.
 """
 function multistart_smm(
     spec     :: SMMSpec,
     n_starts :: Int;
-    method   :: Symbol  = :sa,
-    max_iter :: Int     = 5000,
-    seed     :: Int     = 42,
+    method   :: Symbol = :de,
+    seed     :: Int    = 42,
 ) :: SMMResult
 
-    rng  = Random.MersenneTwister(seed)
+    rng    = Random.MersenneTwister(seed)
     theta0 = pack_theta(spec)
     npar   = length(theta0)
 
@@ -486,8 +485,7 @@ function multistart_smm(
         spec_s      = _spec_with_init(spec, theta_start)
 
         try
-            res_s = run_smm(spec_s; method=method, max_iter=max_iter,
-                            show_trace=false, rng=rng)
+            res_s = run_smm(spec_s; method = method, rng = rng)
             if isnothing(best_result) || res_s.loss_opt < best_result.loss_opt
                 best_result = res_s
                 @printf("  -> new best  Q = %.6e\n", best_result.loss_opt)
