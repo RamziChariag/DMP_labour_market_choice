@@ -24,31 +24,6 @@
 
 
 # ============================================================
-# Helper: silence a SimParams (force verbose=0)
-# ============================================================
-
-function _silence(sim::SimParams) :: SimParams
-    return SimParams(
-        tol_inner      = sim.tol_inner,
-        tol_outer_U    = sim.tol_outer_U,
-        tol_outer_S    = sim.tol_outer_S,
-        tol_global     = sim.tol_global,
-        maxit_inner    = sim.maxit_inner,
-        maxit_outer    = sim.maxit_outer,
-        maxit_global   = sim.maxit_global,
-        conv_streak    = sim.conv_streak,
-        use_anderson   = sim.use_anderson,
-        anderson_m     = sim.anderson_m,
-        anderson_reg   = sim.anderson_reg,
-        damp_pstar_U   = sim.damp_pstar_U,
-        damp_pstar_S   = sim.damp_pstar_S,
-        verbose        = 0,
-        verbose_stride = sim.verbose_stride,
-    )
-end
-
-
-# ============================================================
 # Weighted loss
 # ============================================================
 
@@ -93,9 +68,9 @@ function smm_objective(
     local model, solve_result
     try
         model, solve_result = solve_model(cp, rp, up, sp, spec.sim;
-                                          Nx   = spec.Nx,
-                                          Np_U = spec.Np_U,
-                                          Np_S = spec.Np_S)
+                                          Nx   = spec.run.Nx,
+                                          Np_U = spec.run.Np_U,
+                                          Np_S = spec.run.Np_S)
     catch
         return Inf
     end
@@ -254,6 +229,7 @@ function _run_de(
     pop_size     :: Int     = 0,
     f            :: Float64 = 0.65,
     cr           :: Float64 = 0.85,
+    patience     :: Int     = 20,     # stop after this many generations with 0 improvements
     show_trace   :: Bool    = true,
     trace_stride :: Int     = 100,
     rng                     = Random.default_rng(),
@@ -299,7 +275,8 @@ function _run_de(
     end
 
     # ── Main DE loop (generations) ─────────────────────────────────────
-    n_evals = pop_size
+    n_evals    = pop_size
+    stagnation = 0
     for gen in 1:max_iter
         n_improved = 0
         for i in 1:pop_size
@@ -332,6 +309,7 @@ function _run_de(
                 end
             end
 
+            # Within-generation progress
             if show_trace && i % trace_stride == 0
                 @printf("  [DE gen=%4d  member=%4d/%4d]  Q_best=%.6e  improved=%d\n",
                         gen, i, pop_size, Q_best, n_improved)
@@ -339,12 +317,27 @@ function _run_de(
             end
         end
 
+        # Stagnation tracking
+        if n_improved == 0
+            stagnation += 1
+        else
+            stagnation = 0
+        end
+
+        # End-of-generation summary — always printed
         if show_trace
             Q_mean = mean(filter(isfinite, Q_pop))
             n_feas = count(isfinite, Q_pop)
-            @printf("  [DE gen=%4d  DONE]  Q_best=%.6e  Q_mean=%.6e  feasible=%d/%d  evals=%d\n",
-                    gen, Q_best, Q_mean, n_feas, pop_size, n_evals)
+            @printf("  [DE gen=%4d DONE]  Q_best=%.6e  Q_mean=%.6e  feasible=%d/%d  improved=%d  stagnation=%d/%d  evals=%d\n",
+                    gen, Q_best, Q_mean, n_feas, pop_size, n_improved, stagnation, patience, n_evals)
             flush(stdout)
+        end
+
+        # Early stopping
+        if stagnation >= patience
+            show_trace && @printf("  [DE]  early stop: no improvement for %d generations\n", patience)
+            flush(stdout)
+            break
         end
     end
 
@@ -362,59 +355,41 @@ end
 # ============================================================
 
 """
-    run_smm(spec; method=:sa, max_iter=5000, ...) -> SMMResult
+    run_smm(spec; method=:de, rng=default_rng()) -> SMMResult
 
-Estimate parameters by SMM.
+Run SMM estimation. All settings (grid sizes, DE parameters,
+Nelder-Mead parameters, tracing) are read from `spec.run`.
 
-  :de          Differential evolution via BlackBoxOptim.jl (recommended
-               global search). Population-based, derivative-free, robust
-               to non-smooth objectives. Use population_size ~10x n_params.
+  :de          Differential evolution — global search (default).
+  :sa          Simulated annealing — alternative global search.
+  :neldermead  Nelder-Mead — local polish after :de or :sa.
 
-  :sa          Simulated annealing (our own loop). Alternative global
-               search, works well with tuned T0 and step size.
-
-  :neldermead  Nelder-Mead via Optim.jl. Best for polishing a solution
-               already near the optimum. Always use this after :de or :sa.
-
-Typical workflow:
-  res_de  = run_smm(spec; method=:de,         max_iter=5000)
-  res_pol = run_smm(_spec_with_init(spec, res_de.theta_opt);
-                    method=:neldermead, max_iter=2000)
+Typical workflow (both stages read their settings from spec.run):
+  res_de  = run_smm(spec; method=:de)
+  res_pol = run_smm(_spec_with_init(spec, res_de.theta_opt); method=:neldermead)
 """
 function run_smm(
-    spec            :: SMMSpec;
-    method          :: Symbol  = :de,
-    max_iter        :: Int     = 5000,
-    # DE options
-    de_pop_size     :: Int     = 0,       # 0 = auto (10 × n_params)
-    de_f            :: Float64 = 0.65,    # mutation scale (0.5–0.9 typical)
-    de_cr           :: Float64 = 0.85,    # crossover probability
-    # SA options
-    sa_T0           :: Float64 = 2.0,
-    sa_step         :: Float64 = 0.15,
-    # Optim options
-    f_tol           :: Float64 = 1e-6,
-    x_tol           :: Float64 = 1e-5,
-    # Trace
-    show_trace      :: Bool    = true,
-    trace_stride    :: Int     = 100,
-    rng                        = Random.default_rng(),
+    spec   :: SMMSpec;
+    method :: Symbol = :de,
+    rng             = Random.default_rng(),
 ) :: SMMResult
 
+    r    = spec.run     # shorthand
     npar = length(spec.free)
-    @printf("\nStarting SMM  (%s,  %d free params,  max_iter=%d)\n",
-            method, npar, max_iter)
+
+    @printf("\nStarting SMM  (%s,  %d free params)\n", method, npar)
     flush(stdout)
 
     if method == :de
         theta_opt, loss_opt, niters = _run_de(
             spec;
-            max_iter     = max_iter,
-            pop_size     = de_pop_size > 0 ? de_pop_size : 100 * npar,
-            f            = de_f,
-            cr           = de_cr,
-            show_trace   = show_trace,
-            trace_stride = trace_stride,
+            max_iter     = r.de_max_iter,
+            pop_size     = r.de_pop_size > 0 ? r.de_pop_size : 100 * npar,
+            f            = r.de_f,
+            cr           = r.de_cr,
+            patience     = r.de_patience,
+            show_trace   = r.show_trace,
+            trace_stride = r.trace_stride,
             rng          = rng,
         )
         converged = isfinite(loss_opt)
@@ -422,11 +397,9 @@ function run_smm(
     elseif method == :sa
         theta_opt, loss_opt, niters = _run_sa(
             spec;
-            T0           = sa_T0,
-            step         = sa_step,
-            max_iter     = max_iter,
-            show_trace   = show_trace,
-            trace_stride = trace_stride,
+            max_iter     = r.de_max_iter,   # reuse DE iter count for SA
+            show_trace   = r.show_trace,
+            trace_stride = r.trace_stride,
             rng          = rng,
         )
         converged = isfinite(loss_opt)
@@ -440,7 +413,7 @@ function run_smm(
             iter_count[] += 1
             Q = smm_objective(theta, spec)
             isfinite(Q) && Q < best_loss[] && (best_loss[] = Q)
-            if show_trace && iter_count[] % trace_stride == 0
+            if r.show_trace && iter_count[] % r.trace_stride == 0
                 @printf("  [%s iter %4d]  Q=%-14s  best=%.6e\n",
                         method, iter_count[],
                         isfinite(Q) ? @sprintf("%.6e", Q) : "Inf",
@@ -453,8 +426,10 @@ function run_smm(
         opt_method = (method == :neldermead) ? Optim.NelderMead() :
                      (method == :lbfgs)      ? Optim.LBFGS()      : Optim.BFGS()
 
-        options   = Optim.Options(iterations=max_iter, f_tol=f_tol,
-                                  x_tol=x_tol, show_trace=false)
+        options   = Optim.Options(iterations = r.nm_max_iter,
+                                  f_tol      = r.nm_f_tol,
+                                  x_tol      = r.nm_x_tol,
+                                  show_trace = false)
         result    = Optim.optimize(obj_traced, theta0, opt_method, options)
         theta_opt = Optim.minimizer(result)
         loss_opt  = smm_objective(theta_opt, spec)
@@ -600,6 +575,5 @@ function _spec_with_init(spec::SMMSpec, theta_unc::Vector{Float64})
                   _to_constrained(theta_unc[i], ps.lb, ps.ub), ps.label)
         for (i, ps) in enumerate(spec.free)
     ]
-    return SMMSpec(new_free, spec.fixed, spec.moments, spec.sim,
-                   spec.Nx, spec.Np_U, spec.Np_S)
+    return SMMSpec(new_free, spec.fixed, spec.moments, spec.sim, spec.run)
 end

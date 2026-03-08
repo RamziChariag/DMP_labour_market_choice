@@ -114,15 +114,7 @@ moments = load_data_moments()
 #    separation as externally calibrated.
 # ============================================================
 fixed_params = (
-    r = 0.05,     # discount rate
-    ν = 0.05,     # demographic exit rate
-    φ = 0.20,     # training completion rate
-    ξ = 0.03,     # skilled exogenous separation rate
-    a_ℓ = 2.0,   # worker type distribution shape a_ℓ
-    b_ℓ = 5.0,   # worker type distribution shape b_ℓ
-    a_Γ = 2.0,   # skilled offer distribution shape a_Γ
-    b_Γ = 5.0,   # skilled offer distribution shape b_Γ
-    α_U = 1.0   # unskilled damage distribution shape α_U
+    ;
 )
 
 # ============================================================
@@ -136,60 +128,61 @@ fixed_params = (
 free_params = default_free_params()
 
 # ============================================================
-# 5. Build SMM spec
+# 5. Run parameters — grids, DE, Nelder-Mead, tracing
+# ============================================================
+run_params = SMMRunParams(
+    # ── Grids (coarser = faster per iteration) ──────────────
+    Nx      = 80,
+    Np_U    = 80,
+    Np_S    = 80,
+
+    # ── DE global search ────────────────────────────────────
+    de_max_iter  = 200,       # generations; total evals = max_iter × pop_size
+    de_pop_size  = 600,       # 0 = auto (100 × n_free_params)
+    de_f         = 0.65,
+    de_cr        = 0.85,
+    de_patience  = 10,
+
+    # ── Nelder-Mead polish ───────────────────────────────────
+    nm_max_iter  = 5_000,
+    nm_f_tol     = 1e-6,
+    nm_x_tol     = 1e-5,
+
+    # ── Tracing ─────────────────────────────────────────────
+    show_trace   = true,
+    trace_stride = 10,
+)
+
+# ============================================================
+# 6. Build SMM spec
 # ============================================================
 spec = build_smm_spec(
     moments, sim_smm;
     fixed      = fixed_params,
     free_specs = free_params,
-    Nx   = 80,     # grid size during estimation (coarser = faster)
-    Np_U = 80,
-    Np_S = 80,
+    run        = run_params,
 )
 
 print_spec(spec)
 
 # ============================================================
-# 6. Run estimation
-#
-#    Single-start (fast, for testing):
-#      results = run_smm(spec; method = :neldermead, max_iter = 500)
-#
-#    Multi-start (for final estimation):
-#      results = multistart_smm(spec, 10; method = :neldermead, max_iter = 1000)
+# 7. Run estimation
 # ============================================================
 println("Starting SMM optimisation..."); flush(stdout)
 
-# ── Stage 1: global search with Differential Evolution ────────────────────────
-# pop_size = 10 × n_params is a good default.
-# max_iter here means generations, so total evals = max_iter × pop_size.
-# With ~20 free params and pop_size=200, each generation = 200 model solves.
-# Start modest and increase once you know the model is running cleanly.
-res_de = run_smm(
-    spec;
-    method       = :de,
-    max_iter     = 5000,          # generations (× pop_size = total evals)
-    de_pop_size  = 500,            # 0 = auto: 100 × n_free_params
-    de_f         = 0.65,         # mutation scale
-    de_cr        = 0.85,         # crossover probability
-    show_trace   = true,
-    trace_stride = 10,
-)
+# Stage 1: global search
+res_de = run_smm(spec; method = :de)
 
-# ── Stage 2: polish with Nelder-Mead from DE solution ─────────────────────────
-res_pol = run_smm(
-    _spec_with_init(spec, res_de.theta_opt);
-    method       = :neldermead,
-    max_iter     = 5_000,
-    show_trace   = true,
-    trace_stride = 10,
-)
+# Stage 2: polish from DE solution
+res_pol = run_smm(_spec_with_init(spec, res_de.theta_opt); method = :neldermead)
+
+results = res_pol
 
 # ============================================================
-# 7. Save results
+# 8. Save results
 # ============================================================
 mkpath(TABLES_DIR)
 save_results(results, joinpath(TABLES_DIR, "smm_estimates.csv"))
 
-println("\nDone.")=
+println("\nDone.")
 flush(stdout)

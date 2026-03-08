@@ -44,32 +44,88 @@ end
 
 
 # ============================================================
+# SMMRunParams — optimisation and grid settings
+# ============================================================
+
+"""
+    SMMRunParams
+
+All runtime settings for the SMM estimation: grid sizes,
+global search (DE), local polish (Nelder-Mead), and tracing.
+
+Construct with keyword arguments; all have defaults.
+
+Fields — grids
+──────────────
+  Nx, Np_U, Np_S      grid sizes passed to the solver
+                      (coarser = faster iterations)
+
+Fields — global search (DE)
+───────────────────────────
+  de_max_iter         maximum generations
+  de_pop_size         population size (0 = auto: 100 × n_free_params)
+  de_f                mutation scale ∈ (0, 2), typically 0.5–0.9
+  de_cr               crossover probability ∈ (0, 1), typically 0.7–0.9
+  de_patience         early-stop after this many stagnant generations
+
+Fields — local polish (Nelder-Mead)
+────────────────────────────────────
+  nm_max_iter         maximum iterations
+  nm_f_tol            function value tolerance
+  nm_x_tol            parameter tolerance
+
+Fields — tracing
+────────────────
+  show_trace          print progress during optimisation
+  trace_stride        print every N members (within-generation)
+"""
+Base.@kwdef struct SMMRunParams
+    # ── Grids ─────────────────────────────────────────────────────────
+    Nx      :: Int     = 80
+    Np_U    :: Int     = 80
+    Np_S    :: Int     = 80
+
+    # ── DE global search ──────────────────────────────────────────────
+    de_max_iter  :: Int     = 200
+    de_pop_size  :: Int     = 0        # 0 = 100 × n_free_params
+    de_f         :: Float64 = 0.65
+    de_cr        :: Float64 = 0.85
+    de_patience  :: Int     = 20
+
+    # ── Nelder-Mead polish ────────────────────────────────────────────
+    nm_max_iter  :: Int     = 5_000
+    nm_f_tol     :: Float64 = 1e-6
+    nm_x_tol     :: Float64 = 1e-5
+
+    # ── Tracing ───────────────────────────────────────────────────────
+    show_trace   :: Bool    = true
+    trace_stride :: Int     = 10
+end
+
+
+# ============================================================
 # SMMSpec — full problem specification
 # ============================================================
 
 """
     SMMSpec
 
-Holds everything the SMM loop needs.
+Holds everything the SMM estimation needs.
 
 Fields
 ──────
   free        vector of ParamSpec (parameters to estimate)
-  fixed       NamedTuple: any field from the four param structs whose
-              value is pinned.  Keys are Symbol field names; the SMM
-              loop will override model defaults with these values.
+  fixed       NamedTuple of pinned parameter values
   moments     NamedTuple from load_data_moments() — (value, weight) pairs
-  sim         SimParams — solver settings, always fixed
-  Nx / Np_U / Np_S   grid sizes passed through to the solver
+  sim         SimParams — solver settings (tolerances, maxit, verbose…)
+  run         SMMRunParams — grid sizes and optimiser settings
 """
 struct SMMSpec
     free    :: Vector{ParamSpec}
     fixed   :: NamedTuple
     moments :: NamedTuple
     sim     :: SimParams
-    Nx      :: Int
-    Np_U    :: Int
-    Np_S    :: Int
+    run     :: SMMRunParams
 end
 
 
@@ -79,9 +135,9 @@ end
 
 """
     build_smm_spec(moments, sim;
-                   fixed        = NamedTuple(),
-                   free_specs   = default_free_params(),
-                   Nx = 80, Np_U = 80, Np_S = 80)
+                   fixed      = (;),
+                   free_specs = default_free_params(),
+                   run        = SMMRunParams())
 
 Build an `SMMSpec`.
 
@@ -90,23 +146,22 @@ Build an `SMMSpec`.
   UnskilledParams / SkilledParams is valid.
   Example: `fixed = (r = 0.05, ν = 0.05, ξ = 0.03)`
 
-- `free_specs`: vector of ParamSpec.  If a field appears in both
-  `fixed` and `free_specs`, the fixed value takes precedence (the
-  free entry is silently dropped).
+- `free_specs`: vector of ParamSpec.  Any entry whose name also
+  appears in `fixed` is silently dropped.
 
-- Grid sizes are set small by default for fast SMM iterations;
-  increase for final estimation.
+- `run`: an `SMMRunParams` controlling grid sizes, DE settings,
+  Nelder-Mead settings, and tracing.
 """
 function build_smm_spec(
-    moments  :: NamedTuple,
-    sim      :: SimParams;
-    fixed    :: NamedTuple    = NamedTuple(),
-    free_specs :: Vector{ParamSpec} = default_free_params(),
-    Nx   :: Int = 80,
-    Np_U :: Int = 80,
-    Np_S :: Int = 80,
+    moments    :: NamedTuple,
+    sim        :: SimParams;
+    fixed      :: Any                = (;),
+    free_specs :: Vector{ParamSpec}  = default_free_params(),
+    run        :: SMMRunParams       = SMMRunParams(),
 )
-    fixed_names = keys(fixed)
+    # Coerce () or any non-NamedTuple to an empty NamedTuple
+    fixed_nt    = (fixed isa NamedTuple) ? fixed : NamedTuple()
+    fixed_names = keys(fixed_nt)
 
     # Drop any free spec whose field appears in `fixed`
     active_free = filter(ps -> !(ps.name in fixed_names), free_specs)
@@ -117,7 +172,7 @@ function build_smm_spec(
                 join(string.(dropped), ", "))
     end
 
-    return SMMSpec(active_free, fixed, moments, sim, Nx, Np_U, Np_S)
+    return SMMSpec(active_free, fixed_nt, moments, sim, run)
 end
 
 
@@ -140,35 +195,35 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:common, :r,   0.01,  0.15,  0.05,  "discount rate r"),
         ParamSpec(:common, :ν,   0.01,  0.20,  0.05,  "demographic exit ν"),
         ParamSpec(:common, :φ,   0.05,  0.60,  0.20,  "training completion φ"),
-        ParamSpec(:common, :a_ℓ, 0.01,  8.00,  2.00,  "worker type shape a_ℓ"),
-        ParamSpec(:common, :b_ℓ, 0.01,  8.00,  5.00,  "worker type shape b_ℓ"),
-        ParamSpec(:common, :c,   0.01, 10.00,  1.70,  "training cost coeff c"),
+        ParamSpec(:common, :a_ℓ, 0.50,  8.00,  2.00,  "worker type shape a_ℓ"),
+        ParamSpec(:common, :b_ℓ, 0.50,  8.00,  5.00,  "worker type shape b_ℓ"),
+        ParamSpec(:common, :c,   0.10, 10.00,  1.70,  "training cost coeff c"),
 
         # ── RegimeParams ───────────────────────────────────────────────
-        ParamSpec(:regime, :PU,  0.10,  2.00,  0.70,  "unskilled productivity PU"),
-        ParamSpec(:regime, :PS,  0.20,  5.00,  1.85,  "skilled productivity PS"),
+        ParamSpec(:regime, :PU,  0.20,  2.00,  0.70,  "unskilled productivity PU"),
+        ParamSpec(:regime, :PS,  0.50,  5.00,  1.85,  "skilled productivity PS"),
         ParamSpec(:regime, :bU,  0.00,  0.80,  0.00,  "unskilled UI flow bU"),
         ParamSpec(:regime, :bT,  0.00,  0.80,  0.28,  "training flow bT"),
         ParamSpec(:regime, :bS,  0.00,  0.80,  0.01,  "skilled UI flow bS"),
-        ParamSpec(:regime, :α_U, 0.05,  5.00,  1.00,  "unskilled damage shape α_U"),
-        ParamSpec(:regime, :a_Γ, 0.01,  8.00,  2.00,  "skilled offer shape a_Γ"),
-        ParamSpec(:regime, :b_Γ, 0.01,  8.00,  5.00,  "skilled offer shape b_Γ"),
+        ParamSpec(:regime, :α_U, 0.20,  5.00,  1.00,  "unskilled damage shape α_U"),
+        ParamSpec(:regime, :a_Γ, 0.50,  8.00,  2.00,  "skilled offer shape a_Γ"),
+        ParamSpec(:regime, :b_Γ, 0.50,  8.00,  5.00,  "skilled offer shape b_Γ"),
 
         # ── UnskilledParams ────────────────────────────────────────────
         ParamSpec(:unsk, :μ,  0.10,  2.00,  0.74,  "unskilled matching eff μ_U"),
         ParamSpec(:unsk, :η,  0.10,  0.90,  0.60,  "unskilled matching elas η_U"),
         ParamSpec(:unsk, :k,  0.01,  2.00,  0.25,  "unskilled vacancy cost k_U"),
-        ParamSpec(:unsk, :β,  0.01,  0.90,  0.40,  "unskilled bargaining β_U"),
-        ParamSpec(:unsk, :λ,  0.001,  0.50,  0.08,  "unskilled damage rate λ_U"),
+        ParamSpec(:unsk, :β,  0.10,  0.90,  0.40,  "unskilled bargaining β_U"),
+        ParamSpec(:unsk, :λ,  0.01,  0.50,  0.08,  "unskilled damage rate λ_U"),
 
         # ── SkilledParams ──────────────────────────────────────────────
         ParamSpec(:skl, :μ,  0.10,  2.00,  0.90,  "skilled matching eff μ_S"),
         ParamSpec(:skl, :η,  0.10,  0.90,  0.50,  "skilled matching elas η_S"),
         ParamSpec(:skl, :k,  0.01,  2.00,  0.17,  "skilled vacancy cost k_S"),
-        ParamSpec(:skl, :β,  0.01,  0.90,  0.32,  "skilled bargaining β_S"),
-        ParamSpec(:skl, :ξ,  0.01, 0.20,  0.03,  "skilled exog. sep rate ξ"),
+        ParamSpec(:skl, :β,  0.10,  0.90,  0.32,  "skilled bargaining β_S"),
+        ParamSpec(:skl, :ξ,  0.001, 0.20,  0.03,  "skilled exog. sep rate ξ"),
         ParamSpec(:skl, :λ,  0.01,  0.50,  0.07,  "skilled quality shock λ_S"),
-        ParamSpec(:skl, :σ,  0.001, 0.15,  0.01,  "OJS flow cost σ"),
+        ParamSpec(:skl, :σ,  0.001, 0.20,  0.01,  "OJS flow cost σ"),
     ]
 end
 
@@ -355,6 +410,13 @@ function print_spec(spec::SMMSpec)
         v.weight > 0.0 || continue
         @printf("  %-22s  %10.4f  %10.2f\n", k, v.value, v.weight)
     end
-    @printf("\n  Grid: Nx=%d  Np_U=%d  Np_S=%d\n", spec.Nx, spec.Np_U, spec.Np_S)
+    @printf("\n  Grid: Nx=%d  Np_U=%d  Np_S=%d\n",
+            spec.run.Nx, spec.run.Np_U, spec.run.Np_S)
+    @printf("  DE:   max_iter=%d  pop_size=%s  f=%.2f  cr=%.2f  patience=%d\n",
+            spec.run.de_max_iter,
+            spec.run.de_pop_size == 0 ? "auto" : string(spec.run.de_pop_size),
+            spec.run.de_f, spec.run.de_cr, spec.run.de_patience)
+    @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e\n",
+            spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol)
     @printf("╚══════════════════════════════════════════════════════╝\n\n")
 end
