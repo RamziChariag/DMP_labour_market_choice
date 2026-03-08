@@ -76,8 +76,9 @@ Fields — local polish (Nelder-Mead)
 
 Fields — tracing
 ────────────────
-  show_trace          print progress during optimisation
-  trace_stride        print every N members (within-generation)
+  show_trace_members     print within-generation member progress
+  show_trace_generations print end-of-generation summary line
+  trace_stride           print member line every N members
 """
 Base.@kwdef struct SMMRunParams
     # ── Grids ─────────────────────────────────────────────────────────
@@ -98,8 +99,9 @@ Base.@kwdef struct SMMRunParams
     nm_x_tol     :: Float64 = 1e-5
 
     # ── Tracing ───────────────────────────────────────────────────────
-    show_trace   :: Bool    = true
-    trace_stride :: Int     = 10
+    show_trace_members     :: Bool = false   # within-generation member lines
+    show_trace_generations :: Bool = true    # end-of-generation summary lines
+    trace_stride           :: Int  = 10
 end
 
 

@@ -229,9 +229,10 @@ function _run_de(
     pop_size     :: Int     = 0,
     f            :: Float64 = 0.65,
     cr           :: Float64 = 0.85,
-    patience     :: Int     = 20,     # stop after this many generations with 0 improvements
-    show_trace   :: Bool    = true,
-    trace_stride :: Int     = 100,
+    patience     :: Int     = 20,
+    show_members :: Bool    = false,
+    show_gens    :: Bool    = true,
+    trace_stride :: Int     = 10,
     rng                     = Random.default_rng(),
 )
     npar     = length(spec.free)
@@ -248,7 +249,7 @@ function _run_de(
     # Evaluate initial population — Inf for non-converging members
     Q_pop = fill(Inf, pop_size)
 
-    if show_trace
+    if show_gens
         @printf("  [DE init]  evaluating %d initial members...\n", pop_size)
         flush(stdout)
     end
@@ -257,18 +258,18 @@ function _run_de(
     for i in 1:pop_size
         Q_pop[i] = smm_objective(pop[i], spec)
         isfinite(Q_pop[i]) && (n_feasible += 1)
-        if show_trace && (i % trace_stride == 0 || i == pop_size)
+        if show_members && (i % trace_stride == 0 || i == pop_size)
             @printf("  [DE init]  evaluated %d/%d  feasible so far: %d\n",
                     i, pop_size, n_feasible)
             flush(stdout)
         end
     end
 
-    i_best   = argmin(Q_pop)
-    Q_best   = Q_pop[i_best]
+    i_best     = argmin(Q_pop)
+    Q_best     = Q_pop[i_best]
     theta_best = copy(pop[i_best])
 
-    if show_trace
+    if show_gens
         @printf("  [DE init]  feasible=%d/%d  Q_best=%.6e\n",
                 n_feasible, pop_size, Q_best)
         flush(stdout)
@@ -310,9 +311,12 @@ function _run_de(
             end
 
             # Within-generation progress
-            if show_trace && i % trace_stride == 0
-                @printf("  [DE gen=%4d  member=%4d/%4d]  Q_best=%.6e  improved=%d\n",
-                        gen, i, pop_size, Q_best, n_improved)
+            if show_members && i % trace_stride == 0
+                Q_i = Q_pop[i]
+                @printf("  [DE gen=%4d  member=%4d/%4d]  Q_member=%-14s  Q_best=%.6e  improved=%d\n",
+                        gen, i, pop_size,
+                        isfinite(Q_i) ? @sprintf("%.6e", Q_i) : "Inf",
+                        Q_best, n_improved)
                 flush(stdout)
             end
         end
@@ -324,8 +328,8 @@ function _run_de(
             stagnation = 0
         end
 
-        # End-of-generation summary — always printed
-        if show_trace
+        # End-of-generation summary
+        if show_gens
             Q_mean = mean(filter(isfinite, Q_pop))
             n_feas = count(isfinite, Q_pop)
             @printf("  [DE gen=%4d DONE]  Q_best=%.6e  Q_mean=%.6e  feasible=%d/%d  improved=%d  stagnation=%d/%d  evals=%d\n",
@@ -335,13 +339,13 @@ function _run_de(
 
         # Early stopping
         if stagnation >= patience
-            show_trace && @printf("  [DE]  early stop: no improvement for %d generations\n", patience)
+            show_gens && @printf("  [DE]  early stop: no improvement for %d generations\n", patience)
             flush(stdout)
             break
         end
     end
 
-    if show_trace
+    if show_gens
         @printf("  [DE done]  Q_best=%.6e  total evals=%d\n", Q_best, n_evals)
         flush(stdout)
     end
@@ -388,7 +392,8 @@ function run_smm(
             f            = r.de_f,
             cr           = r.de_cr,
             patience     = r.de_patience,
-            show_trace   = r.show_trace,
+            show_members = r.show_trace_members,
+            show_gens    = r.show_trace_generations,
             trace_stride = r.trace_stride,
             rng          = rng,
         )
@@ -397,8 +402,8 @@ function run_smm(
     elseif method == :sa
         theta_opt, loss_opt, niters = _run_sa(
             spec;
-            max_iter     = r.de_max_iter,   # reuse DE iter count for SA
-            show_trace   = r.show_trace,
+            max_iter     = r.de_max_iter,
+            show_trace   = r.show_trace_generations,
             trace_stride = r.trace_stride,
             rng          = rng,
         )
@@ -413,7 +418,7 @@ function run_smm(
             iter_count[] += 1
             Q = smm_objective(theta, spec)
             isfinite(Q) && Q < best_loss[] && (best_loss[] = Q)
-            if r.show_trace && iter_count[] % r.trace_stride == 0
+            if r.show_trace_generations && iter_count[] % r.trace_stride == 0
                 @printf("  [%s iter %4d]  Q=%-14s  best=%.6e\n",
                         method, iter_count[],
                         isfinite(Q) ? @sprintf("%.6e", Q) : "Inf",

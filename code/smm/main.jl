@@ -114,7 +114,7 @@ moments = load_data_moments()
 #    separation as externally calibrated.
 # ============================================================
 fixed_params = (
-    ;
+;
 )
 
 # ============================================================
@@ -141,7 +141,7 @@ run_params = SMMRunParams(
     de_pop_size  = 600,       # 0 = auto (100 × n_free_params)
     de_f         = 0.65,
     de_cr        = 0.85,
-    de_patience  = 10,
+    de_patience  = 20,
 
     # ── Nelder-Mead polish ───────────────────────────────────
     nm_max_iter  = 5_000,
@@ -149,8 +149,9 @@ run_params = SMMRunParams(
     nm_x_tol     = 1e-5,
 
     # ── Tracing ─────────────────────────────────────────────
-    show_trace   = true,
-    trace_stride = 10,
+    show_trace_members     = false,   # per-member lines within each generation
+    show_trace_generations = true,    # end-of-generation summary lines
+    trace_stride           = 10,
 )
 
 # ============================================================
