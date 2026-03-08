@@ -470,6 +470,12 @@ function solve_skilled_block!(
             sc.θ  = θ_raw
         end
 
+        # NaN/Inf guard — abort immediately
+        if !isfinite(sc.θ)
+            sim.verbose >= 1 && @printf("  [outer S]  NaN/Inf θ at it=%d — aborting\n", it)
+            return false
+        end
+
         # (E) Convergence
         dθ = abs(sc.θ - θ_old)
         dp = supnorm(sc.pstar, pstar_old)
@@ -486,11 +492,14 @@ function solve_skilled_block!(
             if streak >= sim.conv_streak
                 sim.verbose >= 2 && @printf(
                     "  [outer S]  converged it=%d  d=%.3e  θ=%.4f\n", it, d, sc.θ)
-                break
+                return true   # ← converged
             end
         else
             streak = 0
         end
     end
-    return nothing
+
+    # Reached maxit without converging
+    sim.verbose >= 1 && @printf("  [outer S]  maxit reached without convergence  θ=%.4f\n", sc.θ)
+    return false
 end

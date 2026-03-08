@@ -40,15 +40,11 @@ using SparseArrays
 using Statistics
 using Random
 using Distributions
-using QuadGK
 using FastGaussQuadrature
 using Interpolations
-using Roots
-using NLsolve
+using Parameters
 using Printf
 using Base.Threads
-using Plots
-using LaTeXStrings
 
 println("done."); flush(stdout)
 
@@ -74,8 +70,16 @@ flush(stdout)
 println("Initialising model..."); flush(stdout)
 model = initialise_model()
 
-println("Solving stationary equilibrium..."); flush(stdout)
-@time solve_model!(model)
+@printf("\nSolving stationary equilibrium...\n")
+@time result = solve_model!(model)
+
+if result.ok
+    @printf("Solver converged  (U=%s  S=%s  global=%s)\n",
+            result.converged_U, result.converged_S, result.converged_global)
+else
+    @printf("WARNING: solver did not fully converge  (U=%s  S=%s  global=%s)\n",
+            result.converged_U, result.converged_S, result.converged_global)
+end
 
 # ── Compute equilibrium objects ────────────────────────────────────────────────
 println("\nComputing equilibrium objects..."); flush(stdout)

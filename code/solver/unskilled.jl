@@ -12,6 +12,8 @@
 #   solve_unskilled_block!         — outer loop (θ, pstar, u, t)
 ############################################################
 
+# packages loaded by main.jl
+
 # ---------------------------------------------------------------------------
 # dG quadrature weights
 #   G = Beta(α_U, 1),  g(p) = α_U · p^(α_U − 1)
@@ -338,6 +340,12 @@ function solve_unskilled_block!(
         θ_acc = anderson1_update!(aa_θ, [θ_old], [θ_raw])[1]
         uc.θ  = max(θ_acc, 1e-14)
 
+        # NaN/Inf guard — abort immediately
+        if !isfinite(uc.θ)
+            sim.verbose >= 1 && @printf("  [outer U]  NaN/Inf θ at it=%d — aborting\n", it)
+            return false
+        end
+
         # Step 5: convergence
         dθ = abs(uc.θ - θ_old)
         dp = supnorm(uc.pstar, pstar_old)
@@ -354,11 +362,14 @@ function solve_unskilled_block!(
             if streak >= sim.conv_streak
                 sim.verbose >= 2 && @printf(
                     "  [outer U]  converged it=%d  d=%.3e  θ=%.4f\n", it, d, uc.θ)
-                break
+                return true   # ← converged
             end
         else
             streak = 0
         end
     end
-    return nothing
+
+    # Reached maxit without converging
+    sim.verbose >= 1 && @printf("  [outer U]  maxit reached without convergence  θ=%.4f\n", uc.θ)
+    return false
 end

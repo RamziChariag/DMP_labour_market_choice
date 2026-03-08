@@ -19,6 +19,35 @@
 #   5. Write mixed U_S back to sc.U; repeat.
 ############################################################
 
+# packages loaded by main.jl
+
+# ============================================================
+# SolveResult — convergence report from one model solve
+# ============================================================
+
+"""
+    SolveResult
+
+Records whether each layer of the solver converged on the final
+global iteration.  All three must be `true` for the solve to be
+considered valid in SMM.
+
+Fields
+──────
+  converged_U      :: Bool    unskilled outer loop converged
+  converged_S      :: Bool    skilled outer loop converged
+  converged_global :: Bool    global fixed-point converged
+  ok               :: Bool    all three true (convenience)
+"""
+struct SolveResult
+    converged_U      :: Bool
+    converged_S      :: Bool
+    converged_global :: Bool
+    ok               :: Bool
+end
+
+SolveResult(cU::Bool, cS::Bool, cG::Bool) = SolveResult(cU, cS, cG, cU && cS && cG)
+
 # ---------------------------------------------------------------------------
 # Cache initialisation (internal helper)
 # ---------------------------------------------------------------------------
@@ -77,10 +106,11 @@ end
 # solve_model — allocates fresh model and solves
 # ---------------------------------------------------------------------------
 """
-    solve_model(common, regime, unsk_par, skl_par, sim; Nx, Np_U, Np_S) → Model
+    solve_model(common, regime, unsk_par, skl_par, sim; Nx, Np_U, Np_S)
+        → (Model, SolveResult)
 
 Builds grids and caches from scratch, runs the global fixed-point loop,
-and returns the solved `Model`.
+and returns the solved Model together with a SolveResult convergence report.
 """
 function solve_model(
     common   :: CommonParams,
@@ -91,8 +121,7 @@ function solve_model(
     Nx   :: Int = 200,
     Np_U :: Int = 200,
     Np_S :: Int = 200
-) :: Model
-
+)
     xgrid,   wx   = build_gl_grid(Nx)
     pgrid_U, wp_U = build_gl_grid(Np_U)
     pgrid_S, wp_S = build_gl_grid(Np_S)
@@ -122,8 +151,8 @@ function solve_model(
         sim        = sim,
     )
 
-    solve_model!(model)
-    return model
+    result = solve_model!(model)
+    return model, result
 end
 
 
@@ -131,12 +160,14 @@ end
 # solve_model! — in-place solver (operates on an existing Model)
 # ---------------------------------------------------------------------------
 """
-    solve_model!(model)
+    solve_model!(model) → SolveResult
 
 Run the global fixed-point loop on `model`, updating caches in place.
-Use this when the model struct was built via `initialise_model()`.
+Returns a `SolveResult` indicating whether each layer converged.
+All three flags (converged_U, converged_S, converged_global) must be
+`true` for `result.ok` to be `true`.
 """
-function solve_model!(model::Model)
+function solve_model!(model::Model) :: SolveResult
     cp  = model.common
     sc  = model.skl_cache
     uc  = model.unsk_cache
@@ -148,19 +179,35 @@ function solve_model!(model::Model)
     aa     = Anderson1(2 * Nx)
     mS_cur = [max((φ / ν) * uc.t[ix], 0.0) for ix in 1:Nx]
 
+    # Track convergence flags from the LAST global iteration's block solves
+    last_conv_U = false
+    last_conv_S = false
+    global_converged = false
+
     streak = 0
     for it in 1:sim.maxit_global
 
         US_old = copy(sc.U)
         mS_old = copy(mS_cur)
 
-        # Step A: unskilled block
-        solve_unskilled_block!(model; US_in = sc.U)
+        # Step A: unskilled block — returns Bool
+        last_conv_U = solve_unskilled_block!(model; US_in = sc.U)
+
+        # NaN propagation check before continuing
+        if !isfinite(uc.θ)
+            sim.verbose >= 1 && @printf("[global]  θ_U is NaN/Inf at it=%d — aborting\n", it)
+            return SolveResult(false, false, false)
+        end
 
         mS_raw = [max((φ / ν) * uc.t[ix], 0.0) for ix in 1:Nx]
 
-        # Step B: skilled block
-        solve_skilled_block!(model; mS_in = mS_raw)
+        # Step B: skilled block — returns Bool
+        last_conv_S = solve_skilled_block!(model; mS_in = mS_raw)
+
+        if !isfinite(sc.θ)
+            sim.verbose >= 1 && @printf("[global]  θ_S is NaN/Inf at it=%d — aborting\n", it)
+            return SolveResult(false, false, false)
+        end
 
         US_raw = copy(sc.U)
 
@@ -190,6 +237,7 @@ function solve_model!(model::Model)
         if d < sim.tol_global
             streak += 1
             if streak >= sim.conv_streak
+                global_converged = true
                 sim.verbose >= 1 && @printf(
                     "[global]  converged it=%d  d=%.3e\n", it, d)
                 break
@@ -202,5 +250,6 @@ function solve_model!(model::Model)
             @printf("[global]  maxit reached  it=%d  d=%.3e\n", it, d)
         end
     end
-    return nothing
+
+    return SolveResult(last_conv_U, last_conv_S, global_converged)
 end
