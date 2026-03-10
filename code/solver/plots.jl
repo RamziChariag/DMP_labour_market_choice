@@ -5,8 +5,9 @@
 #   Generates and saves every figure to output_dir.
 #   obj — NamedTuple from compute_equilibrium_objects()
 #
-# NOTE: `using Plots` and `using LaTeXStrings` are loaded
-# in main.jl before this file's functions are called.
+# NOTE: `using Plots`, `using LaTeXStrings`, and
+# `using Interpolations` are loaded in main.jl before
+# this file's functions are called.
 ############################################################
 
 # ── Shared theme ────────────────────────────────────────────────────────────
@@ -271,12 +272,35 @@ function fig_skilled_wages(obj)
 end
 
 
-function fig_oj_premium(obj)
-    p = heatmap(obj.pg, obj.xg, obj.Δw_surface,
+function fig_skill_premium(obj)
+    # Realised skilled wage: w_S^1 where p < poj(x), w_S^0 elsewhere
+    wS_actual = fill(NaN, obj.Nx, obj.NpS)
+    for ix in 1:obj.Nx
+        poj_ix = clamp01(obj.poj[ix])
+        for jp in 1:obj.NpS
+            if obj.pg[jp] < poj_ix
+                wS_actual[ix, jp] = obj.wS1_surface[ix, jp]
+            else
+                wS_actual[ix, jp] = obj.wS0_surface[ix, jp]
+            end
+        end
+    end
+
+    # Interpolate w_U onto the skilled p-grid for each x
+    wU_on_pg = fill(NaN, obj.Nx, obj.NpS)
+    for ix in 1:obj.Nx
+        itp = linear_interpolation(obj.pgU, obj.wU_surface[ix, :],
+                                   extrapolation_bc=NaN)
+        wU_on_pg[ix, :] = itp.(obj.pg)
+    end
+
+    ΔwSU_surface = wS_actual .- wU_on_pg
+
+    p = heatmap(obj.pg, obj.xg, ΔwSU_surface,
                 xlabel=L"p", ylabel=L"x",
-                title=L"OJS wage premium $w_S^1-w_S^0$", color=:cividis)
-    contour!(p, obj.pg, obj.xg, obj.Δw_surface,
-             color=:black, alpha=0.35, lw=0.7, levels=10, colorbar=false)
+                title=L"Skill premium $w_S(x,p) - w_U(x,p)$", color=:cividis)
+    contour!(p, obj.pg, obj.xg, ΔwSU_surface,
+             color=:black, alpha=0.35, lw=0.7, levels=10, colorbar=true)
     plot!(p, obj.pstar_S, obj.xg,
           label=L"p_S^*(x)", color=:red, lw=2, ls=:dash)
     plot!(p, obj.poj, obj.xg,
@@ -305,10 +329,10 @@ end
 
 
 function fig_wage_densities_pooled(obj)
-    p = plot(obj.wmid, obj.dens_U,  label="Unskilled",    color=:steelblue, lw=2)
-    plot!(p, obj.wmid, obj.dens_S0, label=L"Skilled\ s{=}0", color=:seagreen,  lw=2)
+    p = plot(obj.wmid, obj.dens_U,  label="Unskilled",       color=:steelblue,  lw=2)
+    plot!(p, obj.wmid, obj.dens_S0, label=L"Skilled\ s{=}0", color=:seagreen,   lw=2)
     plot!(p, obj.wmid, obj.dens_S1, label=L"Skilled\ s{=}1", color=:darkorange, lw=2, ls=:dash)
-    plot!(p, obj.wmid, obj.dens_S,  label="Skilled (pooled)", color=:firebrick, lw=2.2, ls=:dot)
+    plot!(p, obj.wmid, obj.dens_S,  label="Skilled (pooled)", color=:firebrick,  lw=2.2, ls=:dot)
     title!(p, "Wage densities: all employment types")
     xlabel!(p, "Wage");  ylabel!(p, "Density")
     plot(p, size=(820,380), margin=5Plots.mm)
@@ -345,7 +369,7 @@ function make_all_plots(obj; output_dir::String = "output/plots")
         ("fig11_unemployment_values",  fig_unemployment_values(obj)),
         ("figW1_unskilled_wage",       fig_unskilled_wage(obj)),
         ("figW2_skilled_wages",        fig_skilled_wages(obj)),
-        ("figW3_oj_premium",           fig_oj_premium(obj)),
+        ("figW3_skill_premium",        fig_skill_premium(obj)),
         ("figW4_wage_densities",       fig_wage_densities(obj)),
         ("figW4b_wage_densities_pool", fig_wage_densities_pooled(obj)),
     ]

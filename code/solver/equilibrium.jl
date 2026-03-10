@@ -265,6 +265,22 @@ function compute_equilibrium_objects(model::Model)
     ur_S        = agg_uS / max(agg_mS, 1e-14)
     ur_total    = (agg_uU + agg_uS) / max(total_pop, 1e-14)
 
+    # ── Transition rates for model_moments ────────────────────────────────
+    # f_S = θ_S · q_S(θ_S)   [κS already computed above for wages]
+    f_S = κS
+
+    # sep_rate_U: employment-weighted unskilled destruction hazard
+    #   δ_U(x) = λ_U · G(p*(x)) = λ_U · p*(x)^α_U   [G(p) = p^α_U]
+    δU_by_x    = λU .* clamp01.(pstar_U) .^ αU
+    sep_rate_U = dot(δU_by_x, eU_vec .* wx) / max(agg_eU, 1e-14)
+
+    # sep_rate_S: employment-weighted skilled separation hazard into unemployment
+    #   δ_S(x) = ξ_S + λ_S · Γ(p*_S(x))
+    #   job-to-job quits are excluded — they do not create unemployment
+    ΓpstarS    = [pre.Γvals[pcut_index(pg, clamp01(pstar_S[ix]))] for ix in 1:Nx]
+    δS_by_x    = sp.ξ .+ λS .* ΓpstarS
+    sep_rate_S = dot(δS_by_x, eS_tot .* wx) / max(agg_eS, 1e-14)
+
     return (
         # grids
         xg = xg, pgU = pgU, pg = pg, wx = wx, wpU = wpU, wpS = wpS,
@@ -311,7 +327,12 @@ function compute_equilibrium_objects(model::Model)
         agg_mS_flow = agg_mS_flow, total_pop = total_pop,
         ur_U    = ur_U,   ur_S    = ur_S,     ur_total = ur_total,
         thetaU  = uc.θ,   thetaS  = sc.θ,
-        f_U     = f_U,
+
+        # job-finding and separation rates
+        f_U        = f_U,
+        f_S        = f_S,
+        sep_rate_U = sep_rate_U,
+        sep_rate_S = sep_rate_S,
     )
 end
 

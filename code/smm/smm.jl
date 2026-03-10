@@ -14,8 +14,6 @@
 #
 # Design notes
 # ────────────
-# - smm_objective ALWAYS forces verbose=0 on the solver regardless
-#   of what spec.sim says.  Solver output during SMM is always noise.
 # - SA is implemented here, not delegated to Optim.jl, because
 #   Optim's SA rejects Inf proposals silently and gets stuck when
 #   many parameter regions produce non-converging models.  Our loop
@@ -230,6 +228,7 @@ function _run_de(
     f            :: Float64 = 0.65,
     cr           :: Float64 = 0.85,
     patience     :: Int     = 20,
+    avg_tol      :: Float64 = 0.01,   # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 = off
     show_members :: Bool    = false,
     show_gens    :: Bool    = true,
     trace_stride :: Int     = 10,
@@ -241,8 +240,8 @@ function _run_de(
 
     # ── Initialise population around starting point ────────────────────
     # First member is the supplied starting point; rest are random
-    # perturbations. Using ±2 in logit space covers most of [lb, ub].
-    pop  = [theta0 .+ 2.0 .* (2.0 .* rand(rng, npar) .- 1.0)
+    # perturbations. Using ±6 in logit space covers most of [lb, ub].
+    pop  = [theta0 .+ 6.0 .* (.0 .* rand(rng, npar) .- 1.0)
             for _ in 1:pop_size]
     pop[1] = copy(theta0)
 
@@ -313,10 +312,10 @@ function _run_de(
             # Within-generation progress
             if show_members && i % trace_stride == 0
                 Q_i = Q_pop[i]
-                @printf("  [DE gen=%4d  member=%4d/%4d]  Q_member=%-14s  Q_best=%.6e  improved=%d\n",
+                @printf("  [DE gen=%4d  member=%4d/%4d]  Q_member=%-14s  improved=%d\n",
                         gen, i, pop_size,
                         isfinite(Q_i) ? @sprintf("%.6e", Q_i) : "Inf",
-                        Q_best, n_improved)
+                        n_improved)
                 flush(stdout)
             end
         end
@@ -337,11 +336,25 @@ function _run_de(
             flush(stdout)
         end
 
-        # Early stopping
+        # Early stopping — stagnation
         if stagnation >= patience
             show_gens && @printf("  [DE]  early stop: no improvement for %d generations\n", patience)
             flush(stdout)
             break
+        end
+
+        # Early stopping — population convergence around best
+        if avg_tol > 0.0 && isfinite(Q_best) && Q_best != 0.0
+            Q_finite = filter(isfinite, Q_pop)
+            if !isempty(Q_finite)
+                rel_gap = (mean(Q_finite) - Q_best) / abs(Q_best)
+                if rel_gap < avg_tol
+                    show_gens && @printf("  [DE]  early stop: Q_mean within %.1e of Q_best (rel gap = %.4e)\n",
+                                         avg_tol, rel_gap)
+                    flush(stdout)
+                    break
+                end
+            end
         end
     end
 
@@ -392,6 +405,7 @@ function run_smm(
             f            = r.de_f,
             cr           = r.de_cr,
             patience     = r.de_patience,
+            avg_tol      = r.de_avg_tol,
             show_members = r.show_trace_members,
             show_gens    = r.show_trace_generations,
             trace_stride = r.trace_stride,

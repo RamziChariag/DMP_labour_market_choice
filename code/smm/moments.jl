@@ -56,31 +56,31 @@ function load_data_moments()
 
     return (
         # ── Labour market stocks ─────────────────────────────────────────
-        ur_total       = (value = 0.060,  weight = 100.0),
-        ur_U           = (value = 0.090,  weight =  80.0),
-        ur_S           = (value = 0.030,  weight =  80.0),
-        skilled_share  = (value = 0.400,  weight =  50.0),
-        training_share = (value = 0.050,  weight =  40.0),
+        ur_total       = (value = 0.050,  weight = 150.0),
+        ur_U           = (value = 0.080,  weight =  80.0),
+        ur_S           = (value = 0.025,  weight =  80.0),
+        skilled_share  = (value = 0.450,  weight =  50.0),
+        training_share = (value = 0.020,  weight =  40.0),
 
         # ── Transition rates ─────────────────────────────────────────────
-        jfr_U          = (value = 0.300,  weight =  60.0),
-        sep_rate_U     = (value = 0.030,  weight =  60.0),
-        jfr_S          = (value = 0.200,  weight =  60.0),
-        sep_rate_S     = (value = 0.020,  weight =  60.0),
-        training_rate  = (value = 0.100,  weight =  30.0),
+        jfr_U          = (value = 0.220,  weight =  35.0),
+        sep_rate_U     = (value = 0.025,  weight =  25.0),
+        jfr_S          = (value = 0.140,  weight =  35.0),
+        sep_rate_S     = (value = 0.010,  weight =  15.0),
+        training_rate  = (value = 0.040,  weight =  15.0),
 
         # ── Wages ────────────────────────────────────────────────────────
-        mean_wage_U    = (value = 0.600,  weight =  0.0),
-        mean_wage_S    = (value = 1.100,  weight =  0.0),
-        p50_wage_U     = (value = 0.570,  weight =  0.0),
-        p50_wage_S     = (value = 1.050,  weight =  0.0),
-        wage_premium   = (value = 0.600,  weight =  0.0),   # log ratio
-        wage_sd_U      = (value = 0.150,  weight =  0.0),
-        wage_sd_S      = (value = 0.250,  weight =  0.0),
+        mean_wage_U    = (value = 0.700,  weight =  40.0),
+        mean_wage_S    = (value = 1.250,  weight =  30.0),
+        p50_wage_U     = (value = 0.660,  weight =  30.0),
+        p50_wage_S     = (value = 1.180,  weight =  20.0),
+        wage_premium   = (value = 0.580,  weight =  05.0),   # log ratio; key identification moment
+        wage_sd_U      = (value = 0.220,  weight =  10.0),
+        wage_sd_S      = (value = 0.350,  weight =  10.0),
 
         # ── Tightness ────────────────────────────────────────────────────
-        theta_U        = (value = 1.000,  weight =   0.0),   # excluded for now
-        theta_S        = (value = 1.000,  weight =   0.0),   # excluded for now
+        theta_U        = (value = 0.700,  weight =  15.0),
+        theta_S        = (value = 1.400,  weight =  15.0),
     )
 end
 
@@ -90,49 +90,52 @@ end
 
 Extract the same set of moments from a solved model's equilibrium objects.
 `obj` is the NamedTuple returned by `compute_equilibrium_objects`.
+
+Prerequisites — the following fields must be added to the return tuple of
+`compute_equilibrium_objects` (see note at bottom of this file):
+    f_S         :: Float64             # κ_S = θ_S · q_S(θ_S)
+    sep_rate_U  :: Float64             # employment-weighted unskilled separation rate
+    sep_rate_S  :: Float64             # employment-weighted skilled separation rate
 """
 function model_moments(obj)
 
-    # ── Convenience ──────────────────────────────────────────────────────
-    wx  = obj.wx
-    wpU = obj.wpU
-    wpS = obj.wpS
-
     # ── Labour market stocks ──────────────────────────────────────────────
-    ur_total      = obj.ur_total
-    ur_U          = obj.ur_U
-    ur_S          = obj.ur_S
-    skilled_share = obj.agg_mS / max(obj.total_pop, 1e-14)
-    training_share = obj.agg_t / max(obj.total_pop, 1e-14)
+    ur_total       = obj.ur_total
+    ur_U           = obj.ur_U
+    ur_S           = obj.ur_S
+    skilled_share  = obj.agg_mS  / max(obj.total_pop, 1e-14)
+    training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
 
     # ── Transition rates ──────────────────────────────────────────────────
-    jfr_U     = obj.f_U
+    # jfr_U: θ_U · q_U(θ_U), already stored as f_U in obj
+    jfr_U         = obj.f_U
 
-    θS        = obj.thetaS
-    # (f_S not stored directly in obj — recompute from thetaS stored there)
-    # We use the fact that obj.thetaS and the skilled matching params are
-    # accessible indirectly; for now approximate as the mean hiring rate.
-    jfr_S     = obj.thetaS  # placeholder — replace with f_S once stored in obj
+    # jfr_S: θ_S · q_S(θ_S), stored as f_S (added to compute_equilibrium_objects)
+    jfr_S         = obj.f_S
 
-    # Separation rate: δ_U = λ_U * E[G(p*(x))]  weighted by employment
-    eU_total  = max(obj.agg_eU, 1e-14)
-    sep_rate_U = 0.0          # TODO: compute from model internals if needed
-    sep_rate_S = 0.0          # TODO
+    # sep_rate_U: employment-weighted λ_U · G(p*(x)) = λ_U · p*(x)^α_U
+    # sep_rate_S: employment-weighted ξ_S + λ_S · Γ(p*_S(x))
+    # Both pre-computed in compute_equilibrium_objects (see note below)
+    sep_rate_U    = obj.sep_rate_U
+    sep_rate_S    = obj.sep_rate_S
 
+    # training_rate: flow into training per unskilled unemployed
     training_rate = obj.agg_t / max(obj.agg_uU, 1e-14)
 
     # ── Wages ─────────────────────────────────────────────────────────────
-    # Wage densities are already computed in obj
-    wmid    = obj.wmid
-    dens_U  = obj.dens_U
-    dens_S  = obj.dens_S
-
-    bw = wmid[2] - wmid[1]
+    # dens_U and dens_S are employment-mass-weighted wage densities built in
+    # compute_equilibrium_objects. Only (x,p) cells with e > 1e-16 contribute,
+    # so the means and medians below are automatically over employed workers only.
+    # The skilled density pools s=0 and s=1 workers (correct: both are employed).
+    wmid   = obj.wmid
+    dens_U = obj.dens_U
+    dens_S = obj.dens_S
+    bw     = wmid[2] - wmid[1]
 
     mean_wage_U = sum(wmid .* dens_U) * bw
     mean_wage_S = sum(wmid .* dens_S) * bw
 
-    # Median: first bin where cumulative density >= 0.5
+    # Median: first bin where cumulative density crosses 0.5
     function _median(wmid, dens, bw)
         cum = 0.0
         for (w, d) in zip(wmid, dens)
@@ -145,11 +148,12 @@ function model_moments(obj)
     p50_wage_U = _median(wmid, dens_U, bw)
     p50_wage_S = _median(wmid, dens_S, bw)
 
+    # Log mean-wage premium: log(E[w_S]) - log(E[w_U])
+    # Both means are employment-weighted by construction of dens_U / dens_S
     wage_premium = log(max(mean_wage_S, 1e-14)) - log(max(mean_wage_U, 1e-14))
 
-    var_U = sum((wmid .- mean_wage_U).^2 .* dens_U) * bw
-    var_S = sum((wmid .- mean_wage_S).^2 .* dens_S) * bw
-
+    var_U     = sum((wmid .- mean_wage_U).^2 .* dens_U) * bw
+    var_S     = sum((wmid .- mean_wage_S).^2 .* dens_S) * bw
     wage_sd_U = sqrt(max(var_U, 0.0))
     wage_sd_S = sqrt(max(var_S, 0.0))
 

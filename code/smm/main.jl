@@ -93,9 +93,9 @@ sim_smm = SimParams(
     anderson_reg   = 1e-10,
 
     damp_pstar_U   = 1.30,
-    damp_pstar_S   = 0.02,
+    damp_pstar_S   = 0.06,
 
-    verbose        = 0,          # silent during SMM iterations
+    verbose        = 0,          # 0: model is silent; 1: print outer convergence info per iteration; 2: also print inner iteration details
     verbose_stride = 10,
 )
 
@@ -114,7 +114,13 @@ moments = load_data_moments()
 #    separation as externally calibrated.
 # ============================================================
 fixed_params = (
-;
+    r   = 0.05,   # discount rate
+    ν   = 0.02,   # demographic turnover rate
+    a_ℓ = 2.00,   # unskilled wage distribution shape (Gamma a)
+    b_ℓ = 5.00,   # unskilled wage distribution shape (Gamma b)
+    φ   = 0.20,   # training completion rate
+    a_Γ = 1.00,   # training wage distribution shape (Gamma a)
+    b_Γ = 5.00,   # training wage distribution shape (Gamma b)
 )
 
 # ============================================================
@@ -137,21 +143,22 @@ run_params = SMMRunParams(
     Np_S    = 80,
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 200,       # generations; total evals = max_iter × pop_size
+    de_max_iter  = 500,       # generations; total evals = max_iter × pop_size
     de_pop_size  = 600,       # 0 = auto (100 × n_free_params)
-    de_f         = 0.65,
-    de_cr        = 0.85,
-    de_patience  = 20,
+    de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
+    de_cr        = 0.85,        #crossover probability (0-1)
+    de_patience  = 10,      # how many generations to wait for improvement before early stopping
+    de_avg_tol   = 0.0,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
+
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 5_000,
-    nm_f_tol     = 1e-6,
-    nm_x_tol     = 1e-5,
-
+    nm_max_iter  = 500,       
+    nm_f_tol     = 1e-6,        
+    nm_x_tol     = 1e-5,   
     # ── Tracing ─────────────────────────────────────────────
     show_trace_members     = false,   # per-member lines within each generation
     show_trace_generations = true,    # end-of-generation summary lines
-    trace_stride           = 10,
+    trace_stride           = 10,        # how often to print within DE generations (in members, not generations)
 )
 
 # ============================================================
