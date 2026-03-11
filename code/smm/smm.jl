@@ -118,13 +118,20 @@ Acceptance rule:
   - never accept Inf proposals
 """
 function _run_sa(
-    spec         :: SMMSpec;
-    T0           :: Float64 = 2.0,
-    step         :: Float64 = 0.15,
-    max_iter     :: Int     = 5000,
-    show_trace   :: Bool    = true,
-    trace_stride :: Int     = 100,
-    rng                     = Random.default_rng(),
+    spec             :: SMMSpec;
+    T0               :: Float64 = 2.0,
+    step             :: Float64 = 0.15,
+    max_iter         :: Int     = 5000,
+    cooling_rate     :: Float64 = 1.0,
+    cooling_exp      :: Float64 = 0.5,
+    reheat_patience  :: Int     = 200,
+    reheat_factor    :: Float64 = 2.0,
+    max_reheats      :: Int     = 5,
+    adapt_window     :: Int     = 50,
+    target_fin       :: Float64 = 0.90,
+    show_trace       :: Bool    = true,
+    trace_stride     :: Int     = 100,
+    rng                         = Random.default_rng(),
 )
     theta      = pack_theta(spec)
     Q          = smm_objective(theta, spec)
@@ -132,27 +139,59 @@ function _run_sa(
     Q_best     = isfinite(Q) ? Q : Inf
     n_acc      = 0
     n_fin      = 0
+    n_reheats  = 0
+
+    steps_since_improvement = 0
+    T_current = T0
+
+    # Rolling window for adaptive step
+    win_fin = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
+    win_idx = 0
 
     if show_trace
-        @printf("  [SA init]  Q0 = %s\n",
-                isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (bad starting point)")
+        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f\n",
+                isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (bad starting point)",
+                T0, step)
         flush(stdout)
     end
 
     for t in 1:max_iter
+        # ── Cooling schedule: T0 / log(1 + rate*t)^exp ────────────────
+        T_sched   = T0 / (log(1.0 + cooling_rate * t))^cooling_exp
+        T_current = max(T_sched, T_current)   # reheat keeps T above schedule
+        T_current = max(T_current * (T_sched / max(T0 / (log(1.0 + cooling_rate * max(t-1,1)))^cooling_exp, 1e-10)), T_sched)
+        T_current = max(T_current, 1e-8)
+
+        # ── Proposal ──────────────────────────────────────────────────
         theta_prop = theta .+ step .* randn(rng, length(theta))
         Q_prop     = smm_objective(theta_prop, spec)
 
-        if isfinite(Q_prop)
-            n_fin += 1
-            T = T0 / log(t + 2)
+        is_fin = isfinite(Q_prop)
+        is_fin && (n_fin += 1)
 
+        # ── Adaptive step ─────────────────────────────────────────────
+        if adapt_window > 0
+            win_idx          = mod1(win_idx + 1, adapt_window)
+            win_fin[win_idx] = is_fin
+            if t >= adapt_window && t % adapt_window == 0
+                fin_rate = mean(win_fin)
+                if fin_rate < target_fin * 0.90
+                    step *= 0.85
+                elseif fin_rate > min(target_fin * 1.05, 0.99)
+                    step *= 1.10
+                end
+                step = clamp(step, 0.01, 2.0)
+            end
+        end
+
+        # ── Accept / reject ───────────────────────────────────────────
+        if is_fin
             accept = if !isfinite(Q)
                 true
             elseif Q_prop <= Q
                 true
             else
-                rand(rng) < exp(-(Q_prop - Q) / T)
+                rand(rng) < exp(-(Q_prop - Q) / T_current)
             end
 
             if accept
@@ -162,25 +201,52 @@ function _run_sa(
                 if Q < Q_best
                     Q_best     = Q
                     theta_best = copy(theta)
+                    steps_since_improvement = 0
+                else
+                    steps_since_improvement += 1
                 end
+            else
+                steps_since_improvement += 1
+            end
+        else
+            steps_since_improvement += 1
+        end
+
+        # ── Reheating on stagnation ────────────────────────────────────
+        if reheat_patience > 0 &&
+           steps_since_improvement >= reheat_patience &&
+           (max_reheats == 0 || n_reheats < max_reheats)
+
+            n_reheats += 1
+            T_before   = T_current
+            T_current  = T_current * reheat_factor
+            theta      = copy(theta_best)
+            Q          = Q_best
+            steps_since_improvement = 0
+
+            if show_trace
+                @printf("  [SA REHEAT #%d  t=%5d]  T %.4f→%.4f  restarting from Q_best=%.6e\n",
+                        n_reheats, t, T_before, T_current, Q_best)
+                flush(stdout)
             end
         end
 
+        # ── Progress trace ────────────────────────────────────────────
         if show_trace && t % trace_stride == 0
-            T_now = T0 / log(t + 2)
-            @printf("  [SA t=%5d]  curr=%-14s  best=%.6e  T=%.4f  acc=%.2f  fin=%.2f\n",
+            @printf("  [SA t=%5d]  curr=%-14s  best=%.6e  T=%.4f  step=%.4f  acc=%.2f  fin=%.2f  reheats=%d\n",
                     t,
                     isfinite(Q) ? @sprintf("%.6e", Q) : "Inf",
-                    Q_best, T_now,
+                    Q_best, T_current, step,
                     n_acc / t,
-                    n_fin / t)
+                    n_fin / t,
+                    n_reheats)
             flush(stdout)
         end
     end
 
     if show_trace
-        @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite proposals %d/%d\n",
-                Q_best, n_acc, max_iter, n_fin, max_iter)
+        @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  reheats=%d\n",
+                Q_best, n_acc, max_iter, n_fin, max_iter, n_reheats)
         flush(stdout)
     end
 
@@ -239,9 +305,11 @@ function _run_de(
     theta0   = pack_theta(spec)
 
     # ── Initialise population around starting point ────────────────────
-    # First member is the supplied starting point; rest are random
-    # perturbations. Using ±6 in logit space covers most of [lb, ub].
-    pop  = [theta0 .+ 6.0 .* (.0 .* rand(rng, npar) .- 1.0)
+    # First member is the supplied starting point; rest are uniform
+    # random perturbations in logit space.  ±6 in logit space maps to
+    # roughly [lb+0.2%, ub-0.2%] in constrained space, so the population
+    # spans almost the full prior range from the outset.
+    pop  = [theta0 .+ 12.0 .* (rand(rng, npar) .- 0.5)
             for _ in 1:pop_size]
     pop[1] = copy(theta0)
 
@@ -416,10 +484,19 @@ function run_smm(
     elseif method == :sa
         theta_opt, loss_opt, niters = _run_sa(
             spec;
-            max_iter     = r.de_max_iter,
-            show_trace   = r.show_trace_generations,
-            trace_stride = r.trace_stride,
-            rng          = rng,
+            max_iter        = r.sa_max_iter,
+            T0              = r.sa_T0,
+            step            = r.sa_step,
+            cooling_rate    = r.sa_cooling_rate,
+            cooling_exp     = r.sa_cooling_exp,
+            reheat_patience = r.sa_reheat_patience,
+            reheat_factor   = r.sa_reheat_factor,
+            max_reheats     = r.sa_max_reheats,
+            adapt_window    = r.sa_adapt_window,
+            target_fin      = r.sa_target_fin,
+            show_trace      = r.show_trace_generations,
+            trace_stride    = r.trace_stride,
+            rng             = rng,
         )
         converged = isfinite(loss_opt)
 

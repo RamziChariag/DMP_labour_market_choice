@@ -97,6 +97,27 @@ Base.@kwdef struct SMMRunParams
     de_patience  :: Int     = 20
     de_avg_tol   :: Float64 = 0.01   # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 = off
 
+    # ── Simulated annealing global search ────────────────────────────
+    sa_max_iter      :: Int     = 5_000   # total SA proposals
+    sa_T0            :: Float64 = 2.0     # initial temperature
+    sa_step          :: Float64 = 0.15    # initial random-walk step (logit space)
+    # Cooling schedule: T(t) = T0 / (1 + cooling_rate * t)^cooling_exp
+    # Default is log-cooling (cooling_rate=1, exp≈0 absorbed into log);
+    # increase cooling_exp toward 1.0 to cool faster, decrease toward 0 to cool slower.
+    sa_cooling_rate  :: Float64 = 1.0     # scales t in denominator
+    sa_cooling_exp   :: Float64 = 0.5     # exponent on log: T0 / log(1 + rate*t)^exp
+    # Reheating: if best hasn't improved for sa_reheat_patience steps, reset
+    # current→best and multiply T by sa_reheat_factor (>1 to warm back up).
+    # Set sa_reheat_patience=0 to disable.
+    sa_reheat_patience :: Int     = 200   # proposals without improvement before reheat
+    sa_reheat_factor   :: Float64 = 2.0   # T multiplier on reheat
+    sa_max_reheats     :: Int     = 5     # cap on total reheats (0 = unlimited)
+    # Adaptive step: every sa_adapt_window proposals, rescale step so that
+    # the feasibility rate (fin/total) stays near sa_target_fin.
+    # Set sa_adapt_window=0 to disable.
+    sa_adapt_window  :: Int     = 50      # rolling window for step adaptation
+    sa_target_fin    :: Float64 = 0.90    # target feasibility rate
+
     # ── Nelder-Mead polish ────────────────────────────────────────────
     nm_max_iter  :: Int     = 5_000
     nm_f_tol     :: Float64 = 1e-6

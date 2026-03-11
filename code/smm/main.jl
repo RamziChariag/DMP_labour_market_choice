@@ -142,21 +142,34 @@ run_params = SMMRunParams(
     Np_U    = 80,
     Np_S    = 80,
 
+    # ── SA global search ────────────────────────────────────
+    sa_max_iter        = 10_000,  # total SA proposals
+    sa_T0              = 5.0,     # initial temperature (higher = more uphill acceptance early)
+    sa_step            = 0.20,    # initial random-walk step in logit space
+    sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
+    sa_cooling_exp     = 0.5,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
+    sa_reheat_patience = 100,     # proposals without improvement before reheating
+    sa_reheat_factor   = 2.0,     # temperature multiplier on reheat
+    sa_max_reheats     = 3,       # cap on total reheats (0 = unlimited)
+    sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
+    sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
+
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 500,       # generations; total evals = max_iter × pop_size
+    de_max_iter  = 200,       # generations; total evals = max_iter × pop_size
     de_pop_size  = 600,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
     de_patience  = 10,      # how many generations to wait for improvement before early stopping
-    de_avg_tol   = 0.0,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
+    de_avg_tol   = 1.00e-4,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 500,       
-    nm_f_tol     = 1e-6,        
-    nm_x_tol     = 1e-5,   
+    nm_max_iter  = 500,       # maximum iterations for Nelder-Mead local search
+    nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
+    nm_x_tol     = 1e-5,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
+
     # ── Tracing ─────────────────────────────────────────────
-    show_trace_members     = false,   # per-member lines within each generation
+    show_trace_members     = true,   # per-member lines within each generation for DE, prints for stride proposal in SA
     show_trace_generations = true,    # end-of-generation summary lines
     trace_stride           = 10,        # how often to print within DE generations (in members, not generations)
 )
@@ -179,7 +192,7 @@ print_spec(spec)
 println("Starting SMM optimisation..."); flush(stdout)
 
 # Stage 1: global search
-res_de = run_smm(spec; method = :de)
+res_de = run_smm(spec; method = :sa)
 
 # Stage 2: polish from DE solution
 res_pol = run_smm(_spec_with_init(spec, res_de.theta_opt); method = :neldermead)

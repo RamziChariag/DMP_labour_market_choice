@@ -24,6 +24,10 @@ Moment list
     ur_S              skilled unemployment rate
     skilled_share     share of population in skilled segment
     training_share    share of population in training
+    emp_var_U         variance of wages among unskilled employed
+    emp_cm3_U         third central moment of wages, unskilled employed
+    emp_var_S         variance of wages among skilled employed
+    emp_cm3_S         third central moment of wages, skilled employed
 
   Transition rates
     jfr_U             unskilled job-finding rate
@@ -37,7 +41,7 @@ Moment list
     mean_wage_S       mean wage, skilled employed
     p50_wage_U        median wage, unskilled
     p50_wage_S        median wage, skilled
-    wage_premium      log skilled / unskilled mean wage ratio
+    wage_premium      E[log w_S] / E[log w_U], ratio of mean log wages
     wage_sd_U         std dev of unskilled wages
     wage_sd_S         std dev of skilled wages
 
@@ -56,11 +60,15 @@ function load_data_moments()
 
     return (
         # ── Labour market stocks ─────────────────────────────────────────
-        ur_total       = (value = 0.050,  weight = 150.0),
+        ur_total       = (value = 0.050,  weight = 100.0),
         ur_U           = (value = 0.080,  weight =  80.0),
         ur_S           = (value = 0.025,  weight =  80.0),
-        skilled_share  = (value = 0.450,  weight =  50.0),
+        skilled_share  = (value = 0.450,  weight =  90.0),
         training_share = (value = 0.020,  weight =  40.0),
+        emp_var_U      = (value = 0.050,  weight =  20.0),
+        emp_cm3_U      = (value = 0.005,  weight =  10.0),
+        emp_var_S      = (value = 0.120,  weight =  20.0),
+        emp_cm3_S      = (value = 0.015,  weight =  10.0),
 
         # ── Transition rates ─────────────────────────────────────────────
         jfr_U          = (value = 0.220,  weight =  35.0),
@@ -74,7 +82,7 @@ function load_data_moments()
         mean_wage_S    = (value = 1.250,  weight =  30.0),
         p50_wage_U     = (value = 0.660,  weight =  30.0),
         p50_wage_S     = (value = 1.180,  weight =  20.0),
-        wage_premium   = (value = 0.580,  weight =  05.0),   # log ratio; key identification moment
+        wage_premium   = (value = 0.580,  weight =  45.0),   # E[log w_S]/E[log w_U]; key identification moment
         wage_sd_U      = (value = 0.220,  weight =  10.0),
         wage_sd_S      = (value = 0.350,  weight =  10.0),
 
@@ -105,6 +113,23 @@ function model_moments(obj)
     ur_S           = obj.ur_S
     skilled_share  = obj.agg_mS  / max(obj.total_pop, 1e-14)
     training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
+
+    # emp_var / emp_cm3: variance and third central moment of the employed
+    # wage distribution, computed from the same density grids used for
+    # mean_wage and wage_sd below.  Evaluated here so they sit logically
+    # with the other labour-stock moments; the densities are re-used later.
+    wmid_tmp   = obj.wmid
+    dens_U_tmp = obj.dens_U
+    dens_S_tmp = obj.dens_S
+    bw_tmp     = wmid_tmp[2] - wmid_tmp[1]
+
+    _mean_U_tmp = sum(wmid_tmp .* dens_U_tmp) * bw_tmp
+    _mean_S_tmp = sum(wmid_tmp .* dens_S_tmp) * bw_tmp
+
+    emp_var_U  = sum((wmid_tmp .- _mean_U_tmp).^2 .* dens_U_tmp) * bw_tmp
+    emp_cm3_U  = sum((wmid_tmp .- _mean_U_tmp).^3 .* dens_U_tmp) * bw_tmp
+    emp_var_S  = sum((wmid_tmp .- _mean_S_tmp).^2 .* dens_S_tmp) * bw_tmp
+    emp_cm3_S  = sum((wmid_tmp .- _mean_S_tmp).^3 .* dens_S_tmp) * bw_tmp
 
     # ── Transition rates ──────────────────────────────────────────────────
     # jfr_U: θ_U · q_U(θ_U), already stored as f_U in obj
@@ -148,9 +173,12 @@ function model_moments(obj)
     p50_wage_U = _median(wmid, dens_U, bw)
     p50_wage_S = _median(wmid, dens_S, bw)
 
-    # Log mean-wage premium: log(E[w_S]) - log(E[w_U])
-    # Both means are employment-weighted by construction of dens_U / dens_S
-    wage_premium = log(max(mean_wage_S, 1e-14)) - log(max(mean_wage_U, 1e-14))
+    # Wage premium: E[log w_S] / E[log w_U]
+    # Integrates log(w) against each employment-weighted density.
+    # clamp guards against any zero/negative bin midpoints on the wage grid.
+    mean_log_wage_U = sum(log.(max.(wmid, 1e-14)) .* dens_U) * bw
+    mean_log_wage_S = sum(log.(max.(wmid, 1e-14)) .* dens_S) * bw
+    wage_premium    = mean_log_wage_S / max(mean_log_wage_U, 1e-14)
 
     var_U     = sum((wmid .- mean_wage_U).^2 .* dens_U) * bw
     var_S     = sum((wmid .- mean_wage_S).^2 .* dens_S) * bw
@@ -167,6 +195,10 @@ function model_moments(obj)
         ur_S          = ur_S,
         skilled_share = skilled_share,
         training_share = training_share,
+        emp_var_U     = emp_var_U,
+        emp_cm3_U     = emp_cm3_U,
+        emp_var_S     = emp_var_S,
+        emp_cm3_S     = emp_cm3_S,
 
         jfr_U         = jfr_U,
         sep_rate_U    = sep_rate_U,
