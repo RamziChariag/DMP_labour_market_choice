@@ -7,6 +7,17 @@
 # Returns a NamedTuple of (value, weight) pairs.
 # Weight = 1 / variance of the moment estimator (or a proxy).
 # Higher weight = more tightly targeted.
+#
+# Wage premium convention
+# ───────────────────────
+# wage_premium  ≡  E[log w_S] − E[log w_U]
+#
+# This is the standard Mincer / OLS skill-premium: scale-invariant,
+# directly estimable from micro data, and orthogonal to the level
+# moments mean_wage_U / mean_wage_S already in the objective.
+# Do NOT use E[log w_S]/E[log w_U]: with wages normalised below 1
+# the logs are negative and the ratio is non-monotone in the premium.
+# Do NOT use E[w_S]/E[w_U]: collinear with the two level means.
 ############################################################
 
 
@@ -41,7 +52,7 @@ Moment list
     mean_wage_S       mean wage, skilled employed
     p50_wage_U        median wage, unskilled
     p50_wage_S        median wage, skilled
-    wage_premium      E[log w_S] / E[log w_U], ratio of mean log wages
+    wage_premium      E[log w_S] − E[log w_U]  (log skill premium)
     wage_sd_U         std dev of unskilled wages
     wage_sd_S         std dev of skilled wages
 
@@ -82,7 +93,7 @@ function load_data_moments()
         mean_wage_S    = (value = 1.250,  weight =  30.0),
         p50_wage_U     = (value = 0.660,  weight =  30.0),
         p50_wage_S     = (value = 1.180,  weight =  20.0),
-        wage_premium   = (value = 0.580,  weight =  45.0),   # E[log w_S]/E[log w_U]; key identification moment
+        wage_premium   = (value = 0.580,  weight =  45.0),   # E[log w_S] − E[log w_U]; ≈ log(1.25/0.70) ≈ 0.58
         wage_sd_U      = (value = 0.220,  weight =  10.0),
         wage_sd_S      = (value = 0.350,  weight =  10.0),
 
@@ -173,12 +184,17 @@ function model_moments(obj)
     p50_wage_U = _median(wmid, dens_U, bw)
     p50_wage_S = _median(wmid, dens_S, bw)
 
-    # Wage premium: E[log w_S] / E[log w_U]
-    # Integrates log(w) against each employment-weighted density.
+    # Wage premium: E[log w_S] − E[log w_U]
+    #
+    # This is the log skill premium — the same object estimated by a
+    # Mincer regression of log wages on a skill indicator.  It is
+    # scale-invariant (unaffected by wage normalisation) and adds
+    # identifying information orthogonal to the two level means above.
+    #
     # clamp guards against any zero/negative bin midpoints on the wage grid.
     mean_log_wage_U = sum(log.(max.(wmid, 1e-14)) .* dens_U) * bw
     mean_log_wage_S = sum(log.(max.(wmid, 1e-14)) .* dens_S) * bw
-    wage_premium    = mean_log_wage_S / max(mean_log_wage_U, 1e-14)
+    wage_premium    = mean_log_wage_S - mean_log_wage_U
 
     var_U     = sum((wmid .- mean_wage_U).^2 .* dens_U) * bw
     var_S     = sum((wmid .- mean_wage_S).^2 .* dens_S) * bw
