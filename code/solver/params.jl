@@ -251,7 +251,7 @@ function initialise_model(;
     sim = SimParams(
         tol_inner      = 1e-8,
         tol_outer_U    = 1e-6,
-        tol_outer_S    = 1e-5,
+        tol_outer_S    = 1e-7,
         tol_global     = 1e-3,
 
         maxit_inner    = 500,
@@ -265,7 +265,7 @@ function initialise_model(;
         anderson_reg   = 1e-10,
 
         damp_pstar_U   = 1.30,
-        damp_pstar_S   = 0.02,
+        damp_pstar_S   = 1.00,
 
         verbose        = 2,
         verbose_stride = 10,

@@ -71,12 +71,26 @@ function _initialise_caches(
     U_init       = max.(Usearch_init, T_init)
     t_seed       = [(ν / (ν + φ + ν)) * grids.ℓ[ix] for ix in 1:Nx]
 
+    # ── Parameter-informed initial cutoffs ───────────────────────────────
+    # pstar_U(x) ≈ (r+ν)·U / (PU·x);  U ≈ bU/(r+ν)  →  pstar_U ≈ bU/(PU·x)
+    # Clamped away from corners so the solver has a sensible starting bracket.
+    PU_init = max(regime.PU, 1e-6)
+    pstar_U_init = [clamp(regime.bU / (PU_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
+                    for ix in 1:Nx]
+
+    # pstar_S(x) ≈ (r+ν)·US / (PS·x);  US ≈ bS/(r+ν)  →  pstar_S ≈ bS/(PS·x)
+    PS_init = max(regime.PS, 1e-6)
+    US_guess_init = regime.bS / max(r + ν, 1e-6)
+    pstar_S_init = [clamp(regime.bS / (PS_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
+                    for ix in 1:Nx]
+    poj_init = clamp.(pstar_S_init .+ 0.30, pstar_S_init, 0.95)
+
     uc = UnskilledCache(
         Usearch   = Usearch_init,
         U         = U_init,
         T         = T_init,
         Jfrontier = zeros(Nx),
-        pstar     = fill(0.10, Nx),
+        pstar     = pstar_U_init,
         τT        = zeros(Nx),
         u         = 0.4 .* grids.ℓ,
         t         = t_seed,
@@ -91,8 +105,8 @@ function _initialise_caches(
         E1    = zeros(Nx, Np_S),
         J0    = zeros(Nx, Np_S),
         J1    = zeros(Nx, Np_S),
-        pstar = fill(0.10, Nx),
-        poj   = fill(0.60, Nx),
+        pstar = pstar_S_init,
+        poj   = poj_init,
         u     = zeros(Nx),
         e     = zeros(Nx, Np_S),
         θ     = 1.0,

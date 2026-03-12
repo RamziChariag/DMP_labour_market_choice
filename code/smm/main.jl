@@ -78,9 +78,9 @@ flush(stdout)
 # ============================================================
 sim_smm = SimParams(
     tol_inner      = 1e-6,
-    tol_outer_U    = 1e-5,
-    tol_outer_S    = 1e-4,
-    tol_global     = 1e-2,
+    tol_outer_U    = 1e-6,
+    tol_outer_S    = 1e-6,
+    tol_global     = 1e-3,
 
     maxit_inner    = 300,
     maxit_outer    = 200,
@@ -93,7 +93,7 @@ sim_smm = SimParams(
     anderson_reg   = 1e-10,
 
     damp_pstar_U   = 1.30,
-    damp_pstar_S   = 0.06,
+    damp_pstar_S   = 0.80,
 
     verbose        = 0,          # 0: model is silent; 1: print outer convergence info per iteration; 2: also print inner iteration details
     verbose_stride = 10,
@@ -116,11 +116,7 @@ moments = load_data_moments()
 fixed_params = (
     r   = 0.05,   # discount rate
     ν   = 0.02,   # demographic turnover rate
-    a_ℓ = 2.00,   # unskilled wage distribution shape (Gamma a)
-    b_ℓ = 5.00,   # unskilled wage distribution shape (Gamma b)
     φ   = 0.20,   # training completion rate
-    a_Γ = 1.00,   # training wage distribution shape (Gamma a)
-    b_Γ = 5.00,   # training wage distribution shape (Gamma b)
 )
 
 # ============================================================
@@ -144,13 +140,13 @@ run_params = SMMRunParams(
 
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 10_000,  # total SA proposals
-    sa_T0              = 5.0,     # initial temperature (higher = more uphill acceptance early)
+    sa_T0              = 05.0,     # initial temperature (higher = more uphill acceptance early)
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 0.5,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
     sa_reheat_patience = 100,     # proposals without improvement before reheating
     sa_reheat_factor   = 2.0,     # temperature multiplier on reheat
-    sa_max_reheats     = 3,       # cap on total reheats (0 = unlimited)
+    sa_max_reheats     = 1,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
 
@@ -192,7 +188,7 @@ print_spec(spec)
 println("Starting SMM optimisation..."); flush(stdout)
 
 # Stage 1: global search
-res_de = run_smm(spec; method = :sa)
+res_de = run_smm(spec; method = :de)
 
 # Stage 2: polish from DE solution
 res_pol = run_smm(_spec_with_init(spec, res_de.theta_opt); method = :neldermead)

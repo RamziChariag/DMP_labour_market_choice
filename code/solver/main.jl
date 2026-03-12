@@ -44,6 +44,8 @@ using FastGaussQuadrature
 using Interpolations
 using Parameters
 using Printf
+using Plots
+using LaTeXStrings
 using Base.Threads
 
 println("done."); flush(stdout)
@@ -90,8 +92,6 @@ flush(stdout)
 
 # ── Generate and save all plots ────────────────────────────────────────────────
 println("\nLoading plot packages..."); flush(stdout)
-using Plots
-using LaTeXStrings
 
 println("Generating and saving plots..."); flush(stdout)
 mkpath(PLOTS_DIR)

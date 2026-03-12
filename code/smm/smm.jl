@@ -155,11 +155,17 @@ function _run_sa(
         flush(stdout)
     end
 
+    # t_local tracks steps since last reheat for per-segment cooling
+    t_local    = 0
+    T_reheat   = T0   # T at the start of current segment
+
     for t in 1:max_iter
-        # ── Cooling schedule: T0 / log(1 + rate*t)^exp ────────────────
-        T_sched   = T0 / (log(1.0 + cooling_rate * t))^cooling_exp
-        T_current = max(T_sched, T_current)   # reheat keeps T above schedule
-        T_current = max(T_current * (T_sched / max(T0 / (log(1.0 + cooling_rate * max(t-1,1)))^cooling_exp, 1e-10)), T_sched)
+        # ── Cooling: each segment decays from its own T_reheat ─────────
+        # T(t_local) = T_reheat / log(1 + rate * t_local)^exp
+        # This means after a reheat the temperature decays smoothly from
+        # the reheated value rather than being pinned at it forever.
+        t_local  += 1
+        T_current = T_reheat / (log(1.0 + cooling_rate * t_local))^cooling_exp
         T_current = max(T_current, 1e-8)
 
         # ── Proposal ──────────────────────────────────────────────────
@@ -212,6 +218,18 @@ function _run_sa(
             steps_since_improvement += 1
         end
 
+        # ── Early stop: reheats exhausted and still stagnating ──────────
+        if reheat_patience > 0 &&
+           max_reheats > 0 && n_reheats >= max_reheats &&
+           steps_since_improvement >= reheat_patience
+            if show_trace
+                @printf("  [SA EARLY STOP  t=%5d]  reheats exhausted, no improvement for %d steps, Q_best=%.6e\n",
+                        t, steps_since_improvement, Q_best)
+                flush(stdout)
+            end
+            break
+        end
+
         # ── Reheating on stagnation ────────────────────────────────────
         if reheat_patience > 0 &&
            steps_since_improvement >= reheat_patience &&
@@ -220,6 +238,8 @@ function _run_sa(
             n_reheats += 1
             T_before   = T_current
             T_current  = T_current * reheat_factor
+            T_reheat   = T_current   # new segment starts here
+            t_local    = 0           # reset local clock so decay starts fresh
             theta      = copy(theta_best)
             Q          = Q_best
             steps_since_improvement = 0

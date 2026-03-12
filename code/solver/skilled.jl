@@ -46,13 +46,20 @@ function find_cutoff_from_j0(
     j0_prev :: Int
 )
     Np = length(pgrid)
-    if j0_prev <= 1 || Smax[j0_prev] < 0.0
+    if Smax[j0_prev] < 0.0
+        # True cutoff is above j0_prev: search forward for first non-negative surplus
         @inbounds for j in j0_prev:Np
             Smax[j] >= 0.0 && return pgrid[j]
         end
-        return pgrid[Np]
+        return pgrid[Np]   # all matches unprofitable
     else
-        return pgrid[1]
+        # True cutoff is at or below j0_prev: search backward for zero-crossing
+        @inbounds for j in j0_prev:-1:1
+            if Smax[j] < 0.0
+                return pgrid[min(j + 1, Np)]
+            end
+        end
+        return pgrid[1]    # surplus positive everywhere: hire at minimum quality
     end
 end
 
@@ -480,7 +487,8 @@ function solve_skilled_block!(
         dθ = abs(sc.θ - θ_old)
         dp = supnorm(sc.pstar, pstar_old)
         dj = supnorm(sc.poj,   poj_old)
-        d  = dθ
+        #d  = max(dθ, dp, dj)
+        d = dθ
 
         if sim.verbose >= 2 && (it == 1 || it % sim.verbose_stride == 0)
             @printf("  [outer S it=%d]  maxΔ=%.3e  (Δθ=%.3e  Δp*=%.3e  Δpoj=%.3e)  θ=%.4f\n",
