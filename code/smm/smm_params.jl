@@ -232,7 +232,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:regime, :bU,  0.000,  7.00,  0.00,  "unskilled UI flow bU"),
         ParamSpec(:regime, :bT,  0.000,  7.00,  0.28,  "training flow bT"),
         ParamSpec(:regime, :bS,  0.000,  7.00,  0.01,  "skilled UI flow bS"),
-        ParamSpec(:regime, :α_U, 0.001,  7.00,  1.00,  "unskilled damage shape α_U"),
+        ParamSpec(:regime, :α_U, 0.001,  10.00,  1.00,  "unskilled damage shape α_U"),
         ParamSpec(:regime, :a_Γ, 0.001,  8.00,  2.00,  "skilled offer shape a_Γ"),
         ParamSpec(:regime, :b_Γ, 0.001,  8.00,  5.00,  "skilled offer shape b_Γ"),
 

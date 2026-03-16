@@ -207,9 +207,9 @@ function solve_model!(model::Model) :: SolveResult
         # Step A: unskilled block — returns Bool
         last_conv_U = solve_unskilled_block!(model; US_in = sc.U)
 
-        # NaN propagation check before continuing
-        if !isfinite(uc.θ)
-            sim.verbose >= 1 && @printf("[global]  θ_U is NaN/Inf at it=%d — aborting\n", it)
+        # NaN propagation check before continuing — covers θ and all key outputs
+        if !isfinite(uc.θ) || any(!isfinite, uc.t) || any(!isfinite, uc.U) || any(!isfinite, uc.pstar)
+            sim.verbose >= 1 && @printf("[global]  NaN/Inf in unskilled block at it=%d — aborting\n", it)
             return SolveResult(false, false, false)
         end
 
@@ -218,8 +218,8 @@ function solve_model!(model::Model) :: SolveResult
         # Step B: skilled block — returns Bool
         last_conv_S = solve_skilled_block!(model; mS_in = mS_raw)
 
-        if !isfinite(sc.θ)
-            sim.verbose >= 1 && @printf("[global]  θ_S is NaN/Inf at it=%d — aborting\n", it)
+        if !isfinite(sc.θ) || any(!isfinite, sc.U) || any(!isfinite, sc.pstar)
+            sim.verbose >= 1 && @printf("[global]  NaN/Inf in skilled block at it=%d — aborting\n", it)
             return SolveResult(false, false, false)
         end
 
