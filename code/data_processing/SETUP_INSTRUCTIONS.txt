@@ -1,0 +1,137 @@
+================================================================================
+DATA PROCESSING PIPELINE - SETUP INSTRUCTIONS
+================================================================================
+
+QUICK START:
+1. Set paths in main.jl (lines ~20):
+   - CPS_BASIC_FILE = "data/raw/cps_basic.csv"
+   - CPS_ASEC_FILE = "data/raw/cps_asec.csv"
+   - JOLTS_DATA_DIR = "data/raw/jolts/"
+
+2. Populate CPI_DEFLATOR in main.jl with actual CPI-U monthly factors
+
+3. Run: julia --threads auto code/data_processing/main.jl
+
+OUTPUT FILES:
+- derived/moments_{window}.csv       (moment estimates + standard errors)
+- derived/sigma_{window}.csv         (variance-covariance matrices)
+- derived/W_{window}.csv             (weight matrices, SMM-ready)
+- derived/all_moments.csv            (stacked across all windows)
+
+WINDOWS:
+- :base_fc      2003-01 to 2007-12   (Pre-2008 financial crisis)
+- :crisis_fc    2008-01 to 2009-06   (During 2008-09 financial crisis)
+- :base_covid   2015-01 to 2019-12   (Pre-COVID baseline)
+- :crisis_covid 2020-03 to 2021-12   (COVID-19 crisis period)
+
+KEY MOMENTS (25 total):
+
+Labour Market Flows (from CPS Basic panel matching):
+  ur_total, ur_U, ur_S                    [Unemployment rates]
+  skilled_share, training_share           [Labour force composition]
+  jfr_U, jfr_S                            [Job-finding rates]
+  sep_rate_U, sep_rate_S                  [Separation rates]
+  ee_rate_S                               [E-to-E transitions, skilled]
+  training_rate                           [Entry to training]
+
+Wage Distribution (from CPS ASEC, deflated, log-normalized):
+  mean_wage_U, mean_wage_S                [Means]
+  p50_wage_U, p50_wage_S                  [Medians]
+  wage_premium                            [Skill premium]
+  wage_sd_U, wage_sd_S                    [Standard deviations]
+  emp_var_U, emp_var_S                    [Variances]
+  emp_cm3_U, emp_cm3_S                    [Third central moments]
+
+Market Tightness (from JOLTS + CPS):
+  theta_U, theta_S                        [V/U ratios by skill]
+
+SAMPLE RESTRICTIONS:
+✓ Age 16-64, civilian labour force
+✓ Exclude armed forces
+✓ Wages: wage/salary workers, positive income/weeks/hours
+✓ Skill: EDUC ≥ 111 = bachelor's degree
+
+PANEL MATCHING (for transitions):
+✓ Match on CPSIDP across consecutive months
+✓ Restrict MISH ∈ {1,2,3,5,6,7} (avoid rotation breaks)
+✓ Compute flows: unemployed→employed, employed→unemployed, etc.
+
+COVID CORRECTION:
+✓ Mar-Jun 2020: Reclassify employed-absent → unemployed on temporary layoff
+  (per BLS's revised classification during pandemic)
+
+INFLUENCE FUNCTIONS:
+✓ Computed for all moments to get standard errors
+✓ Mean:   ψ_i = y_i - m̂
+✓ Median: ψ_i = (1{y_i ≤ m̂} - 0.5) / (2 f̂(m̂))
+✓ Var:    ψ_i = (y_i - ȳ)² - σ̂²
+✓ Ratios: Delta method on component influence functions
+✓ VCV:    Σ̂ = (1/N) Σ_i ψ_i ψ_i'
+✓ Weight: W = Σ̂^{-1}
+
+TROUBLESHOOTING:
+
+Q: "No data for window X"
+A: Check that raw data files contain observations in specified date range.
+   Verify YEAR, MONTH columns are correctly formatted.
+
+Q: "No valid JOLTS files found"
+A: Ensure JOLTS_DATA_DIR contains:
+   - jolts_total.csv (or similar aggregate file)
+   - jolts_by_industry.csv (or similar industry breakdown)
+   Check column names: YEAR, MONTH, NAICS/INDUSTRY, VACANCIES
+
+Q: "VCV matrix singular"
+A: Some moment combinations may be collinear. Check for:
+   - Tiny sample sizes in any window
+   - Quasi-perfect collinearity in wage moments
+   Script will use pseudo-inverse (pinv) as fallback
+
+Q: CPI deflator "not found"
+A: Current implementation uses CPI_DEFLATOR dict.
+   If entry missing, wages won't be deflated (multiplied by 1.0).
+   Populate dict with all (year, month) pairs from BLS CPI-U.
+
+FILE STRUCTURE:
+
+code/
+  data_processing/
+    cps_basic.jl          ← CPS Basic Monthly processing
+    cps_asec.jl           ← CPS ASEC wage processing
+    jolts.jl              ← JOLTS vacancy processing
+    main.jl               ← Entry point (run this)
+    README.md             ← Detailed documentation
+    SETUP_INSTRUCTIONS.txt ← This file
+
+data/
+  raw/
+    cps_basic.csv         ← IPUMS-CPS Basic Monthly extract (CSV or Arrow)
+    cps_asec.csv          ← IPUMS-CPS ASEC extract
+    jolts/
+      jolts_total.csv     ← BLS JOLTS aggregate
+      jolts_by_industry.csv ← BLS JOLTS by industry
+
+derived/
+  moments_base_fc.csv
+  moments_crisis_fc.csv
+  moments_base_covid.csv
+  moments_crisis_covid.csv
+  sigma_base_fc.csv
+  sigma_crisis_fc.csv
+  sigma_base_covid.csv
+  sigma_crisis_covid.csv
+  W_base_fc.csv
+  W_crisis_fc.csv
+  W_base_covid.csv
+  W_crisis_covid.csv
+  all_moments.csv         ← Stacked across windows
+
+NEXT STEPS:
+1. Adjust paths in main.jl for your data location
+2. Populate CPI_DEFLATOR dict (or set to 1.0 for no deflation)
+3. Run: julia --threads auto code/data_processing/main.jl
+4. Check derived/ folder for output CSVs
+5. Use derived/W_*.csv as weight matrices for SMM estimation
+
+For detailed function documentation, see cps_basic.jl, cps_asec.jl, jolts.jl.
+================================================================================

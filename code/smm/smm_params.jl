@@ -146,6 +146,8 @@ Fields
   moments     NamedTuple from load_data_moments() — (value, weight) pairs
   sim         SimParams — solver settings (tolerances, maxit, verbose…)
   run         SMMRunParams — grid sizes and optimiser settings
+  W           Union{Nothing, Matrix{Float64}} — optimal weight matrix from influence functions
+              (Nothing = use diagonal weights from moment variances)
 """
 struct SMMSpec
     free    :: Vector{ParamSpec}
@@ -153,6 +155,7 @@ struct SMMSpec
     moments :: NamedTuple
     sim     :: SimParams
     run     :: SMMRunParams
+    W       :: Union{Nothing, Matrix{Float64}}
 end
 
 
@@ -164,7 +167,8 @@ end
     build_smm_spec(moments, sim;
                    fixed      = (;),
                    free_specs = default_free_params(),
-                   run        = SMMRunParams())
+                   run        = SMMRunParams(),
+                   W          = nothing)
 
 Build an `SMMSpec`.
 
@@ -178,13 +182,19 @@ Build an `SMMSpec`.
 
 - `run`: an `SMMRunParams` controlling grid sizes, DE settings,
   Nelder-Mead settings, and tracing.
+
+- `W`: optional K×K optimal weight matrix from influence functions.
+  If provided and well-conditioned (cond < 1e8), will be used in the
+  loss function instead of diagonal weights. If nothing (default),
+  uses diagonal weights from moment variances.
 """
 function build_smm_spec(
     moments    :: NamedTuple,
     sim        :: SimParams;
-    fixed      :: Any                = (;),
-    free_specs :: Vector{ParamSpec}  = default_free_params(),
-    run        :: SMMRunParams       = SMMRunParams(),
+    fixed      :: Any                           = (;),
+    free_specs :: Vector{ParamSpec}             = default_free_params(),
+    run        :: SMMRunParams                  = SMMRunParams(),
+    W          :: Union{Nothing, Matrix{Float64}} = nothing,
 )
     # Coerce () or any non-NamedTuple to an empty NamedTuple
     fixed_nt    = (fixed isa NamedTuple) ? fixed : NamedTuple()
@@ -199,7 +209,7 @@ function build_smm_spec(
                 join(string.(dropped), ", "))
     end
 
-    return SMMSpec(active_free, fixed_nt, moments, sim, run)
+    return SMMSpec(active_free, fixed_nt, moments, sim, run, W)
 end
 
 
@@ -431,11 +441,24 @@ function print_spec(spec::SMMSpec)
     @printf("\n╠══════════════════════════════════════════════════════╣\n")
     @printf("║  Active moments                                      ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    @printf("  %-22s  %10s  %10s\n", "moment", "target", "weight")
-    @printf("  %s\n", "─"^46)
-    for (k, v) in pairs(spec.moments)
-        v.weight > 0.0 || continue
-        @printf("  %-22s  %10.4f  %10.2f\n", k, v.value, v.weight)
+    if !isnothing(spec.W)
+        @printf("  (Weighting: full optimal W matrix)\n\n")
+        @printf("  %-22s  %10s  %12s\n", "moment", "target", "W diag wt")
+        @printf("  %s\n", "─"^48)
+        idx = 0
+        for (k, v) in pairs(spec.moments)
+            v.weight > 0.0 || continue
+            idx += 1
+            w_diag = (idx <= size(spec.W, 1)) ? spec.W[idx, idx] : NaN
+            @printf("  %-22s  %10.4f  %12.4e\n", k, v.value, w_diag)
+        end
+    else
+        @printf("  %-22s  %10s  %10s\n", "moment", "target", "weight")
+        @printf("  %s\n", "─"^46)
+        for (k, v) in pairs(spec.moments)
+            v.weight > 0.0 || continue
+            @printf("  %-22s  %10.4f  %10.2f\n", k, v.value, v.weight)
+        end
     end
     @printf("\n  Grid: Nx=%d  Np_U=%d  Np_S=%d\n",
             spec.run.Nx, spec.run.Np_U, spec.run.Np_S)
@@ -446,5 +469,11 @@ function print_spec(spec::SMMSpec)
             spec.run.de_avg_tol > 0.0 ? @sprintf("%.1e", spec.run.de_avg_tol) : "off")
     @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e\n",
             spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol)
+    if !isnothing(spec.W)
+        cond_W = cond(spec.W)
+        @printf("  W:    optimal weight matrix provided (cond(W)=%.2e)\n", cond_W)
+    else
+        @printf("  W:    using diagonal weights from moment variances\n")
+    end
     @printf("╚══════════════════════════════════════════════════════╝\n\n")
 end

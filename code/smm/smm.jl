@@ -45,6 +45,41 @@ function compute_loss(m_model::NamedTuple, spec::SMMSpec) :: Float64
 end
 
 
+"""
+    compute_loss_matrix(m_model, spec, W) -> Float64
+
+    Q(θ) = [m̂ − m(θ)]' W [m̂ − m(θ)]
+
+Compute the loss using the full K×K optimal weight matrix W,
+where m̂ is the vector of empirical moment targets and m(θ) is
+the vector of model moments.
+
+Only moments with positive weight in spec.moments are included.
+"""
+function compute_loss_matrix(
+    m_model::NamedTuple,
+    spec::SMMSpec,
+    W::Matrix{Float64}
+) :: Float64
+
+    # Build deviation vector m̂ - m(θ), excluding moments with weight ≤ 0
+    dev_vec = Float64[]
+    for k in keys(spec.moments)
+        target = spec.moments[k]
+        target.weight <= 0.0 && continue
+        !hasproperty(m_model, k) && continue
+        dev = getproperty(m_model, k) - target.value
+        push!(dev_vec, dev)
+    end
+
+    isempty(dev_vec) && return 0.0
+
+    # Compute Q = dev' W dev
+    Q = dot(dev_vec, W * dev_vec)
+    return Q
+end
+
+
 # ============================================================
 # SMM objective
 # ============================================================
@@ -55,6 +90,9 @@ end
 Solve the model at parameters decoded from θ_unc and return Q(θ).
 Returns Inf (never throws) on any failure or non-convergence.
 The solver always runs silently regardless of spec.sim.verbose.
+
+If spec.W is not nothing, uses the full weight matrix via
+compute_loss_matrix; otherwise uses diagonal weights via compute_loss.
 """
 function smm_objective(
     θ_unc :: AbstractVector{Float64},
@@ -83,7 +121,12 @@ function smm_objective(
         return Inf
     end
 
-    return compute_loss(m_model, spec)
+    # Use full weight matrix if available; otherwise diagonal weights
+    if !isnothing(spec.W)
+        return compute_loss_matrix(m_model, spec, spec.W)
+    else
+        return compute_loss(m_model, spec)
+    end
 end
 
 
@@ -223,7 +266,7 @@ function _run_sa(
            max_reheats > 0 && n_reheats >= max_reheats &&
            steps_since_improvement >= reheat_patience
             if show_trace
-                @printf("  [SA EARLY STOP  t=%5d]  reheats exhausted, no improvement for %d steps, Q_best=%.6e\n",
+                @printf("  [SA EARLY STOP  iter=%5d]  reheats exhausted, no improvement for %d steps, Q_best=%.6e\n",
                         t, steps_since_improvement, Q_best)
                 flush(stdout)
             end
@@ -245,7 +288,7 @@ function _run_sa(
             steps_since_improvement = 0
 
             if show_trace
-                @printf("  [SA REHEAT #%d  t=%5d]  T %.4f→%.4f  restarting from Q_best=%.6e\n",
+                @printf("  [SA REHEAT #%d  iter=%5d]  T %.4f→%.4f  restarting from Q_best=%.6e\n",
                         n_reheats, t, T_before, T_current, Q_best)
                 flush(stdout)
             end
@@ -253,7 +296,7 @@ function _run_sa(
 
         # ── Progress trace ────────────────────────────────────────────
         if show_trace && t % trace_stride == 0
-            @printf("  [SA t=%5d]  curr=%-14s  best=%.6e  T=%.4f  step=%.4f  acc=%.2f  fin=%.2f  reheats=%d\n",
+            @printf("  [SA iter=%5d]  curr=%-14s  best=%.6e  T=%.4f  step=%.4f  acc=%.2f  fin=%.2f  reheats=%d\n",
                     t,
                     isfinite(Q) ? @sprintf("%.6e", Q) : "Inf",
                     Q_best, T_current, step,
@@ -689,5 +732,5 @@ function _spec_with_init(spec::SMMSpec, theta_unc::Vector{Float64})
                   _to_constrained(theta_unc[i], ps.lb, ps.ub), ps.label)
         for (i, ps) in enumerate(spec.free)
     ]
-    return SMMSpec(new_free, spec.fixed, spec.moments, spec.sim, spec.run)
+    return SMMSpec(new_free, spec.fixed, spec.moments, spec.sim, spec.run, spec.W)
 end

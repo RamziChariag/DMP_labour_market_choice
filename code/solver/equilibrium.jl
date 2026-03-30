@@ -281,6 +281,31 @@ function compute_equilibrium_objects(model::Model)
     δS_by_x    = sp.ξ .+ λS .* ΓpstarS
     sep_rate_S = dot(δS_by_x, eS_tot .* wx) / max(agg_eS, 1e-14)
 
+    # ee_rate_S: skilled employment-to-employment transition rate
+    # For each employed skilled worker at (x,p):
+    #   - s=0 workers (not doing OJS): do not search on the job, so EE rate = 0
+    #   - s=1 workers (doing OJS, p < poj): receive offers at rate kappa_S,
+    #     accept those above poj, so EE rate = kappa_S * (1 - Gamma(poj(x)))
+    # We approximate: the fraction of skilled employed doing OJS is captured
+    # by the mass in e_S with p < poj, and their EE rate is kappa_S * (1 - Gamma(poj(x))).
+    ee_mass = 0.0
+    ee_flow = 0.0
+    for ix in 1:Nx
+        poj_ix   = clamp01(poj[ix])
+        j_poj    = pcut_index(pg, poj_ix)
+        # Gamma(poj) = CDF of offer distribution at poj
+        Gamma_poj = pre.Γvals[j_poj]
+        for jp in 1:NpS
+            e_ij = eS_mat[ix, jp] * wx[ix] * wpS[jp]
+            if pg[jp] < poj_ix
+                # This worker does OJS: EE flow rate = kappa_S * (1 - Gamma(poj))
+                ee_flow += e_ij * κS * (1.0 - Gamma_poj)
+            end
+            ee_mass += e_ij
+        end
+    end
+    ee_rate_S = ee_mass > 1e-14 ? ee_flow / ee_mass : 0.0
+
     return (
         # grids
         xg = xg, pgU = pgU, pg = pg, wx = wx, wpU = wpU, wpS = wpS,
@@ -333,6 +358,7 @@ function compute_equilibrium_objects(model::Model)
         f_S        = f_S,
         sep_rate_U = sep_rate_U,
         sep_rate_S = sep_rate_S,
+        ee_rate_S  = ee_rate_S,
     )
 end
 

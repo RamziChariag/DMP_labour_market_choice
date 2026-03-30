@@ -1,8 +1,8 @@
 ############################################################
 # moments.jl — Empirical moment targets
 #
-# TODO: replace placeholder values with data-based estimates
-#       once the data pipeline is ready.
+# Supports loading moments from CSV files produced by the data
+# pipeline, with fallback to placeholder values.
 #
 # Returns a NamedTuple of (value, weight) pairs.
 # Weight = 1 / variance of the moment estimator (or a proxy).
@@ -21,16 +21,36 @@
 ############################################################
 
 
+# ============================================================
+# Moment names (in order)
+# ============================================================
+
+const MOMENT_NAMES = [
+    :ur_U, :ur_S, :skilled_share, :training_share,
+    :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
+    :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :ee_rate_S,
+    :mean_wage_U, :mean_wage_S,
+    :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
+    :wage_premium, :theta_U, :theta_S,
+]
+
+
 """
-    load_data_moments() → NamedTuple
+    load_data_moments(; window::Symbol = :base_fc, derived_dir::String) → NamedTuple
 
 Returns the empirical moment targets used in SMM estimation.
 Each field is a (value, weight) tuple.
 
-Moment list
+Reads from CSV files produced by the data pipeline:
+  - moments_{window}.csv: moment values and standard errors
+
+# Arguments
+- `window::Symbol`: window identifier (default `:base_fc`)
+- `derived_dir::String`: directory containing derived CSV files
+
+# Moment list (22 moments, matches data_pipeline_v6)
 ───────────────────────────────────────────────────────────
   Labour market stocks
-    ur_total          overall unemployment rate
     ur_U              unskilled unemployment rate
     ur_S              skilled unemployment rate
     skilled_share     share of population in skilled segment
@@ -45,90 +65,214 @@ Moment list
     sep_rate_U        unskilled separation rate
     jfr_S             skilled job-finding rate
     sep_rate_S        skilled (endogenous+exogenous) separation rate
-    training_rate     flow into training per unskilled unemployed
+    ee_rate_S         skilled employment-to-employment transition rate
 
   Wages
     mean_wage_U       mean wage, unskilled employed
     mean_wage_S       mean wage, skilled employed
+    p25_wage_U        25th percentile wage, unskilled
+    p25_wage_S        25th percentile wage, skilled
     p50_wage_U        median wage, unskilled
     p50_wage_S        median wage, skilled
     wage_premium      E[log w_S] − E[log w_U]  (log skill premium)
-    wage_sd_U         std dev of unskilled wages
-    wage_sd_S         std dev of skilled wages
 
   Tightness (if vacancy data available)
     theta_U           unskilled vacancy-unemployment ratio
     theta_S           skilled vacancy-unemployment ratio
 ───────────────────────────────────────────────────────────
 """
-function load_data_moments()
+function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
 
-    # ── PLACEHOLDER VALUES ───────────────────────────────────────────────
-    # Replace each `value` with the empirically estimated moment.
-    # Replace each `weight` with 1/var or a tuned scalar.
-    # Set weight = 0.0 to exclude a moment from the objective.
-    # ─────────────────────────────────────────────────────────────────────
+    moments_file = joinpath(derived_dir, "moments_$(window).csv")
+    isfile(moments_file) || error("Moments file not found: $moments_file — run the data pipeline first.")
 
-    return (
-        # ── Labour market stocks ─────────────────────────────────────────
-        ur_total       = (value = 0.050,  weight = 100.0),
-        ur_U           = (value = 0.080,  weight =  80.0),
-        ur_S           = (value = 0.025,  weight =  80.0),
-        skilled_share  = (value = 0.450,  weight =  90.0),
-        training_share = (value = 0.020,  weight =  40.0),
-        emp_var_U      = (value = 0.050,  weight =  20.0),
-        emp_cm3_U      = (value = 0.005,  weight =  10.0),
-        emp_var_S      = (value = 0.120,  weight =  20.0),
-        emp_cm3_S      = (value = 0.015,  weight =  10.0),
-
-        # ── Transition rates ─────────────────────────────────────────────
-        jfr_U          = (value = 0.220,  weight =  35.0),
-        sep_rate_U     = (value = 0.025,  weight =  25.0),
-        jfr_S          = (value = 0.140,  weight =  35.0),
-        sep_rate_S     = (value = 0.010,  weight =  15.0),
-        training_rate  = (value = 0.040,  weight =  15.0),
-
-        # ── Wages ────────────────────────────────────────────────────────
-        mean_wage_U    = (value = 0.700,  weight =  40.0),
-        mean_wage_S    = (value = 1.250,  weight =  30.0),
-        p50_wage_U     = (value = 0.660,  weight =  30.0),
-        p50_wage_S     = (value = 1.180,  weight =  20.0),
-        wage_premium   = (value = 0.580,  weight =  45.0),   # E[log w_S] − E[log w_U]; ≈ log(1.25/0.70) ≈ 0.58
-        wage_sd_U      = (value = 0.220,  weight =  10.0),
-        wage_sd_S      = (value = 0.350,  weight =  10.0),
-
-        # ── Tightness ────────────────────────────────────────────────────
-        theta_U        = (value = 0.700,  weight =  15.0),
-        theta_S        = (value = 1.400,  weight =  15.0),
-    )
+    return _read_moments_csv(moments_file)
 end
 
 
 """
-    model_moments(obj) → NamedTuple
+    load_weight_matrix(; window::Symbol = :base_fc, derived_dir::String) → Matrix{Float64}
 
-Extract the same set of moments from a solved model's equilibrium objects.
+Load the optimal weight matrix from influence functions.
+
+Reads `W_{window}.csv` (K × K matrix) from derived_dir.
+Returns a K × K symmetric positive definite matrix.
+
+If the loaded matrix has condition number > 1e8, falls back to
+diagonal 1/σ² from sigma_{window}.csv.
+"""
+function load_weight_matrix(; window::Symbol = :base_fc, derived_dir::String)
+
+    K = length(MOMENT_NAMES)
+
+    # ── Load optimal W from CSV ────────────────────────────────────────
+    W_file = joinpath(derived_dir, "W_$(window).csv")
+    if isfile(W_file)
+        W_loaded = _read_weight_matrix_csv(W_file)
+        cond_W = cond(W_loaded)
+        if cond_W < 1e8
+            @printf("  Loaded W matrix from %s  (cond = %.2e)\n", W_file, cond_W)
+            return W_loaded
+        else
+            @warn "W matrix ill-conditioned (cond(W)=$cond_W > 1e8). Falling back to diagonal from Σ."
+        end
+    end
+
+    # ── Diagonal fallback from sigma_{window}.csv ──────────────────────
+    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+    isfile(sigma_file) || error("Neither W_$(window).csv nor sigma_$(window).csv found in $derived_dir — run the data pipeline first.")
+
+    sigma_vec = _read_sigma_csv(sigma_file)
+    W = Diagonal(1.0 ./ (sigma_vec .^ 2))
+    @printf("  Using diagonal W from %s\n", sigma_file)
+    return Matrix(W)
+end
+
+
+"""
+    load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String) → Vector{Float64}
+
+Load the standard error vector from sigma_{window}.csv.
+
+Returns a K-element vector of standard errors (σ), where K = number of moments.
+"""
+function load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String)
+
+    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+    isfile(sigma_file) || error("Sigma file not found: $sigma_file — run the data pipeline first.")
+
+    return _read_sigma_csv(sigma_file)
+end
+
+
+# ============================================================
+# Load externally calibrated parameters from data pipeline
+# ============================================================
+
+"""
+    load_calibrated_params(; derived_dir::String) -> NamedTuple{(:r, :nu, :phi)}
+
+Load the three externally calibrated parameters:
+  - r   = 0.05/12 ≈ 0.00417  (monthly discount rate; 5% annual / 12 months)
+  - nu  from nu_estimate.csv  (demographic turnover from CPS matched panels)
+  - phi from phi_calibration.csv  (training completion rate from NSC data)
+
+These three are FIXED across all 4 estimation windows (base_fc, crisis_fc,
+base_covid, crisis_covid).  Only r is truly external; nu and phi are
+computed from data but held constant because they represent structural
+parameters that do not change with the business cycle.
+
+Requires the data pipeline to have been run first.  Errors if CSV files
+are missing — there are no hardcoded fallbacks for data-derived values.
+"""
+function load_calibrated_params(; derived_dir::String)
+    # r: externally set at 5% annual.  The data is monthly, so the
+    # per-period discount rate is 0.05/12 ≈ 0.00417.
+    r_val = 0.05 / 12
+
+    # ── nu from CPS matched-panel exit hazard ─────────────────────────
+    nu_file = joinpath(derived_dir, "nu_estimate.csv")
+    isfile(nu_file) || error("nu_estimate.csv not found in $derived_dir — run the data pipeline first.")
+    df_nu = CSV.read(nu_file, DataFrame)
+    nu_val = Float64(df_nu.nu[1])
+    @printf("  Loaded nu = %.5f from %s\n", nu_val, nu_file)
+
+    # ── phi from NSC completion-rate calibration ───────────────────────
+    phi_file = joinpath(derived_dir, "phi_calibration.csv")
+    isfile(phi_file) || error("phi_calibration.csv not found in $derived_dir — run the data pipeline first.")
+    df_phi = CSV.read(phi_file, DataFrame)
+    phi_val = Float64(df_phi.phi[1])
+    @printf("  Loaded phi = %.5f from %s\n", phi_val, phi_file)
+
+    return (r = r_val, nu = nu_val, phi = phi_val)
+end
+
+
+# ============================================================
+# Internal helpers for reading CSV files
+# ============================================================
+
+"""
+    _read_moments_csv(filepath) → NamedTuple
+
+Read moments_{window}.csv and return a NamedTuple mapping moment name → (value, weight).
+
+Expected format (CSV with header):
+  moment, value
+  ur_U, 0.080
+  ur_S, 0.025
+  ...
+
+Weight is set to 1.0 for all moments; actual weights come from the W matrix.
+"""
+function _read_moments_csv(filepath::String)
+    df = CSV.read(filepath, DataFrame)
+
+    # Build NamedTuple with (value, weight) pairs
+    # Weight = 1.0 here; actual weights come from the W matrix
+    pairs = Pair{Symbol, NamedTuple{(:value, :weight), Tuple{Float64, Float64}}}[]
+
+    for row in eachrow(df)
+        name = Symbol(row.moment)
+        val = Float64(row.value)
+        push!(pairs, name => (value = val, weight = 1.0))
+    end
+
+    return NamedTuple(pairs)
+end
+
+
+"""
+    _read_weight_matrix_csv(filepath) → Matrix{Float64}
+
+Read W_{window}.csv and return the K × K weight matrix.
+
+Expected format: CSV with K columns (moment names as headers) and K rows, symmetric positive definite.
+"""
+function _read_weight_matrix_csv(filepath::String)
+    df = CSV.read(filepath, DataFrame)
+    return Matrix{Float64}(df)
+end
+
+
+"""
+    _read_sigma_csv(filepath) → Vector{Float64}
+
+Read sigma_{window}.csv and return the standard error vector.
+
+Expected format: CSV with 22×22 matrix (moment names as column headers).
+Returns the square root of the diagonal elements (standard errors).
+"""
+function _read_sigma_csv(filepath::String)
+    df = CSV.read(filepath, DataFrame)
+    Sigma = Matrix{Float64}(df)
+    # Return standard errors (sqrt of diagonal)
+    return sqrt.(max.(diag(Sigma), 0.0))
+end
+
+
+"""
+    model_moments(obj) -> NamedTuple
+
+Extract the 22 targeted moments from a solved model's equilibrium objects.
 `obj` is the NamedTuple returned by `compute_equilibrium_objects`.
 
-Prerequisites — the following fields must be added to the return tuple of
-`compute_equilibrium_objects` (see note at bottom of this file):
-    f_S         :: Float64             # κ_S = θ_S · q_S(θ_S)
+Prerequisites -- the following fields must be present in obj:
+    f_S         :: Float64             # kappa_S = theta_S * q_S(theta_S)
     sep_rate_U  :: Float64             # employment-weighted unskilled separation rate
     sep_rate_S  :: Float64             # employment-weighted skilled separation rate
+    ee_rate_S   :: Float64             # skilled EE transition rate
 """
 function model_moments(obj)
 
     # ── Labour market stocks ──────────────────────────────────────────────
-    ur_total       = obj.ur_total
     ur_U           = obj.ur_U
     ur_S           = obj.ur_S
     skilled_share  = obj.agg_mS  / max(obj.total_pop, 1e-14)
     training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
 
     # emp_var / emp_cm3: variance and third central moment of the employed
-    # wage distribution, computed from the same density grids used for
-    # mean_wage and wage_sd below.  Evaluated here so they sit logically
-    # with the other labour-stock moments; the densities are re-used later.
+    # wage distribution, computed from the density grids.
     wmid_tmp   = obj.wmid
     dens_U_tmp = obj.dens_U
     dens_S_tmp = obj.dens_S
@@ -143,26 +287,13 @@ function model_moments(obj)
     emp_cm3_S  = sum((wmid_tmp .- _mean_S_tmp).^3 .* dens_S_tmp) * bw_tmp
 
     # ── Transition rates ──────────────────────────────────────────────────
-    # jfr_U: θ_U · q_U(θ_U), already stored as f_U in obj
     jfr_U         = obj.f_U
-
-    # jfr_S: θ_S · q_S(θ_S), stored as f_S (added to compute_equilibrium_objects)
     jfr_S         = obj.f_S
-
-    # sep_rate_U: employment-weighted λ_U · G(p*(x)) = λ_U · p*(x)^α_U
-    # sep_rate_S: employment-weighted ξ_S + λ_S · Γ(p*_S(x))
-    # Both pre-computed in compute_equilibrium_objects (see note below)
     sep_rate_U    = obj.sep_rate_U
     sep_rate_S    = obj.sep_rate_S
-
-    # training_rate: flow into training per unskilled unemployed
-    training_rate = obj.agg_t / max(obj.agg_uU, 1e-14)
+    ee_rate_S     = obj.ee_rate_S
 
     # ── Wages ─────────────────────────────────────────────────────────────
-    # dens_U and dens_S are employment-mass-weighted wage densities built in
-    # compute_equilibrium_objects. Only (x,p) cells with e > 1e-16 contribute,
-    # so the means and medians below are automatically over employed workers only.
-    # The skilled density pools s=0 and s=1 workers (correct: both are employed).
     wmid   = obj.wmid
     dens_U = obj.dens_U
     dens_S = obj.dens_S
@@ -171,42 +302,33 @@ function model_moments(obj)
     mean_wage_U = sum(wmid .* dens_U) * bw
     mean_wage_S = sum(wmid .* dens_S) * bw
 
-    # Median: first bin where cumulative density crosses 0.5
-    function _median(wmid, dens, bw)
+    # 25th percentile: first bin where cumulative density crosses 0.25
+    function _percentile(wmid, dens, bw, target)
         cum = 0.0
         for (w, d) in zip(wmid, dens)
             cum += d * bw
-            cum >= 0.5 && return w
+            cum >= target && return w
         end
         return wmid[end]
     end
 
-    p50_wage_U = _median(wmid, dens_U, bw)
-    p50_wage_S = _median(wmid, dens_S, bw)
+    p25_wage_U = _percentile(wmid, dens_U, bw, 0.25)
+    p25_wage_S = _percentile(wmid, dens_S, bw, 0.25)
 
-    # Wage premium: E[log w_S] − E[log w_U]
-    #
-    # This is the log skill premium — the same object estimated by a
-    # Mincer regression of log wages on a skill indicator.  It is
-    # scale-invariant (unaffected by wage normalisation) and adds
-    # identifying information orthogonal to the two level means above.
-    #
-    # clamp guards against any zero/negative bin midpoints on the wage grid.
+    # Median: first bin where cumulative density crosses 0.5
+    p50_wage_U = _percentile(wmid, dens_U, bw, 0.50)
+    p50_wage_S = _percentile(wmid, dens_S, bw, 0.50)
+
+    # Wage premium: E[log w_S] - E[log w_U]
     mean_log_wage_U = sum(log.(max.(wmid, 1e-14)) .* dens_U) * bw
     mean_log_wage_S = sum(log.(max.(wmid, 1e-14)) .* dens_S) * bw
     wage_premium    = mean_log_wage_S - mean_log_wage_U
-
-    var_U     = sum((wmid .- mean_wage_U).^2 .* dens_U) * bw
-    var_S     = sum((wmid .- mean_wage_S).^2 .* dens_S) * bw
-    wage_sd_U = sqrt(max(var_U, 0.0))
-    wage_sd_S = sqrt(max(var_S, 0.0))
 
     # ── Tightness ─────────────────────────────────────────────────────────
     theta_U = obj.thetaU
     theta_S = obj.thetaS
 
     return (
-        ur_total      = ur_total,
         ur_U          = ur_U,
         ur_S          = ur_S,
         skilled_share = skilled_share,
@@ -220,15 +342,15 @@ function model_moments(obj)
         sep_rate_U    = sep_rate_U,
         jfr_S         = jfr_S,
         sep_rate_S    = sep_rate_S,
-        training_rate = training_rate,
+        ee_rate_S     = ee_rate_S,
 
         mean_wage_U   = mean_wage_U,
         mean_wage_S   = mean_wage_S,
+        p25_wage_U    = p25_wage_U,
+        p25_wage_S    = p25_wage_S,
         p50_wage_U    = p50_wage_U,
         p50_wage_S    = p50_wage_S,
         wage_premium  = wage_premium,
-        wage_sd_U     = wage_sd_U,
-        wage_sd_S     = wage_sd_S,
 
         theta_U       = theta_U,
         theta_S       = theta_S,

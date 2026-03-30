@@ -28,6 +28,7 @@ const SOLVER_DIR   = joinpath(SMM_DIR, "..", "solver")
 const PROJECT_ROOT = joinpath(SMM_DIR, "..", "..")
 const OUTPUT_DIR   = joinpath(PROJECT_ROOT, "output")
 const TABLES_DIR   = joinpath(OUTPUT_DIR, "tables")
+const SMM_OUT_DIR  = joinpath(OUTPUT_DIR, "smm")
 
 # ── Packages ──────────────────────────────────────────────────────────────────
 print("Loading packages... "); flush(stdout)
@@ -43,6 +44,9 @@ using Parameters
 using Printf
 using Base.Threads
 using Optim
+using CSV
+using DataFrames
+using Serialization
 
 println("done."); flush(stdout)
 
@@ -100,27 +104,54 @@ sim_smm = SimParams(
 )
 
 # ============================================================
-# 2. Data moments
-#    Loaded from moments.jl (placeholder values for now).
+# 2. Select estimation window
+#    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-moments = load_data_moments()
+WINDOW = :base_fc    
+
+
+@printf("Estimation window: %s\n", WINDOW)
+flush(stdout)
 
 # ============================================================
-# 3. Fixed parameters
-#    Any parameter listed here is excluded from estimation.
-#    Leave a parameter out of this NamedTuple to estimate it.
-#
-#    Example: pin discount rate, demographic rate, and exogenous
-#    separation as externally calibrated.
+# 3. Data moments
+#    Load from moments.jl. Attempt to read from CSV if derived
+#    files are available, otherwise use placeholders.
 # ============================================================
+derived_dir = joinpath(PROJECT_ROOT, "data", "derived")
+moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
+
+# ============================================================
+# 4. Optimal weight matrix
+#    Try to load the optimal weight matrix from influence functions.
+#    If not available or ill-conditioned, construct diagonal matrix
+#    from moment standard errors.
+# ============================================================
+W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir)
+
+# ============================================================
+# 5. Fixed parameters
+#    r, nu, phi are externally calibrated and FIXED across all
+#    4 estimation windows.  r is set at 5% annual.  nu and phi
+#    are computed from data (CPS panels and NSC completion rates)
+#    in the data pipeline notebook (Stages 6-7) and loaded here.
+# ============================================================
+println("\nLoading externally calibrated parameters (r, \u03bd, \u03c6)...")
+flush(stdout)
+calib = load_calibrated_params(; derived_dir=derived_dir)
+
 fixed_params = (
-    r   = 0.05,   # discount rate
-    ν   = 0.02,   # demographic turnover rate
-    φ   = 0.20,   # training completion rate
+    r   = calib.r,    # discount rate  (5% annual, externally set)
+    ν   = calib.nu,   # demographic turnover  (from CPS matched panels)
+    φ   = calib.phi,  # training completion   (from NSC data)
 )
 
+@printf("  Fixed:  r = %.6f (= 0.05/12, monthly),  \u03bd = %.5f,  \u03c6 = %.5f\n",
+        fixed_params.r, fixed_params.ν, fixed_params.φ)
+flush(stdout)
+
 # ============================================================
-# 4. Free parameter list
+# 6. Free parameter list
 #    Start from the full default list and trim if desired.
 #    To estimate only a subset, build the vector manually:
 #
@@ -130,7 +161,7 @@ fixed_params = (
 free_params = default_free_params()
 
 # ============================================================
-# 5. Run parameters — grids, DE, Nelder-Mead, tracing
+# 7. Run parameters — grids, SA, Nelder-Mead, tracing
 # ============================================================
 run_params = SMMRunParams(
     # ── Grids (coarser = faster per iteration) ──────────────
@@ -140,10 +171,10 @@ run_params = SMMRunParams(
 
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 10_000,  # total SA proposals
-    sa_T0              = 4.0,     # initial temperature (higher = more uphill acceptance early)
+    sa_T0              = 5.0,     # initial temperature (higher = more uphill acceptance early)
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
-    sa_cooling_exp     = 0.5,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
+    sa_cooling_exp     = 0.75,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
     sa_reheat_patience = 300,     # proposals without improvement before reheating
     sa_reheat_factor   = 1.10,     # temperature multiplier on reheat
     sa_max_reheats     = 1,       # cap on total reheats (0 = unlimited)
@@ -171,19 +202,20 @@ run_params = SMMRunParams(
 )
 
 # ============================================================
-# 6. Build SMM spec
+# 8. Build SMM spec
 # ============================================================
 spec = build_smm_spec(
     moments, sim_smm;
     fixed      = fixed_params,
     free_specs = free_params,
     run        = run_params,
+    W          = W_opt,
 )
 
 print_spec(spec)
 
 # ============================================================
-# 7. Run estimation
+# 9. Run estimation
 # ============================================================
 println("Starting SMM optimisation..."); flush(stdout)
 
@@ -196,10 +228,22 @@ res_pol = run_smm(_spec_with_init(spec, res_sa.theta_opt); method = :neldermead)
 results = res_pol
 
 # ============================================================
-# 8. Save results
+# 10. Save results
 # ============================================================
 mkpath(TABLES_DIR)
-save_results(results, joinpath(TABLES_DIR, "smm_estimates.csv"))
+mkpath(SMM_OUT_DIR)
+
+# CSV table of parameter estimates
+save_results(results, joinpath(TABLES_DIR, "smm_estimates_$(WINDOW).csv"))
+
+# Serialize full result for the transition solver.
+# The .jls file stores: (result, spec, sim_smm) so that
+# transition_main.jl can reconstruct the solved model.
+smm_jls_path = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW).jls")
+open(smm_jls_path, "w") do io
+    serialize(io, (result = results, spec = spec, sim = sim_smm))
+end
+@printf("Serialized SMM result → %s\n", smm_jls_path)
 
 println("\nDone.")
 flush(stdout)

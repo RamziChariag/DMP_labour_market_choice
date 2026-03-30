@@ -1,0 +1,318 @@
+================================================================================
+DATA PROCESSING PIPELINE - FILE INDEX
+================================================================================
+
+DIRECTORY: /sessions/practical-affectionate-ramanujan/mnt/Search and Matching/data_processing/
+
+FILES CREATED:
+================================================================================
+
+1. cps_basic.jl (13 KB)
+   ├─ load_cps_basic(raw_path)
+   │  └─ Loads IPUMS-CPS Basic Monthly, applies sample restrictions
+   │
+   ├─ compute_stock_moments(df, window)
+   │  └─ Returns: ur_total, ur_U, ur_S, skilled_share, training_share
+   │
+   ├─ compute_transition_rates(df, window)
+   │  └─ Panel matching on CPSIDP across months
+   │  └─ Returns: jfr_U, jfr_S, sep_rate_U, sep_rate_S, ee_rate_S, training_rate
+   │
+   ├─ compute_industry_skill_shares(df, window)
+   │  └─ Skill composition by 2-digit NAICS industry (for JOLTS allocation)
+   │
+   ├─ covid_bls_correction!(df)
+   │  └─ Reclassify employed-absent during Mar-Jun 2020
+   │
+   └─ assign_window(year, month)
+      └─ Maps dates to estimation windows
+
+2. cps_asec.jl (11 KB)
+   ├─ load_cps_asec(raw_path, cpi_deflator)
+   │  └─ Loads IPUMS-CPS ASEC, constructs real hourly wages
+   │  └─ Trims at 1st/99th percentiles
+   │
+   ├─ compute_wage_moments(df, window)
+   │  └─ Returns: mean_wage_U, mean_wage_S, p50_wage_U, p50_wage_S,
+   │  │           wage_premium, wage_sd_U, wage_sd_S,
+   │  │           emp_var_U, emp_var_S, emp_cm3_U, emp_cm3_S
+   │
+   ├─ compute_influence_functions_wages(df, window, moments)
+   │  └─ Computes ψ_i for all wage moments (for standard errors)
+   │
+   ├─ kernel_density_at(data, x)
+   │  └─ Epanechnikov kernel density for median influence function
+   │
+   └─ assign_window(year, month)
+      └─ Maps dates to estimation windows
+
+3. jolts.jl (9.5 KB)
+   ├─ load_jolts(raw_dir)
+   │  └─ Loads BLS JOLTS CSV files, converts from thousands to counts
+   │
+   ├─ compute_tightness(jolts_df, cps_basic_df, window, industry_skill_shares)
+   │  └─ Allocates vacancies to skill using industry shares
+   │  └─ Returns: theta_U, theta_S, vacancies_U, vacancies_S, unemp_U, unemp_S
+   │
+   ├─ compute_influence_functions_tightness(...)
+   │  └─ Computes ψ_i for tightness moments
+   │
+   └─ assign_window(year, month)
+      └─ Maps dates to estimation windows
+
+4. main.jl (11 KB)
+   ├─ main()
+   │  ├─ Loads CPS Basic, CPS ASEC, JOLTS data
+   │  ├─ Processes each estimation window
+   │  ├─ Computes all 25 moments
+   │  ├─ Calculates influence functions and VCV matrices
+   │  └─ Saves outputs to derived/
+   │
+   ├─ compute_vcov_matrix_window(psi_wages, psi_tightness, window)
+   │  └─ Forms Σ̂ = (1/N) Σ_i ψ_i ψ_i'
+   │
+   ├─ save_moments(output_dir, window, moments)
+   │  └─ Writes moments_{window}.csv
+   │
+   ├─ save_vcov_matrix(output_dir, window, sigma)
+   │  └─ Writes sigma_{window}.csv
+   │
+   ├─ save_weight_matrix(output_dir, window, sigma)
+   │  └─ Writes W_{window}.csv = Σ̂^{-1}
+   │
+   └─ save_all_moments(output_dir, all_moments)
+      └─ Writes all_moments.csv (stacked across windows)
+
+5. README.md
+   └─ Comprehensive documentation:
+      ├─ Function descriptions
+      ├─ Moment definitions
+      ├─ Data requirements
+      ├─ Sample restrictions
+      ├─ Panel matching logic
+      ├─ Influence functions
+      └─ Output formats
+
+6. SETUP_INSTRUCTIONS.txt
+   └─ Quick start guide:
+      ├─ Configuration steps
+      ├─ Output file descriptions
+      ├─ Window definitions
+      ├─ Moment list (25 total)
+      ├─ Troubleshooting FAQ
+      └─ File structure diagram
+
+7. INDEX.txt (this file)
+   └─ Overview of all files and functions
+
+================================================================================
+QUICK REFERENCE: 25 MOMENTS COMPUTED
+================================================================================
+
+CPS BASIC (from cps_basic.jl):
+  1. ur_total        Unemployment rate (total)
+  2. ur_U            Unemployment rate (unskilled)
+  3. ur_S            Unemployment rate (skilled)
+  4. skilled_share   Proportion of labour force with bachelor's degree
+  5. training_share  Proportion in training/college enrolment
+  6. jfr_U           Job-finding rate (unskilled)
+  7. jfr_S           Job-finding rate (skilled)
+  8. sep_rate_U      Separation rate (unskilled)
+  9. sep_rate_S      Separation rate (skilled)
+ 10. ee_rate_S       E→E transition rate (skilled)
+ 11. training_rate   Entry to training
+
+CPS ASEC (from cps_asec.jl):
+ 12. mean_wage_U     Mean log real wage (unskilled)
+ 13. mean_wage_S     Mean log real wage (skilled)
+ 14. p50_wage_U      Median log real wage (unskilled)
+ 15. p50_wage_S      Median log real wage (skilled)
+ 16. wage_premium    Skill premium (log ratio)
+ 17. wage_sd_U       Std dev of log wages (unskilled)
+ 18. wage_sd_S       Std dev of log wages (skilled)
+ 19. emp_var_U       Variance of log wages (unskilled)
+ 20. emp_var_S       Variance of log wages (skilled)
+ 21. emp_cm3_U       3rd central moment of log wages (unskilled)
+ 22. emp_cm3_S       3rd central moment of log wages (skilled)
+
+JOLTS (from jolts.jl):
+ 23. theta_U         Market tightness (vacancies/unemployment, unskilled)
+ 24. theta_S         Market tightness (vacancies/unemployment, skilled)
+
+[+ supporting outputs from compute_tightness: vacancies_U, vacancies_S, unemp_U, unemp_S]
+
+================================================================================
+WORKFLOW: HOW TO RUN
+================================================================================
+
+Step 1: Set configuration in main.jl
+   - Line 21: CPS_BASIC_FILE = "your/path/cps_basic.csv"
+   - Line 22: CPS_ASEC_FILE = "your/path/cps_asec.csv"
+   - Line 23: JOLTS_DATA_DIR = "your/path/jolts/"
+   - Lines 31-36: Populate CPI_DEFLATOR with actual CPI-U factors
+
+Step 2: Ensure data files exist
+   - IPUMS-CPS Basic Monthly extract (CSV or Arrow)
+   - IPUMS-CPS ASEC extract
+   - BLS JOLTS files (jolts_total.csv, jolts_by_industry.csv)
+
+Step 3: Run the pipeline
+   $ julia --threads auto code/data_processing/main.jl
+
+Step 4: Check outputs in derived/ folder
+   - moments_{base_fc,crisis_fc,base_covid,crisis_covid}.csv
+   - sigma_{base_fc,crisis_fc,base_covid,crisis_covid}.csv
+   - W_{base_fc,crisis_fc,base_covid,crisis_covid}.csv
+   - all_moments.csv
+
+Step 5: Use weight matrices for SMM estimation
+   - Read W_*.csv into your solver
+   - These are Σ̂^{-1} (inverse of variance-covariance)
+   - Use in SMM criterion: Q(θ) = (m̂ - m(θ))' W (m̂ - m(θ))
+
+================================================================================
+ESTIMATION WINDOWS (4 TOTAL)
+================================================================================
+
+Window Name        Period              Dates
+─────────────────────────────────────────────────
+:base_fc           Pre-2008 baseline   2003-01 to 2007-12
+:crisis_fc         Financial crisis    2008-01 to 2009-06
+:base_covid        Pre-COVID baseline  2015-01 to 2019-12
+:crisis_covid      COVID crisis        2020-03 to 2021-12
+
+Each window has 25 moments + VCV matrix (25×25) + weight matrix W (25×25).
+Total: 4 × (25 moments + 2 matrices) = complete SMM dataset
+
+================================================================================
+DATA SOURCES
+================================================================================
+
+CPS Basic Monthly (IPUMS-CPS)
+  • Source: https://www.ipums.org/
+  • Variables: YEAR, MONTH, CPSIDP, MISH, AGE, EDUC, EMPSTAT, LABFORCE, CLASSWKR, IND
+  • Sample: Civilian labour force, age 16-64, exclude armed forces
+  • Use: Unemployment rates, transitions, industry skill shares
+
+CPS ASEC (IPUMS-CPS)
+  • Source: https://www.ipums.org/
+  • Variables: YEAR, MONTH, AGE, EDUC, INCWAGE, WKSWORK1, UHRSWORKLY, CLASSWKR
+  • Sample: Wage/salary workers, positive income/weeks/hours
+  • Use: Wage distribution moments (mean, median, variance, skewness)
+
+JOLTS (BLS)
+  • Source: https://www.bls.gov/jlt/
+  • Data: Job openings by industry, monthly
+  • Units: Reported in thousands (script multiplies by 1000)
+  • Use: Market tightness θ = V/U (allocated by skill)
+
+CPI-U (BLS)
+  • Source: https://www.bls.gov/cpi/
+  • Use: Deflate nominal wages to real wages
+  • Base: Typically 2000=100 (convert to 2000=1.0)
+
+================================================================================
+ERROR HANDLING & TROUBLESHOOTING
+================================================================================
+
+Common Issues:
+
+1. "No data for window X"
+   → Check date ranges in raw files match estimation window
+   → Verify YEAR, MONTH columns are present and numeric
+   → Use SETUP_INSTRUCTIONS.txt FAQ for debugging
+
+2. "No valid JOLTS files found"
+   → Ensure JOLTS_DATA_DIR contains jolts_total.csv or jolts_by_industry.csv
+   → Check column names: YEAR, MONTH, NAICS, VACANCIES
+   → Verify CSV format (comma-separated, no headers issue)
+
+3. "Unemployment rate > 1.0" or other invalid moments
+   → Check sample restrictions are correctly applied
+   → Verify EMPSTAT coding (1=employed, 2=unemployed, 3=NILF)
+   → Look for missing/invalid values in data
+
+4. "VCV matrix singular"
+   → Some moments may be perfectly collinear
+   → Script uses pseudo-inverse (pinv) as fallback
+   → Check for very small sample sizes in certain subgroups
+   → Review wage_sd and wage_var (may have high correlation)
+
+5. "CPI deflator not found for (Y,M)"
+   → Current code defaults to 1.0 (no deflation)
+   → To use CPI, populate CPI_DEFLATOR dict with all (year, month) pairs
+   → Get CPI-U from BLS, convert to base=1.0 (divide by reference period value)
+
+See SETUP_INSTRUCTIONS.txt for more troubleshooting.
+
+================================================================================
+PROJECT STRUCTURE (RELATIVE TO CODE ROOT)
+================================================================================
+
+code/
+├── data_processing/              ← YOU ARE HERE
+│   ├── cps_basic.jl              CPS Basic processing
+│   ├── cps_asec.jl               CPS ASEC processing
+│   ├── jolts.jl                  JOLTS processing
+│   ├── main.jl                   Entry point (run this)
+│   ├── README.md                 Full documentation
+│   ├── SETUP_INSTRUCTIONS.txt    Quick start
+│   └── INDEX.txt                 This file
+├── solver/                       ← SMM solver (separate module)
+├── smm/                          ← SMM estimation (separate module)
+└── transition/                   ← Transition modeling (separate module)
+
+data/
+├── raw/
+│   ├── cps_basic.csv             ← IPUMS-CPS Basic Monthly extract
+│   ├── cps_asec.csv              ← IPUMS-CPS ASEC extract
+│   └── jolts/
+│       ├── jolts_total.csv       ← BLS JOLTS aggregate
+│       └── jolts_by_industry.csv ← BLS JOLTS by industry
+└── derived/                      ← OUTPUT FOLDER (created by main.jl)
+    ├── moments_base_fc.csv
+    ├── moments_crisis_fc.csv
+    ├── moments_base_covid.csv
+    ├── moments_crisis_covid.csv
+    ├── sigma_base_fc.csv
+    ├── sigma_crisis_fc.csv
+    ├── sigma_base_covid.csv
+    ├── sigma_crisis_covid.csv
+    ├── W_base_fc.csv             ← Weight matrices for SMM
+    ├── W_crisis_fc.csv
+    ├── W_base_covid.csv
+    ├── W_crisis_covid.csv
+    └── all_moments.csv           ← Stacked moments
+
+================================================================================
+KEY FUNCTIONS CHEAT SHEET
+================================================================================
+
+CPS BASIC:
+  load_cps_basic(path)                     → DataFrame[age 16-64, civilian LF]
+  compute_stock_moments(df, window)        → (ur_total, ur_U, ur_S, ...)
+  compute_transition_rates(df, window)     → (jfr_U, jfr_S, sep_rate_U, ...)
+  compute_industry_skill_shares(df, window) → DataFrame[industry, skill_share]
+  covid_bls_correction!(df)                → modifies df in place
+
+CPS ASEC:
+  load_cps_asec(path, cpi_dict)            → DataFrame[deflated wages, trimmed]
+  compute_wage_moments(df, window)         → (mean_wage_U, mean_wage_S, ...)
+  compute_influence_functions_wages(...)   → DataFrame[psi_mean_U, psi_mean_S, ...]
+  kernel_density_at(data, x)               → Float64 [f̂(x)]
+
+JOLTS:
+  load_jolts(dir)                          → DataFrame[date, industry, vacancies]
+  compute_tightness(jolts, cps, window, shares) → (theta_U, theta_S, V_U, V_S, ...)
+  compute_influence_functions_tightness(...) → DataFrame[psi_theta_U, psi_theta_S]
+
+MAIN:
+  main()                                   → runs entire pipeline
+  compute_vcov_matrix_window(...)          → Matrix[25×25 VCV]
+  save_moments(dir, window, moments)       → moments_{window}.csv
+  save_vcov_matrix(dir, window, sigma)     → sigma_{window}.csv
+  save_weight_matrix(dir, window, sigma)   → W_{window}.csv
+
+================================================================================
+END OF INDEX
+================================================================================
