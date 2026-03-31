@@ -129,7 +129,7 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 #      2.0   →  equal weights (identity, no W matrix)
 #      >2.0  →  full optimal W (shrunk if κ > target)
 # ============================================================
-const W_COND_TARGET = 1e-4   # also set in run_params below; keep in sync
+const W_COND_TARGET = 2.0   # also set in run_params below; keep in sync
 
 """
     _w_suffix(cond_target) → String
@@ -356,19 +356,19 @@ run_params = SMMRunParams(
     de_pop_size  = 600,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
-    de_patience  = 10,      # how many generations to wait for improvement before early stopping
-    de_avg_tol   = 1.00e-4,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
+    de_patience  = 25,           # how many generations to wait for improvement before early stopping
+    de_avg_tol   = 0.0,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 200,       # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 1000,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-5,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 
     # ── Tracing ─────────────────────────────────────────────
     show_trace_members     = false,   # per-member lines within each generation for DE, prints for stride proposal in SA
     show_trace_generations = true,    # end-of-generation summary lines
-    trace_stride           = 100,        # how often to print within DE generations (in members, not generations)
+    trace_stride           = 100,      # how often to print within DE generations (in members, not generations), for SA how often to print
 )
 
 # ============================================================
@@ -390,10 +390,10 @@ print_spec(spec)
 println("Starting SMM optimisation..."); flush(stdout)
 
 # Stage 1: global search
-res_sa = run_smm(spec; method = :sa)
+res = run_smm(spec; method = :de)
 
-# Stage 2: polish from SA solution
-res_pol = run_smm(_spec_with_init(spec, res_sa.theta_opt); method = :neldermead)
+# Stage 2: polish from global optimizer solution
+res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead)
 
 results = res_pol
 

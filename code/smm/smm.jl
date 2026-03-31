@@ -484,14 +484,24 @@ function _run_de(
     theta0   = pack_theta(spec)
 
 
-    # ── Initialise population around starting point ────────────────────
-    # First member is the supplied starting point; rest are uniform
-    # random perturbations in logit space.  ±6 in logit space maps to
-    # roughly [lb+0.2%, ub-0.2%] in constrained space, so the population
-    # spans almost the full prior range from the outset.
-    pop  = [theta0 .+ 12.0 .* (rand(rng, npar) .- 0.5)
-            for _ in 1:pop_size]
-    pop[1] = copy(theta0)
+    # ── Initialise population — uniform in constrained space ──────────────
+    # Draw x_k ~ Uniform(lb_k, ub_k) for each parameter independently,
+    # then map to logit space.  This gives a flat density over the
+    # feasible rectangle, unlike uniform-in-logit which is U-shaped
+    # (dense near boundaries, sparse in the interior).
+    pop = Vector{Vector{Float64}}(undef, pop_size)
+    for j in 1:pop_size
+        theta_j = Vector{Float64}(undef, npar)
+        for (k, ps) in enumerate(spec.free)
+            x_k = ps.lb + (ps.ub - ps.lb) * rand(rng)
+            # Clamp away from exact bounds to avoid ±Inf in logit
+            x_k = clamp(x_k, ps.lb + 1e-8 * (ps.ub - ps.lb),
+                            ps.ub - 1e-8 * (ps.ub - ps.lb))
+            theta_j[k] = _to_unconstrained(x_k, ps.lb, ps.ub)
+        end
+        pop[j] = theta_j
+    end
+    pop[1] = copy(theta0)   # first member is still the supplied starting point
 
 
     # Evaluate initial population — Inf for non-converging members
@@ -504,15 +514,23 @@ function _run_de(
     end
 
 
-    n_feasible = 0
-    for i in 1:pop_size
+    n_feasible = Threads.Atomic{Int}(0)
+    Threads.@threads for i in 1:pop_size
         Q_pop[i] = smm_objective(pop[i], spec)
-        isfinite(Q_pop[i]) && (n_feasible += 1)
-        if show_members && (i % trace_stride == 0 || i == pop_size)
-            @printf("  [DE init]  evaluated %d/%d  feasible so far: %d\n",
-                    i, pop_size, n_feasible)
+        if isfinite(Q_pop[i])
+            Threads.atomic_add!(n_feasible, 1)
+        end
+        if show_members && i % trace_stride == 0
+            @printf("  [DE init]  evaluated ~%d/%d  feasible so far: ~%d\n",
+                    i, pop_size, n_feasible[])
             flush(stdout)
         end
+    end
+    # Print final summary after all threads have joined
+    if show_members
+        @printf("  [DE init]  evaluated %d/%d  feasible: %d\n",
+                pop_size, pop_size, n_feasible[])
+        flush(stdout)
     end
 
 
@@ -523,53 +541,55 @@ function _run_de(
 
     if show_gens
         @printf("  [DE init]  feasible=%d/%d  Q_best=%.6e\n",
-                n_feasible, pop_size, Q_best)
+                n_feasible[], pop_size, Q_best)
         flush(stdout)
     end
 
 
     # ── Main DE loop (generations) ─────────────────────────────────────
-    n_evals      = pop_size
-    stagnation   = 0
-    actual_gens  = 0
+    n_evals    = Threads.Atomic{Int}(pop_size)
+    stagnation = 0
+    actual_gens = 0
+    best_lock  = ReentrantLock()
+
     for gen in 1:max_iter
         actual_gens = gen
-        n_improved = 0
-        for i in 1:pop_size
-            # ── Pick three distinct donors ≠ i ─────────────────────────
-            # _pick3 uses a rejection sampler: O(1) draws expected,
-            # avoids the O(pop_size) randperm shuffle of the old code.
-            ia, ib, ic = _pick3(rng, pop_size, i)
-            a, b, c    = pop[ia], pop[ib], pop[ic]
+        n_improved  = Threads.Atomic{Int}(0)
 
+        Threads.@threads for i in 1:pop_size
+            # ── Pick three distinct donors ≠ i ─────────────────────────
+            ia, ib, ic = _pick3(Random.default_rng(), pop_size, i)
+            a, b, c    = pop[ia], pop[ib], pop[ic]
 
             # Mutant vector
             v = a .+ f .* (b .- c)
 
-
             # Binomial crossover — ensure at least one dimension from mutant
-            mask    = rand(rng, npar) .< cr
-            j_force = rand(rng, 1:npar)
+            mask    = rand(Random.default_rng(), npar) .< cr
+            j_force = rand(Random.default_rng(), 1:npar)
             mask[j_force] = true
             u = ifelse.(mask, v, pop[i])
 
-
             # Evaluate trial vector
             Q_u = smm_objective(u, spec)
-            n_evals += 1
-
+            Threads.atomic_add!(n_evals, 1)
 
             # Greedy selection — Inf proposals never win
             if isfinite(Q_u) && Q_u < Q_pop[i]
                 pop[i]   = u
                 Q_pop[i] = Q_u
-                n_improved += 1
+                Threads.atomic_add!(n_improved, 1)
+
+                # Update global best under lock — two fields must stay in sync
                 if Q_u < Q_best
-                    Q_best     = Q_u
-                    theta_best = copy(u)
+                    lock(best_lock) do
+                        if Q_u < Q_best          # re-check inside lock
+                            Q_best     = Q_u
+                            theta_best = copy(u)
+                        end
+                    end
                 end
             end
-
 
             # Within-generation progress
             if show_members && i % trace_stride == 0
@@ -577,29 +597,30 @@ function _run_de(
                 @printf("  [DE gen=%4d  member=%4d/%4d]  Q_member=%-14s  improved=%d\n",
                         gen, i, pop_size,
                         isfinite(Q_i) ? @sprintf("%.6e", Q_i) : "Inf",
-                        n_improved)
+                        n_improved[])
                 flush(stdout)
             end
         end
 
+        # Read atomics once after all threads have joined
+        n_imp  = n_improved[]
+        n_eval = n_evals[]
 
         # Stagnation tracking
-        if n_improved == 0
+        if n_imp == 0
             stagnation += 1
         else
             stagnation = 0
         end
-
 
         # End-of-generation summary
         if show_gens
             Q_mean = mean(filter(isfinite, Q_pop))
             n_feas = count(isfinite, Q_pop)
             @printf("  [DE gen=%4d DONE]  Q_best=%.6e  Q_mean=%.6e  feasible=%d/%d  improved=%d  stagnation=%d/%d  evals=%d\n",
-                    gen, Q_best, Q_mean, n_feas, pop_size, n_improved, stagnation, patience, n_evals)
+                    gen, Q_best, Q_mean, n_feas, pop_size, n_imp, stagnation, patience, n_eval)
             flush(stdout)
         end
-
 
         # Early stopping — stagnation
         if stagnation >= patience
@@ -607,7 +628,6 @@ function _run_de(
             flush(stdout)
             break
         end
-
 
         # Early stopping — population convergence around best
         if avg_tol > 0.0 && isfinite(Q_best) && Q_best != 0.0
@@ -624,12 +644,10 @@ function _run_de(
         end
     end
 
-
     if show_gens
-        @printf("  [DE done]  Q_best=%.6e  total evals=%d\n", Q_best, n_evals)
+        @printf("  [DE done]  Q_best=%.6e  total evals=%d\n", Q_best, n_evals[])
         flush(stdout)
     end
-
 
     return theta_best, Q_best, actual_gens
 end

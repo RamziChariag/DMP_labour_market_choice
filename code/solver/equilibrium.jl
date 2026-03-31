@@ -126,6 +126,8 @@ function compute_equilibrium_objects(model::Model)
         itp = linear_interpolation(pgU, eU_surface[ix, :], extrapolation_bc = 0.0)
         eU_on_pg[ix, :] = max.(itp.(pg), 0.0)
     end
+
+    eS_surface = eS_mat
     e_total_surface = eU_on_pg .+ eS_mat
 
     # ── Wages ──────────────────────────────────────────────────────────────
@@ -320,6 +322,7 @@ function compute_equilibrium_objects(model::Model)
 
         # employment surfaces
         eU_surface      = eU_surface,
+        eS_surface      = eS_surface,
         e_total_surface = e_total_surface,
 
         # unskilled values & policy

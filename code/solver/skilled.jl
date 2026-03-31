@@ -158,6 +158,24 @@ end
     return clamp((p_next - pstar) / cell, 0.0, 1.0)
 end
 
+# Companion to _soft_weight, but active BELOW the cutoff (OJS region).
+# Returns fraction of grid cell [pj, p_{j+1}] lying below poj.
+@inline function _soft_oj_weight(
+    pj    :: Float64,
+    poj   :: Float64,
+    pgrid :: Vector{Float64},
+    j     :: Int,
+    Np    :: Int
+)
+    pj >= poj  && return 0.0          # node above OJS boundary — no search
+    j  >= Np   && return 1.0          # last node, fully below poj
+    p_next = pgrid[min(j + 1, Np)]
+    p_next <= poj && return 1.0       # entire cell below poj — full OJS
+    cell = p_next - pj
+    cell < 1e-14 && return 1.0
+    return clamp((poj - pj) / cell, 0.0, 1.0)
+end
+
 
 # ---------------------------------------------------------------------------
 # Skilled inner loop
@@ -351,7 +369,7 @@ function solve_stationary_skilled_x!(
         Γj  = pre.Γvals[j]
         wpj = sg.wp[j]
 
-        s_j = (pj < poj) ? 1.0 : 0.0
+        s_j = _soft_oj_weight(pj, poj, sg.p, j, Np)
 
         a_j = ν + ξ + λ + s_j * f * (1.0 - Γj)
         b_j = f * γj
