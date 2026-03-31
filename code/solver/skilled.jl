@@ -396,11 +396,11 @@ function update_theta_skilled(model::Model)
     sc   = model.skl_cache
     Jbar = compute_Jbar_skilled(model)
 
-    Jbar < 1e-12 && return sc.θ
+    (Jbar < 1e-12 || !isfinite(Jbar)) && return sc.θ
 
     q     = sp.k / Jbar
     θ_raw = theta_from_q(q, sp.μ, sp.η)
-    return clamp(θ_raw, 1e-14, 30.0)
+    return clamp(θ_raw, 1e-14, 100.0)
 end
 
 

@@ -97,17 +97,17 @@ sim_smm = SimParams(
     anderson_reg   = 1e-10,
 
     damp_pstar_U   = 1.30,
-    damp_pstar_S   = 0.80,
+    damp_pstar_S   = 0.95,
 
     verbose        = 0,          # 0: model is silent; 1: print outer convergence info per iteration; 2: also print inner iteration details
-    verbose_stride = 10,
+    verbose_stride = 100,
 )
 
 # ============================================================
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :base_fc    
+WINDOW = :crisis_fc    
 
 
 @printf("Estimation window: %s\n", WINDOW)
@@ -123,42 +123,209 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 
 # ============================================================
 # 4. Optimal weight matrix
-#    Try to load the optimal weight matrix from influence functions.
-#    If not available or ill-conditioned, construct diagonal matrix
-#    from moment standard errors.
+#    W_COND_TARGET controls which weighting scheme is used:
+#      0.0   →  diagonal from sigma_{window}.csv
+#      1.0   →  compressed diagonal: w = log(1 + diag)
+#      2.0   →  equal weights (identity, no W matrix)
+#      >2.0  →  full optimal W (shrunk if κ > target)
 # ============================================================
-W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir)
+const W_COND_TARGET = 1e-4   # also set in run_params below; keep in sync
+
+"""
+    _w_suffix(cond_target) → String
+
+Return the filename suffix that identifies the weight-matrix mode.
+  0.0   → "_diagonalW"
+  1.0   → "_compressedW"
+  2.0   → "_equalW"
+  else  → "_fullW"
+"""
+function _w_suffix(cond_target::Float64)
+    cond_target == 0.0 && return "_diagonalW"
+    cond_target == 1.0 && return "_compressedW"
+    cond_target == 2.0 && return "_equalW"
+    return "_fullW"
+end
+
+const W_SUFFIX = _w_suffix(W_COND_TARGET)
+
+W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
+                             cond_target=W_COND_TARGET)
 
 # ============================================================
-# 5. Fixed parameters
-#    r, nu, phi are externally calibrated and FIXED across all
-#    4 estimation windows.  r is set at 5% annual.  nu and phi
-#    are computed from data (CPS panels and NSC completion rates)
-#    in the data pipeline notebook (Stages 6-7) and loaded here.
+# 5. Externally calibrated parameters (r, ν, φ)
+#    Always fixed across all 4 estimation windows.
 # ============================================================
-println("\nLoading externally calibrated parameters (r, \u03bd, \u03c6)...")
+println("\nLoading externally calibrated parameters (r, ν, φ)...")
 flush(stdout)
 calib = load_calibrated_params(; derived_dir=derived_dir)
 
-fixed_params = (
-    r   = calib.r,    # discount rate  (5% annual, externally set)
-    ν   = calib.nu,   # demographic turnover  (from CPS matched panels)
-    φ   = calib.phi,  # training completion   (from NSC data)
-)
-
-@printf("  Fixed:  r = %.6f (= 0.05/12, monthly),  \u03bd = %.5f,  \u03c6 = %.5f\n",
-        fixed_params.r, fixed_params.ν, fixed_params.φ)
+@printf("  Calibrated:  r = %.6f,  ν = %.5f,  φ = %.5f\n",
+        calib.r, calib.nu, calib.phi)
 flush(stdout)
 
 # ============================================================
-# 6. Free parameter list
-#    Start from the full default list and trim if desired.
-#    To estimate only a subset, build the vector manually:
+# 6. Fixed and free parameters
+#    - Baseline windows (:base_fc, :base_covid):
+#        fix only (r, ν, φ); estimate all structural + regime params
+#    - Crisis windows (:crisis_fc, :crisis_covid):
+#        load Stage 1 baseline (base_fc) results;
+#        fix deep structural params at baseline values;
+#        re-estimate only regime-specific params
 #
-#    free = [p for p in default_free_params()
-#              if p.block in (:regime, :unsk)]
+#    Parameter classification (from Model Notes, §2.3–2.4):
+#
+#    Deep structural (constant across regimes):
+#      common:  a_ℓ, b_ℓ, c
+#      regime:  bU, bT, bS          (institutional / policy)
+#      unsk:    μ, η, β             (technology / institutions)
+#      skl:     μ, η, β, σ          (technology / institutions)
+#
+#    Regime-specific (re-estimated per crisis window):
+#      regime:  PU, PS, α_U, a_Γ, b_Γ
+#      unsk:    k, λ
+#      skl:     k, λ, ξ
 # ============================================================
-free_params = default_free_params()
+
+# Set of (block, name) pairs that are regime-specific
+const REGIME_SPECIFIC_PARAMS = Set([
+    (:regime, :PU), (:regime, :PS), (:regime, :α_U), (:regime, :a_Γ), (:regime, :b_Γ),
+    (:unsk, :k), (:unsk, :λ),
+    (:skl, :k), (:skl, :λ), (:skl, :ξ),
+])
+
+"""
+    _baseline_param_value(ps::ParamSpec, cp, rp, up, sp) → Float64
+
+Extract the value of parameter `ps` from the four solved structs.
+"""
+function _baseline_param_value(ps::ParamSpec, cp, rp, up, sp) :: Float64
+    if     ps.block == :common; return Float64(getfield(cp, ps.name))
+    elseif ps.block == :regime; return Float64(getfield(rp, ps.name))
+    elseif ps.block == :unsk;   return Float64(getfield(up, ps.name))
+    else                        return Float64(getfield(sp, ps.name))
+    end
+end
+
+if WINDOW in (:crisis_fc, :crisis_covid)
+    # ── Stage 2: crisis re-estimation ──────────────────────────────────
+    # Load baseline result (always from base_fc with matching W suffix)
+    baseline_jls = joinpath(SMM_OUT_DIR, "smm_result_base_fc$(W_SUFFIX).jls")
+    @printf("\nCrisis window detected — loading baseline from:\n  %s\n", baseline_jls)
+    flush(stdout)
+    isfile(baseline_jls) || error(
+        "Baseline result not found at $baseline_jls. " *
+        "Run the base_fc estimation first (WINDOW = :base_fc, W_COND_TARGET = $W_COND_TARGET).")
+
+    baseline_data   = open(deserialize, baseline_jls)
+    baseline_result  = baseline_data.result   # SMMResult
+    baseline_spec    = baseline_data.spec     # SMMSpec
+
+    # Reconstruct the four parameter structs from the baseline optimum
+    cp_base, rp_base, up_base, sp_base =
+        unpack_θ(baseline_result.theta_opt, baseline_spec)
+
+    @printf("  Baseline Q = %.6e  (converged = %s)\n",
+            baseline_result.loss_opt, baseline_result.converged)
+    flush(stdout)
+
+    # ── Build fixed_params: calibrated + deep structural ───────────────
+    # For shared names (μ, η, β) use block-qualified keys so that
+    # unskilled and skilled blocks receive their own baseline values.
+    fixed_params = (
+        # Externally calibrated
+        r     = calib.r,
+        ν     = calib.nu,
+        φ     = calib.phi,
+        # Deep structural — common block
+        a_ℓ   = cp_base.a_ℓ,
+        b_ℓ   = cp_base.b_ℓ,
+        c     = cp_base.c,
+        # Deep structural — regime block (institutional)
+        bU    = rp_base.bU,
+        bT    = rp_base.bT,
+        bS    = rp_base.bS,
+        # Deep structural — unskilled (block-qualified for shared names)
+        unsk_μ = up_base.μ,
+        unsk_η = up_base.η,
+        unsk_β = up_base.β,
+        # Deep structural — skilled (block-qualified for shared names)
+        skl_μ  = sp_base.μ,
+        skl_η  = sp_base.η,
+        skl_β  = sp_base.β,
+        skl_σ  = sp_base.σ,
+    )
+
+    # ── Build free_params: regime-specific only, init from baseline ─────
+    free_params = ParamSpec[]
+    for ps in default_free_params()
+        (ps.block, ps.name) in REGIME_SPECIFIC_PARAMS || continue
+        init_val = _baseline_param_value(ps, cp_base, rp_base, up_base, sp_base)
+        push!(free_params,
+              ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label))
+    end
+
+    println("\n  Deep structural parameters FIXED from baseline:")
+    @printf("    common:  a_ℓ=%.4f  b_ℓ=%.4f  c=%.4f\n",
+            cp_base.a_ℓ, cp_base.b_ℓ, cp_base.c)
+    @printf("    regime:  bU=%.4f  bT=%.4f  bS=%.4f\n",
+            rp_base.bU, rp_base.bT, rp_base.bS)
+    @printf("    unsk:    μ=%.4f  η=%.4f  β=%.4f\n",
+            up_base.μ, up_base.η, up_base.β)
+    @printf("    skl:     μ=%.4f  η=%.4f  β=%.4f  σ=%.4f\n",
+            sp_base.μ, sp_base.η, sp_base.β, sp_base.σ)
+    @printf("  Regime-specific parameters FREE (%d params)\n", length(free_params))
+    flush(stdout)
+
+else
+    # ── Stage 1: baseline estimation (base_fc or base_covid) ───────────
+    # Fix only the externally calibrated params; estimate everything else.
+    fixed_params = (
+        r   = calib.r,
+        ν   = calib.nu,
+        φ   = calib.phi,
+    )
+
+    free_params = default_free_params()
+
+    # ── Warm-start: if a prior base_fc result exists, use its
+    #    optimum as the initial values for this run.  This helps
+    #    when re-estimating with a different weight matrix. ──────
+    _warmstart_jls = joinpath(SMM_OUT_DIR, "smm_result_base_fc$(W_SUFFIX).jls")
+    if isfile(_warmstart_jls)
+        println("\n  Warm-start: loading prior base_fc result from:")
+        @printf("    %s\n", _warmstart_jls)
+        flush(stdout)
+        _ws_data   = open(deserialize, _warmstart_jls)
+        _ws_result = _ws_data.result
+        _ws_spec   = _ws_data.spec
+        _ws_cp, _ws_rp, _ws_up, _ws_sp = unpack_θ(_ws_result.theta_opt, _ws_spec)
+        @printf("    Prior Q = %.6e  (converged = %s)\n",
+                _ws_result.loss_opt, _ws_result.converged)
+        flush(stdout)
+
+        # Override init values in free_params with the prior optimum
+        free_params = [
+            let init_val = _baseline_param_value(ps, _ws_cp, _ws_rp, _ws_up, _ws_sp)
+                # Clamp to bounds (safety)
+                init_val = clamp(init_val, ps.lb + 1e-10, ps.ub - 1e-10)
+                ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
+            end
+            for ps in free_params
+        ]
+        println("    Initial values set from prior optimum.")
+    else
+        println("\n  No prior base_fc result found — using default initial values.")
+    end
+    flush(stdout)
+
+    @printf("\n  Baseline mode: all structural + regime params are FREE\n")
+    flush(stdout)
+end
+
+@printf("  Fixed params:  %d  |  Free params:  %d\n",
+        length(fixed_params), length(free_params))
+flush(stdout)
 
 # ============================================================
 # 7. Run parameters — grids, SA, Nelder-Mead, tracing
@@ -169,14 +336,17 @@ run_params = SMMRunParams(
     Np_U    = 80,
     Np_S    = 80,
 
+    # ── Weight matrix conditioning ────────────────────────────
+    w_cond_target = W_COND_TARGET,
+
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 10_000,  # total SA proposals
     sa_T0              = 5.0,     # initial temperature (higher = more uphill acceptance early)
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
-    sa_cooling_exp     = 0.75,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
-    sa_reheat_patience = 300,     # proposals without improvement before reheating
-    sa_reheat_factor   = 1.10,     # temperature multiplier on reheat
+    sa_cooling_exp     = 1.00,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
+    sa_reheat_patience = 500,     # proposals without improvement before reheating
+    sa_reheat_factor   = 2.00,     # temperature multiplier on reheat
     sa_max_reheats     = 1,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
@@ -198,7 +368,7 @@ run_params = SMMRunParams(
     # ── Tracing ─────────────────────────────────────────────
     show_trace_members     = false,   # per-member lines within each generation for DE, prints for stride proposal in SA
     show_trace_generations = true,    # end-of-generation summary lines
-    trace_stride           = 10,        # how often to print within DE generations (in members, not generations)
+    trace_stride           = 100,        # how often to print within DE generations (in members, not generations)
 )
 
 # ============================================================
@@ -234,12 +404,12 @@ mkpath(TABLES_DIR)
 mkpath(SMM_OUT_DIR)
 
 # CSV table of parameter estimates
-save_results(results, joinpath(TABLES_DIR, "smm_estimates_$(WINDOW).csv"))
+save_results(results, joinpath(TABLES_DIR, "smm_estimates_$(WINDOW)$(W_SUFFIX).csv"))
 
 # Serialize full result for the transition solver.
 # The .jls file stores: (result, spec, sim_smm) so that
 # transition_main.jl can reconstruct the solved model.
-smm_jls_path = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW).jls")
+smm_jls_path = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
 open(smm_jls_path, "w") do io
     serialize(io, (result = results, spec = spec, sim = sim_smm))
 end

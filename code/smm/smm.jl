@@ -28,8 +28,11 @@
 """
     compute_loss(m_model, spec) -> Float64
 
-    Q(θ) = Σ_k  w_k · (m_k^model − m_k^data)²
+    Q(θ) = Σ_k  w_k · [(m_k^model − m_k^data) / |m_k^data|]²
 
+Diagonal-weight loss with scale-normalised deviations.
+Each deviation is divided by |m̂_k| (floored at 1e-10) so that
+moments of different magnitudes contribute on a comparable scale.
 Only moments with weight > 0 are included.
 """
 function compute_loss(m_model::NamedTuple, spec::SMMSpec) :: Float64
@@ -38,8 +41,9 @@ function compute_loss(m_model::NamedTuple, spec::SMMSpec) :: Float64
         target = spec.moments[k]
         target.weight <= 0.0  && continue
         !hasproperty(m_model, k) && continue
-        dev  = getproperty(m_model, k) - target.value
-        Q   += target.weight * dev^2
+        scale = max(abs(target.value), 1e-10)
+        dev   = (getproperty(m_model, k) - target.value) / scale
+        Q    += target.weight * dev^2
     end
     return Q
 end
@@ -48,11 +52,30 @@ end
 """
     compute_loss_matrix(m_model, spec, W) -> Float64
 
-    Q(θ) = [m̂ − m(θ)]' W [m̂ − m(θ)]
+    Q(θ) = g̃(θ)' W g̃(θ)     where g̃_k = (m_k^model − m̂_k) / |m̂_k|
 
-Compute the loss using the full K×K optimal weight matrix W,
-where m̂ is the vector of empirical moment targets and m(θ) is
-the vector of model moments.
+Compute the loss using the full K×K optimal weight matrix W = Σ̃⁻¹.
+
+Normalisation convention
+───────────────────────
+The data pipeline normalises each influence function ψ_k by
+|m̂_k| before forming the outer product:
+    ψ̃_k = ψ_k / |m̂_k|
+    Σ̃ = (1/N) Σ_i ψ̃(z_i) ψ̃(z_i)'
+    W = Σ̃⁻¹
+
+Because W lives in normalised space, the deviation vector must
+also be normalised:  g̃_k = (m_k − m̂_k) / |m̂_k|.
+This ensures that Q(θ) = g̃' Σ̃⁻¹ g̃ is scale-invariant
+and consistent with the diagonal-weight loss in compute_loss.
+
+Mathematically, if D = diag(|m̂_k|), then:
+    Σ̃ = D⁻¹ Σ_raw D⁻¹   ⟹   W = D Σ_raw⁻¹ D
+    g̃' W g̃ = (D⁻¹ g)' (D Σ_raw⁻¹ D) (D⁻¹ g)
+            = g' Σ_raw⁻¹ g
+So the normalisation cancels and is equivalent to using the
+raw optimal W with raw deviations — but numerically the
+normalised form is far better conditioned.
 
 Only moments with positive weight in spec.moments are included.
 """
@@ -62,19 +85,20 @@ function compute_loss_matrix(
     W::Matrix{Float64}
 ) :: Float64
 
-    # Build deviation vector m̂ - m(θ), excluding moments with weight ≤ 0
+    # Build normalised deviation vector g̃_k = (m_k − m̂_k) / |m̂_k|
     dev_vec = Float64[]
     for k in keys(spec.moments)
         target = spec.moments[k]
         target.weight <= 0.0 && continue
         !hasproperty(m_model, k) && continue
-        dev = getproperty(m_model, k) - target.value
+        scale = max(abs(target.value), 1e-10)
+        dev   = (getproperty(m_model, k) - target.value) / scale
         push!(dev_vec, dev)
     end
 
     isempty(dev_vec) && return 0.0
 
-    # Compute Q = dev' W dev
+    # Compute Q = g̃' W g̃
     Q = dot(dev_vec, W * dev_vec)
     return Q
 end
@@ -191,6 +215,8 @@ function _run_sa(
     win_fin = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
     win_idx = 0
 
+    actual_iters = 0
+
     if show_trace
         @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f\n",
                 isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (bad starting point)",
@@ -203,6 +229,7 @@ function _run_sa(
     T_reheat   = T0   # T at the start of current segment
 
     for t in 1:max_iter
+        actual_iters = t
         # ── Cooling: each segment decays from its own T_reheat ─────────
         # T(t_local) = T_reheat / log(1 + rate * t_local)^exp
         # This means after a reheat the temperature decays smoothly from
@@ -309,11 +336,11 @@ function _run_sa(
 
     if show_trace
         @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  reheats=%d\n",
-                Q_best, n_acc, max_iter, n_fin, max_iter, n_reheats)
+                Q_best, n_acc, actual_iters, n_fin, actual_iters, n_reheats)
         flush(stdout)
     end
 
-    return theta_best, Q_best, max_iter
+    return theta_best, Q_best, actual_iters
 end
 
 # Alias so pack_theta works (smm_params.jl defines pack_θ with Unicode)
@@ -406,9 +433,11 @@ function _run_de(
     end
 
     # ── Main DE loop (generations) ─────────────────────────────────────
-    n_evals    = pop_size
-    stagnation = 0
+    n_evals      = pop_size
+    stagnation   = 0
+    actual_gens  = 0
     for gen in 1:max_iter
+        actual_gens = gen
         n_improved = 0
         for i in 1:pop_size
             # Select three distinct members ≠ i
@@ -494,7 +523,7 @@ function _run_de(
         flush(stdout)
     end
 
-    return theta_best, Q_best, max_iter * pop_size
+    return theta_best, Q_best, actual_gens
 end
 
 

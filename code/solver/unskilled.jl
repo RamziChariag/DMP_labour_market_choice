@@ -278,13 +278,13 @@ function update_theta_unskilled(model::Model)
     U_total = dot(uc.u,                 gp.wx)
     Jbar    = dot(uc.Jfrontier .* uc.u, gp.wx)
 
-    if Jbar < 1e-14 || U_total < 1e-14
+    if Jbar < 1e-14 || U_total < 1e-14 || !isfinite(Jbar) || !isfinite(U_total)
         return uc.θ
     end
 
     q     = up.k * U_total / Jbar
     θ_raw = theta_from_q(q, up.μ, up.η)
-    return clamp(θ_raw, 1e-14, 50.0)
+    return clamp(θ_raw, 1e-14, 100.0)
 end
 
 

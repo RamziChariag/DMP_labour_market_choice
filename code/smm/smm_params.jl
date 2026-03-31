@@ -71,6 +71,15 @@ Fields — global search (DE)
                       value (population has converged around the best).
                       Set to 0.0 to disable. Default: 0.01 (1 %).
 
+Fields — weight matrix conditioning
+────────────────────────────────────
+  w_cond_target       weight-matrix mode selector.
+                      0.0   →  diagonal from Σ (weights = 1/σ²)
+                      1.0   →  compressed diagonal: log(1 + 1/σ²)
+                      2.0   →  equal weights (identity, no W matrix)
+                      >2.0  →  full optimal W (shrunk if κ > target)
+                      Should match TARGET_KAPPA in the data pipeline.
+
 Fields — local polish (Nelder-Mead)
 ────────────────────────────────────
   nm_max_iter         maximum iterations
@@ -118,6 +127,9 @@ Base.@kwdef struct SMMRunParams
     sa_adapt_window  :: Int     = 50      # rolling window for step adaptation
     sa_target_fin    :: Float64 = 0.90    # target feasibility rate
 
+    # ── Weight matrix conditioning ──────────────────────────────────────
+    w_cond_target :: Float64 = 1e8   # 0=diagonal, 1=compressed, 2=equal, >2=full W (shrink if κ>target)
+
     # ── Nelder-Mead polish ────────────────────────────────────────────
     nm_max_iter  :: Int     = 5_000
     nm_f_tol     :: Float64 = 1e-6
@@ -146,8 +158,8 @@ Fields
   moments     NamedTuple from load_data_moments() — (value, weight) pairs
   sim         SimParams — solver settings (tolerances, maxit, verbose…)
   run         SMMRunParams — grid sizes and optimiser settings
-  W           Union{Nothing, Matrix{Float64}} — optimal weight matrix from influence functions
-              (Nothing = use diagonal weights from moment variances)
+  W           Union{Nothing, Matrix{Float64}} — weight matrix
+              (Nothing = equal weights; Matrix = diagonal/compressed/full W)
 """
 struct SMMSpec
     free    :: Vector{ParamSpec}
@@ -184,9 +196,10 @@ Build an `SMMSpec`.
   Nelder-Mead settings, and tracing.
 
 - `W`: optional K×K optimal weight matrix from influence functions.
-  If provided and well-conditioned (cond < 1e8), will be used in the
-  loss function instead of diagonal weights. If nothing (default),
-  uses diagonal weights from moment variances.
+  If provided, will be used in the loss function instead of diagonal
+  weights (conditioning is handled by `load_weight_matrix` before
+  this is called). If nothing (default), uses diagonal weights from
+  moment variances.
 """
 function build_smm_spec(
     moments    :: NamedTuple,
@@ -201,10 +214,17 @@ function build_smm_spec(
     fixed_names = keys(fixed_nt)
 
     # Drop any free spec whose field appears in `fixed`
-    active_free = filter(ps -> !(ps.name in fixed_names), free_specs)
+    # Supports both plain names (e.g. :r) and block-qualified names
+    # (e.g. :unsk_μ, :skl_μ) for disambiguating shared names across blocks.
+    active_free = filter(ps -> begin
+        qualified = Symbol(string(ps.block) * "_" * string(ps.name))
+        !(ps.name in fixed_names || qualified in fixed_names)
+    end, free_specs)
 
     if length(active_free) < length(free_specs)
-        dropped = [ps.name for ps in free_specs if ps.name in fixed_names]
+        dropped = [ps.name for ps in free_specs
+                   if ps.name in fixed_names ||
+                      Symbol(string(ps.block) * "_" * string(ps.name)) in fixed_names]
         @printf("SMMSpec: fixed override dropped free params: %s\n",
                 join(string.(dropped), ", "))
     end
@@ -314,50 +334,54 @@ function unpack_θ(
     end
 
     # Step 2: merge helper — fixed takes priority, then free, then default
-    function _get(name::Symbol, default::Float64) :: Float64
-        haskey(spec.fixed, name)    && return Float64(spec.fixed[name])
-        haskey(free_vals, name)     && return free_vals[name]
+    # Supports block-qualified fixed keys (e.g. :unsk_μ, :skl_μ) to
+    # disambiguate shared field names across unskilled/skilled blocks.
+    function _get(name::Symbol, block::Symbol, default::Float64) :: Float64
+        qualified = Symbol(string(block) * "_" * string(name))
+        haskey(spec.fixed, qualified)   && return Float64(spec.fixed[qualified])
+        haskey(spec.fixed, name)        && return Float64(spec.fixed[name])
+        haskey(free_vals, name)         && return free_vals[name]
         return default
     end
 
     # Step 3: build each struct using defaults from initialise_model()
     #  (defaults are the notebook's calibrated values)
     cp = CommonParams(
-        r   = _get(:r,   0.05),
-        ν   = _get(:ν,   0.05),
-        φ   = _get(:φ,   0.20),
-        a_ℓ = _get(:a_ℓ, 2.00),
-        b_ℓ = _get(:b_ℓ, 5.00),
-        c   = _get(:c,   1.70),
+        r   = _get(:r,   :common, 0.05),
+        ν   = _get(:ν,   :common, 0.05),
+        φ   = _get(:φ,   :common, 0.20),
+        a_ℓ = _get(:a_ℓ, :common, 2.00),
+        b_ℓ = _get(:b_ℓ, :common, 5.00),
+        c   = _get(:c,   :common, 1.70),
     )
 
     rp = RegimeParams(
-        PU  = _get(:PU,  0.70),
-        PS  = _get(:PS,  1.85),
-        bU  = _get(:bU,  0.00),
-        bT  = _get(:bT,  0.28),
-        bS  = _get(:bS,  0.01),
-        α_U = _get(:α_U, 1.00),
-        a_Γ = _get(:a_Γ, 2.00),
-        b_Γ = _get(:b_Γ, 5.00),
+        PU  = _get(:PU,  :regime, 0.70),
+        PS  = _get(:PS,  :regime, 1.85),
+        bU  = _get(:bU,  :regime, 0.00),
+        bT  = _get(:bT,  :regime, 0.28),
+        bS  = _get(:bS,  :regime, 0.01),
+        α_U = _get(:α_U, :regime, 1.00),
+        a_Γ = _get(:a_Γ, :regime, 2.00),
+        b_Γ = _get(:b_Γ, :regime, 5.00),
     )
 
     up = UnskilledParams(
-        μ = _get(:μ,  0.74),   # note: μ and other names shared across blocks
-        η = _get(:η,  0.60),   # disambiguation handled by block in ParamSpec,
-        k = _get(:k,  0.25),   # but _get looks up by name only.
-        β = _get(:β,  0.40),   # For shared names (μ,η,k,β,λ), the free_vals
-        λ = _get(:λ,  0.08),   # dict holds the *last* block's value — see note.
+        μ = _get(:μ,  :unsk, 0.74),   # note: μ and other names shared across blocks
+        η = _get(:η,  :unsk, 0.60),   # disambiguation via block-qualified fixed keys
+        k = _get(:k,  :unsk, 0.25),   # (e.g. :unsk_μ vs :skl_μ in spec.fixed)
+        β = _get(:β,  :unsk, 0.40),
+        λ = _get(:λ,  :unsk, 0.08),
     )
 
     sp = SkilledParams(
-        μ = _get(:μ,  0.90),
-        η = _get(:η,  0.50),
-        k = _get(:k,  0.17),
-        β = _get(:β,  0.32),
-        ξ = _get(:ξ,  0.03),
-        λ = _get(:λ,  0.07),
-        σ = _get(:σ,  0.01),
+        μ = _get(:μ,  :skl, 0.90),
+        η = _get(:η,  :skl, 0.50),
+        k = _get(:k,  :skl, 0.17),
+        β = _get(:β,  :skl, 0.32),
+        ξ = _get(:ξ,  :skl, 0.03),
+        λ = _get(:λ,  :skl, 0.07),
+        σ = _get(:σ,  :skl, 0.01),
     )
 
     # ── Handle shared field names (μ, η, k, β, λ) ─────────────────────
@@ -380,11 +404,16 @@ function unpack_θ(
             sp_fields[ps.name] = v
         end
     end
-    # Also apply fixed overrides per block
+    # Apply block-qualified fixed overrides (e.g. :unsk_μ, :skl_η)
     for (nm, val) in pairs(spec.fixed)
-        # We cannot know the block from the fixed NamedTuple alone,
-        # so fixed params with shared names apply to BOTH blocks unless
-        # those names also appear in free (already handled above).
+        s = string(nm)
+        if startswith(s, "unsk_")
+            field = Symbol(s[6:end])
+            haskey(up_fields, field) && (up_fields[field] = Float64(val))
+        elseif startswith(s, "skl_")
+            field = Symbol(s[5:end])
+            haskey(sp_fields, field) && (sp_fields[field] = Float64(val))
+        end
     end
 
     up = UnskilledParams(
@@ -469,11 +498,21 @@ function print_spec(spec::SMMSpec)
             spec.run.de_avg_tol > 0.0 ? @sprintf("%.1e", spec.run.de_avg_tol) : "off")
     @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e\n",
             spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol)
-    if !isnothing(spec.W)
+    if spec.run.w_cond_target == 2.0
+        @printf("  W:    equal weights (identity, no W matrix)\n")
+    elseif !isnothing(spec.W)
         cond_W = cond(spec.W)
-        @printf("  W:    optimal weight matrix provided (cond(W)=%.2e)\n", cond_W)
+        if spec.run.w_cond_target == 0.0
+            @printf("  W:    diagonal from moment Σ (cond(W)=%.2e)\n", cond_W)
+        elseif spec.run.w_cond_target == 1.0
+            @printf("  W:    compressed diagonal log(1 + 1/σ²) (cond(W)=%.2e)\n", cond_W)
+        else
+            @printf("  W:    optimal weight matrix (cond(W)=%.2e, target κ=%.1e)\n",
+                    cond_W, spec.run.w_cond_target)
+        end
     else
-        @printf("  W:    using diagonal weights from moment variances\n")
+        @printf("  W:    using diagonal weights from moment variances (target κ=%.1e)\n",
+                spec.run.w_cond_target)
     end
     @printf("╚══════════════════════════════════════════════════════╝\n\n")
 end

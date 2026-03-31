@@ -91,41 +91,148 @@ end
 
 
 """
-    load_weight_matrix(; window::Symbol = :base_fc, derived_dir::String) → Matrix{Float64}
+    load_weight_matrix(; window, derived_dir, cond_target) → Union{Nothing, Matrix{Float64}}
 
 Load the optimal weight matrix from influence functions.
 
 Reads `W_{window}.csv` (K × K matrix) from derived_dir.
-Returns a K × K symmetric positive definite matrix.
+Returns a K × K symmetric positive definite matrix, or `nothing`
+for the equal-weight (identity) case.
 
-If the loaded matrix has condition number > 1e8, falls back to
-diagonal 1/σ² from sigma_{window}.csv.
+Conditioning behaviour (controlled by `cond_target`):
+  - cond_target == 0.0:  Pure diagonal matrix from sigma_{window}.csv.
+    Weights are 1/σ² for each moment.
+  - cond_target == 1.0:  Compressed diagonal — loads diagonal weights
+    (1/σ²) from sigma_{window}.csv, then applies log(1 + d) element-wise
+    to compress the dynamic range while preserving ranking.
+  - cond_target == 2.0:  Equal weights — returns `nothing`.
+    The loss function will use compute_loss with unit diagonal weights,
+    i.e. all moments weighted equally (no W matrix).
+  - cond_target > 2.0:  Full optimal W matrix.  If the loaded W has
+    κ(W) > cond_target, shrink off-diagonal elements toward zero via
+        W_shrunk = (1 − α) W  +  α diag(W)
+    until κ(W_shrunk) ≤ cond_target.  The shrinkage factor α is found
+    by bisection.
 """
-function load_weight_matrix(; window::Symbol = :base_fc, derived_dir::String)
+function load_weight_matrix(;
+    window::Symbol = :base_fc,
+    derived_dir::String,
+    cond_target::Float64 = 1e8,
+)
 
     K = length(MOMENT_NAMES)
 
-    # ── Load optimal W from CSV ────────────────────────────────────────
+    # ── cond_target == 2.0  →  equal weights (identity / nothing) ─────
+    if cond_target == 2.0
+        @printf("  cond_target == 2.0 → equal weights (no W matrix)\n")
+        return nothing
+    end
+
+    # ── cond_target == 0.0  →  pure diagonal from Σ ───────────────────
+    if cond_target == 0.0
+        sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+        isfile(sigma_file) || error(
+            "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
+        sigma_vec = _read_sigma_csv(sigma_file)
+        W = Diagonal(1.0 ./ (sigma_vec .^ 2))
+        @printf("  cond_target == 0.0 → using pure diagonal W from %s\n", sigma_file)
+        return Matrix(W)
+    end
+
+    # ── cond_target == 1.0  →  compressed diagonal from Σ ─────────────
+    if cond_target == 1.0
+        sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+        isfile(sigma_file) || error(
+            "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
+        sigma_vec = _read_sigma_csv(sigma_file)
+        d = 1.0 ./ (sigma_vec .^ 2)
+        d_compressed = log.(1.0 .+ d)
+        W = Diagonal(d_compressed)
+        @printf("  cond_target == 1.0 → using compressed diagonal W from %s\n", sigma_file)
+        @printf("    raw diag range:        [%.4e, %.4e]\n", minimum(d), maximum(d))
+        @printf("    compressed diag range:  [%.4e, %.4e]\n", minimum(d_compressed), maximum(d_compressed))
+        return Matrix(W)
+    end
+
+    # ── cond_target > 2.0  →  load full optimal W from CSV ────────────
     W_file = joinpath(derived_dir, "W_$(window).csv")
     if isfile(W_file)
         W_loaded = _read_weight_matrix_csv(W_file)
         cond_W = cond(W_loaded)
-        if cond_W < 1e8
+        if cond_W <= cond_target
             @printf("  Loaded W matrix from %s  (cond = %.2e)\n", W_file, cond_W)
             return W_loaded
         else
-            @warn "W matrix ill-conditioned (cond(W)=$cond_W > 1e8). Falling back to diagonal from Σ."
+            # ── Shrink off-diagonals to reach target κ ─────────────────
+            W_shrunk, alpha = _shrink_to_target(W_loaded, cond_target)
+            cond_new = cond(W_shrunk)
+            msg = @sprintf("W matrix ill-conditioned (κ = %.2e > %.2e). Shrinking off-diagonal elements (α = %.6f → κ = %.2e).",
+                           cond_W, cond_target, alpha, cond_new)
+            @warn msg
+            return W_shrunk
         end
     end
 
-    # ── Diagonal fallback from sigma_{window}.csv ──────────────────────
+    # ── No W file found — diagonal fallback from sigma_{window}.csv ───
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-    isfile(sigma_file) || error("Neither W_$(window).csv nor sigma_$(window).csv found in $derived_dir — run the data pipeline first.")
+    isfile(sigma_file) || error(
+        "Neither W_$(window).csv nor sigma_$(window).csv found in $derived_dir — run the data pipeline first.")
 
     sigma_vec = _read_sigma_csv(sigma_file)
     W = Diagonal(1.0 ./ (sigma_vec .^ 2))
-    @printf("  Using diagonal W from %s\n", sigma_file)
+    @printf("  W_%s.csv not found — using diagonal W from %s\n",
+            window, sigma_file)
     return Matrix(W)
+end
+
+
+"""
+    _shrink_to_target(W, cond_target; tol, maxiter) → (W_shrunk, α)
+
+Shrink the off-diagonal elements of symmetric matrix W so that
+    κ(W_shrunk) ≤ cond_target
+using the convex combination
+    W(α) = (1 − α) W  +  α diag(W),       α ∈ [0, 1]
+
+At α = 0 we have the original W; at α = 1, a pure diagonal.
+The condition number is monotonically non-increasing in α, so
+bisection is guaranteed to converge.
+
+Returns the shrunk matrix and the shrinkage factor α used.
+"""
+function _shrink_to_target(
+    W::Matrix{Float64},
+    cond_target::Float64;
+    tol::Float64  = 1e-3,
+    maxiter::Int  = 100,
+)
+    D = Diagonal(diag(W))
+
+    # Sanity: if pure diagonal already exceeds target, just return it
+    if cond(Matrix(D)) > cond_target
+        return Matrix(D), 1.0
+    end
+
+    lo, hi = 0.0, 1.0
+    alpha  = 0.5
+    W_shrunk = similar(W)
+
+    for _ in 1:maxiter
+        alpha = (lo + hi) / 2.0
+        W_shrunk .= (1.0 - alpha) .* W .+ alpha .* D
+        κ = cond(W_shrunk)
+        if κ <= cond_target
+            hi = alpha          # can shrink less
+        else
+            lo = alpha          # need to shrink more
+        end
+        (hi - lo) < tol && break
+    end
+
+    # Use the conservative (higher-α) endpoint to guarantee κ ≤ target
+    alpha = hi
+    W_shrunk .= (1.0 - alpha) .* W .+ alpha .* D
+    return W_shrunk, alpha
 end
 
 
