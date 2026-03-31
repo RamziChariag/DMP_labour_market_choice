@@ -97,7 +97,7 @@ sim_smm = SimParams(
     anderson_reg   = 1e-10,
 
     damp_pstar_U   = 1.30,
-    damp_pstar_S   = 0.95,
+    damp_pstar_S   = 1.00,
 
     verbose        = 0,          # 0: model is silent; 1: print outer convergence info per iteration; 2: also print inner iteration details
     verbose_stride = 100,
@@ -107,7 +107,7 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :crisis_fc    
+WINDOW = :base_fc    
 
 
 @printf("Estimation window: %s\n", WINDOW)
@@ -341,13 +341,13 @@ run_params = SMMRunParams(
 
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 10_000,  # total SA proposals
-    sa_T0              = 5.0,     # initial temperature (higher = more uphill acceptance early)
+    sa_T0              = 0.5,     # initial temperature (higher = more uphill acceptance early)
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 1.00,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
     sa_reheat_patience = 500,     # proposals without improvement before reheating
-    sa_reheat_factor   = 2.00,     # temperature multiplier on reheat
-    sa_max_reheats     = 1,       # cap on total reheats (0 = unlimited)
+    sa_reheat_factor   = 3.00,     # temperature multiplier on reheat
+    sa_max_reheats     = 5,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
 

@@ -21,14 +21,18 @@
 ############################################################
 
 
+
 # ============================================================
 # Weighted loss
 # ============================================================
 
+
 """
     compute_loss(m_model, spec) -> Float64
 
+
     Q(θ) = Σ_k  w_k · [(m_k^model − m_k^data) / |m_k^data|]²
+
 
 Diagonal-weight loss with scale-normalised deviations.
 Each deviation is divided by |m̂_k| (floored at 1e-10) so that
@@ -49,12 +53,16 @@ function compute_loss(m_model::NamedTuple, spec::SMMSpec) :: Float64
 end
 
 
+
 """
     compute_loss_matrix(m_model, spec, W) -> Float64
 
+
     Q(θ) = g̃(θ)' W g̃(θ)     where g̃_k = (m_k^model − m̂_k) / |m̂_k|
 
+
 Compute the loss using the full K×K optimal weight matrix W = Σ̃⁻¹.
+
 
 Normalisation convention
 ───────────────────────
@@ -64,10 +72,12 @@ The data pipeline normalises each influence function ψ_k by
     Σ̃ = (1/N) Σ_i ψ̃(z_i) ψ̃(z_i)'
     W = Σ̃⁻¹
 
+
 Because W lives in normalised space, the deviation vector must
 also be normalised:  g̃_k = (m_k − m̂_k) / |m̂_k|.
 This ensures that Q(θ) = g̃' Σ̃⁻¹ g̃ is scale-invariant
 and consistent with the diagonal-weight loss in compute_loss.
+
 
 Mathematically, if D = diag(|m̂_k|), then:
     Σ̃ = D⁻¹ Σ_raw D⁻¹   ⟹   W = D Σ_raw⁻¹ D
@@ -77,6 +87,7 @@ So the normalisation cancels and is equivalent to using the
 raw optimal W with raw deviations — but numerically the
 normalised form is far better conditioned.
 
+
 Only moments with positive weight in spec.moments are included.
 """
 function compute_loss_matrix(
@@ -84,6 +95,7 @@ function compute_loss_matrix(
     spec::SMMSpec,
     W::Matrix{Float64}
 ) :: Float64
+
 
     # Build normalised deviation vector g̃_k = (m_k − m̂_k) / |m̂_k|
     dev_vec = Float64[]
@@ -96,7 +108,9 @@ function compute_loss_matrix(
         push!(dev_vec, dev)
     end
 
+
     isempty(dev_vec) && return 0.0
+
 
     # Compute Q = g̃' W g̃
     Q = dot(dev_vec, W * dev_vec)
@@ -104,16 +118,20 @@ function compute_loss_matrix(
 end
 
 
+
 # ============================================================
 # SMM objective
 # ============================================================
 
+
 """
     smm_objective(θ_unc, spec) -> Float64
+
 
 Solve the model at parameters decoded from θ_unc and return Q(θ).
 Returns Inf (never throws) on any failure or non-convergence.
 The solver always runs silently regardless of spec.sim.verbose.
+
 
 If spec.W is not nothing, uses the full weight matrix via
 compute_loss_matrix; otherwise uses diagonal weights via compute_loss.
@@ -123,7 +141,9 @@ function smm_objective(
     spec  :: SMMSpec
 ) :: Float64
 
+
     cp, rp, up, sp = unpack_θ(θ_unc, spec)
+
 
     local model, solve_result
     try
@@ -135,7 +155,9 @@ function smm_objective(
         return Inf
     end
 
+
     solve_result.ok || return Inf
+
 
     local obj_eq, m_model
     try
@@ -144,6 +166,7 @@ function smm_objective(
     catch
         return Inf
     end
+
 
     # Use full weight matrix if available; otherwise diagonal weights
     if !isnothing(spec.W)
@@ -154,9 +177,11 @@ function smm_objective(
 end
 
 
+
 # ============================================================
 # Result type
 # ============================================================
+
 
 struct SMMResult
     theta_opt  :: Vector{Float64}
@@ -168,15 +193,19 @@ struct SMMResult
 end
 
 
+
 # ============================================================
 # Simulated Annealing (own implementation)
 # ============================================================
+
 
 """
     _run_sa(spec; T0, step, max_iter, show_trace, trace_stride, rng)
         -> (theta_best, Q_best, iters)
 
+
 Simulated annealing in unconstrained (logit) space.
+
 
 Temperature schedule: T(t) = T0 / log(t + 2)
 Acceptance rule:
@@ -204,18 +233,23 @@ function _run_sa(
     Q          = smm_objective(theta, spec)
     theta_best = copy(theta)
     Q_best     = isfinite(Q) ? Q : Inf
+    Q_scale    = isfinite(Q) ? Q : Inf
     n_acc      = 0
     n_fin      = 0
     n_reheats  = 0
 
+
     steps_since_improvement = 0
     T_current = T0
+
 
     # Rolling window for adaptive step
     win_fin = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
     win_idx = 0
 
+
     actual_iters = 0
+
 
     if show_trace
         @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f\n",
@@ -224,9 +258,11 @@ function _run_sa(
         flush(stdout)
     end
 
+
     # t_local tracks steps since last reheat for per-segment cooling
     t_local    = 0
     T_reheat   = T0   # T at the start of current segment
+
 
     for t in 1:max_iter
         actual_iters = t
@@ -238,12 +274,15 @@ function _run_sa(
         T_current = T_reheat / (log(1.0 + cooling_rate * t_local))^cooling_exp
         T_current = max(T_current, 1e-8)
 
+
         # ── Proposal ──────────────────────────────────────────────────
         theta_prop = theta .+ step .* randn(rng, length(theta))
         Q_prop     = smm_objective(theta_prop, spec)
 
+
         is_fin = isfinite(Q_prop)
         is_fin && (n_fin += 1)
+
 
         # ── Adaptive step ─────────────────────────────────────────────
         if adapt_window > 0
@@ -260,15 +299,20 @@ function _run_sa(
             end
         end
 
+
         # ── Accept / reject ───────────────────────────────────────────
         if is_fin
+            if !isfinite(Q_scale)
+                Q_scale = Q_prop
+            end
             accept = if !isfinite(Q)
                 true
             elseif Q_prop <= Q
                 true
             else
-                rand(rng) < exp(-(Q_prop - Q) / T_current)
+                rand(rng) < exp(-(Q_prop - Q) / (T_current * Q_scale))
             end
+
 
             if accept
                 theta = theta_prop
@@ -288,6 +332,7 @@ function _run_sa(
             steps_since_improvement += 1
         end
 
+
         # ── Early stop: reheats exhausted and still stagnating ──────────
         if reheat_patience > 0 &&
            max_reheats > 0 && n_reheats >= max_reheats &&
@@ -300,10 +345,12 @@ function _run_sa(
             break
         end
 
+
         # ── Reheating on stagnation ────────────────────────────────────
         if reheat_patience > 0 &&
            steps_since_improvement >= reheat_patience &&
            (max_reheats == 0 || n_reheats < max_reheats)
+
 
             n_reheats += 1
             T_before   = T_current
@@ -314,12 +361,14 @@ function _run_sa(
             Q          = Q_best
             steps_since_improvement = 0
 
+
             if show_trace
                 @printf("  [SA REHEAT #%d  iter=%5d]  T %.4f→%.4f  restarting from Q_best=%.6e\n",
                         n_reheats, t, T_before, T_current, Q_best)
                 flush(stdout)
             end
         end
+
 
         # ── Progress trace ────────────────────────────────────────────
         if show_trace && t % trace_stride == 0
@@ -334,28 +383,66 @@ function _run_sa(
         end
     end
 
+
     if show_trace
         @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  reheats=%d\n",
                 Q_best, n_acc, actual_iters, n_fin, actual_iters, n_reheats)
         flush(stdout)
     end
 
+
     return theta_best, Q_best, actual_iters
 end
 
+
 # Alias so pack_theta works (smm_params.jl defines pack_θ with Unicode)
 pack_theta(spec) = pack_θ(spec)
+
+
+
+# ============================================================
+# Differential Evolution — internal helper
+# ============================================================
+
+
+"""
+    _pick3(rng, n, exclude) -> (a, b, c)
+
+
+Pick three distinct indices from 1:n, all different from `exclude`,
+using a rejection sampler.  Expected draws per call ≈ 3 + O(1/n),
+much cheaper than shuffling all n−1 candidates.
+"""
+@inline function _pick3(rng, n::Int, exclude::Int)
+    a = exclude
+    while a == exclude
+        a = rand(rng, 1:n)
+    end
+    b = exclude
+    while b == exclude || b == a
+        b = rand(rng, 1:n)
+    end
+    c = exclude
+    while c == exclude || c == a || c == b
+        c = rand(rng, 1:n)
+    end
+    return a, b, c
+end
+
 
 
 # ============================================================
 # Differential Evolution (own implementation)
 # ============================================================
 
+
 """
     _run_de(spec; max_iter, pop_size, f, cr, show_trace, trace_stride, rng)
         -> (theta_best, Q_best, iters)
 
+
 Differential Evolution in unconstrained (logit) space.
+
 
 Algorithm: DE/rand/1/bin  (standard, robust variant)
   For each member i of the population:
@@ -364,9 +451,11 @@ Algorithm: DE/rand/1/bin  (standard, robust variant)
     3. Trial:    u = v where rand < CR, else keep x_i  (binomial crossover)
     4. Select:   replace x_i with u if Q(u) < Q(x_i)
 
+
 Non-converging proposals (Q = Inf) are never accepted — the current
 population member survives unchanged, so the population always contains
 only feasible parameter vectors.
+
 
 Parameters
 ──────────
@@ -394,6 +483,7 @@ function _run_de(
     pop_size = pop_size > 0 ? pop_size : 10 * npar
     theta0   = pack_theta(spec)
 
+
     # ── Initialise population around starting point ────────────────────
     # First member is the supplied starting point; rest are uniform
     # random perturbations in logit space.  ±6 in logit space maps to
@@ -403,13 +493,16 @@ function _run_de(
             for _ in 1:pop_size]
     pop[1] = copy(theta0)
 
+
     # Evaluate initial population — Inf for non-converging members
     Q_pop = fill(Inf, pop_size)
+
 
     if show_gens
         @printf("  [DE init]  evaluating %d initial members...\n", pop_size)
         flush(stdout)
     end
+
 
     n_feasible = 0
     for i in 1:pop_size
@@ -422,15 +515,18 @@ function _run_de(
         end
     end
 
+
     i_best     = argmin(Q_pop)
     Q_best     = Q_pop[i_best]
     theta_best = copy(pop[i_best])
+
 
     if show_gens
         @printf("  [DE init]  feasible=%d/%d  Q_best=%.6e\n",
                 n_feasible, pop_size, Q_best)
         flush(stdout)
     end
+
 
     # ── Main DE loop (generations) ─────────────────────────────────────
     n_evals      = pop_size
@@ -440,13 +536,16 @@ function _run_de(
         actual_gens = gen
         n_improved = 0
         for i in 1:pop_size
-            # Select three distinct members ≠ i
-            candidates = filter(j -> j != i, 1:pop_size)
-            abc = candidates[randperm(rng, length(candidates))[1:3]]
-            a, b, c = pop[abc[1]], pop[abc[2]], pop[abc[3]]
+            # ── Pick three distinct donors ≠ i ─────────────────────────
+            # _pick3 uses a rejection sampler: O(1) draws expected,
+            # avoids the O(pop_size) randperm shuffle of the old code.
+            ia, ib, ic = _pick3(rng, pop_size, i)
+            a, b, c    = pop[ia], pop[ib], pop[ic]
+
 
             # Mutant vector
             v = a .+ f .* (b .- c)
+
 
             # Binomial crossover — ensure at least one dimension from mutant
             mask    = rand(rng, npar) .< cr
@@ -454,9 +553,11 @@ function _run_de(
             mask[j_force] = true
             u = ifelse.(mask, v, pop[i])
 
+
             # Evaluate trial vector
             Q_u = smm_objective(u, spec)
             n_evals += 1
+
 
             # Greedy selection — Inf proposals never win
             if isfinite(Q_u) && Q_u < Q_pop[i]
@@ -469,6 +570,7 @@ function _run_de(
                 end
             end
 
+
             # Within-generation progress
             if show_members && i % trace_stride == 0
                 Q_i = Q_pop[i]
@@ -480,12 +582,14 @@ function _run_de(
             end
         end
 
+
         # Stagnation tracking
         if n_improved == 0
             stagnation += 1
         else
             stagnation = 0
         end
+
 
         # End-of-generation summary
         if show_gens
@@ -496,12 +600,14 @@ function _run_de(
             flush(stdout)
         end
 
+
         # Early stopping — stagnation
         if stagnation >= patience
             show_gens && @printf("  [DE]  early stop: no improvement for %d generations\n", patience)
             flush(stdout)
             break
         end
+
 
         # Early stopping — population convergence around best
         if avg_tol > 0.0 && isfinite(Q_best) && Q_best != 0.0
@@ -518,28 +624,35 @@ function _run_de(
         end
     end
 
+
     if show_gens
         @printf("  [DE done]  Q_best=%.6e  total evals=%d\n", Q_best, n_evals)
         flush(stdout)
     end
 
+
     return theta_best, Q_best, actual_gens
 end
+
 
 
 # ============================================================
 # Main optimisation entry point
 # ============================================================
 
+
 """
     run_smm(spec; method=:de, rng=default_rng()) -> SMMResult
+
 
 Run SMM estimation. All settings (grid sizes, DE parameters,
 Nelder-Mead parameters, tracing) are read from `spec.run`.
 
+
   :de          Differential evolution — global search (default).
   :sa          Simulated annealing — alternative global search.
   :neldermead  Nelder-Mead — local polish after :de or :sa.
+
 
 Typical workflow (both stages read their settings from spec.run):
   res_de  = run_smm(spec; method=:de)
@@ -551,11 +664,14 @@ function run_smm(
     rng             = Random.default_rng(),
 ) :: SMMResult
 
+
     r    = spec.run     # shorthand
     npar = length(spec.free)
 
+
     @printf("\nStarting SMM  (%s,  %d free params)\n", method, npar)
     flush(stdout)
+
 
     if method == :de
         theta_opt, loss_opt, niters = _run_de(
@@ -572,6 +688,7 @@ function run_smm(
             rng          = rng,
         )
         converged = isfinite(loss_opt)
+
 
     elseif method == :sa
         theta_opt, loss_opt, niters = _run_sa(
@@ -592,10 +709,12 @@ function run_smm(
         )
         converged = isfinite(loss_opt)
 
+
     elseif method in (:neldermead, :lbfgs, :bfgs)
         theta0     = pack_theta(spec)
         iter_count = Ref(0)
         best_loss  = Ref(Inf)
+
 
         function obj_traced(theta)
             iter_count[] += 1
@@ -611,8 +730,10 @@ function run_smm(
             return isfinite(Q) ? Q : 1e16
         end
 
+
         opt_method = (method == :neldermead) ? Optim.NelderMead() :
                      (method == :lbfgs)      ? Optim.LBFGS()      : Optim.BFGS()
+
 
         options   = Optim.Options(iterations = r.nm_max_iter,
                                   f_tol      = r.nm_f_tol,
@@ -624,16 +745,20 @@ function run_smm(
         converged = Optim.converged(result) && isfinite(loss_opt)
         niters    = Optim.iterations(result)
 
+
     else
         error("Unknown method :$method. Choose :de, :sa, :neldermead, :lbfgs, or :bfgs.")
     end
+
 
     @printf("\nSMM complete:  Q=%.6e  converged=%s  iters=%d\n",
             isfinite(loss_opt) ? loss_opt : Inf, converged, niters)
     flush(stdout)
 
+
     cp_opt, rp_opt, up_opt, sp_opt = unpack_θ(theta_opt, spec)
     params_opt = _params_to_namedtuple(cp_opt, rp_opt, up_opt, sp_opt, spec)
+
 
     res = SMMResult(theta_opt, params_opt, loss_opt, converged, niters, spec)
     print_results(res)
@@ -641,12 +766,15 @@ function run_smm(
 end
 
 
+
 # ============================================================
 # Multi-start wrapper
 # ============================================================
 
+
 """
     multistart_smm(spec, n_starts; method=:de, seed=42) -> SMMResult
+
 
 Run `n_starts` searches from randomly perturbed starting points
 and return the best result.  All optimiser settings come from
@@ -659,18 +787,23 @@ function multistart_smm(
     seed     :: Int    = 42,
 ) :: SMMResult
 
+
     rng    = Random.MersenneTwister(seed)
     theta0 = pack_theta(spec)
     npar   = length(theta0)
 
+
     best_result = nothing
+
 
     for s in 1:n_starts
         @printf("\n══ Multi-start %d / %d ══\n", s, n_starts)
         flush(stdout)
 
+
         theta_start = theta0 .+ 0.5 .* randn(rng, npar)
         spec_s      = _spec_with_init(spec, theta_start)
+
 
         try
             res_s = run_smm(spec_s; method = method, rng = rng)
@@ -684,15 +817,18 @@ function multistart_smm(
         end
     end
 
+
     @printf("\nMulti-start done.  Best Q = %.6e\n",
             isnothing(best_result) ? Inf : best_result.loss_opt)
     return best_result
 end
 
 
+
 # ============================================================
 # Result display and saving
 # ============================================================
+
 
 function print_results(res::SMMResult)
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
@@ -718,6 +854,7 @@ function print_results(res::SMMResult)
 end
 
 
+
 function save_results(res::SMMResult, path::String)
     open(path, "w") do io
         println(io, "block,name,label,estimate,lb,ub,fixed")
@@ -738,9 +875,11 @@ function save_results(res::SMMResult, path::String)
 end
 
 
+
 # ============================================================
 # Internal helpers
 # ============================================================
+
 
 function _params_to_namedtuple(cp, rp, up, sp, spec::SMMSpec)
     d = Dict{Symbol, Float64}()
@@ -754,6 +893,7 @@ function _params_to_namedtuple(cp, rp, up, sp, spec::SMMSpec)
     end
     return NamedTuple(d)
 end
+
 
 function _spec_with_init(spec::SMMSpec, theta_unc::Vector{Float64})
     new_free = [

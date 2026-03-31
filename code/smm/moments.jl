@@ -412,9 +412,13 @@ function model_moments(obj)
     # 25th percentile: first bin where cumulative density crosses 0.25
     function _percentile(wmid, dens, bw, target)
         cum = 0.0
-        for (w, d) in zip(wmid, dens)
-            cum += d * bw
-            cum >= target && return w
+        for j in eachindex(wmid)
+            mass = dens[j] * bw
+            if cum + mass >= target
+                frac = mass > 1e-14 ? (target - cum) / mass : 0.5
+                return wmid[j] - bw/2 + frac * bw   # interpolate within bin j
+            end
+            cum += mass
         end
         return wmid[end]
     end

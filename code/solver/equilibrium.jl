@@ -197,10 +197,13 @@ function compute_equilibrium_objects(model::Model)
         bw   = step(wgrid)
         dens = zeros(Nb)
         for (w, m) in zip(wages, weights)
-            ib = searchsortedlast(wgrid, w)
-            if 1 <= ib <= Nb
-                dens[ib] += m
-            end
+            # fractional bin position (0-indexed from left edge of bin 1)
+            raw  = (w - first(wgrid)) / bw
+            j_lo = clamp(floor(Int, raw) + 1, 1, Nb)
+            j_hi = clamp(j_lo + 1,            1, Nb)
+            α    = clamp(raw - (j_lo - 1), 0.0, 1.0)   # weight on j_hi
+            dens[j_lo] += (1.0 - α) * m
+            dens[j_hi] +=        α  * m
         end
         total = sum(dens) * bw
         return total > 0.0 ? dens ./ total : dens

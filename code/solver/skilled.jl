@@ -38,7 +38,12 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Locate pstar_S(x): first grid point where Smax(x, p) >= 0
+# Locate pstar_S(x): interpolated zero-crossing of Smax(x, ·)
+#
+# Instead of snapping to a grid node, we linearly interpolate between
+# the last negative and first non-negative node to find a smooth
+# zero-crossing.  This eliminates the O(Δp) grid-snapping oscillation
+# that prevented p_star_S from converging.
 # ---------------------------------------------------------------------------
 function find_cutoff_from_j0(
     pgrid   :: Vector{Float64},
@@ -46,26 +51,51 @@ function find_cutoff_from_j0(
     j0_prev :: Int
 )
     Np = length(pgrid)
+
+    # --- Find the crossing bracket [j_neg, j_pos] where Smax changes sign ---
     if Smax[j0_prev] < 0.0
-        # True cutoff is above j0_prev: search forward for first non-negative surplus
+        # Search forward from j0_prev for the first non-negative node
+        j_pos = 0
         @inbounds for j in j0_prev:Np
-            Smax[j] >= 0.0 && return pgrid[j]
-        end
-        return pgrid[Np]   # all matches unprofitable
-    else
-        # True cutoff is at or below j0_prev: search backward for zero-crossing
-        @inbounds for j in j0_prev:-1:1
-            if Smax[j] < 0.0
-                return pgrid[min(j + 1, Np)]
+            if Smax[j] >= 0.0
+                j_pos = j
+                break
             end
         end
-        return pgrid[1]    # surplus positive everywhere: hire at minimum quality
+        j_pos == 0 && return pgrid[Np]   # all matches unprofitable
+        j_neg = max(j_pos - 1, 1)
+    else
+        # Search backward from j0_prev for the last negative node
+        j_neg = 0
+        @inbounds for j in j0_prev:-1:1
+            if Smax[j] < 0.0
+                j_neg = j
+                break
+            end
+        end
+        j_neg == 0 && return pgrid[1]    # surplus positive everywhere
+        j_pos = min(j_neg + 1, Np)
     end
+
+    # --- Linear interpolation of the zero-crossing ---
+    S_lo = Smax[j_neg]    # < 0
+    S_hi = Smax[j_pos]    # >= 0
+    dS   = S_hi - S_lo
+    if abs(dS) < 1e-14
+        return pgrid[j_pos]   # degenerate: both ≈ 0, snap to positive side
+    end
+    # α ∈ [0,1]:  0 at j_neg, 1 at j_pos
+    α    = -S_lo / dS
+    α    = clamp(α, 0.0, 1.0)
+    return pgrid[j_neg] + α * (pgrid[j_pos] - pgrid[j_neg])
 end
 
 
 # ---------------------------------------------------------------------------
-# Locate OJS cutoff poj(x): first p >= pstar where S1(p) - S0(p) <= 0
+# Locate OJS cutoff poj(x): interpolated zero-crossing of S1 − S0
+#
+# Same interpolation logic as find_cutoff_from_j0: find where
+# diff = S1 − S0 crosses zero from above, and interpolate.
 # ---------------------------------------------------------------------------
 function find_poj_from_diff_grid(
     pgrid :: Vector{Float64},
@@ -74,10 +104,58 @@ function find_poj_from_diff_grid(
 )
     Np = length(pgrid)
     j0 = pcut_index(pgrid, pstar)
+
+    # Search for the first node at or above pstar where diff ≤ 0
     @inbounds for j in j0:Np
-        diff[j] <= 0.0 && return pgrid[j]
+        if diff[j] <= 0.0
+            # Interpolate between j-1 (positive) and j (non-positive)
+            if j > j0 && diff[j-1] > 0.0
+                d_hi = diff[j-1]     # > 0
+                d_lo = diff[j]       # ≤ 0
+                dD   = d_hi - d_lo
+                if abs(dD) < 1e-14
+                    return pgrid[j]
+                end
+                α = d_hi / dD
+                α = clamp(α, 0.0, 1.0)
+                return pgrid[j-1] + α * (pgrid[j] - pgrid[j-1])
+            end
+            return pgrid[j]   # diff ≤ 0 already at j0 — no OJS region
+        end
     end
     return pgrid[Np]
+end
+
+
+# ---------------------------------------------------------------------------
+# Soft-threshold weight for the grid cell straddling pstar.
+#
+# Returns a weight ω ∈ [0, 1] for grid node j given that the true cutoff
+# is pstar.  Nodes well above pstar get ω = 1 (fully active), nodes well
+# below get ω = 0 (inactive).  The one node in the straddling cell gets
+# ω = fraction of the cell that lies above pstar.
+#
+# This makes the surplus surfaces vary *continuously* with pstar, which
+# is necessary for any fixed-point iteration on the cutoffs to converge.
+# Without it, the hard threshold at pcut_index creates a discontinuous
+# map p*(old) → surplus → p*(new) that admits period-2 limit cycles.
+# ---------------------------------------------------------------------------
+@inline function _soft_weight(
+    pj      :: Float64,
+    pstar   :: Float64,
+    pgrid   :: Vector{Float64},
+    j       :: Int,
+    Np      :: Int
+)
+    pj >= pstar && return 1.0
+    # Node is below pstar.  Check if pstar falls in the cell [p_{j}, p_{j+1}].
+    j >= Np && return 0.0
+    p_next = pgrid[min(j + 1, Np)]
+    p_next <= pstar && return 0.0    # entire cell below cutoff
+    # Fraction of cell [pj, p_next] that lies above pstar:
+    cell = p_next - pj
+    cell < 1e-14 && return 0.0
+    return clamp((p_next - pstar) / cell, 0.0, 1.0)
 end
 
 
@@ -86,6 +164,9 @@ end
 #
 # Given θ, pstar, poj held in sc, iterate on U_S(x) and
 # surplus surfaces S0(x,p), S1(x,p).
+#
+# Uses soft thresholding around pstar so that the surplus surfaces
+# are continuous in pstar.  See _soft_weight above.
 # ---------------------------------------------------------------------------
 function skilled_inner_loop!(
     model :: Model;
@@ -138,17 +219,22 @@ function skilled_inner_loop!(
             @inbounds begin
                 x     = gp.x[ix]
                 pstar = clamp01(sc.pstar[ix])
+                # j0: first grid node at or above pstar (for tail integral start)
                 j0    = pcut_index(sg.p, pstar)
+                # j0_soft: first node that could have nonzero weight
+                # (one below j0, if it exists, to capture the straddling cell)
+                j0_soft = max(j0 - 1, 1)
 
-                # (1) Tail integrals of Smax under dΓ
+                # (1) Tail integrals of Smax under dΓ, with soft weights
                 denom_nb = max(1.0 - β, 1e-14)
                 acc = 0.0
                 for j in Np:-1:1
+                    ω_j    = _soft_weight(sg.p[j], pstar, sg.p, j, Np)
                     Smax_j = max(sc.J0[ix, j], sc.J1[ix, j]) / denom_nb
-                    acc      += Smax_j * wΓ[j]
+                    acc      += ω_j * Smax_j * wΓ[j]
                     tailE[j]  = acc
                 end
-                I = tailE[j0]
+                I = tailE[j0_soft]
 
                 # (2) Unemployment value: (r+ν) U_S = bS + f·β·I
                 U_old        = sc.U[ix]
@@ -163,9 +249,11 @@ function skilled_inner_loop!(
                 base = r + ν + ξ + λ
 
                 for j in 1:Np
-                    pj = sg.p[j]
+                    pj  = sg.p[j]
+                    ω_j = _soft_weight(pj, pstar, sg.p, j, Np)
 
-                    if j < j0
+                    if ω_j <= 0.0
+                        # Fully below cutoff — match destroyed
                         sc.E0[ix, j] = U_new
                         sc.E1[ix, j] = U_new
                         sc.J0[ix, j] = 0.0
@@ -178,17 +266,19 @@ function skilled_inner_loop!(
 
                     # OJS surplus
                     tail_mass_j = pre.tail_weights[j]
-                    tail_Emax_j = tailE[max(j, j0)]
+                    tail_Emax_j = tailE[max(j, j0_soft)]
                     S1 = (PS * x * pj - (r + ν) * U_new - σ + λ * I +
                           f * β * tail_Emax_j) / (base + f * tail_mass_j)
 
                     E0_old = sc.E0[ix, j]
                     E1_old = sc.E1[ix, j]
 
-                    sc.E0[ix, j] = U_new + β * S0
-                    sc.E1[ix, j] = U_new + β * S1
-                    sc.J0[ix, j] = (1.0 - β) * S0
-                    sc.J1[ix, j] = (1.0 - β) * S1
+                    # Soft-blend: ω=1 → fully active surplus;
+                    #             ω<1 → partial (straddling cell)
+                    sc.E0[ix, j] = U_new + β * ω_j * S0
+                    sc.E1[ix, j] = U_new + β * ω_j * S1
+                    sc.J0[ix, j] = (1.0 - β) * ω_j * S0
+                    sc.J1[ix, j] = (1.0 - β) * ω_j * S1
 
                     dS = max(abs(sc.E0[ix, j] - E0_old),
                              abs(sc.E1[ix, j] - E1_old))
@@ -424,7 +514,8 @@ function solve_skilled_block!(
     Np       = length(sg.p)
     denom_nb = max(1.0 - sp.β, 1e-14)
 
-    aaθ = Anderson1(1)
+    # Anderson acceleration on the joint state [theta; pstar; poj]
+    aa_joint = Anderson1(1 + 2 * Nx)
 
     pst_prop = zeros(Float64, Nx)
     poj_prop = zeros(Float64, Nx)
@@ -458,6 +549,7 @@ function solve_skilled_block!(
             end
         end
 
+        # (C) Stationary distribution (using proposed cutoffs temporarily)
         damp = sim.damp_pstar_S
         @inbounds for ix in 1:Nx
             sc.pstar[ix] = clamp01(damp * pst_prop[ix] + (1.0 - damp) * pstar_old[ix])
@@ -465,30 +557,41 @@ function solve_skilled_block!(
                                clamp01(damp * poj_prop[ix] + (1.0 - damp) * poj_old[ix]))
         end
 
-        # (C) Stationary distribution
         solve_stationary_skilled!(model; mS_in = mS_in)
 
-        # (D) Market tightness θ (Anderson on scalar)
+        # (D) Market tightness θ
         θ_raw = update_theta_skilled(model)
+
+        # (E) Anderson acceleration on joint state vector [θ; p*; poj]
+        #     x = old state,  f = new (raw) proposal
+        #     Anderson(m=1) detects period-2 cycles and extrapolates
+        #     to the midpoint fixed-point.
         if sim.use_anderson
-            θ_acc = anderson1_update!(aaθ, [θ_old], [θ_raw])[1]
-            sc.θ  = max(θ_acc, 1e-14)
+            x_old = vcat([θ_old], pstar_old, poj_old)
+            f_raw = vcat([θ_raw], sc.pstar,  sc.poj)
+            x_new = anderson1_update!(aa_joint, x_old, f_raw)
+
+            sc.θ  = max(x_new[1], 1e-14)
+            @inbounds for ix in 1:Nx
+                sc.pstar[ix] = clamp01(x_new[1 + ix])
+                sc.poj[ix]   = clamp01(x_new[1 + Nx + ix])
+                sc.poj[ix]   = max(sc.pstar[ix], sc.poj[ix])  # enforce poj ≥ pstar
+            end
         else
-            sc.θ  = θ_raw
+            sc.θ = θ_raw
         end
 
         # NaN/Inf guard — abort immediately
-        if !isfinite(sc.θ)
-            sim.verbose >= 1 && @printf("  [outer S]  NaN/Inf θ at it=%d — aborting\n", it)
+        if !isfinite(sc.θ) || any(!isfinite, sc.pstar) || any(!isfinite, sc.poj)
+            sim.verbose >= 1 && @printf("  [outer S]  NaN/Inf in state at it=%d — aborting\n", it)
             return false
         end
 
-        # (E) Convergence
+        # (E) Convergence — must check all state variables
         dθ = abs(sc.θ - θ_old)
         dp = supnorm(sc.pstar, pstar_old)
         dj = supnorm(sc.poj,   poj_old)
-        #d  = max(dθ, dp, dj)
-        d = dθ
+        d  = max(dθ, dp, dj)
 
         if sim.verbose >= 2 && (it == 1 || it % sim.verbose_stride == 0)
             @printf("  [outer S it=%d]  maxΔ=%.3e  (Δθ=%.3e  Δp*=%.3e  Δpoj=%.3e)  θ=%.4f\n",
