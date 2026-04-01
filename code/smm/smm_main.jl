@@ -47,6 +47,7 @@ using Optim
 using CSV
 using DataFrames
 using Serialization
+using Clustering
 
 println("done."); flush(stdout)
 

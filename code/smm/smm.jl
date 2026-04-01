@@ -225,7 +225,7 @@ function _run_sa(
     max_reheats      :: Int     = 5,
     adapt_window     :: Int     = 50,
     target_fin       :: Float64 = 0.90,
-    random_init      :: Bool    = true,    # ← new
+    random_init      :: Bool    = true,   
     show_trace       :: Bool    = true,
     trace_stride     :: Int     = 100,
     rng                         = Random.default_rng(),
@@ -440,8 +440,60 @@ end
 
 
 # ============================================================
-# Differential Evolution (own implementation)
+# Differential Evolution 
 # ============================================================
+
+"""
+    _count_basins(pop, Q_pop, spec; eps_frac, min_pts) -> Int
+
+Count distinct parameter-space regions in the feasible population
+using DBSCAN in normalised constrained space.
+
+Each parameter is mapped to [0,1] via (x_k − lb_k)/(ub_k − lb_k)
+before distance computations, making the radius scale-free across
+parameters with different ranges.
+
+Neighbourhood radius:
+    eps = eps_frac × √(npar / 6)
+This scales with the expected inter-point L2 distance for d-dimensional
+uniform random vectors, so the effective neighbourhood fraction stays
+constant as npar changes.  With npar=23 and eps_frac=0.25, eps ≈ 0.49.
+
+Early DE: population spread uniformly → DBSCAN finds few or no clusters
+          (most points are noise).
+Late DE:  population contracting → clusters emerge and their number
+          reflects how many distinct attractors are being tracked.
+
+Returns the number of DBSCAN clusters (noise excluded).
+Returns 0 if fewer than min_pts feasible members exist.
+"""
+function _count_basins(
+    pop      :: Vector{Vector{Float64}},
+    Q_pop    :: Vector{Float64},
+    spec     :: SMMSpec;
+    eps_frac :: Float64 = 0.25,
+    min_pts  :: Int     = 3,
+) :: Int
+    feas_idx = findall(isfinite, Q_pop)
+    length(feas_idx) < min_pts && return 0
+
+    npar  = length(spec.free)
+    nfeas = length(feas_idx)
+
+    # Build npar × nfeas matrix in normalised constrained space
+    X = Matrix{Float64}(undef, npar, nfeas)
+    for (col, i) in enumerate(feas_idx)
+        θ = pop[i]
+        for (k, ps) in enumerate(spec.free)
+            x_k       = _to_constrained(θ[k], ps.lb, ps.ub)
+            X[k, col] = (x_k - ps.lb) / (ps.ub - ps.lb)
+        end
+    end
+
+    eps    = eps_frac * sqrt(npar / 6.0)
+    result = dbscan(X, eps; min_neighbors = min_pts - 1)
+    return length(result.clusters)
+end
 
 
 """
@@ -623,10 +675,11 @@ function _run_de(
 
         # End-of-generation summary
         if show_gens
-            Q_mean = mean(filter(isfinite, Q_pop))
-            n_feas = count(isfinite, Q_pop)
-            @printf("  [DE gen=%4d DONE]  Q_best=%.6e  Q_mean=%.6e  feasible=%d/%d  improved=%d  stagnation=%d/%d  evals=%d\n",
-                    gen, Q_best, Q_mean, n_feas, pop_size, n_imp, stagnation, patience, n_eval)
+            Q_mean  = mean(filter(isfinite, Q_pop))
+            n_feas  = count(isfinite, Q_pop)
+            n_bas   = _count_basins(pop, Q_pop, spec)
+            @printf("  [DE gen=%4d DONE]  Q_best=%.6e  feasible=%d/%d  improved=%d  stagnation=%d/%d  basins=%d  evals=%d\n",
+                    gen, Q_best, n_feas, pop_size, n_imp, stagnation, patience, n_bas, n_eval)
             flush(stdout)
         end
 
@@ -729,6 +782,7 @@ function run_smm(
             max_reheats     = r.sa_max_reheats,
             adapt_window    = r.sa_adapt_window,
             target_fin      = r.sa_target_fin,
+            random_init     = true,
             show_trace      = r.show_trace_generations,
             trace_stride    = r.trace_stride,
             rng             = rng,
@@ -809,7 +863,7 @@ and return the best result.  All optimiser settings come from
 function multistart_smm(
     spec     :: SMMSpec,
     n_starts :: Int;
-    method   :: Symbol = :de,
+    method   :: Symbol = :sa,
     seed     :: Int    = 42,
 ) :: SMMResult
 
