@@ -225,11 +225,27 @@ function _run_sa(
     max_reheats      :: Int     = 5,
     adapt_window     :: Int     = 50,
     target_fin       :: Float64 = 0.90,
+    random_init      :: Bool    = true,    # ← new
     show_trace       :: Bool    = true,
     trace_stride     :: Int     = 100,
     rng                         = Random.default_rng(),
 )
-    theta      = pack_theta(spec)
+    # ── Starting point ────────────────────────────────────────────────
+    # random_init=true:  draw uniform in constrained space, same as DE.
+    # random_init=false: use the init values baked into spec (warm start).
+    theta = if random_init
+        theta_j = Vector{Float64}(undef, length(spec.free))
+        for (k, ps) in enumerate(spec.free)
+            x_k = ps.lb + (ps.ub - ps.lb) * rand(rng)
+            x_k = clamp(x_k, ps.lb + 1e-8 * (ps.ub - ps.lb),
+                             ps.ub - 1e-8 * (ps.ub - ps.lb))
+            theta_j[k] = _to_unconstrained(x_k, ps.lb, ps.ub)
+        end
+        theta_j
+    else
+        pack_theta(spec)    # original behaviour — used when warm-starting
+    end
+
     Q          = smm_objective(theta, spec)
     theta_best = copy(theta)
     Q_best     = isfinite(Q) ? Q : Inf
@@ -238,31 +254,23 @@ function _run_sa(
     n_fin      = 0
     n_reheats  = 0
 
-
     steps_since_improvement = 0
     T_current = T0
 
-
-    # Rolling window for adaptive step
     win_fin = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
     win_idx = 0
 
-
     actual_iters = 0
 
-
     if show_trace
-        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f\n",
+        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f  random_init=%s\n",
                 isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (bad starting point)",
-                T0, step)
+                T0, step, random_init)
         flush(stdout)
     end
 
-
-    # t_local tracks steps since last reheat for per-segment cooling
-    t_local    = 0
-    T_reheat   = T0   # T at the start of current segment
-
+    t_local  = 0
+    T_reheat = T0
 
     for t in 1:max_iter
         actual_iters = t
