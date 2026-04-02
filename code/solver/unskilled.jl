@@ -78,10 +78,13 @@ function solve_unskilled_surplus_on_grid!(
     B     = (λ / denom) * tail_mass
     I     = (abs(1.0 - B) < 1e-14) ? 0.0 : (A / (1.0 - B))
 
-    # (3) Fill surplus surface with soft weights — I is now defined
+    # (3) Fill surplus surface with soft weights — I is now defined.
+    # Clamp to ≥ 0: when pstar is clamped to 1, _soft_weight returns 1 at
+    # j=Np (p=pstar=1) but the raw formula is negative there by construction,
+    # violating S(p) ≥ 0.  The max enforces the model definition exactly.
     for j in 1:Np
         ω        = _soft_weight(pgrid[j], pstar_x, pgrid, j, Np)
-        Svec[j]  = ω * (PU * x * pgrid[j] - (r + ν) * Ux + λ * I) / denom
+        Svec[j]  = max(ω * (PU * x * pgrid[j] - (r + ν) * Ux + λ * I) / denom, 0.0)
     end
 
     return I, tail_mass, 0   # i0=0 sentinel, callers only use I

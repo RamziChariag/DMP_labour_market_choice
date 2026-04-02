@@ -280,13 +280,16 @@ function skilled_inner_loop!(
                     end
 
                     # No-search surplus
-                    S0 = (PS * x * pj - (r + ν) * U_new + λ * I) / base
+                    # Clamp to ≥ 0: same boundary issue as the unskilled block —
+                    # when pstar is clamped to 1, ω_j=1 at j=Np but the raw
+                    # formula can be negative there, violating S(p) ≥ 0.
+                    S0 = max((PS * x * pj - (r + ν) * U_new + λ * I) / base, 0.0)
 
                     # OJS surplus
                     tail_mass_j = pre.tail_weights[j]
                     tail_Emax_j = tailE[max(j, j0_soft)]
-                    S1 = (PS * x * pj - (r + ν) * U_new - σ + λ * I +
-                          f * β * tail_Emax_j) / (base + f * tail_mass_j)
+                    S1 = max((PS * x * pj - (r + ν) * U_new - σ + λ * I +
+                          f * β * tail_Emax_j) / (base + f * tail_mass_j), 0.0)
 
                     E0_old = sc.E0[ix, j]
                     E1_old = sc.E1[ix, j]
