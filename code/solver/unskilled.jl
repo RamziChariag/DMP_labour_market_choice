@@ -272,7 +272,7 @@ function update_theta_unskilled(model::Model)
     Jbar    = dot(uc.Jfrontier .* uc.u, gp.wx)
 
     if Jbar < 1e-14 || U_total < 1e-14 || !isfinite(Jbar) || !isfinite(U_total)
-        return uc.θ
+        return 100.0  # push θ high → disrupts pstar=1 fixed point → solver can find live equilibrium
     end
 
     q     = up.k * U_total / Jbar
