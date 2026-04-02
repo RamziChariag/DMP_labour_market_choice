@@ -181,29 +181,36 @@ function load_weight_matrix(;
     # ── cond_target > 2.0  →  load full optimal W from CSV ────────────
     W_file = joinpath(derived_dir, "W_$(window).csv")
     if isfile(W_file)
-        W_loaded = _read_weight_matrix_csv(W_file)
-        # Subset only if the CSV is the full K×K matrix.
-        # If the pipeline already saved a pre-subsetted matrix (different or same
-        # moment spec), use it as-is. This allows warm-starting with a new W
-        # without requiring the pipeline and SMM spec to match exactly.
-        if size(W_loaded, 1) == K
-            W_loaded = W_loaded[active_idx, active_idx]
-        end
-        cond_W = cond(W_loaded)
-        if cond_W <= cond_target
-            @printf("  Loaded W matrix from %s  (cond = %.2e)\n", W_file, cond_W)
-            return W_loaded
-        else
-            # ── Shrink off-diagonals to reach target κ ─────────────────
-            # Shrinkage is applied on the already-subsetted matrix, so the
-            # condition number is evaluated on the active submatrix only.
-            W_shrunk, alpha = _shrink_to_target(W_loaded, cond_target)
-            cond_new = cond(W_shrunk)
-            msg = @sprintf("W matrix ill-conditioned (κ = %.2e > %.2e). Shrinking off-diagonal elements (α = %.6f → κ = %.2e).",
-                           cond_W, cond_target, alpha, cond_new)
+        W_raw, W_names = _read_weight_matrix_csv(W_file)
+        # Subset by column name — the CSV can be any size from any prior run.
+        # We only extract the rows/columns matching the currently active moments.
+        active_names = [MOMENT_NAMES[i] for i in active_idx]
+        csv_pos      = Dict(nm => i for (i, nm) in enumerate(W_names))
+        matched_pos  = [get(csv_pos, nm, 0) for nm in active_names]
+        missing_nms  = [nm for (nm, p) in zip(active_names, matched_pos) if p == 0]
+        if !isempty(missing_nms)
+            msg = @sprintf("W CSV is missing active moments (%s) — falling back to diagonal W.",
+                           join(string.(missing_nms), ", "))
             @warn msg
-            return W_shrunk
+        else
+            W_loaded = W_raw[matched_pos, matched_pos]
+            cond_W = cond(W_loaded)
+            if cond_W <= cond_target
+                @printf("  Loaded W matrix from %s  (cond = %.2e)\n", W_file, cond_W)
+                return W_loaded
+            else
+                # ── Shrink off-diagonals to reach target κ ─────────────────
+                # Shrinkage is applied on the already-subsetted matrix, so the
+                # condition number is evaluated on the active submatrix only.
+                W_shrunk, alpha = _shrink_to_target(W_loaded, cond_target)
+                cond_new = cond(W_shrunk)
+                msg = @sprintf("W matrix ill-conditioned (κ = %.2e > %.2e). Shrinking off-diagonal elements (α = %.6f → κ = %.2e).",
+                               cond_W, cond_target, alpha, cond_new)
+                @warn msg
+                return W_shrunk
+            end
         end
+        # Some active moments were missing from the CSV — fall through to diagonal
     end
 
     # ── No W file found — diagonal fallback from sigma_{window}.csv ───
@@ -372,7 +379,7 @@ Expected format: CSV with K columns (moment names as headers) and K rows, symmet
 """
 function _read_weight_matrix_csv(filepath::String)
     df = CSV.read(filepath, DataFrame)
-    return Matrix{Float64}(df)
+    return Matrix{Float64}(df), Symbol.(names(df))
 end
 
 

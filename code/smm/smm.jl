@@ -171,6 +171,17 @@ function compute_loss_matrix(
 
     isempty(dev_vec) && return 0.0
 
+    # Guard: catch W/dev_vec size mismatch with a clear error rather than
+    # a cryptic LinearAlgebra DimensionMismatch from inside a thread.
+    if size(W, 1) != length(dev_vec) || size(W, 2) != length(dev_vec)
+        error(
+            "compute_loss_matrix: W is $(size(W,1))×$(size(W,2)) but deviation vector " *
+            "has length $(length(dev_vec)). The W matrix in spec.W is stale — it was built " *
+            "with a different SKIP_MOMENTS list. Rebuild spec via build_smm_spec with the " *
+            "correct W from load_weight_matrix(..., skip_moments=SKIP_MOMENTS)."
+        )
+    end
+
     # W is already the right size -- use directly
     Q = dot(dev_vec, W * dev_vec)
     return Q

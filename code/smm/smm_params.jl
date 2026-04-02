@@ -259,6 +259,22 @@ function build_smm_spec(
         end
     end
 
+    # Validate that W, if provided, matches the number of active moments.
+    # Catches stale W matrices (e.g. loaded from a previous .jls bundle or CSV
+    # with a different SKIP_MOMENTS list) before the optimisation starts.
+    if !isnothing(W)
+        K_active = count(v -> v.weight > 0.0, values(moments))
+        if size(W, 1) != K_active || size(W, 2) != K_active
+            error(
+                "W matrix size $(size(W,1))×$(size(W,2)) does not match the number of " *
+                "active moments ($K_active). This usually means a stale W was loaded from " *
+                "a previous run with a different SKIP_MOMENTS list. " *
+                "Call load_weight_matrix(..., skip_moments=SKIP_MOMENTS) with the current " *
+                "SKIP_MOMENTS so the matrix is subsetted correctly before building the spec."
+            )
+        end
+    end
+
     return SMMSpec(active_free, fixed_nt, moments, sim, run, W)
 end
 
