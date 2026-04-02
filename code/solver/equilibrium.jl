@@ -63,6 +63,9 @@ function compute_equilibrium_objects(model::Model)
     eS_tot = [dot(eS_mat[ix, :], wpS) for ix in 1:Nx]
 
     # ── Unskilled employment surface (Nx × NpU) ───────────────────────────
+    #   Uses the same _soft_weight approach as the skilled block so that
+    #   the surface is a continuous function of pstar — eliminating the
+    #   grid-snapping oscillation that caused the wage density to wiggle.
     θU  = uc.θ
     f_U = θU * q_from_theta(θU, up.μ, up.η)
 
@@ -73,13 +76,33 @@ function compute_equilibrium_objects(model::Model)
         denom_eU   = ν + λU
 
         for jp in 1:NpU
-            p = pgU[jp]
-            if p >= pstar_x
-                g_p = αU * p^(αU - 1.0)
-                eU_surface[ix, jp] = λU * g_p / denom_eU * eU_total_x
+            p   = pgU[jp]
+            ω_j = _soft_weight(p, pstar_x, pgU, jp, NpU)
+            if ω_j > 0.0
+                g_p = (p <= 0.0) ? 0.0 : αU * p^(αU - 1.0)
+                eU_surface[ix, jp] = ω_j * λU * g_p / denom_eU * eU_total_x
             end
         end
-        eU_surface[ix, end] += f_U * uU[ix] / (ν + λU)
+        if eU_vec[ix] > 0.0
+            eU_surface[ix, end] += f_U * uU[ix] / (ν + λU)
+        end
+    end
+
+    # ── Zero-employment guard (consistent for both segments) ──────────────
+    #   When aggregate employment is negligible, force the surfaces to
+    #   exact zeros so that downstream objects (wages, densities, moments)
+    #   see a clean corner solution rather than normalised numerical noise.
+    _emp_tol = 1e-12
+    agg_eU_raw = dot(eU_vec, wx)
+    agg_eS_raw = sum(eS_mat .* wpS' .* reshape(wx, :, 1))
+
+    if agg_eU_raw < _emp_tol
+        fill!(eU_vec,    0.0)
+        fill!(eU_surface, 0.0)
+    end
+    if agg_eS_raw < _emp_tol
+        fill!(eS_mat, 0.0)
+        fill!(eS_tot, 0.0)
     end
 
     # ── Unskilled values and policy ────────────────────────────────────────
@@ -150,38 +173,41 @@ function compute_equilibrium_objects(model::Model)
         I_full[ix] = tailS[ix, j0]
     end
 
-    # w_U(x,p)
+    # w_U(x,p)  — soft-weighted to match the employment surface
     wU_surface = fill(NaN, Nx, NpU)
     for ix in 1:Nx
         pst     = clamp01(pstar_U[ix])
         outside = (1.0 - βU) * (r + ν) * UU[ix]
         for jp in 1:NpU
-            if pgU[jp] >= pst
+            ω_j = _soft_weight(pgU[jp], pst, pgU, jp, NpU)
+            if ω_j > 0.0
                 wU_surface[ix, jp] = βU * PU * xg[ix] * pgU[jp] + outside
             end
         end
     end
 
-    # w_S^0(x,p)
+    # w_S^0(x,p) — soft-weighted
     wS0_surface = fill(NaN, Nx, NpS)
     for ix in 1:Nx
         pst         = clamp01(pstar_S[ix])
         flow_out    = (1.0 - βS) * bS
         ladder_term = βS * (1.0 - βS) * κS * I_full[ix]
         for jp in 1:NpS
-            if pg[jp] >= pst
+            ω_j = _soft_weight(pg[jp], pst, pg, jp, NpS)
+            if ω_j > 0.0
                 wS0_surface[ix, jp] = βS * PS * xg[ix] * pg[jp] + flow_out + ladder_term
             end
         end
     end
 
-    # w_S^1(x,p)
+    # w_S^1(x,p) — soft-weighted
     wS1_surface = fill(NaN, Nx, NpS)
     for ix in 1:Nx
         pst      = clamp01(pstar_S[ix])
         flow_out = (1.0 - βS) * (bS + σS)
         for jp in 1:NpS
-            if pg[jp] >= pst
+            ω_j = _soft_weight(pg[jp], pst, pg, jp, NpS)
+            if ω_j > 0.0
                 I_low = max(I_full[ix] - tailS[ix, jp], 0.0)
                 wS1_surface[ix, jp] =
                     βS * PS * xg[ix] * pg[jp] +
@@ -194,7 +220,7 @@ function compute_equilibrium_objects(model::Model)
     Δw_surface = wS1_surface .- wS0_surface
 
     # ── Wage densities ─────────────────────────────────────────────────────
-    function _wage_density(wages, weights, wgrid)
+    function _wage_density(wages, weights, wgrid; mass_tol = 1e-12)
         Nb   = length(wgrid) - 1
         bw   = step(wgrid)
         dens = zeros(Nb)
@@ -208,7 +234,9 @@ function compute_equilibrium_objects(model::Model)
             dens[j_hi] +=        α  * m
         end
         total = sum(dens) * bw
-        return total > 0.0 ? dens ./ total : dens
+        # Guard: if total employment mass is negligible, return zeros
+        # instead of normalising numerical noise into a fake density.
+        return total > mass_tol ? dens ./ total : dens
     end
 
     wages_U  = Float64[];  mass_U  = Float64[]
@@ -243,16 +271,26 @@ function compute_equilibrium_objects(model::Model)
     end
 
     all_wages = [wages_U; wages_S0; wages_S1]
-    w_lo      = quantile(all_wages, 0.002)
-    w_hi      = quantile(all_wages, 0.998)
     Nbins     = 120
-    wgrid     = range(w_lo, w_hi; length = Nbins + 1)
-    wmid      = collect(wgrid[1:end-1] .+ step(wgrid) / 2)
+    if isempty(all_wages)
+        # No employed workers — return empty densities on a dummy grid
+        wgrid = range(0.0, 1.0; length = Nbins + 1)
+        wmid  = collect(wgrid[1:end-1] .+ step(wgrid) / 2)
+        dens_U  = zeros(Nbins)
+        dens_S0 = zeros(Nbins)
+        dens_S1 = zeros(Nbins)
+        dens_S  = zeros(Nbins)
+    else
+        w_lo  = quantile(all_wages, 0.002)
+        w_hi  = quantile(all_wages, 0.998)
+        wgrid = range(w_lo, w_hi; length = Nbins + 1)
+        wmid  = collect(wgrid[1:end-1] .+ step(wgrid) / 2)
 
-    dens_U  = _wage_density(wages_U,  mass_U,  wgrid)
-    dens_S0 = _wage_density(wages_S0, mass_S0, wgrid)
-    dens_S1 = _wage_density(wages_S1, mass_S1, wgrid)
-    dens_S  = _wage_density([wages_S0; wages_S1], [mass_S0; mass_S1], wgrid)
+        dens_U  = _wage_density(wages_U,  mass_U,  wgrid)
+        dens_S0 = _wage_density(wages_S0, mass_S0, wgrid)
+        dens_S1 = _wage_density(wages_S1, mass_S1, wgrid)
+        dens_S  = _wage_density([wages_S0; wages_S1], [mass_S0; mass_S1], wgrid)
+    end
 
     # ── Population accounting ──────────────────────────────────────────────
     agg_uU      = dot(uU, wx)
@@ -266,9 +304,9 @@ function compute_equilibrium_objects(model::Model)
     agg_mS_flow = (φ / ν) * agg_t
 
     total_pop   = agg_mU + agg_mS
-    ur_U        = agg_uU / max(agg_mU, 1e-14)
-    ur_S        = agg_uS / max(agg_mS, 1e-14)
-    ur_total    = (agg_uU + agg_uS) / max(total_pop, 1e-14)
+    ur_U        = agg_mU > 1e-12 ? agg_uU / agg_mU : 1.0
+    ur_S        = agg_mS > 1e-12 ? agg_uS / agg_mS : 1.0
+    ur_total    = total_pop > 1e-12 ? (agg_uU + agg_uS) / total_pop : 1.0
 
     # ── Transition rates for model_moments ────────────────────────────────
     # f_S = θ_S · q_S(θ_S)   [κS already computed above for wages]

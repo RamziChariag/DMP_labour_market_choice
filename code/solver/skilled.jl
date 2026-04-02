@@ -356,18 +356,25 @@ function solve_stationary_skilled_x!(
     pstar = clamp01(sc.pstar[ix])
     poj   = clamp01(sc.poj[ix])
     j0    = pcut_index(sg.p, pstar)
+    # Include the straddling cell so employment is continuous in pstar
+    j0_soft = max(j0 - 1, 1)
 
     α = zeros(Float64, Np)
     β = zeros(Float64, Np)
+    ω = zeros(Float64, Np)       # soft weight at each node
 
     CumAlpha = 0.0
     CumBeta  = 0.0
 
-    @inbounds for j in j0:Np
+    @inbounds for j in j0_soft:Np
         pj  = sg.p[j]
         γj  = pre.γvals[j]
         Γj  = pre.Γvals[j]
         wpj = sg.wp[j]
+
+        ω_j = _soft_weight(pj, pstar, sg.p, j, Np)
+        ω[j] = ω_j
+        ω_j <= 0.0 && continue     # fully below cutoff
 
         s_j = _soft_oj_weight(pj, poj, sg.p, j, Np)
 
@@ -385,15 +392,17 @@ function solve_stationary_skilled_x!(
             β[j] = num_β / a_j
         end
 
-        CumAlpha += s_j * α[j] * wpj
-        CumBeta  += s_j * β[j] * wpj
+        # Weight contribution to cumulative integrals by ω_j,
+        # consistent with the soft-threshold in the inner loop.
+        CumAlpha += ω_j * s_j * α[j] * wpj
+        CumBeta  += ω_j * s_j * β[j] * wpj
     end
 
     sum_α_wp = 0.0
     sum_β_wp = 0.0
-    @inbounds for j in j0:Np
-        sum_α_wp += α[j] * sg.wp[j]
-        sum_β_wp += β[j] * sg.wp[j]
+    @inbounds for j in j0_soft:Np
+        sum_α_wp += ω[j] * α[j] * sg.wp[j]
+        sum_β_wp += ω[j] * β[j] * sg.wp[j]
     end
 
     denom_u  = 1.0 + sum_α_wp
@@ -402,7 +411,11 @@ function solve_stationary_skilled_x!(
 
     u_ix = sc.u[ix]
     @inbounds for j in 1:Np
-        sc.e[ix, j] = (j < j0) ? 0.0 : max(α[j] * u_ix + β[j], 0.0)
+        if j < j0_soft || ω[j] <= 0.0
+            sc.e[ix, j] = 0.0
+        else
+            sc.e[ix, j] = ω[j] * max(α[j] * u_ix + β[j], 0.0)
+        end
     end
     return nothing
 end
@@ -621,6 +634,11 @@ function solve_skilled_block!(
             if streak >= sim.conv_streak
                 sim.verbose >= 2 && @printf(
                     "  [outer S]  converged it=%d  d=%.3e  θ=%.4f\n", it, d, sc.θ)
+                # Final pass: recompute stationary distribution with the
+                # converged (θ, p*, poj) so that sc.u and sc.e are
+                # consistent with the final state, not the pre-Anderson
+                # values from the last iteration.
+                solve_stationary_skilled!(model; mS_in = mS_in)
                 return true   # ← converged
             end
         else
@@ -628,7 +646,8 @@ function solve_skilled_block!(
         end
     end
 
-    # Reached maxit without converging
+    # Reached maxit without converging — still re-sync densities
+    solve_stationary_skilled!(model; mS_in = mS_in)
     sim.verbose >= 1 && @printf("  [outer S]  maxit reached without convergence  θ=%.4f\n", sc.θ)
     return false
 end

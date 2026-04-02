@@ -63,35 +63,28 @@ function solve_unskilled_surplus_on_grid!(
 )
     Np = length(pgrid)
 
-    i0 = Np
-    @inbounds for j in 1:Np
-        if pgrid[j] >= pstar_x
-            i0 = j
-            break
-        end
-    end
-
+    # (1) Soft-weighted tail integrals — continuous in pstar_x
     tail_mass = 0.0
     tail_p1   = 0.0
-    @inbounds for j in i0:Np
-        w          = wG[j]
-        tail_mass += w
-        tail_p1   += pgrid[j] * w
+    for j in 1:Np
+        ω          = _soft_weight(pgrid[j], pstar_x, pgrid, j, Np)
+        tail_mass += ω * wG[j]
+        tail_p1   += ω * pgrid[j] * wG[j]
     end
 
+    # (2) Solve for I analytically (same formula as before)
     denom = r + ν + λ
     A     = (PU * x * tail_p1 - (r + ν) * Ux * tail_mass) / denom
     B     = (λ / denom) * tail_mass
     I     = (abs(1.0 - B) < 1e-14) ? 0.0 : (A / (1.0 - B))
 
-    @inbounds for j in 1:(i0 - 1)
-        Svec[j] = 0.0
-    end
-    @inbounds for j in i0:Np
-        Svec[j] = (PU * x * pgrid[j] - (r + ν) * Ux + λ * I) / denom
+    # (3) Fill surplus surface with soft weights — I is now defined
+    for j in 1:Np
+        ω        = _soft_weight(pgrid[j], pstar_x, pgrid, j, Np)
+        Svec[j]  = ω * (PU * x * pgrid[j] - (r + ν) * Ux + λ * I) / denom
     end
 
-    return I, tail_mass, i0
+    return I, tail_mass, 0   # i0=0 sentinel, callers only use I
 end
 
 
@@ -362,6 +355,15 @@ function solve_unskilled_block!(
             if streak >= sim.conv_streak
                 sim.verbose >= 2 && @printf(
                     "  [outer U]  converged it=%d  d=%.3e  θ=%.4f\n", it, d, uc.θ)
+                # Final pass: recompute stationary composition with the
+                # converged (θ, p*) so that uc.u and uc.t are consistent
+                # with the final state, not the pre-Anderson values.
+                inner_final = unskilled_inner_loop!(model; US_in = US_in)
+                solve_stationary_unskilled_pointwise!(
+                    u_new, t_new, gp.ℓ, uc.τT, uc.pstar, inner_final.f, model
+                )
+                copyto!(uc.u, u_new)
+                copyto!(uc.t, t_new)
                 return true   # ← converged
             end
         else
@@ -369,7 +371,13 @@ function solve_unskilled_block!(
         end
     end
 
-    # Reached maxit without converging
+    # Reached maxit without converging — still re-sync densities
+    inner_final = unskilled_inner_loop!(model; US_in = US_in)
+    solve_stationary_unskilled_pointwise!(
+        u_new, t_new, gp.ℓ, uc.τT, uc.pstar, inner_final.f, model
+    )
+    copyto!(uc.u, u_new)
+    copyto!(uc.t, t_new)
     sim.verbose >= 1 && @printf("  [outer U]  maxit reached without convergence  θ=%.4f\n", uc.θ)
     return false
 end

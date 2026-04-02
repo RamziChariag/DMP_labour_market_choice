@@ -97,7 +97,7 @@ sim_smm = SimParams(
     anderson_m     = 1,
     anderson_reg   = 1e-10,
 
-    damp_pstar_U   = 1.30,
+    damp_pstar_U   = 1.00,
     damp_pstar_S   = 1.00,
 
     verbose        = 0,          # 0: model is silent; 1: print outer convergence info per iteration; 2: also print inner iteration details
@@ -130,7 +130,7 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 #      2.0   →  equal weights (identity, no W matrix)
 #      >2.0  →  full optimal W (shrunk if κ > target)
 # ============================================================
-const W_COND_TARGET = 2.0   # also set in run_params below; keep in sync
+const W_COND_TARGET = 0.0   # also set in run_params below; keep in sync
 
 """
     _w_suffix(cond_target) → String
@@ -341,30 +341,30 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── SA global search ────────────────────────────────────
-    sa_max_iter        = 10_000,  # total SA proposals
-    sa_T0              = 0.5,     # initial temperature (higher = more uphill acceptance early)
+    sa_max_iter        = 30_000,  # total SA proposals
+    sa_T0              = 5.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 1.00,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
-    sa_reheat_patience = 500,     # proposals without improvement before reheating
-    sa_reheat_factor   = 3.00,     # temperature multiplier on reheat
-    sa_max_reheats     = 5,       # cap on total reheats (0 = unlimited)
+    sa_reheat_patience = 5,         # proposals without improvement before reheating
+    sa_reheat_factor   = 1.50,     # temperature multiplier on reheat
+    sa_max_reheats     = 1,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 200,       # generations; total evals = max_iter × pop_size
-    de_pop_size  = 600,       # 0 = auto (100 × n_free_params)
+    de_max_iter  = 1_000,       # generations; total evals = max_iter × pop_size
+    de_pop_size  = 200,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
-    de_patience  = 25,           # how many generations to wait for improvement before early stopping
-    de_avg_tol   = 0.0,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
+    de_patience  = 5,           # how many generations to wait for improvement before early stopping
+    de_avg_tol   = 1e-5,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
     nm_max_iter  = 1000,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
-    nm_x_tol     = 1e-5,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
+    nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 
     # ── Tracing ─────────────────────────────────────────────
     show_trace_members     = false,   # per-member lines within each generation for DE, prints for stride proposal in SA
@@ -390,7 +390,7 @@ print_spec(spec)
 # ============================================================
 println("Starting SMM optimisation..."); flush(stdout)
 
-# Stage 1: global search
+# Stage 1: global search :sa or :de 
 res = run_smm(spec; method = :de)
 
 # Stage 2: polish from global optimizer solution

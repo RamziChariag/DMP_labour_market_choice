@@ -372,18 +372,38 @@ Prerequisites -- the following fields must be present in obj:
 """
 function model_moments(obj)
 
+    # ── Corner-solution detection ────────────────────────────────────────
+    #   When aggregate employment is negligible for a segment, all
+    #   wage-related moments for that segment are set to 0.  This avoids
+    #   two pathologies:
+    #     (a) _percentile returning the dummy-grid endpoint (~1.0) when
+    #         the density is all-zeros, giving misleadingly "good" wage
+    #         percentile values that confuse the SMM optimizer;
+    #     (b) mean_log_wage computed over a dummy grid producing an
+    #         arbitrary wage premium.
+    #   The _emp_tol threshold matches the guard in equilibrium.jl.
+    _emp_tol = 1e-12
+    _has_eU  = obj.agg_eU > _emp_tol
+    _has_eS  = obj.agg_eS > _emp_tol
+
     # ── Labour market stocks ──────────────────────────────────────────────
+    #   ur_U is well-defined when unskilled mass > 0 (which it always is).
+    #   ur_S: when the skilled segment is empty (agg_mS ≈ 0), report
+    #   ur_S = 1.0 ("if anyone were there, they'd all be unemployed").
+    #   Reporting 0 would mislead the SMM into thinking skilled
+    #   unemployment is impressively low.
     ur_U           = obj.ur_U
-    ur_S           = obj.ur_S
+    ur_S           = obj.agg_mS > _emp_tol ? obj.ur_S : 1.0
     skilled_share  = obj.agg_mS  / max(obj.total_pop, 1e-14)
     training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
 
     # emp_var / emp_cm3: variance and third central moment of the employed
     # wage distribution, computed from the density grids.
+    # When employment is zero the density is all-zeros so these are 0.
     wmid_tmp   = obj.wmid
     dens_U_tmp = obj.dens_U
     dens_S_tmp = obj.dens_S
-    bw_tmp     = wmid_tmp[2] - wmid_tmp[1]
+    bw_tmp     = length(wmid_tmp) >= 2 ? wmid_tmp[2] - wmid_tmp[1] : 1.0
 
     _mean_U_tmp = sum(wmid_tmp .* dens_U_tmp) * bw_tmp
     _mean_S_tmp = sum(wmid_tmp .* dens_S_tmp) * bw_tmp
@@ -394,22 +414,24 @@ function model_moments(obj)
     emp_cm3_S  = sum((wmid_tmp .- _mean_S_tmp).^3 .* dens_S_tmp) * bw_tmp
 
     # ── Transition rates ──────────────────────────────────────────────────
-    jfr_U         = obj.f_U
-    jfr_S         = obj.f_S
+    jfr_U = _has_eU ? obj.f_U : 0.0
+    jfr_S = _has_eS ? obj.f_S : 0.0
     sep_rate_U    = obj.sep_rate_U
     sep_rate_S    = obj.sep_rate_S
     ee_rate_S     = obj.ee_rate_S
 
     # ── Wages ─────────────────────────────────────────────────────────────
+    #   When a segment has no employment, all its wage moments are 0.
+    #   This includes mean, percentiles, and the log wage used in the
+    #   premium.  The key fix: _percentile must NOT fall through to
+    #   wmid[end] when the density integrates to < 1.
     wmid   = obj.wmid
     dens_U = obj.dens_U
     dens_S = obj.dens_S
-    bw     = wmid[2] - wmid[1]
+    bw     = length(wmid) >= 2 ? wmid[2] - wmid[1] : 1.0
 
-    mean_wage_U = sum(wmid .* dens_U) * bw
-    mean_wage_S = sum(wmid .* dens_S) * bw
-
-    # 25th percentile: first bin where cumulative density crosses 0.25
+    # Percentile helper — returns 0 when the density has no mass
+    # (instead of the old fallback to wmid[end] which was ~1.0).
     function _percentile(wmid, dens, bw, target)
         cum = 0.0
         for j in eachindex(wmid)
@@ -420,24 +442,47 @@ function model_moments(obj)
             end
             cum += mass
         end
-        return wmid[end]
+        # Cumulative density never reached the target → density has
+        # insufficient mass.  Return 0 (not wmid[end]) so that the
+        # SMM objective sees a clean corner value.
+        return 0.0
     end
 
-    p25_wage_U = _percentile(wmid, dens_U, bw, 0.25)
-    p25_wage_S = _percentile(wmid, dens_S, bw, 0.25)
+    if _has_eU
+        mean_wage_U    = sum(wmid .* dens_U) * bw
+        p25_wage_U     = _percentile(wmid, dens_U, bw, 0.25)
+        p50_wage_U     = _percentile(wmid, dens_U, bw, 0.50)
+        mean_log_wage_U = sum(log.(max.(wmid, 1e-14)) .* dens_U) * bw
+    else
+        mean_wage_U     = 0.0
+        p25_wage_U      = 0.0
+        p50_wage_U      = 0.0
+        mean_log_wage_U = 0.0
+    end
 
-    # Median: first bin where cumulative density crosses 0.5
-    p50_wage_U = _percentile(wmid, dens_U, bw, 0.50)
-    p50_wage_S = _percentile(wmid, dens_S, bw, 0.50)
+    if _has_eS
+        mean_wage_S    = sum(wmid .* dens_S) * bw
+        p25_wage_S     = _percentile(wmid, dens_S, bw, 0.25)
+        p50_wage_S     = _percentile(wmid, dens_S, bw, 0.50)
+        mean_log_wage_S = sum(log.(max.(wmid, 1e-14)) .* dens_S) * bw
+    else
+        mean_wage_S     = 0.0
+        p25_wage_S      = 0.0
+        p50_wage_S      = 0.0
+        mean_log_wage_S = 0.0
+    end
 
     # Wage premium: E[log w_S] - E[log w_U]
-    mean_log_wage_U = sum(log.(max.(wmid, 1e-14)) .* dens_U) * bw
-    mean_log_wage_S = sum(log.(max.(wmid, 1e-14)) .* dens_S) * bw
-    wage_premium    = mean_log_wage_S - mean_log_wage_U
+    #   Only meaningful when both segments have employment.
+    #   Otherwise 0 — which is far from the positive data target,
+    #   giving the SMM a strong signal to move away from this corner.
+    wage_premium = (_has_eU && _has_eS) ?
+                   (mean_log_wage_S - mean_log_wage_U) : 0.0
 
     # ── Tightness ─────────────────────────────────────────────────────────
-    theta_U = obj.thetaU
-    theta_S = obj.thetaS
+    _THETA_CAP = 100.0
+    theta_U = _has_eU ? obj.thetaU : _THETA_CAP
+    theta_S = _has_eS ? obj.thetaS : _THETA_CAP
 
     return (
         ur_U          = ur_U,
