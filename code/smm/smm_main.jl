@@ -108,8 +108,34 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :base_fc    
+WINDOW = :base_fc
 
+# ============================================================
+# Moments to exclude from the SMM objective.
+# Use the SAME list for both load_weight_matrix and build_smm_spec
+# so that sigma/W is subsetted consistently with the loss function.
+#
+# Valid names:
+#   :ur_U, :ur_S, :skilled_share, :training_share,
+#   :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
+#   :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :ee_rate_S,
+#   :mean_wage_U, :mean_wage_S,
+#   :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
+#   :wage_premium, :theta_U, :theta_S
+# ============================================================
+const SKIP_MOMENTS = Symbol[
+    #:emp_var_U,
+    :emp_var_S,
+    :emp_cm3_U,
+    #:emp_cm3_S,
+    :ee_rate_S,
+    :p25_wage_U,
+    :p25_wage_S,
+    :p50_wage_U,
+    :p50_wage_S,
+    :mean_wage_U,
+    :mean_wage_S,
+]
 
 @printf("Estimation window: %s\n", WINDOW)
 flush(stdout)
@@ -130,7 +156,7 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 #      2.0   →  equal weights (identity, no W matrix)
 #      >2.0  →  full optimal W (shrunk if κ > target)
 # ============================================================
-const W_COND_TARGET = 0.0   # also set in run_params below; keep in sync
+const W_COND_TARGET = 1e6  # also set in run_params below; keep in sync
 
 """
     _w_suffix(cond_target) → String
@@ -151,7 +177,8 @@ end
 const W_SUFFIX = _w_suffix(W_COND_TARGET)
 
 W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
-                             cond_target=W_COND_TARGET)
+                             cond_target=W_COND_TARGET,
+                             skip_moments=SKIP_MOMENTS)
 
 # ============================================================
 # 5. Externally calibrated parameters (r, ν, φ)
@@ -390,17 +417,11 @@ run_params = SMMRunParams(
 # ============================================================
 spec = build_smm_spec(
     moments, sim_smm;
-    fixed      = fixed_params,
-    free_specs = free_params,
-    run        = run_params,
-    W          = W_opt,
-    skip_moments = [          # leave empty to target all moments
-     :emp_cm3_U,
-     :emp_cm3_S,
-     :ee_rate_S,
-     :p25wage_U,
-     :p25wage_S,
-]
+    fixed        = fixed_params,
+    free_specs   = free_params,
+    run          = run_params,
+    W            = W_opt,
+    skip_moments = SKIP_MOMENTS,
 )
 
 print_spec(spec)

@@ -199,11 +199,9 @@ Build an `SMMSpec`.
 - `run`: an `SMMRunParams` controlling grid sizes, DE settings,
   Nelder-Mead settings, and tracing.
 
-- `W`: optional K×K optimal weight matrix from influence functions.
-  If provided, will be used in the loss function instead of diagonal
-  weights (conditioning is handled by `load_weight_matrix` before
-  this is called). If nothing (default), uses diagonal weights from
-  moment variances.
+- `W`: optional weight matrix from influence functions, already
+  subsetted to the active moments by `load_weight_matrix`.
+  If nothing (default), uses diagonal weights from moment variances.
 
 - `skip_moments`: vector of moment name Symbols to exclude from the
   SMM objective.  Their weights are set to zero in the stored moments
@@ -513,9 +511,7 @@ function print_spec(spec::SMMSpec)
         @printf("  (Weighting: full optimal W matrix)\n\n")
         @printf("  %-22s  %10s  %12s\n", "moment", "target", "W diag wt")
         @printf("  %s\n", "─"^48)
-        idx = 0
-        for (k, v) in active_moments
-            idx += 1
+        for (idx, (k, v)) in enumerate(active_moments)
             w_diag = (idx <= size(spec.W, 1)) ? spec.W[idx, idx] : NaN
             @printf("  %-22s  %10.4f  %12.4e\n", k, v.value, w_diag)
         end

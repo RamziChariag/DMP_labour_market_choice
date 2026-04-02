@@ -158,25 +158,21 @@ function compute_loss_matrix(
 
 
 
-    # Build deviation vector and track which indices into W are active.
-    # W was built from all MOMENT_NAMES (22 rows/cols); skip_moments may have
-    # zeroed some weights, so we must subset W to the same active rows/columns.
-    dev_vec    = Float64[]
-    active_idx = Int[]
-    for (i, k) in enumerate(keys(spec.moments))
+    # Build deviation vector over active moments (weight > 0).
+    # W is already sized K_active x K_active (pre-subsetted by load_weight_matrix),
+    # so we iterate sequentially -- no index remapping into W needed.
+    dev_vec = Float64[]
+    for k in keys(spec.moments)
         target = spec.moments[k]
         target.weight <= 0.0 && continue
         !hasproperty(m_model, k) && continue
-        dev = (getproperty(m_model, k) - target.value)
-        push!(dev_vec, dev)
-        push!(active_idx, i)
+        push!(dev_vec, getproperty(m_model, k) - target.value)
     end
 
     isempty(dev_vec) && return 0.0
 
-    # Subset W to the active rows/columns, then compute Q = g' W_sub g
-    W_sub = W[active_idx, active_idx]
-    Q = dot(dev_vec, W_sub * dev_vec)
+    # W is already the right size -- use directly
+    Q = dot(dev_vec, W * dev_vec)
     return Q
 end
 

@@ -91,13 +91,17 @@ end
 
 
 """
-    load_weight_matrix(; window, derived_dir, cond_target) → Union{Nothing, Matrix{Float64}}
+    load_weight_matrix(; window, derived_dir, cond_target,
+                         skip_moments) → Union{Nothing, Matrix{Float64}}
 
 Load the optimal weight matrix from influence functions.
 
 Reads `W_{window}.csv` (K × K matrix) from derived_dir.
-Returns a K × K symmetric positive definite matrix, or `nothing`
-for the equal-weight (identity) case.
+Returns a matrix already subsetted to the active moments (i.e. all
+moments NOT in `skip_moments`), or `nothing` for the equal-weight case.
+The returned matrix is always K_active × K_active where
+K_active = K − |skip_moments|, so it is dimensionally consistent with
+the deviation vector built by `compute_loss_matrix`.
 
 Conditioning behaviour (controlled by `cond_target`):
   - cond_target == 0.0:  Pure diagonal matrix from sigma_{window}.csv.
@@ -112,20 +116,38 @@ Conditioning behaviour (controlled by `cond_target`):
     κ(W) > cond_target, shrink off-diagonal elements toward zero via
         W_shrunk = (1 − α) W  +  α diag(W)
     until κ(W_shrunk) ≤ cond_target.  The shrinkage factor α is found
-    by bisection.
+    by bisection.  Shrinkage is applied AFTER subsetting, so the
+    condition number is evaluated on the active submatrix only.
+
+- `skip_moments`: vector of moment Symbols to exclude.  Must match
+  what is passed to `build_smm_spec`.  Unknown names produce a warning.
 """
 function load_weight_matrix(;
     window::Symbol = :base_fc,
     derived_dir::String,
     cond_target::Float64 = 1e8,
+    skip_moments::Vector{Symbol} = Symbol[],
 )
 
     K = length(MOMENT_NAMES)
 
+    # Compute active indices (into MOMENT_NAMES) once — used by all branches.
+    unknown = setdiff(skip_moments, MOMENT_NAMES)
+    if !isempty(unknown)
+        @printf("  load_weight_matrix: skip_moments — unrecognised names (ignored): %s\n",
+                join(string.(unknown), ", "))
+    end
+    active_idx = [i for (i, nm) in enumerate(MOMENT_NAMES) if !(nm in skip_moments)]
+    K_active   = length(active_idx)
+    if K_active < K
+        @printf("  load_weight_matrix: subsetting to %d / %d active moments (skipping: %s)\n",
+                K_active, K, join(string.(skip_moments), ", "))
+    end
+
     # ── cond_target == 2.0  →  equal weights (identity / nothing) ─────
     if cond_target == 2.0
         @printf("  cond_target == 2.0 → equal weights (no W matrix)\n")
-        return nothing
+        return nothing   # compute_loss uses unit weights; no subsetting needed
     end
 
     # ── cond_target == 0.0  →  pure diagonal from Σ ───────────────────
@@ -134,6 +156,7 @@ function load_weight_matrix(;
         isfile(sigma_file) || error(
             "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
         sigma_vec = _read_sigma_csv(sigma_file)
+        length(sigma_vec) == K       && (sigma_vec = sigma_vec[active_idx])
         W = Diagonal(1.0 ./ (sigma_vec .^ 2))
         @printf("  cond_target == 0.0 → using pure diagonal W from %s\n", sigma_file)
         return Matrix(W)
@@ -145,6 +168,7 @@ function load_weight_matrix(;
         isfile(sigma_file) || error(
             "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
         sigma_vec = _read_sigma_csv(sigma_file)
+        length(sigma_vec) == K       && (sigma_vec = sigma_vec[active_idx])
         d = 1.0 ./ (sigma_vec .^ 2)
         d_compressed = log.(1.0 .+ d)
         W = Diagonal(d_compressed)
@@ -158,12 +182,21 @@ function load_weight_matrix(;
     W_file = joinpath(derived_dir, "W_$(window).csv")
     if isfile(W_file)
         W_loaded = _read_weight_matrix_csv(W_file)
+        # Subset only if the CSV is the full K×K matrix.
+        # If the pipeline already saved a pre-subsetted matrix (different or same
+        # moment spec), use it as-is. This allows warm-starting with a new W
+        # without requiring the pipeline and SMM spec to match exactly.
+        if size(W_loaded, 1) == K
+            W_loaded = W_loaded[active_idx, active_idx]
+        end
         cond_W = cond(W_loaded)
         if cond_W <= cond_target
             @printf("  Loaded W matrix from %s  (cond = %.2e)\n", W_file, cond_W)
             return W_loaded
         else
             # ── Shrink off-diagonals to reach target κ ─────────────────
+            # Shrinkage is applied on the already-subsetted matrix, so the
+            # condition number is evaluated on the active submatrix only.
             W_shrunk, alpha = _shrink_to_target(W_loaded, cond_target)
             cond_new = cond(W_shrunk)
             msg = @sprintf("W matrix ill-conditioned (κ = %.2e > %.2e). Shrinking off-diagonal elements (α = %.6f → κ = %.2e).",
@@ -179,6 +212,7 @@ function load_weight_matrix(;
         "Neither W_$(window).csv nor sigma_$(window).csv found in $derived_dir — run the data pipeline first.")
 
     sigma_vec = _read_sigma_csv(sigma_file)
+    length(sigma_vec) == K           && (sigma_vec = sigma_vec[active_idx])
     W = Diagonal(1.0 ./ (sigma_vec .^ 2))
     @printf("  W_%s.csv not found — using diagonal W from %s\n",
             window, sigma_file)
