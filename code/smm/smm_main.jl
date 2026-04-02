@@ -218,7 +218,14 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         "Baseline result not found at $baseline_jls. " *
         "Run the base_fc estimation first (WINDOW = :base_fc, W_COND_TARGET = $W_COND_TARGET).")
 
-    baseline_data   = open(deserialize, baseline_jls)
+    baseline_data = _load_smm_bundle(baseline_jls; delete_on_fail=false, label="baseline file")
+    isnothing(baseline_data) && error(
+        "Baseline result at $baseline_jls is unreadable or stale. " *
+        "Re-run the base_fc estimation first (WINDOW = :base_fc, W_COND_TARGET = $W_COND_TARGET)."
+    )
+
+baseline_result = baseline_data.result
+baseline_spec   = baseline_data.spec
     baseline_result  = baseline_data.result   # SMMResult
     baseline_spec    = baseline_data.spec     # SMMSpec
 
@@ -297,30 +304,31 @@ else
         println("\n  Warm-start: loading prior base_fc result from:")
         @printf("    %s\n", _warmstart_jls)
         flush(stdout)
-        _ws_data = try
-            open(deserialize, _warmstart_jls)
-        catch e
-            @warn "Failed to deserialize warm-start file (stale format — will overwrite): $e"
-            rm(_warmstart_jls, force=true)
-            nothing
-        end
-        _ws_result = _ws_data.result
-        _ws_spec   = _ws_data.spec
-        _ws_cp, _ws_rp, _ws_up, _ws_sp = unpack_θ(_ws_result.theta_opt, _ws_spec)
-        @printf("    Prior Q = %.6e  (converged = %s)\n",
-                _ws_result.loss_opt, _ws_result.converged)
-        flush(stdout)
 
-        # Override init values in free_params with the prior optimum
-        free_params = [
-            let init_val = _baseline_param_value(ps, _ws_cp, _ws_rp, _ws_up, _ws_sp)
-                # Clamp to bounds (safety)
-                init_val = clamp(init_val, ps.lb + 1e-10, ps.ub - 1e-10)
-                ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
-            end
-            for ps in free_params
-        ]
-        println("    Initial values set from prior optimum.")
+        _ws_data = _load_smm_bundle(_warmstart_jls; delete_on_fail=true, label="warm-start file")
+
+        if !isnothing(_ws_data)
+            _ws_result = _ws_data.result
+            _ws_spec   = _ws_data.spec
+            _ws_cp, _ws_rp, _ws_up, _ws_sp = unpack_θ(_ws_result.theta_opt, _ws_spec)
+
+            @printf("    Prior Q = %.6e  (converged = %s)\n",
+                    _ws_result.loss_opt, _ws_result.converged)
+            flush(stdout)
+
+            # Override init values in free_params with the prior optimum
+            free_params = [
+                let init_val = _baseline_param_value(ps, _ws_cp, _ws_rp, _ws_up, _ws_sp)
+                    init_val = clamp(init_val, ps.lb + 1e-10, ps.ub - 1e-10)
+                    ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
+                end
+                for ps in free_params
+            ]
+
+            println("    Initial values set from prior optimum.")
+        else
+            println("    Warm-start skipped — stale/unreadable file was removed.")
+        end
     else
         println("\n  No prior base_fc result found — using default initial values.")
     end
@@ -347,12 +355,12 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── SA global search ────────────────────────────────────
-    sa_max_iter        = 30_000,  # total SA proposals
+    sa_max_iter        = 25_000,  # total SA proposals
     sa_T0              = 5.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
-    sa_cooling_exp     = 1.00,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
-    sa_reheat_patience = 5,         # proposals without improvement before reheating
+    sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
+    sa_reheat_patience = 800,         # proposals without improvement before reheating
     sa_reheat_factor   = 1.50,     # temperature multiplier on reheat
     sa_max_reheats     = 1,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
@@ -360,8 +368,8 @@ run_params = SMMRunParams(
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 500,       # generations; total evals = max_iter × pop_size
-    de_pop_size  = 230,       # 0 = auto (100 × n_free_params)
+    de_max_iter  = 600,       # generations; total evals = max_iter × pop_size
+    de_pop_size  = 100,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
     de_patience  = 5,           # how many generations to wait for improvement before early stopping
@@ -369,14 +377,14 @@ run_params = SMMRunParams(
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 10,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 500,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 
     # ── Tracing ─────────────────────────────────────────────
     show_trace_members     = false,   # per-member lines within each generation for DE, prints for stride proposal in SA
     show_trace_generations = true,    # end-of-generation summary lines
-    trace_stride           = 100,      # how often to print within DE generations (in members, not generations), for SA how often to print
+    trace_stride           = 500,      # how often to print within DE generations (in members, not generations), for SA how often to print
 )
 
 # ============================================================
@@ -398,7 +406,7 @@ print_spec(spec)
 println("Starting SMM optimisation..."); flush(stdout)
 
 # Stage 1: global search :sa or :de 
-res = run_smm(spec; method = :de)
+res = run_smm(spec; method = :sa)
 
 # Stage 2: polish from global optimizer solution
 res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead)

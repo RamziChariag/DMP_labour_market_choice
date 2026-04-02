@@ -250,41 +250,44 @@ bounds and starting values.  Pass a subset to `build_smm_spec`
 to estimate only selected parameters.
 """
 function default_free_params() :: Vector{ParamSpec}
-    return [
-        # ── CommonParams ───────────────────────────────────────────────
-        ParamSpec(:common, :r,   0.001,  0.15,  0.05,  "discount rate r"),
-        ParamSpec(:common, :ν,   0.001,  0.20,  0.05,  "demographic exit ν"),
-        ParamSpec(:common, :φ,   0.0001,  0.60,  0.20,  "training completion φ"),
-        ParamSpec(:common, :a_ℓ, 0.0001,  8.00,  2.00,  "worker type shape a_ℓ"),
-        ParamSpec(:common, :b_ℓ, 0.0001,  8.00,  5.00,  "worker type shape b_ℓ"),
-        ParamSpec(:common, :c,   0.0001, 30.00,  1.70,  "training cost coeff c"),
+return [
+# ── CommonParams ───────────────────────────────────────────────
+ParamSpec(:common, :r, 0.001, 0.15, 0.05, "discount rate r"),
+ParamSpec(:common, :ν, 0.001, 0.20, 0.05, "demographic exit ν"),
+ParamSpec(:common, :φ, 0.0001, 0.60, 0.20, "training completion φ"),
+ParamSpec(:common, :a_ℓ, 0.0001, 8.00, 2.00, "worker type shape a_ℓ"),
+ParamSpec(:common, :b_ℓ, 0.0001, 8.00, 5.00, "worker type shape b_ℓ"),
+ParamSpec(:common, :c, 0.0001, 30.00, 1.70, "training cost coeff c"),
 
-        # ── RegimeParams ───────────────────────────────────────────────
-        ParamSpec(:regime, :PU,  0.001,  5.00,  0.70,  "unskilled productivity PU"),
-        ParamSpec(:regime, :PS,  0.001,  10.00,  1.85,  "skilled productivity PS"),
-        ParamSpec(:regime, :bU,  0.000,  7.00,  0.00,  "unskilled UI flow bU"),
-        ParamSpec(:regime, :bT,  0.000,  7.00,  0.28,  "training flow bT"),
-        ParamSpec(:regime, :bS,  0.000,  7.00,  0.01,  "skilled UI flow bS"),
-        ParamSpec(:regime, :α_U, 0.001,  10.00,  1.00,  "unskilled damage shape α_U"),
-        ParamSpec(:regime, :a_Γ, 0.001,  8.00,  2.00,  "skilled offer shape a_Γ"),
-        ParamSpec(:regime, :b_Γ, 0.001,  8.00,  5.00,  "skilled offer shape b_Γ"),
 
-        # ── UnskilledParams ────────────────────────────────────────────
-        ParamSpec(:unsk, :μ,  0.10,  5.00,  0.74,  "unskilled matching eff μ_U"),
-        ParamSpec(:unsk, :η,  0.01,  0.99,  0.60,  "unskilled matching elas η_U"),
-        ParamSpec(:unsk, :k,  0.00001,  2.00,  0.25,  "unskilled vacancy cost k_U"),
-        ParamSpec(:unsk, :β,  0.0001,  0.99,  0.40,  "unskilled bargaining β_U"),
-        ParamSpec(:unsk, :λ,  0.001,  0.99,  0.08,  "unskilled damage rate λ_U"),
+# ── RegimeParams ───────────────────────────────────────────────
+ParamSpec(:regime, :PU, 0.001, 5.00, 0.70, "unskilled productivity PU"),
+ParamSpec(:regime, :PS, 0.001, 10.00, 1.85, "skilled productivity PS"),
+ParamSpec(:regime, :bU, 0.000, 7.00, 0.00, "unskilled UI flow bU"),
+ParamSpec(:regime, :bT, 0.000, 7.00, 0.28, "training flow bT"),
+ParamSpec(:regime, :bS, 0.000, 7.00, 0.01, "skilled UI flow bS"),
+ParamSpec(:regime, :α_U, 0.001, 10.00, 1.00, "unskilled damage shape α_U"),
+ParamSpec(:regime, :a_Γ, 0.001, 8.00, 2.00, "skilled offer shape a_Γ"),
+ParamSpec(:regime, :b_Γ, 0.001, 8.00, 5.00, "skilled offer shape b_Γ"),
 
-        # ── SkilledParams ──────────────────────────────────────────────
-        ParamSpec(:skl, :μ,  0.10,  5.00,  0.90,  "skilled matching eff μ_S"),
-        ParamSpec(:skl, :η,  0.01,  0.99,  0.50,  "skilled matching elas η_S"),
-        ParamSpec(:skl, :k,  0.00001,  2.00,  0.17,  "skilled vacancy cost k_S"),
-        ParamSpec(:skl, :β,  0.0001,  0.99,  0.32,  "skilled bargaining β_S"),
-        ParamSpec(:skl, :ξ,  0.001, 0.99,  0.03,  "skilled exog. sep rate ξ"),
-        ParamSpec(:skl, :λ,  0.001,  0.99,  0.07,  "skilled quality shock λ_S"),
-        ParamSpec(:skl, :σ,  0.001, 0.50,  0.01,  "OJS flow cost σ"),
-    ]
+
+# ── UnskilledParams ────────────────────────────────────────────
+ParamSpec(:unsk, :μ, 0.10, 5.00, 0.74, "unskilled matching eff μ_U"),
+ParamSpec(:unsk, :η, 0.01, 0.99, 0.60, "unskilled matching elas η_U"),
+ParamSpec(:unsk, :k, 0.00001, 2.00, 0.25, "unskilled vacancy cost k_U"),
+ParamSpec(:unsk, :β, 0.0001, 0.99, 0.40, "unskilled bargaining β_U"),
+ParamSpec(:unsk, :λ, 0.001, 0.99, 0.08, "unskilled damage rate λ_U"),
+
+
+# ── SkilledParams ──────────────────────────────────────────────
+ParamSpec(:skl, :μ, 0.10, 5.00, 0.90, "skilled matching eff μ_S"),
+ParamSpec(:skl, :η, 0.01, 0.99, 0.50, "skilled matching elas η_S"),
+ParamSpec(:skl, :k, 0.00001, 2.00, 0.17, "skilled vacancy cost k_S"),
+ParamSpec(:skl, :β, 0.0001, 0.99, 0.32, "skilled bargaining β_S"),
+ParamSpec(:skl, :ξ, 0.001, 0.99, 0.03, "skilled exog. sep rate ξ"),
+ParamSpec(:skl, :λ, 0.001, 0.99, 0.07, "skilled quality shock λ_S"),
+ParamSpec(:skl, :σ, 0.001, 0.50, 0.01, "OJS flow cost σ"),
+]
 end
 
 
@@ -494,6 +497,11 @@ function print_spec(spec::SMMSpec)
     end
     @printf("\n  Grid: Nx=%d  Np_U=%d  Np_S=%d\n",
             spec.run.Nx, spec.run.Np_U, spec.run.Np_S)
+    @printf("  SA:  max_iter=%d  T0=%.2f  step=%.2f  cooling_rate=%.2f  cooling_exp=%.2f  reheat_patience=%d  reheat_factor=%.2f  adapt_window=%d  target_fin=%.2f\n",
+            spec.run.sa_max_iter, spec.run.sa_T0, spec.run.sa_step,
+            spec.run.sa_cooling_rate, spec.run.sa_cooling_exp,
+            spec.run.sa_reheat_patience, spec.run.sa_reheat_factor,
+            spec.run.sa_adapt_window, spec.run.sa_target_fin)
     @printf("  DE:   max_iter=%d  pop_size=%s  f=%.2f  cr=%.2f  patience=%d  avg_tol=%s\n",
             spec.run.de_max_iter,
             spec.run.de_pop_size == 0 ? "auto" : string(spec.run.de_pop_size),

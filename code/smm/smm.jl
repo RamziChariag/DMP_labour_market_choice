@@ -19,6 +19,56 @@
 #   handles Inf correctly (always reject, never update).
 ############################################################
 
+"""
+    _load_smm_bundle(path; delete_on_fail=false, label="file")
+
+Safely deserialize an SMM .jls bundle.
+Expected format:
+    (result = ::SMMResult, spec = ::SMMSpec, sim = ::SimParams)
+
+Returns the bundle on success, or `nothing` on failure / stale format.
+If `delete_on_fail=true`, removes the unreadable file so it can be overwritten.
+"""
+function _load_smm_bundle(path::String; delete_on_fail::Bool=false, label::String="file")
+    if !isfile(path)
+        return nothing
+    end
+
+    data = try
+        open(deserialize, path)
+    catch e
+        @warn "Failed to deserialize $label (stale format — will overwrite): $e"
+        if delete_on_fail
+            rm(path, force=true)
+        end
+        return nothing
+    end
+
+    # Accept named tuples / tuples with expected keys only
+    ok = false
+    if data isa NamedTuple
+        ok = haskey(data, :result) && haskey(data, :spec)
+    end
+
+    if !ok
+        @warn "Invalid $label format at $path (missing :result or :spec) — treating as stale"
+        if delete_on_fail
+            rm(path, force=true)
+        end
+        return nothing
+    end
+
+    if isnothing(data.result) || isnothing(data.spec)
+        @warn "Invalid $label contents at $path (:result or :spec is nothing) — treating as stale"
+        if delete_on_fail
+            rm(path, force=true)
+        end
+        return nothing
+    end
+
+    return data
+end
+
 
 
 
@@ -114,8 +164,10 @@ function compute_loss_matrix(
         target = spec.moments[k]
         target.weight <= 0.0 && continue
         !hasproperty(m_model, k) && continue
-        scale = max(abs(target.value), 1e-10)
-        dev   = (getproperty(m_model, k) - target.value) / scale
+        #rescale weights by their mean, suspect for causing corner solutions
+        #scale = max(abs(target.value), 1e-10)
+        #dev   = (getproperty(m_model, k) - target.value) / scale
+        dev   = (getproperty(m_model, k) - target.value)
         push!(dev_vec, dev)
     end
 
@@ -193,6 +245,12 @@ function smm_objective(
         return Inf
     end
 
+    # if everyone trains, or no one trains, the model is not identified and the loss is infinite
+    #τ = obj_eq.tauT
+    #if (τ isa AbstractVector && (all(iszero, τ) || all(isone, τ))) ||
+    #(τ isa AbstractArray  && (all(iszero, τ) || all(isone, τ)))
+    #    return Inf
+    #end
 
 
     # Use full weight matrix if available; otherwise diagonal weights
@@ -202,8 +260,6 @@ function smm_objective(
         return compute_loss(m_model, spec)
     end
 end
-
-
 
 
 # ============================================================
