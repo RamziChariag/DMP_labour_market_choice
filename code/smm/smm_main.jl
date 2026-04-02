@@ -224,8 +224,6 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         "Re-run the base_fc estimation first (WINDOW = :base_fc, W_COND_TARGET = $W_COND_TARGET)."
     )
 
-baseline_result = baseline_data.result
-baseline_spec   = baseline_data.spec
     baseline_result  = baseline_data.result   # SMMResult
     baseline_spec    = baseline_data.spec     # SMMSpec
 
@@ -368,7 +366,7 @@ run_params = SMMRunParams(
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 600,       # generations; total evals = max_iter × pop_size
+    de_max_iter  = 3_000,       # generations; total evals = max_iter × pop_size
     de_pop_size  = 100,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
@@ -396,6 +394,13 @@ spec = build_smm_spec(
     free_specs = free_params,
     run        = run_params,
     W          = W_opt,
+    skip_moments = [          # leave empty to target all moments
+     :emp_cm3_U,
+     :emp_cm3_S,
+     :ee_rate_S,
+     :p25wage_U,
+     :p25wage_S,
+]
 )
 
 print_spec(spec)

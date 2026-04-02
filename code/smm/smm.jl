@@ -158,27 +158,25 @@ function compute_loss_matrix(
 
 
 
-    # Build normalised deviation vector g̃_k = (m_k − m̂_k) / |m̂_k|
-    dev_vec = Float64[]
-    for k in keys(spec.moments)
+    # Build deviation vector and track which indices into W are active.
+    # W was built from all MOMENT_NAMES (22 rows/cols); skip_moments may have
+    # zeroed some weights, so we must subset W to the same active rows/columns.
+    dev_vec    = Float64[]
+    active_idx = Int[]
+    for (i, k) in enumerate(keys(spec.moments))
         target = spec.moments[k]
         target.weight <= 0.0 && continue
         !hasproperty(m_model, k) && continue
-        #rescale weights by their mean, suspect for causing corner solutions
-        #scale = max(abs(target.value), 1e-10)
-        #dev   = (getproperty(m_model, k) - target.value) / scale
-        dev   = (getproperty(m_model, k) - target.value)
+        dev = (getproperty(m_model, k) - target.value)
         push!(dev_vec, dev)
+        push!(active_idx, i)
     end
-
-
 
     isempty(dev_vec) && return 0.0
 
-
-
-    # Compute Q = g̃' W g̃
-    Q = dot(dev_vec, W * dev_vec)
+    # Subset W to the active rows/columns, then compute Q = g' W_sub g
+    W_sub = W[active_idx, active_idx]
+    Q = dot(dev_vec, W_sub * dev_vec)
     return Q
 end
 

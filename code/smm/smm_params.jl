@@ -180,10 +180,11 @@ end
 
 """
     build_smm_spec(moments, sim;
-                   fixed      = (;),
-                   free_specs = default_free_params(),
-                   run        = SMMRunParams(),
-                   W          = nothing)
+                   fixed        = (;),
+                   free_specs   = default_free_params(),
+                   run          = SMMRunParams(),
+                   W            = nothing,
+                   skip_moments = Symbol[])
 
 Build an `SMMSpec`.
 
@@ -203,14 +204,23 @@ Build an `SMMSpec`.
   weights (conditioning is handled by `load_weight_matrix` before
   this is called). If nothing (default), uses diagonal weights from
   moment variances.
+
+- `skip_moments`: vector of moment name Symbols to exclude from the
+  SMM objective.  Their weights are set to zero in the stored moments
+  NamedTuple, so both `compute_loss` and `compute_loss_matrix` skip
+  them automatically.  The moment values are still stored and visible
+  in diagnostics (they just show as inactive in `print_spec`).
+  Example: `skip_moments = [:emp_cm3_U, :emp_cm3_S]`
+  Unknown names produce a warning at spec-build time.
 """
 function build_smm_spec(
-    moments    :: NamedTuple,
-    sim        :: SimParams;
-    fixed      :: Any                           = (;),
-    free_specs :: Vector{ParamSpec}             = default_free_params(),
-    run        :: SMMRunParams                  = SMMRunParams(),
-    W          :: Union{Nothing, Matrix{Float64}} = nothing,
+    moments      :: NamedTuple,
+    sim          :: SimParams;
+    fixed        :: Any                           = (;),
+    free_specs   :: Vector{ParamSpec}             = default_free_params(),
+    run          :: SMMRunParams                  = SMMRunParams(),
+    W            :: Union{Nothing, Matrix{Float64}} = nothing,
+    skip_moments :: Vector{Symbol}                = Symbol[],
 )
     # Coerce () or any non-NamedTuple to an empty NamedTuple
     fixed_nt    = (fixed isa NamedTuple) ? fixed : NamedTuple()
@@ -230,6 +240,25 @@ function build_smm_spec(
                       Symbol(string(ps.block) * "_" * string(ps.name)) in fixed_names]
         @printf("SMMSpec: fixed override dropped free params: %s\n",
                 join(string.(dropped), ", "))
+    end
+
+    # Zero out weights for any moments in skip_moments.
+    # Unknown names get a warning so typos are caught immediately.
+    if !isempty(skip_moments)
+        unknown = setdiff(skip_moments, keys(moments))
+        if !isempty(unknown)
+            @printf("SMMSpec: skip_moments — unrecognised moment names (ignored): %s\n",
+                    join(string.(unknown), ", "))
+        end
+        moments = NamedTuple(
+            k => (k in skip_moments ? (value = v.value, weight = 0.0) : v)
+            for (k, v) in pairs(moments)
+        )
+        active_skipped = intersect(skip_moments, keys(moments))
+        if !isempty(active_skipped)
+            @printf("SMMSpec: skip_moments zeroed weights for (%d): %s\n",
+                    length(active_skipped), join(string.(active_skipped), ", "))
+        end
     end
 
     return SMMSpec(active_free, fixed_nt, moments, sim, run, W)
@@ -473,16 +502,19 @@ function print_spec(spec::SMMSpec)
         end
     end
 
+    # Partition moments into active (weight > 0) and skipped (weight == 0)
+    active_moments  = [(k, v) for (k, v) in pairs(spec.moments) if v.weight > 0.0]
+    skipped_moments = [(k, v) for (k, v) in pairs(spec.moments) if v.weight <= 0.0]
+
     @printf("\n╠══════════════════════════════════════════════════════╣\n")
-    @printf("║  Active moments                                      ║\n")
+    @printf("║  Active moments (%2d)                                 ║\n", length(active_moments))
     @printf("╠══════════════════════════════════════════════════════╣\n")
     if !isnothing(spec.W)
         @printf("  (Weighting: full optimal W matrix)\n\n")
         @printf("  %-22s  %10s  %12s\n", "moment", "target", "W diag wt")
         @printf("  %s\n", "─"^48)
         idx = 0
-        for (k, v) in pairs(spec.moments)
-            v.weight > 0.0 || continue
+        for (k, v) in active_moments
             idx += 1
             w_diag = (idx <= size(spec.W, 1)) ? spec.W[idx, idx] : NaN
             @printf("  %-22s  %10.4f  %12.4e\n", k, v.value, w_diag)
@@ -490,9 +522,19 @@ function print_spec(spec::SMMSpec)
     else
         @printf("  %-22s  %10s  %10s\n", "moment", "target", "weight")
         @printf("  %s\n", "─"^46)
-        for (k, v) in pairs(spec.moments)
-            v.weight > 0.0 || continue
+        for (k, v) in active_moments
             @printf("  %-22s  %10.4f  %10.2f\n", k, v.value, v.weight)
+        end
+    end
+
+    if !isempty(skipped_moments)
+        @printf("\n╠══════════════════════════════════════════════════════╣\n")
+        @printf("║  Skipped moments (%2d, weight = 0)                   ║\n", length(skipped_moments))
+        @printf("╠══════════════════════════════════════════════════════╣\n")
+        @printf("  %-22s  %10s\n", "moment", "target")
+        @printf("  %s\n", "─"^34)
+        for (k, v) in skipped_moments
+            @printf("  %-22s  %10.4f\n", k, v.value)
         end
     end
     @printf("\n  Grid: Nx=%d  Np_U=%d  Np_S=%d\n",

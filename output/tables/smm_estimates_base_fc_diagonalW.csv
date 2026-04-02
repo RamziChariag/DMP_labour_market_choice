@@ -1,31 +1,31 @@
 block,name,label,estimate,lb,ub,fixed
-common,a_ℓ,worker type shape a_ℓ,0.80000041,0.80000000,5.50000000,false
-common,b_ℓ,worker type shape b_ℓ,1.50000006,1.50000000,7.00000000,false
-common,c,training cost coeff c,7.99999999,0.50000000,8.00000000,false
-regime,PU,unskilled productivity PU,1.60000000,0.40000000,1.60000000,false
-regime,PS,skilled productivity PS,3.49999996,1.00000000,3.50000000,false
-regime,bU,unskilled UI flow bU,0.00000000,0.00000000,1.00000000,false
-regime,bT,training flow bT,0.55542865,0.00000000,0.60000000,false
-regime,bS,skilled UI flow bS,0.69990066,0.00000000,0.80000000,false
-regime,α_U,unskilled damage shape α_U,4.00000000,0.30000000,4.00000000,false
-regime,a_Γ,skilled offer shape a_Γ,4.49999998,1.20000000,4.50000000,false
-regime,b_Γ,skilled offer shape b_Γ,2.00000000,2.00000000,7.00000000,false
-unsk,μ,unskilled matching eff μ_U,0.20000000,0.20000000,2.00000000,false
-unsk,η,unskilled matching elas η_U,0.79999997,0.30000000,0.80000000,false
-unsk,k,unskilled vacancy cost k_U,0.06200861,0.05000000,0.80000000,false
-unsk,β,unskilled bargaining β_U,0.65000000,0.15000000,0.65000000,false
-unsk,λ,unskilled damage rate λ_U,0.15000000,0.00500000,0.15000000,false
-skl,μ,skilled matching eff μ_S,0.20000014,0.20000000,2.00000000,false
-skl,η,skilled matching elas η_S,0.70000000,0.30000000,0.70000000,false
-skl,k,skilled vacancy cost k_S,0.05000005,0.05000000,0.80000000,false
-skl,β,skilled bargaining β_S,0.60000000,0.15000000,0.60000000,false
-skl,ξ,skilled exog. sep rate ξ,0.00100000,0.00100000,0.03000000,false
-skl,λ,skilled quality shock λ_S,0.15000000,0.00500000,0.15000000,false
-skl,σ,OJS flow cost σ,0.00000001,0.00000000,0.08000000,false
+common,a_ℓ,worker type shape a_ℓ,1.01131238,0.00010000,8.00000000,false
+common,b_ℓ,worker type shape b_ℓ,2.42423152,0.00010000,8.00000000,false
+common,c,training cost coeff c,10.94633290,0.00010000,30.00000000,false
+regime,PU,unskilled productivity PU,2.18948026,0.00100000,5.00000000,false
+regime,PS,skilled productivity PS,5.03638535,0.00100000,10.00000000,false
+regime,bU,unskilled UI flow bU,0.00000006,0.00000000,7.00000000,false
+regime,bT,training flow bT,0.65082318,0.00000000,7.00000000,false
+regime,bS,skilled UI flow bS,0.56934881,0.00000000,7.00000000,false
+regime,α_U,unskilled damage shape α_U,4.80594343,0.00100000,10.00000000,false
+regime,a_Γ,skilled offer shape a_Γ,4.77377446,0.00100000,8.00000000,false
+regime,b_Γ,skilled offer shape b_Γ,2.28169092,0.00100000,8.00000000,false
+unsk,μ,unskilled matching eff μ_U,0.25584910,0.10000000,5.00000000,false
+unsk,η,unskilled matching elas η_U,0.66041851,0.01000000,0.99000000,false
+unsk,k,unskilled vacancy cost k_U,0.10061060,0.00001000,2.00000000,false
+unsk,β,unskilled bargaining β_U,0.71641780,0.00010000,0.99000000,false
+unsk,λ,unskilled damage rate λ_U,0.25263175,0.00100000,0.99000000,false
+skl,μ,skilled matching eff μ_S,0.22461969,0.10000000,5.00000000,false
+skl,η,skilled matching elas η_S,0.73212793,0.01000000,0.99000000,false
+skl,k,skilled vacancy cost k_S,0.03317250,0.00001000,2.00000000,false
+skl,β,skilled bargaining β_S,0.80761688,0.00010000,0.99000000,false
+skl,ξ,skilled exog. sep rate ξ,0.00100000,0.00100000,0.99000000,false
+skl,λ,skilled quality shock λ_S,0.17788457,0.00100000,0.99000000,false
+skl,σ,OJS flow cost σ,0.00100000,0.00100000,0.50000000,false
 fixed,r,r,0.00416667,,,true
 fixed,ν,ν,0.03841185,,,true
 fixed,φ,φ,0.02222129,,,true
 
-# Q = 1.0556329578e+02
+# Q = 4.0976841573e+01
 # converged = false
 # iterations = 500
