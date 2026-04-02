@@ -297,7 +297,13 @@ else
         println("\n  Warm-start: loading prior base_fc result from:")
         @printf("    %s\n", _warmstart_jls)
         flush(stdout)
-        _ws_data   = open(deserialize, _warmstart_jls)
+        _ws_data = try
+            open(deserialize, _warmstart_jls)
+        catch e
+            @warn "Failed to deserialize warm-start file (stale format — will overwrite): $e"
+            rm(_warmstart_jls, force=true)
+            nothing
+        end
         _ws_result = _ws_data.result
         _ws_spec   = _ws_data.spec
         _ws_cp, _ws_rp, _ws_up, _ws_sp = unpack_θ(_ws_result.theta_opt, _ws_spec)
@@ -351,18 +357,19 @@ run_params = SMMRunParams(
     sa_max_reheats     = 1,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
+    sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 1_000,       # generations; total evals = max_iter × pop_size
-    de_pop_size  = 200,       # 0 = auto (100 × n_free_params)
+    de_max_iter  = 500,       # generations; total evals = max_iter × pop_size
+    de_pop_size  = 230,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
     de_patience  = 5,           # how many generations to wait for improvement before early stopping
-    de_avg_tol   = 1e-5,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
+    de_avg_tol   = 0.01,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 1000,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 10,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 

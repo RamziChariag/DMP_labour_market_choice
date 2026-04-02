@@ -126,6 +126,9 @@ Base.@kwdef struct SMMRunParams
     # Set sa_adapt_window=0 to disable.
     sa_adapt_window  :: Int     = 50      # rolling window for step adaptation
     sa_target_fin    :: Float64 = 0.90    # target feasibility rate
+    sa_random_init     :: Bool    = false     # whether to randomize initial solution for SA (instead of using free_params.init)
+
+     # ── DE global search ──────────────────────────────────────────────
 
     # ── Weight matrix conditioning ──────────────────────────────────────
     w_cond_target :: Float64 = 1e8   # 0=diagonal, 1=compressed, 2=equal, >2=full W (shrink if κ>target)

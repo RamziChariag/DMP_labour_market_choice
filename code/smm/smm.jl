@@ -174,12 +174,6 @@ function smm_objective(
         return Inf
     end
 
-    emptol = 1e-12
-    # Check for empty equilibrium objects, which can arise from corner solutions
-    if objeq.agg_eU < emptol || objeq.agg_eS < emptol
-        return Inf
-    end
-
 
     solve_result.ok || return Inf
 
@@ -190,6 +184,12 @@ function smm_objective(
         obj_eq  = compute_equilibrium_objects(model)
         m_model = model_moments(obj_eq)
     catch
+        return Inf
+    end
+
+    emptol = 1e-12
+    # Check for empty equilibrium objects, which can arise from corner solutions
+    if obj_eq.agg_eU < emptol || obj_eq.agg_eS < emptol
         return Inf
     end
 
@@ -649,7 +649,7 @@ function _run_de(
     f            :: Float64 = 0.65,
     cr           :: Float64 = 0.85,
     patience     :: Int     = 20,
-    avg_tol      :: Float64 = 0.01,   # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 = off
+    avg_tol      :: Float64 = 0.01,
     show_members :: Bool    = false,
     show_gens    :: Bool    = true,
     trace_stride :: Int     = 10,
@@ -659,40 +659,33 @@ function _run_de(
     pop_size = pop_size > 0 ? pop_size : 10 * npar
     theta0   = pack_theta(spec)
 
-
+    # Self-contained per-member RNGs
+    member_rngs = begin
+        seeds = rand(rng, UInt64, pop_size)
+        [Random.Xoshiro(s) for s in seeds]
+    end
 
     # ── Initialise population — uniform in constrained space ──────────────
-    # Draw x_k ~ Uniform(lb_k, ub_k) for each parameter independently,
-    # then map to logit space.  This gives a flat density over the
-    # feasible rectangle, unlike uniform-in-logit which is U-shaped
-    # (dense near boundaries, sparse in the interior).
     pop = Vector{Vector{Float64}}(undef, pop_size)
     for j in 1:pop_size
         theta_j = Vector{Float64}(undef, npar)
         for (k, ps) in enumerate(spec.free)
             x_k = ps.lb + (ps.ub - ps.lb) * rand(rng)
-            # Clamp away from exact bounds to avoid ±Inf in logit
-            x_k = clamp(x_k, ps.lb + 1e-8 * (ps.ub - ps.lb),
-                            ps.ub - 1e-8 * (ps.ub - ps.lb))
+            x_k = clamp(x_k,
+                        ps.lb + 1e-8 * (ps.ub - ps.lb),
+                        ps.ub - 1e-8 * (ps.ub - ps.lb))
             theta_j[k] = _to_unconstrained(x_k, ps.lb, ps.ub)
         end
         pop[j] = theta_j
     end
-    pop[1] = copy(theta0)   # first member is still the supplied starting point
+    pop[1] = copy(theta0)
 
-
-
-    # Evaluate initial population — Inf for non-converging members
     Q_pop = fill(Inf, pop_size)
-
-
 
     if show_gens
         @printf("  [DE init]  evaluating %d initial members...\n", pop_size)
         flush(stdout)
     end
-
-
 
     n_feasible = Threads.Atomic{Int}(0)
     Threads.@threads for i in 1:pop_size
@@ -706,20 +699,16 @@ function _run_de(
             flush(stdout)
         end
     end
-    # Print final summary after all threads have joined
+
     if show_members
         @printf("  [DE init]  evaluated %d/%d  feasible: %d\n",
                 pop_size, pop_size, n_feasible[])
         flush(stdout)
     end
 
-
-
     i_best     = argmin(Q_pop)
     Q_best     = Q_pop[i_best]
     theta_best = copy(pop[i_best])
-
-
 
     if show_gens
         @printf("  [DE init]  feasible=%d/%d  Q_best=%.6e\n",
@@ -727,64 +716,49 @@ function _run_de(
         flush(stdout)
     end
 
-
-
-    # ── Main DE loop (generations) ─────────────────────────────────────
-    n_evals    = Threads.Atomic{Int}(pop_size)
-    stagnation = 0
+    n_evals     = Threads.Atomic{Int}(pop_size)
+    stagnation  = 0
     actual_gens = 0
-    best_lock  = ReentrantLock()
-
 
     for gen in 1:max_iter
         actual_gens = gen
         n_improved  = Threads.Atomic{Int}(0)
 
+        # Freeze old generation
+        pop_old = pop
+        Q_old   = Q_pop
+
+        # Allocate next generation
+        pop_new = Vector{Vector{Float64}}(undef, pop_size)
+        Q_new   = Vector{Float64}(undef, pop_size)
 
         Threads.@threads for i in 1:pop_size
-            # ── Pick three distinct donors ≠ i ─────────────────────────
-            ia, ib, ic = _pick3(Random.default_rng(), pop_size, i)
-            a, b, c    = pop[ia], pop[ib], pop[ic]
+            rng_i = member_rngs[i]
 
+            ia, ib, ic = _pick3(rng_i, pop_size, i)
+            a, b, c    = pop_old[ia], pop_old[ib], pop_old[ic]
 
-            # Mutant vector
             v = a .+ f .* (b .- c)
 
-
-            # Binomial crossover — ensure at least one dimension from mutant
-            mask    = rand(Random.default_rng(), npar) .< cr
-            j_force = rand(Random.default_rng(), 1:npar)
+            mask    = rand(rng_i, npar) .< cr
+            j_force = rand(rng_i, 1:npar)
             mask[j_force] = true
-            u = ifelse.(mask, v, pop[i])
+            u = ifelse.(mask, v, pop_old[i])
 
-
-            # Evaluate trial vector
             Q_u = smm_objective(u, spec)
             Threads.atomic_add!(n_evals, 1)
 
-
-            # Greedy selection — Inf proposals never win
-            if isfinite(Q_u) && Q_u < Q_pop[i]
-                pop[i]   = u
-                Q_pop[i] = Q_u
+            if isfinite(Q_u) && Q_u < Q_old[i]
+                pop_new[i] = u
+                Q_new[i]   = Q_u
                 Threads.atomic_add!(n_improved, 1)
-
-
-                # Update global best under lock — two fields must stay in sync
-                if Q_u < Q_best
-                    lock(best_lock) do
-                        if Q_u < Q_best          # re-check inside lock
-                            Q_best     = Q_u
-                            theta_best = copy(u)
-                        end
-                    end
-                end
+            else
+                pop_new[i] = pop_old[i]
+                Q_new[i]   = Q_old[i]
             end
 
-
-            # Within-generation progress
             if show_members && i % trace_stride == 0
-                Q_i = Q_pop[i]
+                Q_i = Q_new[i]
                 @printf("  [DE gen=%4d  member=%4d/%4d]  Q_member=%-14s  improved=%d\n",
                         gen, i, pop_size,
                         isfinite(Q_i) ? @sprintf("%.6e", Q_i) : "Inf",
@@ -793,40 +767,41 @@ function _run_de(
             end
         end
 
+        pop   = pop_new
+        Q_pop = Q_new
 
-        # Read atomics once after all threads have joined
+        i_best     = argmin(Q_pop)
+        Q_best     = Q_pop[i_best]
+        theta_best = copy(pop[i_best])
+
         n_imp  = n_improved[]
         n_eval = n_evals[]
 
-
-        # Stagnation tracking
         if n_imp == 0
             stagnation += 1
         else
             stagnation = 0
         end
 
-
-        # End-of-generation summary
         if show_gens
-            Q_mean  = mean(filter(isfinite, Q_pop))
-            n_feas  = count(isfinite, Q_pop)
-            n_bas   = _count_basins(pop, Q_pop, spec)
-            @printf("  [DE gen=%4d DONE]  Q_best=%.6e Q_mean=%.6e  feasible=%d/%d  improved=%d  clusters=%d  evals=%d\n",
-                    gen, Q_best, Q_mean, n_feas, pop_size, n_imp, n_bas, n_eval)
+            Q_finite = filter(isfinite, Q_pop)
+            Q_mean   = isempty(Q_finite) ? Inf : mean(Q_finite)
+            n_feas   = length(Q_finite)
+            n_bas    = n_feas == 0 ? 0 : _count_basins(pop, Q_pop, spec)
+            @printf("  [DE gen=%4d DONE]  Q_best=%.6e Q_mean=%-14s  feasible=%d/%d  improved=%d  clusters=%d  evals=%d\n",
+                    gen,
+                    Q_best,
+                    isfinite(Q_mean) ? @sprintf("%.6e", Q_mean) : "Inf",
+                    n_feas, pop_size, n_imp, n_bas, n_eval)
             flush(stdout)
         end
 
-
-        # Early stopping — stagnation
         if stagnation >= patience
             show_gens && @printf("  [DE]  early stop: no improvement for %d generations\n", patience)
             flush(stdout)
             break
         end
 
-
-        # Early stopping — population convergence around best
         if avg_tol > 0.0 && isfinite(Q_best) && Q_best != 0.0
             Q_finite = filter(isfinite, Q_pop)
             if !isempty(Q_finite)
@@ -841,12 +816,10 @@ function _run_de(
         end
     end
 
-
     if show_gens
         @printf("  [DE done]  Q_best=%.6e  total evals=%d\n", Q_best, n_evals[])
         flush(stdout)
     end
-
 
     return theta_best, Q_best, actual_gens
 end
@@ -907,7 +880,7 @@ function run_smm(
         theta_opt, loss_opt, niters = _run_de(
             spec;
             max_iter     = r.de_max_iter,
-            pop_size     = r.de_pop_size > 0 ? r.de_pop_size : 100 * npar,
+            pop_size     = r.de_pop_size > 0 ? r.de_pop_size : 10 * npar,
             f            = r.de_f,
             cr           = r.de_cr,
             patience     = r.de_patience,
@@ -934,7 +907,7 @@ function run_smm(
             max_reheats     = r.sa_max_reheats,
             adapt_window    = r.sa_adapt_window,
             target_fin      = r.sa_target_fin,
-            random_init     = false,
+            random_init     = r.sa_random_init,
             show_trace      = r.show_trace_generations,
             trace_stride    = r.trace_stride,
             rng             = rng,
