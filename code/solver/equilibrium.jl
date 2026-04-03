@@ -46,7 +46,7 @@ function compute_equilibrium_objects(model::Model)
 
     PU = rp.PU;  PS = rp.PS;  bS = rp.bS;  αU = rp.α_U
 
-    c_of_x = x -> exp(cp.c) * (1.0 - x) * exp(-x)
+    c_of_x = x -> cp.c * (1.0 - x) * exp(-x)
 
     # ── dG quadrature weights ──────────────────────────────────────────────
     wGU = build_unskilled_G_weights(pgU, wpU, αU)
@@ -309,8 +309,24 @@ function compute_equilibrium_objects(model::Model)
     ur_total    = total_pop > 1e-12 ? (agg_uU + agg_uS) / total_pop : 1.0
 
     # ── Transition rates for model_moments ────────────────────────────────
-    # f_S = θ_S · q_S(θ_S)   [κS already computed above for wages]
-    f_S = κS
+    # ΓpstarS used by both f_S and sep_rate_S — compute once here.
+    ΓpstarS    = [pre.Γvals[pcut_index(pg, clamp01(pstar_S[ix]))] for ix in 1:Nx]
+
+    # f_S: skilled job-finding rate = κ_S · E[1 − Γ(p*_S(x)) | u_S]
+    #
+    # κ_S = θ_S · q_S(θ_S) is the contact rate for any job seeker.
+    # In the skilled market a contact draws p̃ ~ Γ_z; the unemployed worker
+    # accepts only if p̃ ≥ p*_S(x), so the per-type acceptance probability is
+    # (1 − Γ_z(p*_S(x))).  The data moment Pr(E_{t+1}|U_t,S) is this
+    # acceptance-weighted rate averaged over the unemployed composition,
+    # NOT the raw contact rate κ_S.
+    # (Contrast with the unskilled market where all contacts match at p=1,
+    # so f_U = θ_U · q_U(θ_U) is already the correct job-finding rate.)
+    accept_S = 1.0 .- ΓpstarS          # (1 − Γ(p*_S(x))) for each x
+    uS_mass  = dot(uS, wx)             # ∫ u_S(x) dx
+    f_S = uS_mass > 1e-14 ?
+          κS * dot(accept_S, uS .* wx) / uS_mass :
+          κS
 
     # sep_rate_U: employment-weighted unskilled destruction hazard
     #   δ_U(x) = λ_U · G(p*(x)) = λ_U · p*(x)^α_U   [G(p) = p^α_U]
@@ -320,7 +336,6 @@ function compute_equilibrium_objects(model::Model)
     # sep_rate_S: employment-weighted skilled separation hazard into unemployment
     #   δ_S(x) = ξ_S + λ_S · Γ(p*_S(x))
     #   job-to-job quits are excluded — they do not create unemployment
-    ΓpstarS    = [pre.Γvals[pcut_index(pg, clamp01(pstar_S[ix]))] for ix in 1:Nx]
     δS_by_x    = sp.ξ .+ λS .* ΓpstarS
     sep_rate_S = dot(δS_by_x, eS_tot .* wx) / max(agg_eS, 1e-14)
 

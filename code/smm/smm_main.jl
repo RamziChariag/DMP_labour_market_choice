@@ -124,25 +124,73 @@ WINDOW = :base_fc
 #   :wage_premium, :theta_U, :theta_S
 # ============================================================
 SKIP_MOMENTS = Symbol[
-    #:emp_var_U,
+    :emp_var_U,
     :emp_var_S,
     :emp_cm3_U,
-    #:emp_cm3_S,
+    :emp_cm3_S,
     :ee_rate_S,
     :p25_wage_U,
     :p25_wage_S,
-    :p50_wage_U,
-    :p50_wage_S,
     :mean_wage_U,
     :mean_wage_S,
-    :sep_rate_S,
-    :jfr_S,
-    :jfr_U,
-    :sep_rate_U,
+    #:sep_rate_S,
+    #:jfr_S,
+    #:jfr_U,
+    #:sep_rate_U,
 ]
 
 @printf("Estimation window: %s\n", WINDOW)
 flush(stdout)
+
+# ============================================================
+# USE_DEFAULT_PARAMS — set to true to ignore any prior run
+#   and seed the optimiser from the hard-coded values below.
+#   When false (default) the warm-start file is used as usual.
+# ============================================================
+USE_DEFAULT_PARAMS = true
+
+const DEFAULT_PARAMS = Dict{Symbol,Float64}(
+    :r        => 0.00417,
+    :nu       => 0.03841,
+    :phi      => 0.02222,
+    :a_l      => 1.01131,
+    :b_l      => 2.42423,
+    :c        => 2.94633,
+    :PU       => 1.05948,
+    :PS       => 3.83639,
+    :bU       => 0.00000,
+    :bT       => 0.35082,
+    :bS       => 0.56935,
+    :alpha_U  => 4.80594,
+    :a_Gam    => 4.77377,
+    :b_Gam    => 2.28169,
+    :unsk_mu  => 0.25585,
+    :unsk_eta => 0.66042,
+    :unsk_k   => 0.10061,
+    :unsk_bet => 0.71642,
+    :unsk_lam => 0.20263,
+    :skl_mu   => 0.22462,
+    :skl_eta  => 0.73213,
+    :skl_k    => 0.03317,
+    :skl_bet  => 0.80762,
+    :skl_xi   => 0.00100,
+    :skl_lam  => 0.17788,
+    :skl_sig  => 0.00100,
+)
+
+# Mapping from (block, unicode name) → DEFAULT_PARAMS key (ASCII)
+# Used only when USE_DEFAULT_PARAMS = true.
+const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
+    (:common, :a_ℓ) => :a_l,     (:common, :b_ℓ)  => :b_l,     (:common, :c)   => :c,
+    (:regime, :PU)  => :PU,      (:regime, :PS)   => :PS,
+    (:regime, :bU)  => :bU,      (:regime, :bT)   => :bT,      (:regime, :bS)  => :bS,
+    (:regime, :α_U) => :alpha_U, (:regime, :a_Γ)  => :a_Gam,  (:regime, :b_Γ) => :b_Gam,
+    (:unsk,   :μ)   => :unsk_mu, (:unsk,   :η)    => :unsk_eta, (:unsk,  :k)   => :unsk_k,
+    (:unsk,   :β)   => :unsk_bet, (:unsk,  :λ)   => :unsk_lam,
+    (:skl,    :μ)   => :skl_mu,  (:skl,    :η)    => :skl_eta,  (:skl,   :k)   => :skl_k,
+    (:skl,    :β)   => :skl_bet, (:skl,    :ξ)   => :skl_xi,   (:skl,   :λ)   => :skl_lam,
+    (:skl,    :σ)   => :skl_sig,
+)
 
 # ============================================================
 # 3. Data moments
@@ -331,7 +379,31 @@ else
     # result. If found, use that value as the starting point; otherwise keep
     # the default. This works even if SKIP_MOMENTS or fixed_params changed.
     _warmstart_jls = joinpath(SMM_OUT_DIR, "smm_result_base_fc$(W_SUFFIX).jls")
-    if isfile(_warmstart_jls)
+    if USE_DEFAULT_PARAMS
+        # ── Override: seed from DEFAULT_PARAMS, ignore any prior run ──────
+        println("\n  USE_DEFAULT_PARAMS = true — ignoring any prior run.")
+        println("    Seeding free parameters from DEFAULT_PARAMS.")
+        flush(stdout)
+
+        free_params = [
+            let ascii_key = get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing),
+                raw_val   = isnothing(ascii_key) ? ps.init :
+                                get(DEFAULT_PARAMS, ascii_key, ps.init),
+                init_val  = clamp(raw_val, ps.lb + 1e-10, ps.ub - 1e-10)
+                ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
+            end
+            for ps in free_params
+        ]
+
+        n_matched = count(ps -> !isnothing(get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing)) &&
+                                 haskey(DEFAULT_PARAMS,
+                                        get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), :__missing__)),
+                          free_params)
+        @printf("    Matched %d / %d free parameters from DEFAULT_PARAMS.\n",
+                n_matched, length(free_params))
+        flush(stdout)
+
+    elseif isfile(_warmstart_jls)
         println("\n  Warm-start: loading prior parameter values from:")
         @printf("    %s\n", _warmstart_jls)
         flush(stdout)
@@ -398,7 +470,7 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── SA global search ────────────────────────────────────
-    sa_max_iter        = 5_000,  # total SA proposals
+    sa_max_iter        = 500,  # total SA proposals
     sa_T0              = 5.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
@@ -411,7 +483,7 @@ run_params = SMMRunParams(
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 100,       # generations; total evals = max_iter × pop_size
+    de_max_iter  = 10_000,       # generations; total evals = max_iter × pop_size
     de_pop_size  = 120,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
@@ -450,7 +522,7 @@ print_spec(spec)
 println("Starting SMM optimisation..."); flush(stdout)
 
 # Stage 1: global search :sa or :de 
-res = run_smm(spec; method = :de)
+res = run_smm(spec; method = :sa)
 
 # Stage 2: polish from global optimizer solution
 res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead)

@@ -96,7 +96,6 @@ end
 
 Load the optimal weight matrix from influence functions.
 
-Reads `W_{window}.csv` (K × K matrix) from derived_dir.
 Returns a matrix already subsetted to the active moments (i.e. all
 moments NOT in `skip_moments`), or `nothing` for the equal-weight case.
 The returned matrix is always K_active × K_active where
@@ -112,8 +111,11 @@ Conditioning behaviour (controlled by `cond_target`):
   - cond_target == 2.0:  Equal weights — returns `nothing`.
     The loss function will use compute_loss with unit diagonal weights,
     i.e. all moments weighted equally (no W matrix).
-  - cond_target > 2.0:  Full optimal W matrix.  If the loaded W has
-    κ(W) > cond_target, shrink off-diagonal elements toward zero via
+  - cond_target > 2.0:  Full optimal W = Σ⁻¹ computed fresh from
+    sigma_{window}.csv.  The pipeline generates this file already
+    subsetted to the active moments, so it is used as-is — no size
+    checks, no index subsetting, no dependency on any saved W file.
+    If κ(W) > cond_target, shrink off-diagonal elements toward zero via
         W_shrunk = (1 − α) W  +  α diag(W)
     until κ(W_shrunk) ≤ cond_target.  The shrinkage factor α is found
     by bisection.  Shrinkage is applied AFTER subsetting, so the
@@ -156,7 +158,6 @@ function load_weight_matrix(;
         isfile(sigma_file) || error(
             "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
         sigma_vec = _read_sigma_csv(sigma_file)
-        length(sigma_vec) == K       && (sigma_vec = sigma_vec[active_idx])
         W = Diagonal(1.0 ./ (sigma_vec .^ 2))
         @printf("  cond_target == 0.0 → using pure diagonal W from %s\n", sigma_file)
         return Matrix(W)
@@ -168,7 +169,6 @@ function load_weight_matrix(;
         isfile(sigma_file) || error(
             "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
         sigma_vec = _read_sigma_csv(sigma_file)
-        length(sigma_vec) == K       && (sigma_vec = sigma_vec[active_idx])
         d = 1.0 ./ (sigma_vec .^ 2)
         d_compressed = log.(1.0 .+ d)
         W = Diagonal(d_compressed)
@@ -178,52 +178,31 @@ function load_weight_matrix(;
         return Matrix(W)
     end
 
-    # ── cond_target > 2.0  →  load full optimal W from CSV ────────────
-    W_file = joinpath(derived_dir, "W_$(window).csv")
-    if isfile(W_file)
-        W_raw, W_names = _read_weight_matrix_csv(W_file)
-        # Subset by column name — the CSV can be any size from any prior run.
-        # We only extract the rows/columns matching the currently active moments.
-        active_names = [MOMENT_NAMES[i] for i in active_idx]
-        csv_pos      = Dict(nm => i for (i, nm) in enumerate(W_names))
-        matched_pos  = [get(csv_pos, nm, 0) for nm in active_names]
-        missing_nms  = [nm for (nm, p) in zip(active_names, matched_pos) if p == 0]
-        if !isempty(missing_nms)
-            msg = @sprintf("W CSV is missing active moments (%s) — falling back to diagonal W.",
-                           join(string.(missing_nms), ", "))
-            @warn msg
-        else
-            W_loaded = W_raw[matched_pos, matched_pos]
-            cond_W = cond(W_loaded)
-            if cond_W <= cond_target
-                @printf("  Loaded W matrix from %s  (cond = %.2e)\n", W_file, cond_W)
-                return W_loaded
-            else
-                # ── Shrink off-diagonals to reach target κ ─────────────────
-                # Shrinkage is applied on the already-subsetted matrix, so the
-                # condition number is evaluated on the active submatrix only.
-                W_shrunk, alpha = _shrink_to_target(W_loaded, cond_target)
-                cond_new = cond(W_shrunk)
-                msg = @sprintf("W matrix ill-conditioned (κ = %.2e > %.2e). Shrinking off-diagonal elements (α = %.6f → κ = %.2e).",
-                               cond_W, cond_target, alpha, cond_new)
-                @warn msg
-                return W_shrunk
-            end
-        end
-        # Some active moments were missing from the CSV — fall through to diagonal
-    end
-
-    # ── No W file found — diagonal fallback from sigma_{window}.csv ───
+    # ── cond_target > 2.0  →  full optimal W = Σ⁻¹ computed fresh ─────
+    # Always computed directly from sigma_{window}.csv — never loaded from a
+    # pre-saved W CSV.  sigma_{window}.csv is already subsetted to the active
+    # moments by the data pipeline, so it is used as-is with no size checks
+    # or index subsetting here.
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
     isfile(sigma_file) || error(
-        "Neither W_$(window).csv nor sigma_$(window).csv found in $derived_dir — run the data pipeline first.")
+        "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
 
-    sigma_vec = _read_sigma_csv(sigma_file)
-    length(sigma_vec) == K           && (sigma_vec = sigma_vec[active_idx])
-    W = Diagonal(1.0 ./ (sigma_vec .^ 2))
-    @printf("  W_%s.csv not found — using diagonal W from %s\n",
-            window, sigma_file)
-    return Matrix(W)
+    df_sig  = CSV.read(sigma_file, DataFrame)
+    Σ       = Matrix{Float64}(df_sig)
+    W_fresh = inv(Σ)
+    cond_W  = cond(W_fresh)
+
+    if cond_W <= cond_target
+        @printf("  Full W = Σ⁻¹ computed fresh from %s  (cond = %.2e)\n", sigma_file, cond_W)
+        return W_fresh
+    else
+        W_shrunk, alpha = _shrink_to_target(W_fresh, cond_target)
+        cond_new = cond(W_shrunk)
+        msg = @sprintf("Full W ill-conditioned (κ = %.2e > %.2e). Shrinking off-diagonal elements (α = %.6f → κ = %.2e).",
+                       cond_W, cond_target, alpha, cond_new)
+        @warn msg
+        return W_shrunk
+    end
 end
 
 
@@ -371,25 +350,14 @@ end
 
 
 """
-    _read_weight_matrix_csv(filepath) → Matrix{Float64}
-
-Read W_{window}.csv and return the K × K weight matrix.
-
-Expected format: CSV with K columns (moment names as headers) and K rows, symmetric positive definite.
-"""
-function _read_weight_matrix_csv(filepath::String)
-    df = CSV.read(filepath, DataFrame)
-    return Matrix{Float64}(df), Symbol.(names(df))
-end
-
-
-"""
     _read_sigma_csv(filepath) → Vector{Float64}
 
 Read sigma_{window}.csv and return the standard error vector.
 
-Expected format: CSV with 22×22 matrix (moment names as column headers).
+Expected format: CSV with K×K covariance matrix (moment names as column headers).
 Returns the square root of the diagonal elements (standard errors).
+Used by the cond_target == 0.0 and 1.0 branches; the full K×K matrix is
+read directly via CSV.read in the cond_target > 2.0 branch.
 """
 function _read_sigma_csv(filepath::String)
     df = CSV.read(filepath, DataFrame)
