@@ -600,7 +600,7 @@ function compute_influence_functions_and_sigma()
         end
 
         # Remaining moments: plug-in variance estimate (diagonal only)
-        plug_in_moments = [:ee_rate_S, :training_rate, :theta_U, :theta_S]
+        plug_in_moments = [:ee_rate_S, :theta_U, :theta_S]
         for mname in plug_in_moments
             i = idx[mname]
             val = get(moment_vals, mname, NaN)

@@ -224,7 +224,7 @@ end
 # ============================================================
 
 const MOMENT_NAMES = [
-    :ur_U, :ur_S, :skilled_share, :training_share,
+    :ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
     :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
     :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :ee_rate_S,
     :mean_wage_U, :mean_wage_S,

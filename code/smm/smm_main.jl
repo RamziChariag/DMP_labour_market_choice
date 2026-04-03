@@ -116,7 +116,7 @@ WINDOW = :base_fc
 # so that sigma/W is subsetted consistently with the loss function.
 #
 # Valid names:
-#   :ur_U, :ur_S, :skilled_share, :training_share,
+#   :ur_U, :ur_S, :ur_total, :skilled_share, :training_share,
 #   :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
 #   :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :ee_rate_S,
 #   :mean_wage_U, :mean_wage_S,
@@ -124,15 +124,15 @@ WINDOW = :base_fc
 #   :wage_premium, :theta_U, :theta_S
 # ============================================================
 SKIP_MOMENTS = Symbol[
-    :emp_var_U,
-    :emp_var_S,
-    :emp_cm3_U,
-    :emp_cm3_S,
-    :ee_rate_S,
+    #:emp_var_U,
+    #:emp_var_S,
+    #:emp_cm3_U,
+    #:emp_cm3_S,
+    #:ee_rate_S,
     :p25_wage_U,
     :p25_wage_S,
-    :mean_wage_U,
-    :mean_wage_S,
+    #:mean_wage_U,
+    #:mean_wage_S,
     #:sep_rate_S,
     #:jfr_S,
     #:jfr_U,
@@ -147,7 +147,7 @@ flush(stdout)
 #   and seed the optimiser from the hard-coded values below.
 #   When false (default) the warm-start file is used as usual.
 # ============================================================
-USE_DEFAULT_PARAMS = false
+USE_DEFAULT_PARAMS = true
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00417,
@@ -200,6 +200,7 @@ const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
 derived_dir = joinpath(PROJECT_ROOT, "data", "derived")
 moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 
+
 # ============================================================
 # 4. Optimal weight matrix
 #    W_COND_TARGET controls which weighting scheme is used:
@@ -208,7 +209,7 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 #      2.0   →  equal weights (identity, no W matrix)
 #      >2.0  →  full optimal W (shrunk if κ > target)
 # ============================================================
-W_COND_TARGET = 1e6  # also set in run_params below; keep in sync
+W_COND_TARGET = 0.0  # also set in run_params below; keep in sync
 
 """
     _w_suffix(cond_target) → String
@@ -231,6 +232,7 @@ W_SUFFIX = _w_suffix(W_COND_TARGET)
 W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
                              cond_target=W_COND_TARGET,
                              skip_moments=SKIP_MOMENTS)
+
 
 # ============================================================
 # 5. Externally calibrated parameters (r, ν, φ)
@@ -470,14 +472,14 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── SA global search ────────────────────────────────────
-    sa_max_iter        = 25_000,  # total SA proposals
-    sa_T0              = 5.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
+    sa_max_iter        = 35_000,  # total SA proposals
+    sa_T0              = 100.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
-    sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
-    sa_reheat_patience = 300,         # proposals without improvement before reheating
+    sa_cooling_exp     = 3.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
+    sa_reheat_patience = 500,         # proposals without improvement before reheating
     sa_reheat_factor   = 2.00,     # temperature multiplier on reheat
-    sa_max_reheats     = 2,       # cap on total reheats (0 = unlimited)
+    sa_max_reheats     = 10.0,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)

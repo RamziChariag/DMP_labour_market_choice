@@ -26,7 +26,7 @@
 # ============================================================
 
 const MOMENT_NAMES = [
-    :ur_U, :ur_S, :skilled_share, :training_share,
+    :ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
     :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
     :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :ee_rate_S,
     :mean_wage_U, :mean_wage_S,
@@ -48,11 +48,12 @@ Reads from CSV files produced by the data pipeline:
 - `window::Symbol`: window identifier (default `:base_fc`)
 - `derived_dir::String`: directory containing derived CSV files
 
-# Moment list (22 moments, matches data_pipeline_v6)
+# Moment list (23 moments, matches data_pipeline_v6)
 ───────────────────────────────────────────────────────────
   Labour market stocks
     ur_U              unskilled unemployment rate
     ur_S              skilled unemployment rate
+    ur_total          aggregate (population-weighted) unemployment rate
     skilled_share     share of population in skilled segment
     training_share    share of population in training
     emp_var_U         variance of wages among unskilled employed
@@ -96,30 +97,25 @@ end
 
 Load the optimal weight matrix from influence functions.
 
-Returns a matrix already subsetted to the active moments (i.e. all
-moments NOT in `skip_moments`), or `nothing` for the equal-weight case.
-The returned matrix is always K_active × K_active where
-K_active = K − |skip_moments|, so it is dimensionally consistent with
-the deviation vector built by `compute_loss_matrix`.
+Reads the full K×K sigma_{window}.csv produced by the data pipeline,
+subsets it to the active moments (those not in `skip_moments`), and
+returns a K_active × K_active weight matrix — or `nothing` for equal
+weights.  Subsetting happens here by matching CSV column names to
+MOMENT_NAMES, so the pipeline never needs to know which moments the
+SMM will use.
 
 Conditioning behaviour (controlled by `cond_target`):
-  - cond_target == 0.0:  Pure diagonal matrix from sigma_{window}.csv.
-    Weights are 1/σ² for each moment.
-  - cond_target == 1.0:  Compressed diagonal — loads diagonal weights
-    (1/σ²) from sigma_{window}.csv, then applies log(1 + d) element-wise
-    to compress the dynamic range while preserving ranking.
+  - cond_target == 0.0:  Diagonal W from the active submatrix of Σ.
+    Weights are 1/σ² for each active moment.
+  - cond_target == 1.0:  Compressed diagonal — log(1 + 1/σ²) applied
+    element-wise to compress dynamic range while preserving ranking.
   - cond_target == 2.0:  Equal weights — returns `nothing`.
-    The loss function will use compute_loss with unit diagonal weights,
-    i.e. all moments weighted equally (no W matrix).
-  - cond_target > 2.0:  Full optimal W = Σ⁻¹ computed fresh from
-    sigma_{window}.csv.  The pipeline generates this file already
-    subsetted to the active moments, so it is used as-is — no size
-    checks, no index subsetting, no dependency on any saved W file.
-    If κ(W) > cond_target, shrink off-diagonal elements toward zero via
-        W_shrunk = (1 − α) W  +  α diag(W)
-    until κ(W_shrunk) ≤ cond_target.  The shrinkage factor α is found
-    by bisection.  Shrinkage is applied AFTER subsetting, so the
-    condition number is evaluated on the active submatrix only.
+    compute_loss uses unit diagonal weights (all moments equal).
+  - cond_target > 2.0:  Full optimal W = inv(Σ_active) where Σ_active
+    is the K_active × K_active submatrix of Σ corresponding to the
+    active moments.  If κ(W) > cond_target, shrink off-diagonal
+    elements toward zero via W(α) = (1−α)W + α·diag(W) until
+    κ(W) ≤ cond_target (bisection).
 
 - `skip_moments`: vector of moment Symbols to exclude.  Must match
   what is passed to `build_smm_spec`.  Unknown names produce a warning.
@@ -130,70 +126,78 @@ function load_weight_matrix(;
     cond_target::Float64 = 1e8,
     skip_moments::Vector{Symbol} = Symbol[],
 )
-
     K = length(MOMENT_NAMES)
 
-    # Compute active indices (into MOMENT_NAMES) once — used by all branches.
+    # ── Resolve active moments ─────────────────────────────────────────────────
     unknown = setdiff(skip_moments, MOMENT_NAMES)
     if !isempty(unknown)
         @printf("  load_weight_matrix: skip_moments — unrecognised names (ignored): %s\n",
                 join(string.(unknown), ", "))
     end
-    active_idx = [i for (i, nm) in enumerate(MOMENT_NAMES) if !(nm in skip_moments)]
-    K_active   = length(active_idx)
+    active_names = [nm for nm in MOMENT_NAMES if !(nm in skip_moments)]
+    K_active     = length(active_names)
     if K_active < K
         @printf("  load_weight_matrix: subsetting to %d / %d active moments (skipping: %s)\n",
                 K_active, K, join(string.(skip_moments), ", "))
     end
 
-    # ── cond_target == 2.0  →  equal weights (identity / nothing) ─────
+    # ── Equal weights — no matrix needed ──────────────────────────────────────
     if cond_target == 2.0
         @printf("  cond_target == 2.0 → equal weights (no W matrix)\n")
-        return nothing   # compute_loss uses unit weights; no subsetting needed
+        return nothing
     end
 
-    # ── cond_target == 0.0  →  pure diagonal from Σ ───────────────────
-    if cond_target == 0.0
-        sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-        isfile(sigma_file) || error(
-            "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
-        sigma_vec = _read_sigma_csv(sigma_file)
-        W = Diagonal(1.0 ./ (sigma_vec .^ 2))
-        @printf("  cond_target == 0.0 → using pure diagonal W from %s\n", sigma_file)
-        return Matrix(W)
-    end
-
-    # ── cond_target == 1.0  →  compressed diagonal from Σ ─────────────
-    if cond_target == 1.0
-        sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-        isfile(sigma_file) || error(
-            "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
-        sigma_vec = _read_sigma_csv(sigma_file)
-        d = 1.0 ./ (sigma_vec .^ 2)
-        d_compressed = log.(1.0 .+ d)
-        W = Diagonal(d_compressed)
-        @printf("  cond_target == 1.0 → using compressed diagonal W from %s\n", sigma_file)
-        @printf("    raw diag range:        [%.4e, %.4e]\n", minimum(d), maximum(d))
-        @printf("    compressed diag range:  [%.4e, %.4e]\n", minimum(d_compressed), maximum(d_compressed))
-        return Matrix(W)
-    end
-
-    # ── cond_target > 2.0  →  full optimal W = Σ⁻¹ computed fresh ─────
-    # Always computed directly from sigma_{window}.csv — never loaded from a
-    # pre-saved W CSV.  sigma_{window}.csv is already subsetted to the active
-    # moments by the data pipeline, so it is used as-is with no size checks
-    # or index subsetting here.
+    # ── Load the full K×K Σ and subset to active moments ──────────────────────
+    # The pipeline (v6+) always outputs sigma_{window}.csv as a full K×K matrix
+    # with MOMENT_NAMES as column headers.  We use those headers to locate the
+    # active columns, so subsetting is correct even if the CSV column order
+    # ever differs from MOMENT_NAMES.
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
     isfile(sigma_file) || error(
         "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
 
-    df_sig  = CSV.read(sigma_file, DataFrame)
-    Σ       = Matrix{Float64}(df_sig)
-    W_fresh = inv(Σ)
+    df_sig   = CSV.read(sigma_file, DataFrame)
+    csv_cols = Symbol.(names(df_sig))
+
+    # Map each active moment name to its column position in the CSV
+    col_pos = Dict(nm => findfirst(==(nm), csv_cols) for nm in csv_cols)
+    missing_cols = [nm for nm in active_names if !haskey(col_pos, nm)]
+    isempty(missing_cols) || error(
+        "sigma_$(window).csv is missing columns for active moments: " *
+        join(string.(missing_cols), ", ") *
+        " — re-run the data pipeline.")
+    active_col_idx = [col_pos[nm] for nm in active_names]
+
+    Σ_full = Matrix{Float64}(df_sig)
+    Σ      = Σ_full[active_col_idx, active_col_idx]   # K_active × K_active
+
+    # ── Diagonal weight variants ───────────────────────────────────────────────
+    d = diag(Σ)   # variances of the active, normalised moments
+
+    if cond_target == 0.0
+        W = Diagonal(1.0 ./ max.(d, 1e-14))
+        @printf("  cond_target == 0.0 → diagonal W from active submatrix of %s\n", sigma_file)
+        return Matrix(W)
+    end
+
+    if cond_target == 1.0
+        d_inv        = 1.0 ./ max.(d, 1e-14)
+        d_compressed = log.(1.0 .+ d_inv)
+        W = Diagonal(d_compressed)
+        @printf("  cond_target == 1.0 → compressed diagonal W from active submatrix of %s\n", sigma_file)
+        @printf("    raw 1/σ² range:         [%.4e, %.4e]\n", minimum(d_inv), maximum(d_inv))
+        @printf("    compressed diag range:   [%.4e, %.4e]\n", minimum(d_compressed), maximum(d_compressed))
+        return Matrix(W)
+    end
+
+    # ── Full optimal W = inv(Σ_active) ────────────────────────────────────────
+    # Invert only the K_active × K_active submatrix — never the full K×K which
+    # is singular when collinear moments (e.g. ur_total) are present.
+    W_fresh = Matrix(inv(Symmetric(Σ)))
     cond_W  = cond(W_fresh)
 
     if cond_W <= cond_target
-        @printf("  Full W = Σ⁻¹ computed fresh from %s  (cond = %.2e)\n", sigma_file, cond_W)
+        @printf("  Full W = Σ⁻¹ from active submatrix of %s  (cond = %.2e)\n", sigma_file, cond_W)
         return W_fresh
     else
         W_shrunk, alpha = _shrink_to_target(W_fresh, cond_target)
@@ -352,17 +356,16 @@ end
 """
     _read_sigma_csv(filepath) → Vector{Float64}
 
-Read sigma_{window}.csv and return the standard error vector.
+Read sigma_{window}.csv and return the full standard error vector (one entry
+per moment in column order).
 
-Expected format: CSV with K×K covariance matrix (moment names as column headers).
-Returns the square root of the diagonal elements (standard errors).
-Used by the cond_target == 0.0 and 1.0 branches; the full K×K matrix is
-read directly via CSV.read in the cond_target > 2.0 branch.
+The CSV has MOMENT_NAMES as column headers (pipeline v6+).
+Returns sqrt(diag(Σ)) in CSV column order — useful for diagnostics.
+`load_weight_matrix` does not call this; it reads and subsets Σ directly.
 """
 function _read_sigma_csv(filepath::String)
-    df = CSV.read(filepath, DataFrame)
+    df    = CSV.read(filepath, DataFrame)
     Sigma = Matrix{Float64}(df)
-    # Return standard errors (sqrt of diagonal)
     return sqrt.(max.(diag(Sigma), 0.0))
 end
 
@@ -403,6 +406,7 @@ function model_moments(obj)
     #   unemployment is impressively low.
     ur_U           = obj.ur_U
     ur_S           = obj.agg_mS > _emp_tol ? obj.ur_S : 1.0
+    ur_total      = obj.ur_total
     skilled_share  = obj.agg_mS  / max(obj.total_pop, 1e-14)
     training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
 
@@ -494,6 +498,7 @@ function model_moments(obj)
     theta_S = _has_eS ? obj.thetaS : _THETA_CAP
 
     return (
+        ur_total      = ur_total,
         ur_U          = ur_U,
         ur_S          = ur_S,
         skilled_share = skilled_share,
