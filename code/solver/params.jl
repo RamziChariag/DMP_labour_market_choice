@@ -20,7 +20,7 @@ Base.@kwdef struct CommonParams
     a_ℓ :: Float64    # Beta shape 1 for worker-type density ℓ(x)
     b_ℓ :: Float64    # Beta shape 2 for worker-type density ℓ(x)
 
-    c   :: Float64    # training cost coefficient in c(x) = c·(1−x)·e^{−x}
+    c   :: Float64    # training cost coefficient in c(x) = exp(c)·(1−x)·e^{−x}
 end
 
 
