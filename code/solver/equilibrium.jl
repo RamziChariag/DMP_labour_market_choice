@@ -46,7 +46,7 @@ function compute_equilibrium_objects(model::Model)
 
     PU = rp.PU;  PS = rp.PS;  bS = rp.bS;  αU = rp.α_U
 
-    c_of_x = x -> cp.c * (1.0 - x) * exp(-x)
+    c_of_x = x -> training_cost(x, cp.c)
 
     # ── dG quadrature weights ──────────────────────────────────────────────
     wGU = build_unskilled_G_weights(pgU, wpU, αU)
