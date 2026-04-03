@@ -1,4 +1,5 @@
 /extra documents/
 /literature/
-/data/
+/data/raw/
+/data/derived/*.arrow
 /latex/
