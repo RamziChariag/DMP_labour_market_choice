@@ -313,8 +313,8 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:regime, :b_Γ, 0.30,  6.00,  5.00,  "skilled offer shape b_Γ"),
 
         # ── UnskilledParams ────────────────────────────────────────────
-        ParamSpec(:unsk, :μ,    0.10,  1.50,  0.74,  "unskilled matching eff μ_U"),
-        ParamSpec(:unsk, :η,    0.10,  0.90,  0.60,  "unskilled matching elas η_U"),
+        ParamSpec(:unsk, :μ,    0.01,  1.50,  0.74,  "unskilled matching eff μ_U"),
+        ParamSpec(:unsk, :η,    0.01,  0.90,  0.60,  "unskilled matching elas η_U"),
         ParamSpec(:unsk, :k,    0.001, 1.50,  0.25,  "unskilled vacancy cost k_U"),
         ParamSpec(:unsk, :β,    0.05,  0.95,  0.40,  "unskilled bargaining β_U"),
         ParamSpec(:unsk, :λ,    0.001, 0.30,  0.08,  "unskilled damage rate λ_U"),
@@ -324,9 +324,9 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:skl, :η,    0.10,  0.90,  0.50,  "skilled matching elas η_S"),
         ParamSpec(:skl, :k,    0.001, 1.50,  0.17,  "skilled vacancy cost k_S"),
         ParamSpec(:skl, :β,    0.05,  0.95,  0.32,  "skilled bargaining β_S"),
-        ParamSpec(:skl, :ξ,    0.001, 0.15,  0.03,  "skilled exog. sep rate ξ"),
+        ParamSpec(:skl, :ξ,    0.0000001, 0.15,  0.03,  "skilled exog. sep rate ξ"),
         ParamSpec(:skl, :λ,    0.001, 0.30,  0.07,  "skilled quality shock λ_S"),
-        ParamSpec(:skl, :σ,    0.001, 0.20,  0.01,  "OJS flow cost σ"),
+        ParamSpec(:skl, :σ,    0.0000001, 0.20,  0.01,  "OJS flow cost σ"),
     ]
 end
 

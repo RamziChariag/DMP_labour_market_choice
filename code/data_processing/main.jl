@@ -187,6 +187,9 @@ function _compute_stock_moments(cps_w::DataFrame)::Dict{Symbol, Float64}
         training_share = hasproperty(g, :in_training) ?
             (n_lf > 0 ? sum(w[coalesce.(g.in_training, false)]) / n_lf : NaN) : NaN
         push!(monthly, (ur_total=ur_total, ur_U=ur_U, ur_S=ur_S,
+                         exp_ur_total = isfinite(ur_total) ? exp(ur_total) : NaN,
+                         exp_ur_U     = isfinite(ur_U)     ? exp(ur_U)     : NaN,
+                         exp_ur_S     = isfinite(ur_S)     ? exp(ur_S)     : NaN,
                          skilled_share=skilled_share, training_share=training_share))
     end
     if !isempty(monthly)
@@ -194,6 +197,9 @@ function _compute_stock_moments(cps_w::DataFrame)::Dict{Symbol, Float64}
         moments[:ur_total]       = mean(filter(isfinite, mdf.ur_total))
         moments[:ur_U]           = mean(filter(isfinite, mdf.ur_U))
         moments[:ur_S]           = mean(filter(isfinite, mdf.ur_S))
+        moments[:exp_ur_total]   = mean(filter(isfinite, mdf.exp_ur_total))
+        moments[:exp_ur_U]       = mean(filter(isfinite, mdf.exp_ur_U))
+        moments[:exp_ur_S]       = mean(filter(isfinite, mdf.exp_ur_S))
         moments[:skilled_share]  = mean(filter(isfinite, mdf.skilled_share))
         moments[:training_share] = mean(filter(isfinite, mdf.training_share))
     end
@@ -299,7 +305,8 @@ function make_moments()
         if nrow(cps_w) > 0
             merge!(moments, _compute_stock_moments(cps_w))
         else
-            for k in [:ur_total,:ur_U,:ur_S,:skilled_share,:training_share]
+            for k in [:ur_total,:ur_U,:ur_S,:exp_ur_total,:exp_ur_U,:exp_ur_S,
+                      :skilled_share,:training_share]
                 moments[k] = NaN
             end
         end
@@ -381,7 +388,8 @@ function compute_influence_functions_and_sigma()
         cps_w = filter(row -> row.window == wname, cps_basic_m)
         lf_cps_w = hasproperty(cps_w, :in_lf) ? filter(r -> r.in_lf, cps_w) : cps_w
 
-        basic_moments = [:ur_total, :ur_U, :ur_S, :skilled_share, :training_share]
+        basic_moments = [:ur_total, :ur_U, :ur_S, :exp_ur_total, :exp_ur_U, :exp_ur_S,
+                         :skilled_share, :training_share]
         monthly_stock = NamedTuple[]
 
         for gk in groupby(lf_cps_w, [:YEAR, :MONTH])
@@ -396,10 +404,16 @@ function compute_influence_functions_and_sigma()
             n_lf_U = sum(w[.!g.skilled])
             n_lf_S = sum(w[g.skilled])
             ts = hasproperty(g, :in_training) ? sum(w[g.in_training]) / n_lf : NaN
+            ur_t  = n_u/n_lf
+            ur_U_ = n_lf_U > 0 ? n_u_U/n_lf_U : NaN
+            ur_S_ = n_lf_S > 0 ? n_u_S/n_lf_S : NaN
             push!(monthly_stock, (
-                ur_total = n_u/n_lf,
-                ur_U = n_u_U/n_lf_U,
-                ur_S = n_u_S/n_lf_S,
+                ur_total      = ur_t,
+                ur_U          = ur_U_,
+                ur_S          = ur_S_,
+                exp_ur_total  = isfinite(ur_t)  ? exp(ur_t)  : NaN,
+                exp_ur_U      = isfinite(ur_U_) ? exp(ur_U_) : NaN,
+                exp_ur_S      = isfinite(ur_S_) ? exp(ur_S_) : NaN,
                 skilled_share = n_lf_S/n_lf,
                 training_share = ts,
             ))
@@ -584,7 +598,7 @@ function compute_influence_functions_and_sigma()
 
         idx = Dict(m => i for (i, m) in enumerate(MOMENT_NAMES))
 
-        # Block 1: stock moments (5×5)
+        # Block 1: stock moments (8×8 — ur levels + exp_ur + skilled/training shares)
         for (i, mi) in enumerate(basic_moments), (j, mj) in enumerate(basic_moments)
             Sigma[idx[mi], idx[mj]] = Sigma_basic[i, j]
         end

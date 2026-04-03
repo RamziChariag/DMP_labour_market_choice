@@ -124,13 +124,18 @@ WINDOW = :base_fc
 #   :wage_premium, :theta_U, :theta_S
 # ============================================================
 SKIP_MOMENTS = Symbol[
+    #:ur_U,
+    :exp_ur_total,
+    :exp_ur_U,
+    #:exp_ur_S,
+    #:skilled_share,
     #:emp_var_U,
     #:emp_var_S,
     #:emp_cm3_U,
     #:emp_cm3_S,
     #:ee_rate_S,
-    :p25_wage_U,
-    :p25_wage_S,
+    #:p25_wage_U,
+    #:p25_wage_S,
     #:mean_wage_U,
     #:mean_wage_S,
     #:sep_rate_S,
@@ -147,7 +152,7 @@ flush(stdout)
 #   and seed the optimiser from the hard-coded values below.
 #   When false (default) the warm-start file is used as usual.
 # ============================================================
-USE_DEFAULT_PARAMS = true
+USE_DEFAULT_PARAMS = false
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00417,
@@ -209,7 +214,7 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 #      2.0   →  equal weights (identity, no W matrix)
 #      >2.0  →  full optimal W (shrunk if κ > target)
 # ============================================================
-W_COND_TARGET = 0.0  # also set in run_params below; keep in sync
+W_COND_TARGET = 1e8  # also set in run_params below; keep in sync
 
 """
     _w_suffix(cond_target) → String
@@ -472,14 +477,14 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── SA global search ────────────────────────────────────
-    sa_max_iter        = 35_000,  # total SA proposals
-    sa_T0              = 100.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
+    sa_max_iter        = 10_000,  # total SA proposals
+    sa_T0              = 50.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
-    sa_cooling_exp     = 3.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
-    sa_reheat_patience = 500,         # proposals without improvement before reheating
+    sa_cooling_exp     = 1.5,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
+    sa_reheat_patience = 100,         # proposals without improvement before reheating
     sa_reheat_factor   = 2.00,     # temperature multiplier on reheat
-    sa_max_reheats     = 10.0,       # cap on total reheats (0 = unlimited)
+    sa_max_reheats     = 8.0,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
@@ -494,7 +499,7 @@ run_params = SMMRunParams(
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 2_000,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 5_000,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 

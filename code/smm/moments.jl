@@ -26,7 +26,9 @@
 # ============================================================
 
 const MOMENT_NAMES = [
-    :ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
+    :ur_total, :ur_U, :ur_S,
+    :exp_ur_total, :exp_ur_U, :exp_ur_S,
+    :skilled_share, :training_share,
     :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
     :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :ee_rate_S,
     :mean_wage_U, :mean_wage_S,
@@ -97,25 +99,30 @@ end
 
 Load the optimal weight matrix from influence functions.
 
-Reads the full K×K sigma_{window}.csv produced by the data pipeline,
-subsets it to the active moments (those not in `skip_moments`), and
-returns a K_active × K_active weight matrix — or `nothing` for equal
-weights.  Subsetting happens here by matching CSV column names to
-MOMENT_NAMES, so the pipeline never needs to know which moments the
-SMM will use.
+Returns a matrix already subsetted to the active moments (i.e. all
+moments NOT in `skip_moments`), or `nothing` for the equal-weight case.
+The returned matrix is always K_active × K_active where
+K_active = K − |skip_moments|, so it is dimensionally consistent with
+the deviation vector built by `compute_loss_matrix`.
 
 Conditioning behaviour (controlled by `cond_target`):
-  - cond_target == 0.0:  Diagonal W from the active submatrix of Σ.
-    Weights are 1/σ² for each active moment.
-  - cond_target == 1.0:  Compressed diagonal — log(1 + 1/σ²) applied
-    element-wise to compress dynamic range while preserving ranking.
+  - cond_target == 0.0:  Pure diagonal matrix from sigma_{window}.csv.
+    Weights are 1/σ² for each moment.
+  - cond_target == 1.0:  Compressed diagonal — loads diagonal weights
+    (1/σ²) from sigma_{window}.csv, then applies log(1 + d) element-wise
+    to compress the dynamic range while preserving ranking.
   - cond_target == 2.0:  Equal weights — returns `nothing`.
-    compute_loss uses unit diagonal weights (all moments equal).
-  - cond_target > 2.0:  Full optimal W = inv(Σ_active) where Σ_active
-    is the K_active × K_active submatrix of Σ corresponding to the
-    active moments.  If κ(W) > cond_target, shrink off-diagonal
-    elements toward zero via W(α) = (1−α)W + α·diag(W) until
-    κ(W) ≤ cond_target (bisection).
+    The loss function will use compute_loss with unit diagonal weights,
+    i.e. all moments weighted equally (no W matrix).
+  - cond_target > 2.0:  Full optimal W = Σ⁻¹ computed fresh from
+    sigma_{window}.csv.  The pipeline generates this file already
+    subsetted to the active moments, so it is used as-is — no size
+    checks, no index subsetting, no dependency on any saved W file.
+    If κ(W) > cond_target, shrink off-diagonal elements toward zero via
+        W_shrunk = (1 − α) W  +  α diag(W)
+    until κ(W_shrunk) ≤ cond_target.  The shrinkage factor α is found
+    by bisection.  Shrinkage is applied AFTER subsetting, so the
+    condition number is evaluated on the active submatrix only.
 
 - `skip_moments`: vector of moment Symbols to exclude.  Must match
   what is passed to `build_smm_spec`.  Unknown names produce a warning.
@@ -126,9 +133,10 @@ function load_weight_matrix(;
     cond_target::Float64 = 1e8,
     skip_moments::Vector{Symbol} = Symbol[],
 )
+
     K = length(MOMENT_NAMES)
 
-    # ── Resolve active moments ─────────────────────────────────────────────────
+    # Compute active indices (into MOMENT_NAMES) once — used by all branches.
     unknown = setdiff(skip_moments, MOMENT_NAMES)
     if !isempty(unknown)
         @printf("  load_weight_matrix: skip_moments — unrecognised names (ignored): %s\n",
@@ -141,46 +149,35 @@ function load_weight_matrix(;
                 K_active, K, join(string.(skip_moments), ", "))
     end
 
-    # ── Equal weights — no matrix needed ──────────────────────────────────────
+    # ── cond_target == 2.0  →  equal weights (identity / nothing) ─────
     if cond_target == 2.0
         @printf("  cond_target == 2.0 → equal weights (no W matrix)\n")
-        return nothing
+        return nothing   # compute_loss uses unit weights; no subsetting needed
     end
 
-    # ── Load the full K×K Σ and subset to active moments ──────────────────────
-    # The pipeline (v6+) always outputs sigma_{window}.csv as a full K×K matrix
-    # with MOMENT_NAMES as column headers.  We use those headers to locate the
-    # active columns, so subsetting is correct even if the CSV column order
-    # ever differs from MOMENT_NAMES.
-    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-    isfile(sigma_file) || error(
-        "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
-
-    df_sig   = CSV.read(sigma_file, DataFrame)
-    csv_cols = Symbol.(names(df_sig))
-
-    # Map each active moment name to its column position in the CSV
-    col_pos = Dict(nm => findfirst(==(nm), csv_cols) for nm in csv_cols)
-    missing_cols = [nm for nm in active_names if !haskey(col_pos, nm)]
-    isempty(missing_cols) || error(
-        "sigma_$(window).csv is missing columns for active moments: " *
-        join(string.(missing_cols), ", ") *
-        " — re-run the data pipeline.")
-    active_col_idx = [col_pos[nm] for nm in active_names]
-
-    Σ_full = Matrix{Float64}(df_sig)
-    Σ      = Σ_full[active_col_idx, active_col_idx]   # K_active × K_active
-
-    # ── Diagonal weight variants ───────────────────────────────────────────────
-    d = diag(Σ)   # variances of the active, normalised moments
-
+    # ── cond_target == 0.0  →  pure diagonal from active submatrix of Σ ──
     if cond_target == 0.0
+        sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+        isfile(sigma_file) || error(
+            "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
+        df_sig   = CSV.read(sigma_file, DataFrame)
+        csv_cols = Symbol.(names(df_sig))
+        active_col_idx = [findfirst(==(nm), csv_cols) for nm in active_names]
+        d = diag(Matrix{Float64}(df_sig)[active_col_idx, active_col_idx])
         W = Diagonal(1.0 ./ max.(d, 1e-14))
         @printf("  cond_target == 0.0 → diagonal W from active submatrix of %s\n", sigma_file)
         return Matrix(W)
     end
 
+    # ── cond_target == 1.0  →  compressed diagonal from active submatrix of Σ
     if cond_target == 1.0
+        sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+        isfile(sigma_file) || error(
+            "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
+        df_sig   = CSV.read(sigma_file, DataFrame)
+        csv_cols = Symbol.(names(df_sig))
+        active_col_idx = [findfirst(==(nm), csv_cols) for nm in active_names]
+        d            = diag(Matrix{Float64}(df_sig)[active_col_idx, active_col_idx])
         d_inv        = 1.0 ./ max.(d, 1e-14)
         d_compressed = log.(1.0 .+ d_inv)
         W = Diagonal(d_compressed)
@@ -191,22 +188,68 @@ function load_weight_matrix(;
     end
 
     # ── Full optimal W = inv(Σ_active) ────────────────────────────────────────
-    # Invert only the K_active × K_active submatrix — never the full K×K which
-    # is singular when collinear moments (e.g. ur_total) are present.
-    W_fresh = Matrix(inv(Symmetric(Σ)))
-    cond_W  = cond(W_fresh)
+    # Read the full K×K sigma CSV, subset to active moments by column name, then
+    # invert. Shrinkage is applied to Σ BEFORE inverting: shrinking W = inv(Σ)
+    # toward diag(inv(Σ)) is wrong because diag(inv(Σ)) can be negative when Σ
+    # is ill-conditioned, producing a negative-definite W. Shrinking Σ first
+    # guarantees Σ_shrunk is PD, so W = inv(Σ_shrunk) has positive diagonal.
+    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+    isfile(sigma_file) || error(
+        "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
 
-    if cond_W <= cond_target
-        @printf("  Full W = Σ⁻¹ from active submatrix of %s  (cond = %.2e)\n", sigma_file, cond_W)
-        return W_fresh
+    df_sig   = CSV.read(sigma_file, DataFrame)
+    csv_cols = Symbol.(names(df_sig))
+
+    col_pos = Dict(nm => findfirst(==(nm), csv_cols) for nm in csv_cols)
+    missing_cols = [nm for nm in active_names if !haskey(col_pos, nm)]
+    isempty(missing_cols) || error(
+        "sigma_$(window).csv is missing columns for active moments: " *
+        join(string.(missing_cols), ", ") *
+        " — re-run the data pipeline.")
+    active_col_idx = [col_pos[nm] for nm in active_names]
+
+    Σ_full = Matrix{Float64}(df_sig)
+    Σ      = Σ_full[active_col_idx, active_col_idx]   # K_active × K_active
+    Σsym   = Symmetric(Σ)
+    cond_Σ = cond(Σsym)
+
+    Σ_to_invert = if cond_Σ <= cond_target
+        @printf("  Full W = Σ⁻¹ from active submatrix of %s  (cond(Σ) = %.2e)\n", sigma_file, cond_Σ)
+        Σsym
     else
-        W_shrunk, alpha = _shrink_to_target(W_fresh, cond_target)
-        cond_new = cond(W_shrunk)
-        msg = @sprintf("Full W ill-conditioned (κ = %.2e > %.2e). Shrinking off-diagonal elements (α = %.6f → κ = %.2e).",
-                       cond_W, cond_target, alpha, cond_new)
-        @warn msg
-        return W_shrunk
+        Σdiag  = Symmetric(Matrix(Diagonal(diag(Σ))))
+        κ_diag = cond(Σdiag)
+
+        if !isfinite(κ_diag) || κ_diag >= cond_target
+            @warn @sprintf("Even pure diagonal Σ is ill-conditioned (κ = %.2e) — using diagonal W = inv(diag(Σ)).", κ_diag)
+            return Matrix(Diagonal(1.0 ./ max.(diag(Σ), 1e-14)))
+        end
+
+        # Bisect on ρ: Σ(ρ) = (1−ρ)·diag(Σ) + ρ·Σ.
+        # ρ = 0 → pure diagonal; ρ = 1 → original Σ.
+        # Find largest ρ such that κ(Σ(ρ)) ≤ cond_target.
+        ρ_lo, ρ_hi, best_ρ = 0.0, 1.0, 0.0
+        Σ_mid = similar(Matrix(Σsym))
+        for _ in 1:60
+            ρ_mid  = (ρ_lo + ρ_hi) / 2
+            Σ_mid .= (1.0 - ρ_mid) .* Σdiag .+ ρ_mid .* Σsym
+            κ_mid  = cond(Symmetric(Σ_mid))
+            if isfinite(κ_mid) && κ_mid <= cond_target
+                best_ρ = ρ_mid; ρ_lo = ρ_mid
+            else
+                ρ_hi = ρ_mid
+            end
+            (ρ_hi - ρ_lo) < 1e-6 && break
+        end
+
+        Σ_shrunk = Symmetric((1.0 - best_ρ) .* Σdiag .+ best_ρ .* Σsym)
+        κ_shrunk = cond(Σ_shrunk)
+        @warn @sprintf("Σ ill-conditioned (κ = %.2e > %.2e) — shrinking off-diagonals (ρ = %.6f → κ(Σ) = %.2e).",
+                       cond_Σ, cond_target, best_ρ, κ_shrunk)
+        Σ_shrunk
     end
+
+    return Matrix(inv(Σ_to_invert))
 end
 
 
@@ -356,16 +399,17 @@ end
 """
     _read_sigma_csv(filepath) → Vector{Float64}
 
-Read sigma_{window}.csv and return the full standard error vector (one entry
-per moment in column order).
+Read sigma_{window}.csv and return the standard error vector.
 
-The CSV has MOMENT_NAMES as column headers (pipeline v6+).
-Returns sqrt(diag(Σ)) in CSV column order — useful for diagnostics.
-`load_weight_matrix` does not call this; it reads and subsets Σ directly.
+Expected format: CSV with K×K covariance matrix (moment names as column headers).
+Returns the square root of the diagonal elements (standard errors).
+Used by the cond_target == 0.0 and 1.0 branches; the full K×K matrix is
+read directly via CSV.read in the cond_target > 2.0 branch.
 """
 function _read_sigma_csv(filepath::String)
-    df    = CSV.read(filepath, DataFrame)
+    df = CSV.read(filepath, DataFrame)
     Sigma = Matrix{Float64}(df)
+    # Return standard errors (sqrt of diagonal)
     return sqrt.(max.(diag(Sigma), 0.0))
 end
 
@@ -407,6 +451,9 @@ function model_moments(obj)
     ur_U           = obj.ur_U
     ur_S           = obj.agg_mS > _emp_tol ? obj.ur_S : 1.0
     ur_total      = obj.ur_total
+    exp_ur_total   = exp(ur_total)
+    exp_ur_U       = exp(ur_U)
+    exp_ur_S       = exp(ur_S)
     skilled_share  = obj.agg_mS  / max(obj.total_pop, 1e-14)
     training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
 
@@ -501,6 +548,9 @@ function model_moments(obj)
         ur_total      = ur_total,
         ur_U          = ur_U,
         ur_S          = ur_S,
+        exp_ur_total  = exp_ur_total,
+        exp_ur_U      = exp_ur_U,
+        exp_ur_S      = exp_ur_S,
         skilled_share = skilled_share,
         training_share = training_share,
         emp_var_U     = emp_var_U,

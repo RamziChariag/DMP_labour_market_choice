@@ -220,11 +220,20 @@ function wpercentile25(x::AbstractVector, w::AbstractVector)::Float64
 end
 
 # ============================================================
-# Moment name list — 22 moments (matches data_pipeline_v6)
+# Moment name list — 26 moments (matches data_pipeline_v6)
+#
+# exp_ur_total / exp_ur_U / exp_ur_S  = exp(unemployment rate)
+#   Nonlinear transformation of each UR. Because exp is convex,
+#   these moments penalise model over-shoots of the UR more than
+#   the level moments do, and their larger scale (≈1) gives them
+#   a more stable diagonal weight in the W matrix than the tiny
+#   raw rates (≈0.02–0.07).
 # ============================================================
 
 const MOMENT_NAMES = [
-    :ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
+    :ur_total, :ur_U, :ur_S,
+    :exp_ur_total, :exp_ur_U, :exp_ur_S,
+    :skilled_share, :training_share,
     :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
     :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :ee_rate_S,
     :mean_wage_U, :mean_wage_S,
