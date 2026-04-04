@@ -520,13 +520,9 @@ function update_theta_skilled(model::Model)
     sc   = model.skl_cache
     Jbar = compute_Jbar_skilled(model)
 
-    # Use threshold Jbar for smooth boundary (avoids corner sticking)
-    Jbar_eff = max(Jbar, 1e-12)
-    if !isfinite(Jbar)
-        Jbar_eff = 1e-12
-    end
+    (Jbar < 1e-12 || !isfinite(Jbar)) && return sc.θ
 
-    q     = sp.k / Jbar_eff
+    q     = sp.k / Jbar
     θ_raw = theta_from_q(q, sp.μ, sp.η)
     return clamp(θ_raw, 1e-14, 100.0)
 end

@@ -7,7 +7,7 @@ regime,PS,skilled productivity PS,3.39530172,0.10000000,5.00000000,false
 regime,bU,unskilled UI flow bU,0.16177516,0.00000000,2.00000000,false
 regime,bT,training flow bT,0.79882655,0.00000000,2.00000000,false
 regime,bS,skilled UI flow bS,0.97588083,0.00000000,2.00000000,false
-regime,α_U,unskilled damage shape α_U,5.46457174,0.10000000,8.00000000,false
+regime,α_U,unskilled damage shape α_U,6.09895417,0.10000000,8.00000000,false
 regime,a_Γ,skilled offer shape a_Γ,2.22985173,0.30000000,6.00000000,false
 regime,b_Γ,skilled offer shape b_Γ,0.65647905,0.30000000,6.00000000,false
 unsk,μ,unskilled matching eff μ_U,0.10582638,0.01000000,1.50000000,false
@@ -26,6 +26,6 @@ fixed,r,r,0.00416667,,,true
 fixed,ν,ν,0.03841185,,,true
 fixed,φ,φ,0.02222129,,,true
 
-# Q = 4.1327235749e+05
+# Q = 3.9244546191e+05
 # converged = false
 # iterations = 50

@@ -108,7 +108,7 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :base_covid
+WINDOW = :base_fc
 
 # ============================================================
 # Moments to exclude from the SMM objective.
@@ -124,12 +124,12 @@ WINDOW = :base_covid
 #   :wage_premium, :theta_U, :theta_S
 # ============================================================
 SKIP_MOMENTS = Symbol[
-    #:ur_U,
-    :exp_ur_total,
-    :exp_ur_U,
-    #:ur_U,
-    :exp_ur_S,
-    #:ur_S,
+    :ur_total,
+    #:exp_ur_total,
+    #:exp_ur_U,
+    :ur_U,
+    #:exp_ur_S,
+    :ur_S,
     #:exp_ur_S,
     #:skilled_share,
     #:training_share,
@@ -596,7 +596,7 @@ run_params = SMMRunParams(
 
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 10_000,  # total SA proposals
-    sa_T0              = 50.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
+    sa_T0              = 20.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
@@ -617,7 +617,7 @@ run_params = SMMRunParams(
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 50,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 5_000,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 
