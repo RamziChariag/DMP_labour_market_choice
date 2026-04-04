@@ -608,7 +608,7 @@ run_params = SMMRunParams(
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 4_000,       # generations; total evals = max_iter × pop_size
+    de_max_iter  = 10_000,       # generations; total evals = max_iter × pop_size
     de_pop_size  = 230,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)

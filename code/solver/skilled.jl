@@ -62,7 +62,7 @@ function find_cutoff_from_j0(
                 break
             end
         end
-        j_pos == 0 && return pgrid[Np]   # all matches unprofitable
+        j_pos == 0 && return 1.0         # all matches unprofitable → reject everything
         j_neg = max(j_pos - 1, 1)
     else
         # Search backward from j0_prev for the last negative node
@@ -73,7 +73,7 @@ function find_cutoff_from_j0(
                 break
             end
         end
-        j_neg == 0 && return pgrid[1]    # surplus positive everywhere
+        j_neg == 0 && return 0.0         # surplus positive everywhere → accept all matches
         j_pos = min(j_neg + 1, Np)
     end
 
@@ -123,7 +123,7 @@ function find_poj_from_diff_grid(
             return pgrid[j]   # diff ≤ 0 already at j0 — no OJS region
         end
     end
-    return pgrid[Np]
+    return 1.0                          # diff > 0 everywhere above pstar → OJS up to p = 1
 end
 
 

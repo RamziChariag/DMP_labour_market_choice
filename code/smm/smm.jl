@@ -251,12 +251,25 @@ function smm_objective(
     end
 
     # if everyone trains, or no one trains, the model is not identified and the loss is infinite
-    #τ = obj_eq.tauT
-    #if (τ isa AbstractVector && (all(iszero, τ) || all(isone, τ))) ||
-    #(τ isa AbstractArray  && (all(iszero, τ) || all(isone, τ)))
-    #    return Inf
-    #end
+    τ = obj_eq.tauT
+    τv = vec(τ)   # works for vectors and arrays
 
+    # reject degenerate cases: all train or none train
+    if all(iszero, τv) || all(isone, τv)
+        return Inf
+    end
+
+    # optional: ensure tau is actually binary
+    if !all(t -> t == 0 || t == 1, τv)
+        return Inf
+    end
+
+    dτ = diff(τv)
+
+    # reject if tau ever decreases, or if it changes more than once
+    if any(dτ .< 0) || count(!iszero, dτ) > 1
+        return Inf
+    end
 
     # Use full weight matrix if available; otherwise diagonal weights
     if !isnothing(spec.W)
