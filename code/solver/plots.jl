@@ -232,6 +232,9 @@ function fig_skilled_worker_values(obj)
                   legend=false, grid=false, yguidefontrotation=-90)
     contour!(p8a, xg, pg, obj.E0_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    plot!(p8a, xg, obj.pstar_S, color=:red, lw=2, ls=:dash, label="")
+    plot!(p8a, xg, obj.poj,     color=:white, lw=2, ls=:dot,  label="")
+    ylims!(p8a, 0, 1)
 
     p8b = heatmap(xg, pg, obj.E1_surface',
                   xlabel=L"x", ylabel=L"p",
@@ -239,6 +242,9 @@ function fig_skilled_worker_values(obj)
                   legend=false, grid=false, yguidefontrotation=-90)
     contour!(p8b, xg, pg, obj.E1_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    plot!(p8b, xg, obj.pstar_S, color=:red, lw=2, ls=:dash, label="")
+    plot!(p8b, xg, obj.poj,     color=:white, lw=2, ls=:dot,  label="")
+    ylims!(p8b, 0, 1)
 
     plot(p8a, p8b, layout=(1,2), size=(1000,400), margin=5Plots.mm)
 end
@@ -253,6 +259,9 @@ function fig_skilled_firm_values(obj)
                   legend=false, grid=false, yguidefontrotation=-90)
     contour!(p9a, xg, pg, obj.J0_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    plot!(p9a, xg, obj.pstar_S, color=:red, lw=2, ls=:dash, label="")
+    plot!(p9a, xg, obj.poj,     color=:white, lw=2, ls=:dot,  label="")
+    ylims!(p9a, 0, 1)
 
     p9b = heatmap(xg, pg, obj.J1_surface',
                   xlabel=L"x", ylabel=L"p",
@@ -260,6 +269,9 @@ function fig_skilled_firm_values(obj)
                   legend=false, grid=false, yguidefontrotation=-90)
     contour!(p9b, xg, pg, obj.J1_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    plot!(p9b, xg, obj.pstar_S, color=:red, lw=2, ls=:dash, label="")
+    plot!(p9b, xg, obj.poj,     color=:white, lw=2, ls=:dot,  label="")
+    ylims!(p9b, 0, 1)
 
     plot(p9a, p9b, layout=(1,2), size=(1000,400), margin=5Plots.mm)
 end
@@ -276,9 +288,8 @@ function fig_surplus_heatmaps(obj)
                    left_margin=12Plots.mm)
     contour!(p10a, xg, pgU, obj.SU_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
-    plot!(p10a, xg, obj.pstar_U, color=:red, lw=2, ls=:dash)
-    xlims!(p10a, 0.00, 0.00)
-    ylims!(p10a, 0.00, 0.00)
+    plot!(p10a, xg, obj.pstar_U, color=:red, lw=2, ls=:dash, label="")
+    ylims!(p10a, 0, 1)
 
     p10b = heatmap(xg, pg, obj.Smax_surface',
                    xlabel=L"x", ylabel=L"p",
@@ -286,10 +297,9 @@ function fig_surplus_heatmaps(obj)
                    legend=false, grid=false, yguidefontrotation=-90)
     contour!(p10b, xg, pg, obj.Smax_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
-    plot!(p10b, xg, obj.pstar_S, color=:red, lw=2, ls=:dash)
-    plot!(p10b, xg, obj.poj,     color=:white, lw=2, ls=:dot)
-    xlims!(p10b, 0.00, 0.00)
-    ylims!(p10b, 0.00, 0.00)
+    plot!(p10b, xg, obj.pstar_S, color=:red, lw=2, ls=:dash, label="")
+    plot!(p10b, xg, obj.poj,     color=:white, lw=2, ls=:dot,  label="")
+    ylims!(p10b, 0, 1)
 
     plot(p10a, p10b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
 end

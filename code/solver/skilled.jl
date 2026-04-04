@@ -244,12 +244,14 @@ function skilled_inner_loop!(
                 j0_soft = max(j0 - 1, 1)
 
                 # (1) Tail integrals of Smax under dΓ, with soft weights
+                # NOTE: J0/J1 already contain the soft weight ω_j factor
+                # (see J0 = (1-β)*ω_j*S0), so Smax_j = ω_j*Smax after
+                # dividing by (1-β). We must NOT multiply by ω_j again.
                 denom_nb = max(1.0 - β, 1e-14)
                 acc = 0.0
                 for j in Np:-1:1
-                    ω_j    = _soft_weight(sg.p[j], pstar, sg.p, j, Np)
                     Smax_j = max(sc.J0[ix, j], sc.J1[ix, j]) / denom_nb
-                    acc      += ω_j * Smax_j * wΓ[j]
+                    acc      += Smax_j * wΓ[j]
                     tailE[j]  = acc
                 end
                 I = tailE[j0_soft]
@@ -538,15 +540,25 @@ function solve_skilled_block!(
     model :: Model;
     mS_in :: AbstractVector{Float64}
 )
+    cp  = model.common
+    rp  = model.regime
     gp  = model.grids
     sg  = model.skl_grids
     sc  = model.skl_cache
     sim = model.sim
     sp  = model.skl_par
+    pre = model.skl_pre
 
     Nx       = length(gp.x)
     Np       = length(sg.p)
     denom_nb = max(1.0 - sp.β, 1e-14)
+
+    # Extract parameters needed for raw surplus computation
+    r  = cp.r;   ν  = cp.ν
+    PS = rp.PS
+    β  = sp.β;   ξ  = sp.ξ;   λ  = sp.λ;   σ  = sp.σ
+
+    wΓ = pre.γvals .* sg.wp
 
     # Anderson acceleration on the joint state [theta; pstar; poj]
     aa_joint = Anderson1(1 + 2 * Nx)
@@ -561,24 +573,58 @@ function solve_skilled_block!(
         poj_old   = copy(sc.poj)
 
         # (A) Inner loop: update values given θ, pstar, poj
-        skilled_inner_loop!(model; mS_in = mS_in)
+        inner_result = skilled_inner_loop!(model; mS_in = mS_in)
+        f = inner_result.f
 
         # (B) Update cutoffs from surplus surfaces
+        #     BUG FIX: Compute RAW (unclamped) surplus values for cutoff search.
+        #     The stored J0/J1 are clamped to >= 0, so they can never be negative.
+        #     This caused find_cutoff_from_j0 to always return 0 (accept all matches).
         @threads for ix in 1:Nx
             @inbounds begin
-                Smax    = zeros(Float64, Np)
-                diff    = zeros(Float64, Np)
-                j0_prev = pcut_index(sg.p, clamp01(sc.pstar[ix]))
+                x = gp.x[ix]
+                U_x = sc.U[ix]
+                pstar_cur = clamp01(sc.pstar[ix])
+                j0_prev = pcut_index(sg.p, pstar_cur)
+                j0_soft = max(j0_prev - 1, 1)
+
+                # Recompute the tail integral I for this type
+                # (same logic as inner loop, using current J0/J1 surfaces)
+                # NOTE: J0/J1 already contain the soft weight ω_j factor,
+                # so we must NOT multiply by ω_j again here.
+                tailE = zeros(Float64, Np)
+                acc = 0.0
+                for j in Np:-1:1
+                    Smax_j = max(sc.J0[ix, j], sc.J1[ix, j]) / denom_nb
+                    acc      += Smax_j * wΓ[j]
+                    tailE[j]  = acc
+                end
+                I = tailE[j0_soft]
+
+                # Compute RAW (unclamped) surplus for cutoff search
+                Smax_raw = zeros(Float64, Np)
+                diff_raw = zeros(Float64, Np)
+                base = r + ν + ξ + λ
 
                 for j in 1:Np
-                    S0      = sc.J0[ix, j] / denom_nb
-                    S1      = sc.J1[ix, j] / denom_nb
-                    Smax[j] = max(S0, S1)
-                    diff[j] = S1 - S0
+                    pj = sg.p[j]
+
+                    # Raw S0 (no-search surplus) — NOT clamped
+                    raw_S0 = (PS * x * pj - (r + ν) * U_x + λ * I) / base
+
+                    # Raw S1 (OJS surplus) — NOT clamped
+                    tail_mass_j = pre.tail_weights[j]
+                    tail_Emax_j = tailE[max(j, j0_soft)]
+                    denom_S1 = base + f * tail_mass_j
+                    raw_S1 = (PS * x * pj - (r + ν) * U_x - σ + λ * I +
+                              f * β * tail_Emax_j) / denom_S1
+
+                    Smax_raw[j] = max(raw_S0, raw_S1)
+                    diff_raw[j] = raw_S1 - raw_S0
                 end
 
-                pst_prop[ix] = clamp01(find_cutoff_from_j0(sg.p, Smax, j0_prev))
-                raw_poj      = clamp01(find_poj_from_diff_grid(sg.p, diff, pst_prop[ix]))
+                pst_prop[ix] = clamp01(find_cutoff_from_j0(sg.p, Smax_raw, j0_prev))
+                raw_poj      = clamp01(find_poj_from_diff_grid(sg.p, diff_raw, pst_prop[ix]))
                 poj_prop[ix] = max(pst_prop[ix], raw_poj)
             end
         end

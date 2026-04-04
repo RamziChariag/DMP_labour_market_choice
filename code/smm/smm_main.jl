@@ -108,7 +108,7 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :base_fc
+WINDOW = :crisis_fc
 
 # ============================================================
 # Moments to exclude from the SMM objective.
@@ -595,8 +595,8 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── SA global search ────────────────────────────────────
-    sa_max_iter        = 10_000,  # total SA proposals
-    sa_T0              = 20.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
+    sa_max_iter        = 5_000,  # total SA proposals
+    sa_T0              = 10.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
@@ -608,7 +608,7 @@ run_params = SMMRunParams(
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 10_000,       # generations; total evals = max_iter × pop_size
+    de_max_iter  = 5_000,       # generations; total evals = max_iter × pop_size
     de_pop_size  = 230,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
@@ -617,7 +617,7 @@ run_params = SMMRunParams(
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 5_000,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 3_000,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 
