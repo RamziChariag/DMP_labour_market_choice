@@ -108,7 +108,7 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :base_fc
+WINDOW = :base_covid
 
 # ============================================================
 # Moments to exclude from the SMM objective.
