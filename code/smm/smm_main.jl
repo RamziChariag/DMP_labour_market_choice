@@ -127,8 +127,12 @@ SKIP_MOMENTS = Symbol[
     #:ur_U,
     :exp_ur_total,
     :exp_ur_U,
+    #:ur_U,
+    :exp_ur_S,
+    #:ur_S,
     #:exp_ur_S,
     #:skilled_share,
+    #:training_share,
     #:emp_var_U,
     #:emp_var_S,
     #:emp_cm3_U,
@@ -136,16 +140,61 @@ SKIP_MOMENTS = Symbol[
     #:ee_rate_S,
     #:p25_wage_U,
     #:p25_wage_S,
+    #:p50_wage_U,
+    #:p50_wage_S,
     #:mean_wage_U,
     #:mean_wage_S,
     #:sep_rate_S,
     #:jfr_S,
     #:jfr_U,
     #:sep_rate_U,
+    #:wage_premium,
 ]
 
 @printf("Estimation window: %s\n", WINDOW)
 flush(stdout)
+
+# ============================================================
+# Parameters to pin at a fixed value during estimation.
+# Uncomment any entry (or add new ones) to fix that parameter.
+# Whichever parameters are set here are removed from the free
+# list and held constant — exactly like SKIP_MOMENTS for moments.
+#
+# Note: r / nu / phi are ALWAYS fixed from external calibration
+# and do not need to appear here.
+#
+# Key convention (ASCII) — same as DEFAULT_PARAMS:
+#   common:  :a_l  :b_l  :c
+#   regime:  :PU  :PS  :bU  :bT  :bS  :alpha_U  :a_Gam  :b_Gam
+#   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam
+#   skl:     :skl_mu   :skl_eta   :skl_k   :skl_bet
+#            :skl_xi   :skl_lam   :skl_sig
+# ============================================================
+FIX_PARAMS = Dict{Symbol,Float64}(
+    # :a_l      => 1.01131,
+    # :b_l      => 2.42423,
+    # :c        => 2.94633,
+    # :PU       => 1.05948,
+    # :PS       => 3.83639,
+    # :bU       => 0.00000,
+    # :bT       => 0.35082,
+    # :bS       => 0.56935,
+    # :alpha_U  => 4.80594,
+    # :a_Gam    => 4.77377,
+    # :b_Gam    => 2.28169,
+    # :unsk_mu  => 0.25585,
+     :unsk_eta => 0.50000,
+    # :unsk_k   => 0.10061,
+     :unsk_bet => 0.50000,
+    # :unsk_lam => 0.20263,
+    # :skl_mu   => 0.22462,
+     :skl_eta  => 0.50000,
+    # :skl_k    => 0.03317,
+     :skl_bet  => 0.50000,
+    # :skl_xi   => 0.00100,
+    # :skl_lam  => 0.17788,
+     :skl_sig  => 1.10000,
+)
 
 # ============================================================
 # USE_DEFAULT_PARAMS — set to true to ignore any prior run
@@ -196,6 +245,63 @@ const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:skl,    :β)   => :skl_bet, (:skl,    :ξ)   => :skl_xi,   (:skl,   :λ)   => :skl_lam,
     (:skl,    :σ)   => :skl_sig,
 )
+
+# Mapping from ASCII key (FIX_PARAMS convention) → unicode fixed-NamedTuple key.
+# Shared field names (μ, η, k, β, λ) get block-qualified keys so that
+# unskilled and skilled params are always disambiguated in spec.fixed.
+const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
+    :r        => :r,
+    :nu       => :ν,
+    :phi      => :φ,
+    :a_l      => :a_ℓ,
+    :b_l      => :b_ℓ,
+    :c        => :c,
+    :PU       => :PU,
+    :PS       => :PS,
+    :bU       => :bU,
+    :bT       => :bT,
+    :bS       => :bS,
+    :alpha_U  => :α_U,
+    :a_Gam    => :a_Γ,
+    :b_Gam    => :b_Γ,
+    :unsk_mu  => :unsk_μ,
+    :unsk_eta => :unsk_η,
+    :unsk_k   => :unsk_k,
+    :unsk_bet => :unsk_β,
+    :unsk_lam => :unsk_λ,
+    :skl_mu   => :skl_μ,
+    :skl_eta  => :skl_η,
+    :skl_k    => :skl_k,
+    :skl_bet  => :skl_β,
+    :skl_xi   => :skl_ξ,
+    :skl_lam  => :skl_λ,
+    :skl_sig  => :skl_σ,
+)
+
+"""
+    _fix_params_to_nt(fix_dict) → NamedTuple
+
+Convert a FIX_PARAMS Dict{Symbol,Float64} (ASCII keys) to a NamedTuple
+with the unicode keys expected by build_smm_spec / unpack_θ.
+Unknown ASCII keys produce a warning and are silently dropped.
+"""
+function _fix_params_to_nt(fix_dict::Dict{Symbol,Float64}) :: NamedTuple
+    isempty(fix_dict) && return (;)
+    keys_vec = Symbol[]
+    vals_vec = Float64[]
+    for (ascii_key, val) in fix_dict
+        if haskey(_ASCII_TO_FIXED_KEY, ascii_key)
+            push!(keys_vec, _ASCII_TO_FIXED_KEY[ascii_key])
+            push!(vals_vec, val)
+        else
+            valid_str = join(sort(string.(collect(keys(_ASCII_TO_FIXED_KEY)))), ", ")
+            @printf("WARNING: FIX_PARAMS — unrecognised key :%s — ignored.\n", ascii_key)
+            @printf("  Valid keys: %s\n", valid_str)
+        end
+    end
+    isempty(keys_vec) && return (;)
+    return NamedTuple{Tuple(keys_vec)}(Tuple(vals_vec))
+end
 
 # ============================================================
 # 3. Data moments
@@ -324,7 +430,12 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     # ── Build fixed_params: calibrated + deep structural ───────────────
     # For shared names (μ, η, β) use block-qualified keys so that
     # unskilled and skilled blocks receive their own baseline values.
-    fixed_params = (
+    # FIX_PARAMS can additionally pin any regime-specific param;
+    # baseline-derived structural values always take priority over FIX_PARAMS.
+    _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
+    fixed_params = merge(
+        _extra_fixed,
+        (
         # Externally calibrated
         r     = calib.r,
         ν     = calib.nu,
@@ -346,7 +457,7 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         skl_η  = sp_base.η,
         skl_β  = sp_base.β,
         skl_σ  = sp_base.σ,
-    )
+    ))
 
     # ── Build free_params: regime-specific only, init from baseline ─────
     free_params = ParamSpec[]
@@ -371,12 +482,14 @@ if WINDOW in (:crisis_fc, :crisis_covid)
 
 else
     # ── Stage 1: baseline estimation (base_fc or base_covid) ───────────
-    # Fix only the externally calibrated params; estimate everything else.
-    fixed_params = (
+    # Fix externally calibrated params plus anything in FIX_PARAMS.
+    # Calibrated values (r, ν, φ) always take priority over FIX_PARAMS.
+    _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
+    fixed_params = merge(_extra_fixed, (
         r   = calib.r,
         ν   = calib.nu,
         φ   = calib.phi,
-    )
+    ))
 
     free_params = default_free_params()
 
@@ -462,6 +575,11 @@ end
 
 @printf("  Fixed params:  %d  |  Free params:  %d\n",
         length(fixed_params), length(free_params))
+if !isempty(FIX_PARAMS)
+    _valid_fix = [k for k in keys(FIX_PARAMS) if haskey(_ASCII_TO_FIXED_KEY, k)]
+    @printf("  FIX_PARAMS pinned (%d): %s\n",
+            length(_valid_fix), join(string.(_valid_fix), ", "))
+end
 flush(stdout)
 
 # ============================================================
@@ -481,7 +599,7 @@ run_params = SMMRunParams(
     sa_T0              = 50.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
-    sa_cooling_exp     = 1.5,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
+    sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
     sa_reheat_patience = 100,         # proposals without improvement before reheating
     sa_reheat_factor   = 2.00,     # temperature multiplier on reheat
     sa_max_reheats     = 8.0,       # cap on total reheats (0 = unlimited)
@@ -490,8 +608,8 @@ run_params = SMMRunParams(
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 10_000,       # generations; total evals = max_iter × pop_size
-    de_pop_size  = 120,       # 0 = auto (100 × n_free_params)
+    de_max_iter  = 4_000,       # generations; total evals = max_iter × pop_size
+    de_pop_size  = 230,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
     de_patience  = 5,           # how many generations to wait for improvement before early stopping
@@ -499,7 +617,7 @@ run_params = SMMRunParams(
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 5_000,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 50,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 
