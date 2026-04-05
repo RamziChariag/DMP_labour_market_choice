@@ -1,594 +1,731 @@
+############################################################
+# transition_solver.jl — Backward-forward transition dynamics
+#
+# Core algorithm (Section 11.9 of the model notes):
+#   Step 0  Compute stationary equilibria z₀, z₁  (external)
+#   Step 1  Initialise tightness paths + distributions
+#   Step 2  Backward pass: value functions & policies
+#   Step 3  Forward pass:  laws of motion for distributions
+#   Step 4  Update tightness via free entry
+#   Step 5  Iterate 2-4 until convergence
+#
+# Public API
+#   solve_transition(model_z0, model_z1, tp; scenario)
+#       → TransitionResult
+############################################################
+
+using Base.Threads: @threads, nthreads, threadid
+
+# ════════════════════════════════════════════════════════════
+#  Top-level driver
+# ════════════════════════════════════════════════════════════
+
 """
-    transition_solver.jl
+    solve_transition(model_z0, model_z1, tp; scenario) → TransitionResult
 
-Core backward-forward algorithm for solving transition dynamics after a regime change.
+Solve the backward-forward transition from regime z₀ to z₁.
 
-The backward-forward algorithm (Section 11.9) computes the transition path from an
-initial stationary equilibrium (z₀) to a terminal stationary equilibrium (z₁).
-
-Algorithm overview:
-  Step 0: Compute z₀ and z₁ steady states (done externally, passed as model_z0, model_z1)
-  Step 1: Initialize tightness paths and distributions
-  Step 2: Backward pass — solve value functions and policies at each date
-  Step 3: Forward pass — advance distributions using laws of motion
-  Step 4: Update tightness paths using free entry condition
-  Step 5: Iterate until convergence
-
-Key insight: The transition solver stores all time-indexed objects, whereas the
-stationary solver reuses caches in-place for memory efficiency.
+Both models must already be solved (call `solve_model!` first).
+`scenario` is a label stored in the result (:fc or :covid).
 """
+function solve_transition(
+    model_z0 :: Model,
+    model_z1 :: Model,
+    tp       :: TransitionParams;
+    scenario :: Symbol = :unknown,
+)
+    Nt = tp.N_steps + 1
 
-"""
-    solve_transition(model_z0::Model, model_z1::Model, tp::TransitionParams) -> TransitionPath
-
-Solve the backward-forward transition dynamics from regime z₀ to z₁.
-
-# Arguments
-- `model_z0 :: Model`: Solved stationary model under regime z₀ (initial conditions)
-- `model_z1 :: Model`: Solved stationary model under regime z₁ (terminal conditions)
-- `tp :: TransitionParams`: Algorithm parameters (T_max, N_steps, tol, maxit, damp, etc.)
-
-# Returns
-- `TransitionPath`: Complete time-indexed path with value functions, policies, and distributions
-
-# Algorithm
-1. Initialize time grid, distributions, and tightness paths
-2. Iterate until convergence (max `tp.maxit` times):
-   a. Backward pass: solve value functions and policies at each date
-   b. Forward pass: evolve distributions using solved policies
-   c. Update tightness using free entry condition
-   d. Check convergence on tightness paths
-3. Return the converged transition path
-
-# Notes
-- The stationary models (model_z0, model_z1) must already be solved.
-- Initial distributions (t=0) come from z₀ steady state.
-- Terminal value functions (t=T_max) come from z₁ steady state.
-- Policies and distributions are computed for all intermediate dates.
-"""
-function solve_transition(model_z0::Model, model_z1::Model, tp::TransitionParams)
     if tp.verbose
-        @printf("\n%s\n", "="^60)
-        @printf("Transition dynamics: z₀ → z₁\n")
-        @printf("T_max = %.2f, N_steps = %d, dt = %.4f\n", tp.T_max, tp.N_steps, tp.dt)
-        @printf("%s\n", "="^60)
+        @printf("\n%s\n", "="^65)
+        @printf("  Transition dynamics  (%s)  T=%.1f  N=%d  dt=%.4f\n",
+                scenario, tp.T_max, tp.N_steps, tp.dt)
+        @printf("%s\n\n", "="^65)
     end
 
-    # Step 0: Initialize path
-    path = initialise_transition_path(model_z0, model_z1, tp)
+    # ── Step 1: initialise path ──────────────────────────
+    path = _initialise_path(model_z0, model_z1, tp)
 
-    # Step 2-4: Iterate backward-forward loop
+    # ── Steps 2-5: iterate ───────────────────────────────
+    converged  = false
+    final_dist = Inf
+    n_iter     = 0
+
     for iter in 1:tp.maxit
-        # Save old tightness for convergence check
-        theta_U_old = copy(path.theta_U)
-        theta_S_old = copy(path.theta_S)
+        θU_old = copy(path.θU)
+        θS_old = copy(path.θS)
 
-        # Step 2: Backward pass (solve value functions and policies)
-        backward_pass!(path, model_z0, model_z1, tp)
+        # Step 2 — backward pass (values & policies)
+        _backward_pass!(path, model_z1, tp)
 
-        # Step 3: Forward pass (evolve distributions)
-        forward_pass!(path, model_z0, model_z1, tp)
+        # Step 3 — forward pass (distributions)
+        _forward_pass!(path, model_z1, tp)
 
-        # Step 4: Update tightness paths
-        update_tightness!(path, model_z1, tp)
+        # Step 4 — update tightness from free entry
+        _update_tightness!(path, model_z1, tp)
 
-        # Step 5: Check convergence
-        converged, dist = check_convergence(theta_U_old, theta_S_old, path, tp)
+        # Step 5 — convergence check
+        dist = max(maximum(abs, path.θU .- θU_old),
+                   maximum(abs, path.θS .- θS_old))
 
-        if tp.verbose
-            @printf("Iteration %3d: ||Δθ|| = %.2e, damp = %.2f\n", iter, dist, tp.damp)
+        n_iter = iter
+        final_dist = dist
+
+        if tp.verbose && (iter <= 3 || iter % 5 == 0 || dist < tp.tol)
+            @printf("  [transition it=%3d]  ‖Δθ‖ = %.3e\n", iter, dist)
             flush(stdout)
         end
 
-        if converged
-            if tp.verbose
-                @printf("Converged in %d iterations.\n", iter)
-                @printf("%s\n", "="^60)
-                flush(stdout)
-            end
-            return path
+        if dist < tp.tol
+            converged = true
+            tp.verbose && @printf("  ✓ converged in %d iterations (dist=%.3e)\n\n",
+                                   iter, dist)
+            break
         end
     end
 
-    if tp.verbose
-        _, dist_final = check_convergence(theta_U_old, theta_S_old, path, tp)
-        @printf("WARNING: Did not converge after %d iterations. dist = %.2e\n",
-                tp.maxit, dist_final)
-        flush(stdout)
+    if !converged && tp.verbose
+        @printf("  ⚠  maxit reached (%d iterations, dist=%.3e)\n\n",
+                tp.maxit, final_dist)
     end
 
-    return path
+    # ── Build serialisable result ────────────────────────
+    return _build_result(path, model_z0, model_z1, tp,
+                         scenario, converged, n_iter, final_dist)
 end
 
-"""
-    initialise_transition_path(model_z0::Model, model_z1::Model, tp::TransitionParams) -> TransitionPath
 
-Initialize the transition path with boundary conditions and initial guess.
+# ════════════════════════════════════════════════════════════
+#  Step 1: Initialisation
+# ════════════════════════════════════════════════════════════
 
-# Setup
-- Time grid: [0, dt, 2*dt, ..., T_max]
-- Initial distributions (t=0): Copy from z₀ steady state
-- Terminal value functions (t=T_max): Copy from z₁ steady state
-- Initial tightness guess: Linear interpolation between z₀ and z₁ steady-state values
-
-# Returns
-- `TransitionPath`: Pre-allocated and partially initialized
-"""
-function initialise_transition_path(model_z0::Model, model_z1::Model, tp::TransitionParams)
+function _initialise_path(model_z0::Model, model_z1::Model, tp::TransitionParams)
     path = TransitionPath(model_z0, model_z1, tp)
-    Nx = length(model_z0.grids.x)
-    Np_S = length(model_z0.skl_grids.p)
-    N_time = tp.N_steps + 1
+    Nt  = tp.N_steps + 1
+    Nx  = length(model_z0.grids.x)
+    NpS = length(model_z0.skl_grids.p)
 
-    # Initial tightness guess: linear interpolation from z₀ to z₁
-    theta_U_0 = model_z0.unsk_cache.θ
-    theta_U_1 = model_z1.unsk_cache.θ
-    theta_S_0 = model_z0.skl_cache.θ
-    theta_S_1 = model_z1.skl_cache.θ
-
-    for n in 1:N_time
-        t_frac = (n - 1) / tp.N_steps  # Fraction of time elapsed
-        path.theta_U[n] = theta_U_0 + t_frac * (theta_U_1 - theta_U_0)
-        path.theta_S[n] = theta_S_0 + t_frac * (theta_S_1 - theta_S_0)
+    # ── Tightness: linear interpolation z₀ → z₁ ─────────
+    θU0 = model_z0.unsk_cache.θ;  θU1 = model_z1.unsk_cache.θ
+    θS0 = model_z0.skl_cache.θ;   θS1 = model_z1.skl_cache.θ
+    for n in 1:Nt
+        α = (n - 1) / tp.N_steps
+        path.θU[n] = θU0 + α * (θU1 - θU0)
+        path.θS[n] = θS0 + α * (θS1 - θS0)
     end
 
-    # Initial distributions: copy from z₀ steady state
-    for i in 1:Nx
-        path.u_U[i, 1] = model_z0.unsk_cache.u[i]
-        path.t_dens[i, 1] = model_z0.unsk_cache.t[i]
-        path.u_S[i, 1] = model_z0.skl_cache.u[i]
-    end
-    path.m_S[1] = sum(model_z0.skl_cache.u .* model_z0.grids.wx) +
-                  sum(model_z0.skl_cache.e .* model_z0.skl_grids.wp' .* reshape(model_z0.grids.wx, :, 1))
-
-    for i in 1:Nx, j in 1:Np_S
-        path.e_S[1][i, j] = model_z0.skl_cache.e[i, j]
+    # ── Distributions at t = 0: copy from z₀ ────────────
+    @inbounds for ix in 1:Nx
+        path.uU[ix, 1] = model_z0.unsk_cache.u[ix]
+        path.tU[ix, 1] = model_z0.unsk_cache.t[ix]
+        path.uS[ix, 1] = model_z0.skl_cache.u[ix]
     end
 
-    # Terminal value functions: copy from z₁ steady state
-    for i in 1:Nx
-        path.UU[i, N_time] = model_z1.unsk_cache.U[i]
-        path.Usearch[i, N_time] = model_z1.unsk_cache.Usearch[i]
-        path.T_val[i, N_time] = model_z1.unsk_cache.T[i]
-        path.Jfrontier[i, N_time] = model_z1.unsk_cache.Jfrontier[i]
-        path.tau[i, N_time] = model_z1.unsk_cache.τT[i]
-        path.pstar_U[i, N_time] = model_z1.unsk_cache.pstar[i]
-        path.pstar_S[i, N_time] = model_z1.skl_cache.pstar[i]
-        path.poj[i, N_time] = model_z1.skl_cache.poj[i]
+    # mS(x, t=0):  skilled segment mass per type
+    # mS(x) = uS(x) + ∫ eS(x,p) dp
+    wpS = model_z0.skl_grids.wp
+    @inbounds for ix in 1:Nx
+        mass = model_z0.skl_cache.u[ix]
+        for jp in 1:NpS
+            mass += model_z0.skl_cache.e[ix, jp] * wpS[jp]
+        end
+        path.mS[ix, 1] = mass
     end
-    path.US[N_time] = model_z1.skl_cache.U[1]
 
-    for i in 1:Nx, j in 1:Np_S
-        path.E0[N_time][i, j] = model_z1.skl_cache.E0[i, j]
-        path.E1[N_time][i, j] = model_z1.skl_cache.E1[i, j]
-        path.J0[N_time][i, j] = model_z1.skl_cache.J0[i, j]
-        path.J1[N_time][i, j] = model_z1.skl_cache.J1[i, j]
+    @inbounds for ix in 1:Nx, jp in 1:NpS
+        path.eS[ix, jp, 1] = model_z0.skl_cache.e[ix, jp]
+    end
+
+    # ── Terminal values at t = T_max: copy from z₁ ──────
+    n_end = Nt
+    @inbounds for ix in 1:Nx
+        path.U[ix, n_end]        = model_z1.unsk_cache.U[ix]
+        path.Usearch[ix, n_end]  = model_z1.unsk_cache.Usearch[ix]
+        path.T_val[ix, n_end]    = model_z1.unsk_cache.T[ix]
+        path.Jfrontier[ix, n_end] = model_z1.unsk_cache.Jfrontier[ix]
+        path.τT[ix, n_end]       = model_z1.unsk_cache.τT[ix]
+        path.pstar_U[ix, n_end]  = model_z1.unsk_cache.pstar[ix]
+
+        path.US[ix, n_end]       = model_z1.skl_cache.U[ix]
+        path.pstar_S[ix, n_end]  = model_z1.skl_cache.pstar[ix]
+        path.poj[ix, n_end]      = model_z1.skl_cache.poj[ix]
+    end
+
+    @inbounds for ix in 1:Nx, jp in 1:NpS
+        path.E0[ix, jp, n_end] = model_z1.skl_cache.E0[ix, jp]
+        path.E1[ix, jp, n_end] = model_z1.skl_cache.E1[ix, jp]
+        path.J0[ix, jp, n_end] = model_z1.skl_cache.J0[ix, jp]
+        path.J1[ix, jp, n_end] = model_z1.skl_cache.J1[ix, jp]
+    end
+
+    # ── Also fill terminal distributions from z₁ ────────
+    @inbounds for ix in 1:Nx
+        path.uU[ix, n_end] = model_z1.unsk_cache.u[ix]
+        path.tU[ix, n_end] = model_z1.unsk_cache.t[ix]
+        path.uS[ix, n_end] = model_z1.skl_cache.u[ix]
+    end
+    wpS1 = model_z1.skl_grids.wp
+    @inbounds for ix in 1:Nx
+        mass = model_z1.skl_cache.u[ix]
+        for jp in 1:NpS
+            mass += model_z1.skl_cache.e[ix, jp] * wpS1[jp]
+        end
+        path.mS[ix, n_end] = mass
+    end
+    @inbounds for ix in 1:Nx, jp in 1:NpS
+        path.eS[ix, jp, n_end] = model_z1.skl_cache.e[ix, jp]
+    end
+
+    # ── Value functions interior: linear interpolation ───
+    for n in 2:(Nt - 1)
+        α = (n - 1) / tp.N_steps
+        @inbounds for ix in 1:Nx
+            path.U[ix, n]        = (1 - α) * path.U[ix, 1]        + α * path.U[ix, n_end]
+            path.Usearch[ix, n]  = (1 - α) * path.Usearch[ix, 1]  + α * path.Usearch[ix, n_end]
+            path.T_val[ix, n]    = (1 - α) * path.T_val[ix, 1]    + α * path.T_val[ix, n_end]
+            path.Jfrontier[ix, n] = (1 - α) * path.Jfrontier[ix, 1] + α * path.Jfrontier[ix, n_end]
+            path.τT[ix, n]       = (1 - α) * path.τT[ix, 1]       + α * path.τT[ix, n_end]
+            path.pstar_U[ix, n]  = (1 - α) * path.pstar_U[ix, 1]  + α * path.pstar_U[ix, n_end]
+            path.US[ix, n]       = (1 - α) * path.US[ix, 1]       + α * path.US[ix, n_end]
+            path.pstar_S[ix, n]  = (1 - α) * path.pstar_S[ix, 1]  + α * path.pstar_S[ix, n_end]
+            path.poj[ix, n]      = (1 - α) * path.poj[ix, 1]      + α * path.poj[ix, n_end]
+        end
+    end
+
+    # Initial values at t=0 (from z₀ steady state for warm-start)
+    @inbounds for ix in 1:Nx
+        path.U[ix, 1]        = model_z0.unsk_cache.U[ix]
+        path.Usearch[ix, 1]  = model_z0.unsk_cache.Usearch[ix]
+        path.T_val[ix, 1]    = model_z0.unsk_cache.T[ix]
+        path.Jfrontier[ix, 1] = model_z0.unsk_cache.Jfrontier[ix]
+        path.τT[ix, 1]       = model_z0.unsk_cache.τT[ix]
+        path.pstar_U[ix, 1]  = model_z0.unsk_cache.pstar[ix]
+        path.US[ix, 1]       = model_z0.skl_cache.U[ix]
+        path.pstar_S[ix, 1]  = model_z0.skl_cache.pstar[ix]
+        path.poj[ix, 1]      = model_z0.skl_cache.poj[ix]
+    end
+    @inbounds for ix in 1:Nx, jp in 1:NpS
+        path.E0[ix, jp, 1] = model_z0.skl_cache.E0[ix, jp]
+        path.E1[ix, jp, 1] = model_z0.skl_cache.E1[ix, jp]
+        path.J0[ix, jp, 1] = model_z0.skl_cache.J0[ix, jp]
+        path.J1[ix, jp, 1] = model_z0.skl_cache.J1[ix, jp]
     end
 
     return path
 end
 
+
+# ════════════════════════════════════════════════════════════
+#  Step 2: Backward pass  (value functions & policies)
+# ════════════════════════════════════════════════════════════
+
 """
-    backward_pass!(path, model_z0, model_z1, tp)
+At each date n (backward from Nt-1 to 1), compute equilibrium
+value functions and policies under z₁ parameters at the given
+tightness θ(n).
 
-Solve value functions and policies backward from t=T_max to t=0.
-
-At each date tₙ, given tightness θ_U(tₙ) and θ_S(tₙ), solve the
-within-period equilibrium under z₁ parameters (the shock has already hit;
-values reflect the new regime).
-
-The backward pass computes instantaneous equilibrium values at each date
-by solving the Bellman equations with the current (guessed) tightness path.
-Terminal conditions at t=T_max come from the z₁ steady state.
-
-# Modifies
-- `path.UU, path.Usearch, path.T_val, path.US`
-- `path.E0, path.E1, path.J0, path.J1`
-- `path.tau, path.pstar_U, path.pstar_S, path.poj, path.Jfrontier`
+Strategy: overwrite the model_z1 caches with warm-start from n+1,
+set θ = θ(n), then run the inner loops (which solve the stationary
+Bellman given that θ).  This is correct because, with θ given,
+the value functions are uniquely pinned down by the parameters;
+the backward structure enters only through the θ path.
 """
-function backward_pass!(path::TransitionPath, model_z0::Model, model_z1::Model,
-                        tp::TransitionParams)
-    model = model_z1  # Use post-shock parameters
-    Nx = length(model.grids.x)
-    Np_S = length(model.skl_grids.p)
-    N_time = tp.N_steps + 1
+function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
+    Nt  = tp.N_steps + 1
+    Nx  = length(model.grids.x)
+    NpS = length(model.skl_grids.p)
 
-    # Extract parameters
+    uc = model.unsk_cache
+    sc = model.skl_cache
+
+    cp = model.common
+    rp = model.regime
+    up = model.unsk_par
+    sp = model.skl_par
+    gp = model.grids
+    ug = model.unsk_grids
+    sg = model.skl_grids
+    pre = model.skl_pre
+
+    αU = rp.α_U
+    wG = build_unskilled_G_weights(ug.p, ug.wp, αU)
+
+    denom_nb = max(1.0 - sp.β, 1e-14)
+    wΓ = pre.γvals .* sg.wp
+
+    # Scratch arrays for the unskilled surplus computation
+    NpU = length(ug.p)
+    Svec = zeros(Float64, NpU)
+
+    for n in (Nt - 1):-1:1
+
+        # ── Set tightness ────────────────────────────────
+        uc.θ = path.θU[n]
+        sc.θ = path.θS[n]
+
+        fU = jobfinding_rate(uc.θ, up.μ, up.η)
+        fS = jobfinding_rate(sc.θ, sp.μ, sp.η)
+
+        # ────────────────────────────────────────────────
+        # SKILLED BLOCK
+        # ────────────────────────────────────────────────
+
+        # Warm-start skilled caches from n+1
+        @inbounds for ix in 1:Nx
+            sc.U[ix]     = path.US[ix, n + 1]
+            sc.pstar[ix] = path.pstar_S[ix, n + 1]
+            sc.poj[ix]   = path.poj[ix, n + 1]
+        end
+        @inbounds for ix in 1:Nx, jp in 1:NpS
+            sc.E0[ix, jp] = path.E0[ix, jp, n + 1]
+            sc.E1[ix, jp] = path.E1[ix, jp, n + 1]
+            sc.J0[ix, jp] = path.J0[ix, jp, n + 1]
+            sc.J1[ix, jp] = path.J1[ix, jp, n + 1]
+        end
+
+        # Use mS from the current path (from forward pass or init)
+        mS_n = @view path.mS[:, max(n, 1)]
+
+        # Run the skilled inner loop to convergence at this θS
+        skilled_inner_loop!(model; mS_in = mS_n)
+
+        # ── Update skilled cutoffs from converged surfaces ──
+        @inbounds for ix in 1:Nx
+            x_val     = gp.x[ix]
+            U_x       = sc.U[ix]
+            pstar_cur = clamp01(sc.pstar[ix])
+            j0_prev   = pcut_index(sg.p, pstar_cur)
+            j0_soft   = max(j0_prev - 1, 1)
+
+            # Recompute tail integral I
+            tailE = zeros(Float64, NpS)
+            acc = 0.0
+            @inbounds for j in NpS:-1:1
+                Smax_j = max(sc.J0[ix, j], sc.J1[ix, j]) / denom_nb
+                acc       += Smax_j * wΓ[j]
+                tailE[j]   = acc
+            end
+
+            # Raw surplus for cutoff search
+            Smax_raw = zeros(Float64, NpS)
+            diff_raw = zeros(Float64, NpS)
+            base = cp.r + cp.ν + sp.ξ + sp.λ
+            I_val = tailE[j0_soft]
+
+            @inbounds for j in 1:NpS
+                pj = sg.p[j]
+                raw_S0 = (rp.PS * x_val * pj - (cp.r + cp.ν) * U_x + sp.λ * I_val) / base
+                tail_mass_j = pre.tail_weights[j]
+                tail_Emax_j = tailE[max(j, j0_soft)]
+                raw_S1 = (rp.PS * x_val * pj - (cp.r + cp.ν) * U_x - sp.σ + sp.λ * I_val +
+                           fS * sp.β * tail_Emax_j) / (base + fS * tail_mass_j)
+                Smax_raw[j] = max(raw_S0, raw_S1)
+                diff_raw[j] = raw_S1 - raw_S0
+            end
+
+            sc.pstar[ix] = clamp01(find_cutoff_from_j0(sg.p, Smax_raw, j0_prev))
+            raw_poj      = clamp01(find_poj_from_diff_grid(sg.p, diff_raw, sc.pstar[ix]))
+            sc.poj[ix]   = max(sc.pstar[ix], raw_poj)
+        end
+
+        # Store skilled results into path
+        @inbounds for ix in 1:Nx
+            path.US[ix, n]      = sc.U[ix]
+            path.pstar_S[ix, n] = sc.pstar[ix]
+            path.poj[ix, n]     = sc.poj[ix]
+        end
+        @inbounds for ix in 1:Nx, jp in 1:NpS
+            path.E0[ix, jp, n] = sc.E0[ix, jp]
+            path.E1[ix, jp, n] = sc.E1[ix, jp]
+            path.J0[ix, jp, n] = sc.J0[ix, jp]
+            path.J1[ix, jp, n] = sc.J1[ix, jp]
+        end
+
+        # ────────────────────────────────────────────────
+        # UNSKILLED BLOCK
+        # ────────────────────────────────────────────────
+
+        # Warm-start unskilled caches from n+1
+        @inbounds for ix in 1:Nx
+            uc.U[ix]        = path.U[ix, n + 1]
+            uc.Usearch[ix]  = path.Usearch[ix, n + 1]
+            uc.T[ix]        = path.T_val[ix, n + 1]
+            uc.Jfrontier[ix] = path.Jfrontier[ix, n + 1]
+            uc.pstar[ix]    = path.pstar_U[ix, n + 1]
+            uc.τT[ix]       = path.τT[ix, n + 1]
+        end
+
+        # Also need uU, tU for the unskilled inner loop's outer calls
+        @inbounds for ix in 1:Nx
+            uc.u[ix] = path.uU[ix, max(n, 1)]
+            uc.t[ix] = path.tU[ix, max(n, 1)]
+        end
+
+        # Unskilled inner loop: solves Usearch, U, T, Jfrontier, τT
+        inner = unskilled_inner_loop!(model; US_in = sc.U)
+
+        # Update pstar_U from surplus
+        pstar_new = zeros(Float64, Nx)
+        update_pstar_from_surplus!(pstar_new, model, inner.Ivec)
+        copyto!(uc.pstar, pstar_new)
+
+        # Store unskilled results into path
+        @inbounds for ix in 1:Nx
+            path.U[ix, n]        = uc.U[ix]
+            path.Usearch[ix, n]  = uc.Usearch[ix]
+            path.T_val[ix, n]    = uc.T[ix]
+            path.Jfrontier[ix, n] = uc.Jfrontier[ix]
+            path.τT[ix, n]       = uc.τT[ix]
+            path.pstar_U[ix, n]  = uc.pstar[ix]
+        end
+    end
+end
+
+
+# ════════════════════════════════════════════════════════════
+#  Step 3: Forward pass  (laws of motion for distributions)
+# ════════════════════════════════════════════════════════════
+
+"""
+Evolve distributions forward from t = 0 to t = T_max using
+explicit Euler, given the policy paths from the backward pass.
+
+Laws of motion (eqs 34-38 of the notes):
+  ∂_t t(x)  = τ(x)·uU(x) − (φ+ν)·t(x)
+  ∂_t uU(x) = ν·ℓ(x) + δU(x)·eU(x) − (fU + τ(x) + ν)·uU(x)
+  ∂_t uS(x) = φ·t(x) + (ξ+δ^end_S(x))·eS_tot(x) − (ν + fS·(1−Γ(p*S)))·uS(x)
+  ∂_t mS(x) = φ·t(x) − ν·mS(x)
+  ∂_t eS(x,p) = inflow − outflow
+"""
+function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
+    Nt  = tp.N_steps + 1
+    Nx  = length(model.grids.x)
+    NpS = length(model.skl_grids.p)
+    dt  = tp.dt
+
     cp  = model.common
     rp  = model.regime
     up  = model.unsk_par
     sp  = model.skl_par
     pre = model.skl_pre
     gp  = model.grids
-    ug  = model.unsk_grids
     sg  = model.skl_grids
 
-    r  = cp.r;  ν = cp.ν;  φ = cp.φ;  c = cp.c
-    PU = rp.PU; PS = rp.PS; bU = rp.bU; bT = rp.bT; bS = rp.bS; αU = rp.α_U
-    βU = up.β;  λU = up.λ;  μU = up.μ;  ηU = up.η
-    βS = sp.β;  ξS = sp.ξ;  λS = sp.λ;  σS = sp.σ;  μS = sp.μ;  ηS = sp.η
+    φ  = cp.φ;   ν  = cp.ν
+    λU = up.λ;   αU = rp.α_U
+    ξS = sp.ξ;   λS = sp.λ
 
-    wG  = build_unskilled_G_weights(ug.p, ug.wp, αU)
-    wΓ  = pre.γvals .* sg.wp
+    for n in 1:(Nt - 1)
 
-    Svec = zeros(Float64, length(ug.p))
+        # Job-finding rates at this date
+        fU = jobfinding_rate(path.θU[n], up.μ, up.η)
+        fS = jobfinding_rate(path.θS[n], sp.μ, sp.η)
 
-    # Loop backward from second-to-last to first time step
-    for n in (N_time - 1):-1:1
-        theta_U_n = path.theta_U[n]
-        theta_S_n = path.theta_S[n]
+        # ── Training density ─────────────────────────────
+        @inbounds for ix in 1:Nx
+            τ_ix   = path.τT[ix, n]
+            uU_ix  = path.uU[ix, n]
+            tU_ix  = path.tU[ix, n]
 
-        f_U = theta_U_n * q_from_theta(theta_U_n, μU, ηU)
-        f_S = theta_S_n * q_from_theta(theta_S_n, μS, ηS)
+            dt_train = τ_ix * uU_ix - (φ + ν) * tU_ix
+            path.tU[ix, n + 1] = max(tU_ix + dt * dt_train, 0.0)
+        end
 
-        # ── Skilled block at time n ──────────────────────────────────────
+        # ── Unskilled unemployed ─────────────────────────
+        @inbounds for ix in 1:Nx
+            ℓ_ix    = gp.ℓ[ix]
+            uU_ix   = path.uU[ix, n]
+            tU_ix   = path.tU[ix, n]
+            mS_ix   = path.mS[ix, n]
+            τ_ix    = path.τT[ix, n]
+            pstar_ix = clamp01(path.pstar_U[ix, n])
 
-        # Use value functions from n+1 as "continuation" to compute
-        # the within-period equilibrium at n.  In the stationary solver
-        # this is done by fixed-point iteration; for the transition we
-        # use the fact that with known tightness and terminal values, the
-        # Bellman equations can be solved in a single backward step.
+            # Unskilled segment mass and employment (residual)
+            mU_ix = max(ℓ_ix - mS_ix, 0.0)
+            eU_ix = max(mU_ix - uU_ix - tU_ix, 0.0)
 
-        # Step S1: Compute tail integrals and I(x) from Smax at time n+1
-        #          (initialise from previous time step or terminal)
-        denom_nb_S = max(1.0 - βS, 1e-14)
+            δU = λU * G_cdf_unskilled(pstar_ix, αU)
 
-        for ix in 1:Nx
-            x     = gp.x[ix]
-            pstar = clamp01(path.pstar_S[ix, n+1])
-            j0    = pcut_index(sg.p, pstar)
+            du_dt = ν * ℓ_ix + δU * eU_ix - (fU + τ_ix + ν) * uU_ix
+            path.uU[ix, n + 1] = max(uU_ix + dt * du_dt, 0.0)
+        end
 
-            # Tail integral of Smax under dΓ
-            tailE = zeros(Float64, Np_S)
-            acc = 0.0
-            for j in Np_S:-1:1
-                Smax_j = max(path.J0[n+1][ix, j], path.J1[n+1][ix, j]) / denom_nb_S
-                acc      += Smax_j * wΓ[j]
-                tailE[j]  = acc
+        # ── Skilled segment mass ─────────────────────────
+        @inbounds for ix in 1:Nx
+            tU_ix = path.tU[ix, n]
+            mS_ix = path.mS[ix, n]
+
+            dm_dt = φ * tU_ix - ν * mS_ix
+            path.mS[ix, n + 1] = max(mS_ix + dt * dm_dt, 0.0)
+        end
+
+        # ── Skilled unemployed ───────────────────────────
+        @inbounds for ix in 1:Nx
+            tU_ix    = path.tU[ix, n]
+            uS_ix    = path.uS[ix, n]
+            pstar_ix = clamp01(path.pstar_S[ix, n])
+
+            # Total skilled employment
+            eS_tot = 0.0
+            for jp in 1:NpS
+                eS_tot += path.eS[ix, jp, n] * sg.wp[jp]
             end
-            I = tailE[j0]
 
-            # Unemployment value: (r+ν) U_S = bS + f_S·βS·I
-            US_new = (bS + f_S * βS * I) / (r + ν)
-            path.US[n] = US_new  # US is x-invariant in the model
+            j_ps    = pcut_index(sg.p, pstar_ix)
+            Γ_pstar = pre.Γvals[j_ps]
+            δS_sep  = ξS + λS * Γ_pstar   # ξ + endogenous separation
 
-            # Surplus surfaces
-            base = r + ν + ξS + λS
+            du_dt = φ * tU_ix + δS_sep * eS_tot -
+                    (ν + fS * (1.0 - Γ_pstar)) * uS_ix
+            path.uS[ix, n + 1] = max(uS_ix + dt * du_dt, 0.0)
+        end
 
-            for j in 1:Np_S
-                pj = sg.p[j]
-                if j < j0
-                    path.E0[n][ix, j] = US_new
-                    path.E1[n][ix, j] = US_new
-                    path.J0[n][ix, j] = 0.0
-                    path.J1[n][ix, j] = 0.0
+        # ── Skilled employment density e_S(x, p) ────────
+        @inbounds for ix in 1:Nx
+            pstar_ix = clamp01(path.pstar_S[ix, n])
+            poj_ix   = clamp01(path.poj[ix, n])
+            j0       = pcut_index(sg.p, pstar_ix)
+            uS_ix    = path.uS[ix, n]
+
+            cum_e = 0.0   # ∫_{p' < p} eS(x, p') dp'
+
+            for jp in 1:NpS
+                e_old = path.eS[ix, jp, n]
+                pj    = sg.p[jp]
+
+                if jp < j0
+                    # Below reservation quality — employment destroyed
+                    path.eS[ix, jp, n + 1] = 0.0
+                    cum_e += e_old * sg.wp[jp]
                     continue
                 end
 
-                # No-search surplus
-                S0 = (PS * x * pj - (r + ν) * US_new + λS * I) / base
+                γj = pre.γvals[jp]
+                Γj = pre.Γvals[jp]
 
-                # OJS surplus
-                tail_mass_j = pre.tail_weights[j]
-                tail_Emax_j = tailE[max(j, j0)]
-                S1 = (PS * x * pj - (r + ν) * US_new - σS + λS * I +
-                      f_S * βS * tail_Emax_j) / (base + f_S * tail_mass_j)
+                # Inflow from unemployment (new hires)
+                inflow_u = fS * γj * uS_ix
 
-                path.E0[n][ix, j] = US_new + βS * S0
-                path.E1[n][ix, j] = US_new + βS * S1
-                path.J0[n][ix, j] = (1.0 - βS) * S0
-                path.J1[n][ix, j] = (1.0 - βS) * S1
-            end
+                # Inflow from quality shocks (redistribution from below)
+                inflow_λ = λS * γj * cum_e
 
-            # Update cutoffs from surplus
-            Smax_vec = zeros(Float64, Np_S)
-            diff_vec = zeros(Float64, Np_S)
-            for j in 1:Np_S
-                S0 = path.J0[n][ix, j] / denom_nb_S
-                S1 = path.J1[n][ix, j] / denom_nb_S
-                Smax_vec[j] = max(S0, S1)
-                diff_vec[j] = S1 - S0
-            end
+                # OJS: employed workers searching on the job
+                # Workers at (x, p) do OJS if p < poj(x)
+                is_ojs = (pj < poj_ix) ? 1.0 : 0.0
 
-            j0_prev = pcut_index(sg.p, clamp01(path.pstar_S[ix, n+1]))
-            path.pstar_S[ix, n] = clamp01(find_cutoff_from_j0(sg.p, Smax_vec, j0_prev))
-            raw_poj = clamp01(find_poj_from_diff_grid(sg.p, diff_vec, path.pstar_S[ix, n]))
-            path.poj[ix, n] = max(path.pstar_S[ix, n], raw_poj)
-        end
+                # Outflow: quality shock at rate λ removes worker from (x,p)
+                # regardless of new draw (they move to a new p'), plus
+                # demographic exit (ν), exogenous separation (ξ), and
+                # OJS outflow if searching on the job.
+                outflow = (ν + ξS + λS + is_ojs * fS * (1.0 - Γj)) * e_old
 
-        # ── Unskilled block at time n ────────────────────────────────────
-
-        # Get the US value just computed above (or from n+1 terminal condition)
-        US_current = path.US[n]
-
-        for ix in 1:Nx
-            x = gp.x[ix]
-
-            # Training value: (r + φ + ν) T(x) = bT + φ · U_S
-            T_val = (bT + φ * US_current) / (r + φ + ν)
-            path.T_val[ix, n] = T_val
-
-            # Unskilled surplus and firm value at p=1
-            pstar_x = clamp01(path.pstar_U[ix, n+1])  # Use previous guess
-
-            I_U, _, _ = solve_unskilled_surplus_on_grid!(
-                Svec, ug.p, wG, PU, x, r, ν, λU, path.UU[ix, n+1], pstar_x
-            )
-
-            S1_U = Svec[end]
-            J1_U = (1.0 - βU) * S1_U
-            E1_U = path.UU[ix, n+1] + βU * S1_U
-
-            path.Jfrontier[ix, n] = J1_U
-
-            # Search value: (r + ν + f_U) Usearch(x) = bU + f_U · E(x, p=1)
-            Usearch = (bU + f_U * E1_U) / (r + ν + f_U)
-            path.Usearch[ix, n] = Usearch
-
-            # Training decision
-            Utr = -training_cost(x, c) + T_val
-            if Utr >= Usearch
-                path.UU[ix, n]  = Utr
-                path.tau[ix, n] = 1.0
-            else
-                path.UU[ix, n]  = Usearch
-                path.tau[ix, n] = 0.0
-            end
-
-            # Update reservation quality pstar_U
-            if x > 1e-14 && PU > 1e-14
-                path.pstar_U[ix, n] = clamp01(((r + ν) * path.UU[ix, n] - λU * I_U) / (PU * x))
-            else
-                path.pstar_U[ix, n] = 1.0
+                path.eS[ix, jp, n + 1] = max(e_old + dt * (inflow_u + inflow_λ - outflow), 0.0)
+                cum_e += e_old * sg.wp[jp]
             end
         end
     end
 end
 
-"""
-    forward_pass!(path, model_z0, model_z1, tp)
 
-Evolve distributions forward from t=0 to t=T_max using explicit Euler.
-
-Given the policy paths computed in backward_pass!, integrate forward:
-- ∂_t t(x,t) = τ(x,t) u_U(x,t) - (φ+ν) t(x,t)
-- ∂_t u_U(x,t) = ν ℓ(x) + δ_U(x) e_U(x,t) - (f_U + τ(x,t) + ν) u_U(x,t)
-- ∂_t u_S(x,t) = φ t(x,t) + (ξ_S + δ^end_S(x)) e^tot_S(x,t) - (ν + f_S(1-Γ(p*_S(x,t)))) u_S(x,t)
-- ∂_t m_S(x,t) = φ t(x,t) - ν m_S(x,t)
-- ∂_t e_S(x,p,t) = inflow - outflow
-
-The distributions at t=0 are set by initialization (copy from z₀ steady state).
-The forward pass fills in the intermediate steps up to t=T_max.
-
-# Modifies
-- `path.u_U, path.t_dens, path.u_S, path.m_S, path.e_S`
-"""
-function forward_pass!(path::TransitionPath, model_z0::Model, model_z1::Model,
-                       tp::TransitionParams)
-    model = model_z1  # Post-shock parameters
-    Nx = length(model.grids.x)
-    Np_S = length(model.skl_grids.p)
-    N_time = tp.N_steps + 1
-
-    # Extract time-invariant parameters
-    phi  = model.common.φ
-    nu   = model.common.ν
-    xi_S = model.skl_par.ξ
-    λU   = model.unsk_par.λ
-    αU   = model.regime.α_U
-    λS   = model.skl_par.λ
-
-    # Loop forward: from t=0 to t=T_max-dt
-    for n in 1:(N_time - 1)
-        dt = tp.dt
-
-        # Time-dependent job-finding rates from current tightness
-        f_U_n = path.theta_U[n] * q_from_theta(path.theta_U[n], model.unsk_par.μ, model.unsk_par.η)
-        f_S_n = path.theta_S[n] * q_from_theta(path.theta_S[n], model.skl_par.μ, model.skl_par.η)
-
-        # Get current distributions and policies
-        tau_n     = @view path.tau[:, n]
-        pstar_U_n = @view path.pstar_U[:, n]
-        pstar_S_n = @view path.pstar_S[:, n]
-        u_U_n     = @view path.u_U[:, n]
-        t_n       = @view path.t_dens[:, n]
-        u_S_n     = @view path.u_S[:, n]
-        m_S_n     = path.m_S[n]
-        e_S_n     = path.e_S[n]
-
-        # Get distributions at next time step (to be filled)
-        u_U_next = @view path.u_U[:, n + 1]
-        t_next   = @view path.t_dens[:, n + 1]
-        u_S_next = @view path.u_S[:, n + 1]
-        e_S_next = path.e_S[n + 1]
-
-        # Compute Gamma(pstar_S) for each x (match acceptance probability)
-        Gamma_pstar_S = zeros(Nx)
-        for i in 1:Nx
-            j_ps = pcut_index(model.skl_grids.p, clamp01(pstar_S_n[i]))
-            Gamma_pstar_S[i] = model.skl_pre.Γvals[j_ps]
-        end
-
-        # ── Update training density: ∂_t t = τ u_U - (φ+ν) t ─────────
-        for i in 1:Nx
-            dt_train = tau_n[i] * u_U_n[i] - (phi + nu) * t_n[i]
-            t_next[i] = max(t_n[i] + dt * dt_train, 0.0)
-        end
-
-        # ── Update unskilled unemployed ───────────────────────────────
-        for i in 1:Nx
-            ell_x   = model.grids.ℓ[i]
-            m_U_x   = max(ell_x - (phi / nu) * t_n[i], 0.0)
-            e_U_i   = max(m_U_x - u_U_n[i] - t_n[i], 0.0)
-            delta_U = λU * clamp01(pstar_U_n[i])^αU
-            du_U_dt = nu * ell_x + delta_U * e_U_i - (f_U_n + tau_n[i] + nu) * u_U_n[i]
-            u_U_next[i] = max(u_U_n[i] + dt * du_U_dt, 0.0)
-        end
-
-        # ── Update skilled unemployed ─────────────────────────────────
-        for i in 1:Nx
-            e_tot_S_i = sum(e_S_n[i, :] .* model.skl_grids.wp)
-            delta_S   = xi_S + λS * Gamma_pstar_S[i]
-            du_S_dt   = phi * t_n[i] + delta_S * e_tot_S_i -
-                        (nu + f_S_n * (1.0 - Gamma_pstar_S[i])) * u_S_n[i]
-            u_S_next[i] = max(u_S_n[i] + dt * du_S_dt, 0.0)
-        end
-
-        # ── Update skilled segment mass: ∂_t m_S = φ t - ν m_S ───────
-        total_t = sum(t_n .* model.grids.wx)
-        dm_S_dt = phi * total_t - nu * m_S_n
-        path.m_S[n + 1] = max(m_S_n + dt * dm_S_dt, 0.0)
-
-        # ── Update skilled employment: ∂_t e_S(x,p,t) ────────────────
-        # Inflow: f_S · γ(p) · u_S(x)  for p >= p*_S(x)
-        # Outflow: (nu + xi_S + lambda_S · Gamma(p)) · e_S(x,p)
-        # Quality shock redistribution: lambda_S · gamma(p) · ∫_{p'<p} e_S(x,p') dp'
-        for i in 1:Nx
-            pstar_i = clamp01(pstar_S_n[i])
-            j0 = pcut_index(model.skl_grids.p, pstar_i)
-
-            # Cumulative employment below each quality level
-            cum_e = 0.0
-            for j in 1:Np_S
-                if j >= j0
-                    p_j = model.skl_grids.p[j]
-                    gamma_j = model.skl_pre.γvals[j]
-                    Gamma_j = model.skl_pre.Γvals[j]
-
-                    # Inflow from unemployment (new hires at quality p)
-                    inflow_u = f_S_n * gamma_j * u_S_n[i]
-
-                    # Inflow from quality shocks (redistribution from below)
-                    inflow_lambda = λS * gamma_j * cum_e
-
-                    # Outflow
-                    outflow = (nu + xi_S + λS * Gamma_j) * e_S_n[i, j]
-
-                    e_S_next[i, j] = max(e_S_n[i, j] + dt * (inflow_u + inflow_lambda - outflow), 0.0)
-                else
-                    e_S_next[i, j] = 0.0
-                end
-
-                cum_e += e_S_n[i, j] * model.skl_grids.wp[j]
-            end
-        end
-    end
-end
+# ════════════════════════════════════════════════════════════
+#  Step 4: Update tightness via free entry
+# ════════════════════════════════════════════════════════════
 
 """
-    update_tightness!(path, model_z1, tp)
-
-Update tightness paths using the free entry condition.
-
-At each date tₙ:
-- Unskilled: q_U · J_bar_U = k_U  where J_bar_U is the expected firm value
-- Skilled: q_S · J_bar_S = k_S  where J_bar_S is the expected firm value
-
-Apply dampening to smooth the update:
-  θ^(k+1) = (1 - damp) θ^(k) + damp θ^new
-
-# Modifies
-- `path.theta_U, path.theta_S`
+At each date n, compute the free-entry tightness from current
+distributions and firm values, then apply dampening.
 """
-function update_tightness!(path::TransitionPath, model_z1::Model, tp::TransitionParams)
-    model = model_z1
-    Nx = length(model.grids.x)
-    Np_S = length(model.skl_grids.p)
-    N_time = tp.N_steps + 1
+function _update_tightness!(path::TransitionPath, model::Model, tp::TransitionParams)
+    Nt  = tp.N_steps + 1
+    Nx  = length(model.grids.x)
+    NpS = length(model.skl_grids.p)
 
-    k_U   = model.unsk_par.k
-    k_S   = model.skl_par.k
-    eta_U = model.unsk_par.η
-    eta_S = model.skl_par.η
-    mu_U  = model.unsk_par.μ
-    mu_S  = model.skl_par.μ
-    βS    = model.skl_par.β
+    gp  = model.grids
+    sg  = model.skl_grids
+    pre = model.skl_pre
+    up  = model.unsk_par
+    sp  = model.skl_par
 
-    for n in 1:N_time
-        # ── Unskilled free entry ──────────────────────────────────────
-        # q_U = k_U / ∫ J_U(x,1) u_U(x) dx / ∫ u_U(x) dx
-        J_times_u = 0.0
-        u_total = 0.0
-        for i in 1:Nx
-            J_times_u += path.Jfrontier[i, n] * path.u_U[i, n] * model.grids.wx[i]
-            u_total   += path.u_U[i, n] * model.grids.wx[i]
+    wΓ  = pre.γvals .* sg.wp
+    denom_nb = max(1.0 - sp.β, 1e-14)
+
+    for n in 1:Nt
+
+        # ── Unskilled free entry ─────────────────────────
+        J_u_sum = 0.0
+        u_U_sum = 0.0
+        @inbounds for ix in 1:Nx
+            wx  = gp.wx[ix]
+            u_ix = path.uU[ix, n]
+            J_u_sum += path.Jfrontier[ix, n] * u_ix * wx
+            u_U_sum += u_ix * wx
         end
 
-        if J_times_u > 1e-10 && u_total > 1e-10
-            q_U_new = k_U * u_total / J_times_u
-            theta_U_new = theta_from_q(q_U_new, mu_U, eta_U)
-            theta_U_new = clamp(theta_U_new, 1e-14, 50.0)
+        if J_u_sum > 1e-12 && u_U_sum > 1e-12
+            q_U     = up.k * u_U_sum / J_u_sum
+            θU_prop = clamp(theta_from_q(q_U, up.μ, up.η), 1e-14, 100.0)
         else
-            theta_U_new = path.theta_U[n]
+            θU_prop = path.θU[n]
         end
+        path.θU[n] = (1.0 - tp.damp) * path.θU[n] + tp.damp * θU_prop
 
-        # Apply dampening
-        path.theta_U[n] = (1.0 - tp.damp) * path.theta_U[n] + tp.damp * theta_U_new
+        # ── Skilled free entry ───────────────────────────
+        num_S = 0.0
+        den_S = 0.0
 
-        # ── Skilled free entry ────────────────────────────────────────
-        # Expected firm value from posting
-        wΓ = model.skl_pre.γvals .* model.skl_grids.wp
-        denom_nb = max(1.0 - βS, 1e-14)
-
-        J_S_num = 0.0
-        J_S_den = 0.0
-        for i in 1:Nx
-            wx_i    = model.grids.wx[i]
-            pstar_i = clamp01(path.pstar_S[i, n])
-            j0      = pcut_index(model.skl_grids.p, pstar_i)
+        @inbounds for ix in 1:Nx
+            wx_ix     = gp.wx[ix]
+            pstar_ix  = clamp01(path.pstar_S[ix, n])
+            j0        = pcut_index(sg.p, pstar_ix)
 
             # Tail integral of J from p*
             tailJ = 0.0
-            for j in Np_S:-1:j0
-                J_max = max(path.J0[n][i, j], path.J1[n][i, j])
-                tailJ += J_max * wΓ[j]
+            for jp in NpS:-1:j0
+                J_max = max(path.J0[ix, jp, n], path.J1[ix, jp, n])
+                tailJ += J_max * wΓ[jp]
             end
 
-            # Seekers: unemployed + employed doing OJS
-            u_i = path.u_S[i, n]
+            # Seekers = unemployed + employed doing OJS
+            u_ix = path.uS[ix, n]
             seeker_e = 0.0
-            for j in 1:Np_S
-                if path.E1[n][i, j] >= path.E0[n][i, j]
-                    seeker_e += path.e_S[n][i, j] * model.skl_grids.wp[j]
+            for jp in 1:NpS
+                if path.E1[ix, jp, n] >= path.E0[ix, jp, n]
+                    seeker_e += path.eS[ix, jp, n] * sg.wp[jp]
                 end
             end
 
-            seekers = u_i + seeker_e
-            J_S_num += wx_i * seekers * tailJ
-            J_S_den += wx_i * seekers
+            seekers = u_ix + seeker_e
+            num_S  += wx_ix * seekers * tailJ
+            den_S  += wx_ix * seekers
         end
 
-        if J_S_num > 1e-10 && J_S_den > 1e-10
-            Jbar_S = J_S_num / J_S_den
-            q_S_new = k_S / Jbar_S
-            theta_S_new = theta_from_q(q_S_new, mu_S, eta_S)
-            theta_S_new = clamp(theta_S_new, 1e-14, 30.0)
+        if num_S > 1e-12 && den_S > 1e-12
+            Jbar_S  = num_S / den_S
+            q_S     = sp.k / Jbar_S
+            θS_prop = clamp(theta_from_q(q_S, sp.μ, sp.η), 1e-14, 100.0)
         else
-            theta_S_new = path.theta_S[n]
+            θS_prop = path.θS[n]
         end
-
-        # Apply dampening
-        path.theta_S[n] = (1.0 - tp.damp) * path.theta_S[n] + tp.damp * theta_S_new
+        path.θS[n] = (1.0 - tp.damp) * path.θS[n] + tp.damp * θS_prop
     end
 end
 
-"""
-    check_convergence(theta_U_old, theta_S_old, path, tp) -> (converged::Bool, dist::Float64)
 
-Check convergence of tightness paths.
+# ════════════════════════════════════════════════════════════
+#  Build serialisable result
+# ════════════════════════════════════════════════════════════
 
-Convergence criterion: max_n |θ_j^(k+1)(tₙ) - θ_j^(k)(tₙ)| < tol for both j ∈ {U, S}
+function _build_result(
+    path     :: TransitionPath,
+    model_z0 :: Model,
+    model_z1 :: Model,
+    tp       :: TransitionParams,
+    scenario :: Symbol,
+    converged :: Bool,
+    n_iter    :: Int,
+    final_dist :: Float64,
+)
+    Nt  = tp.N_steps + 1
+    Nx  = length(model_z1.grids.x)
+    NpS = length(model_z1.skl_grids.p)
 
-# Returns
-- `converged :: Bool`: True if max distance is below tolerance
-- `dist :: Float64`: Maximum distance (supremum norm) across both tightness paths
-"""
-function check_convergence(theta_U_old::Vector, theta_S_old::Vector,
-                          path::TransitionPath, tp::TransitionParams)
-    dist_U = maximum(abs.(path.theta_U .- theta_U_old))
-    dist_S = maximum(abs.(path.theta_S .- theta_S_old))
-    dist = max(dist_U, dist_S)
+    gp  = model_z1.grids
+    sg  = model_z1.skl_grids
+    up  = model_z1.unsk_par
+    sp  = model_z1.skl_par
+    rp  = model_z1.regime
+    cp  = model_z1.common
 
-    converged = (dist < tp.tol)
-    return converged, dist
+    wx  = gp.wx
+    wpS = sg.wp
+
+    # ── Aggregate time-series ────────────────────────────
+    fU_path             = zeros(Nt)
+    fS_path             = zeros(Nt)
+    ur_U_path           = zeros(Nt)
+    ur_S_path           = zeros(Nt)
+    ur_total_path       = zeros(Nt)
+    skilled_share_path  = zeros(Nt)
+    training_share_path = zeros(Nt)
+    mean_wage_U_path    = zeros(Nt)
+    mean_wage_S_path    = zeros(Nt)
+
+    for n in 1:Nt
+        fU_path[n] = jobfinding_rate(path.θU[n], up.μ, up.η)
+        fS_path[n] = jobfinding_rate(path.θS[n], sp.μ, sp.η)
+
+        agg_uU = 0.0;  agg_tU = 0.0;  agg_mU = 0.0
+        agg_uS = 0.0;  agg_eS = 0.0;  agg_mS = 0.0
+        agg_pop = 0.0
+
+        wage_num_U = 0.0;  wage_den_U = 0.0
+        wage_num_S = 0.0;  wage_den_S = 0.0
+
+        for ix in 1:Nx
+            w = wx[ix]
+            ℓ_ix  = gp.ℓ[ix]
+            uU_ix = path.uU[ix, n]
+            tU_ix = path.tU[ix, n]
+            uS_ix = path.uS[ix, n]
+            mS_ix = path.mS[ix, n]
+
+            mU_ix = max(ℓ_ix - mS_ix, 0.0)
+            eU_ix = max(mU_ix - uU_ix - tU_ix, 0.0)
+
+            agg_uU  += w * uU_ix
+            agg_tU  += w * tU_ix
+            agg_mU  += w * mU_ix
+            agg_uS  += w * uS_ix
+            agg_mS  += w * mS_ix
+            agg_pop += w * ℓ_ix
+
+            # Unskilled wages: w_U(x,p) = PU·x·p·β + (1-β)·(r+ν)·U(x)
+            # Average over employed — approximate using frontier (p=1)
+            if eU_ix > 1e-14
+                w_U_avg = rp.PU * gp.x[ix] * up.β + (1.0 - up.β) * (cp.r + cp.ν) * path.U[ix, n]
+                wage_num_U += w * eU_ix * w_U_avg
+                wage_den_U += w * eU_ix
+            end
+
+            # Skilled wages (average over employed)
+            for jp in 1:NpS
+                e_ij = path.eS[ix, jp, n]
+                if e_ij > 1e-14
+                    pj = sg.p[jp]
+                    w_S_ij = rp.PS * gp.x[ix] * pj * sp.β +
+                             (1.0 - sp.β) * (cp.r + cp.ν) * path.US[ix, n]
+                    wage_num_S += w * e_ij * wpS[jp] * w_S_ij
+                    wage_den_S += w * e_ij * wpS[jp]
+                end
+            end
+
+            for jp in 1:NpS
+                agg_eS += w * path.eS[ix, jp, n] * wpS[jp]
+            end
+        end
+
+        ur_U_path[n]  = agg_mU > 1e-14 ? agg_uU / agg_mU : 0.0
+        ur_S_path[n]  = agg_mS > 1e-14 ? agg_uS / agg_mS : 0.0
+        ur_total_path[n] = agg_pop > 1e-14 ?
+            (agg_uU + agg_uS) / agg_pop : 0.0
+        skilled_share_path[n]  = agg_pop > 1e-14 ? agg_mS / agg_pop : 0.0
+        training_share_path[n] = agg_pop > 1e-14 ? agg_tU / agg_pop : 0.0
+        mean_wage_U_path[n] = wage_den_U > 1e-14 ? wage_num_U / wage_den_U : 0.0
+        mean_wage_S_path[n] = wage_den_S > 1e-14 ? wage_num_S / wage_den_S : 0.0
+    end
+
+    return TransitionResult(
+        scenario, converged, n_iter, final_dist,
+        copy(path.tgrid),
+        copy(path.θU), copy(path.θS),
+        fU_path, fS_path,
+        ur_U_path, ur_S_path, ur_total_path,
+        skilled_share_path, training_share_path,
+        mean_wage_U_path, mean_wage_S_path,
+        copy(path.uU), copy(path.tU), copy(path.uS), copy(path.mS),
+        copy(path.eS),
+        copy(path.τT), copy(path.pstar_U), copy(path.pstar_S), copy(path.poj),
+        copy(path.U), copy(path.US),
+        copy(gp.x), copy(gp.wx), copy(sg.p), copy(sg.wp),
+    )
 end

@@ -1,247 +1,292 @@
-"""
-    main.jl
-
-Entry point for solving transition dynamics.
-
-This script:
-1. Loads required packages and modules
-2. Solves the initial regime z₀ (e.g., baseline)
-3. Solves the terminal regime z₁ (e.g., crisis)
-4. Computes the backward-forward transition path
-5. Optionally saves and visualizes results
-
-Usage:
-    julia transition/main.jl
-"""
-
-# ============================================================================
-# Packages
-# ============================================================================
-
-using Printf
-using Plots
-using JLD2
-
-# ============================================================================
-# Load solver modules
-# ============================================================================
-
-# Adjust paths as needed; assumes structure:
+############################################################
+# code/transition/main.jl — Transition dynamics entry point
+#
+# Usage (from project root):
+#   julia --threads auto code/transition/main.jl
+#
+# User-configurable options (edit below):
+#   SCENARIO       :fc   or  :covid
+#   W_COND_TARGET  weight-matrix mode used in SMM estimation
+#                  (determines which .jls files to load)
+#
+# Workflow:
+#   1. Load the two SMM result bundles (baseline + crisis)
+#   2. Reconstruct parameter structs and solve both steady states
+#   3. Run the backward-forward transition algorithm
+#   4. Save a rich TransitionResult to disk for later analysis
+#
+# Project layout:
 #   code/
-#     solver/
-#       params.jl, grids.jl, solver_stationary.jl, ...
+#     solver/      ← loaded as a library
+#     smm/         ← smm_params.jl, smm.jl (for _load_smm_bundle, unpack_θ)
 #     transition/
-#       main.jl, transition_params.jl, transition_solver.jl
+#       main.jl          ← this file
+#       transition_params.jl
+#       transition_solver.jl
+#   output/
+#     smm/               ← .jls estimation results
+#     transition/        ← saved here
+############################################################
 
-solver_dir = joinpath(@__DIR__, "..", "solver")
-include(joinpath(solver_dir, "params.jl"))
-include(joinpath(solver_dir, "grids.jl"))
-include(joinpath(solver_dir, "solver_stationary.jl"))
+# ═══════════════════════════════════════════════════════════
+# 1. User configuration
+# ═══════════════════════════════════════════════════════════
 
-# Load transition modules
-include(joinpath(@__DIR__, "transition_params.jl"))
-include(joinpath(@__DIR__, "transition_solver.jl"))
+# Choose scenario: :fc  (Financial Crisis)  or  :covid  (Covid)
+const SCENARIO = :fc
 
-# ============================================================================
-# Main execution
-# ============================================================================
+# Weight-matrix mode used when the SMM results were estimated.
+# Must match the W_COND_TARGET that was set in code/smm/main.jl.
+#   0.0  →  "_diagonalW"
+#   1.0  →  "_compressedW"
+#   2.0  →  "_equalW"
+#   >2.0 →  "_fullW"       (e.g. 1e8 → "_cW1e8" style — see below)
+const W_COND_TARGET = 0.0
 
-function main()
-    @printf("\n%s\n", "="^70)
-    @printf("Transition Dynamics: Backward-Forward Algorithm\n")
-    @printf("%s\n\n", "="^70)
+# ═══════════════════════════════════════════════════════════
+# 2. Packages
+# ═══════════════════════════════════════════════════════════
+print("Loading packages... "); flush(stdout)
 
-    # ========================================================================
-    # Step 1: Setup parameter regimes
-    # ========================================================================
+using LinearAlgebra
+using SparseArrays
+using Statistics
+using Distributions
+using FastGaussQuadrature
+using Interpolations
+using Parameters
+using Printf
+using Random
+using Base.Threads
+using Serialization
+using JLD2
+using CSV
+using DataFrames
 
-    @printf("Setting up parameter regimes...\n")
+println("done."); flush(stdout)
 
-    # Regime z₀: Baseline (example parameters)
-    regime_z0 = RegimeParams(
-        z=1.0,          # Productivity / regime indicator
-        sep_U=0.05,     # Unskilled separation rate
-        sep_S=0.03,     # Skilled separation rate
-        A=1.0           # Matching efficiency
-    )
+println("="^65)
+println("  Segmented Search Model — Transition Dynamics")
+println("="^65)
+@printf("  Scenario:      %s\n", SCENARIO)
+@printf("  W_COND_TARGET: %.1f\n\n", W_COND_TARGET)
+flush(stdout)
 
-    # Regime z₁: Crisis / different regime (example: lower productivity, higher sep)
-    regime_z1 = RegimeParams(
-        z=0.9,          # Lower productivity
-        sep_U=0.08,     # Higher unskilled separation
-        sep_S=0.05,     # Higher skilled separation
-        A=0.95          # Lower matching efficiency
-    )
+# ═══════════════════════════════════════════════════════════
+# 3. Load solver modules
+# ═══════════════════════════════════════════════════════════
+const TRANSITION_DIR = @__DIR__
+const SOLVER_DIR     = joinpath(TRANSITION_DIR, "..", "solver")
+const SMM_DIR        = joinpath(TRANSITION_DIR, "..", "smm")
+const PROJECT_ROOT   = joinpath(TRANSITION_DIR, "..", "..")
+const OUTPUT_DIR     = joinpath(PROJECT_ROOT, "output")
+const SMM_OUT_DIR    = joinpath(OUTPUT_DIR, "smm")
+const TRANS_OUT_DIR  = joinpath(OUTPUT_DIR, "transition")
 
-    # Common parameters (shared across regimes)
-    common_params = CommonParams(
-        r=0.01,         # Interest rate
-        k_U=0.5,        # Unskilled recruitment cost
-        k_S=1.0,        # Skilled recruitment cost
-        mu_U=0.5,       # Unskilled matching elasticity parameter
-        mu_S=0.5,       # Skilled matching elasticity parameter
-        eta_U=0.5,      # Unskilled matching curvature
-        eta_S=0.5,      # Skilled matching curvature
-        f_U=0.03,       # Unskilled job finding rate
-        f_S=0.04,       # Skilled job finding rate
-        nu=0.02,        # Flow into outside sector
-        phi=0.1,        # Training-to-skilled flow rate
-        w_U=1.0,        # Unskilled wage floor
-        w_S=2.0         # Skilled wage floor
-    )
+print("Loading solver modules... "); flush(stdout)
+include(joinpath(SOLVER_DIR, "grids.jl"))
+include(joinpath(SOLVER_DIR, "params.jl"))
+include(joinpath(SOLVER_DIR, "unskilled.jl"))
+include(joinpath(SOLVER_DIR, "skilled.jl"))
+include(joinpath(SOLVER_DIR, "solver.jl"))
+include(joinpath(SOLVER_DIR, "equilibrium.jl"))
+println("done."); flush(stdout)
 
-    # Unskilled and Skilled parameters (fixed across regimes)
-    unskilled_params = UnskilledParams(
-        rho_U=0.8,      # Preference parameter
-        gamma_U=0.5,    # Elasticity parameter
-        beta_U=0.6      # Bargaining power
-    )
+# ═══════════════════════════════════════════════════════════
+# 4. Load SMM modules (for _load_smm_bundle, unpack_θ)
+# ═══════════════════════════════════════════════════════════
+print("Loading SMM modules... "); flush(stdout)
+include(joinpath(SMM_DIR, "moments.jl"))
+include(joinpath(SMM_DIR, "smm_params.jl"))
+include(joinpath(SMM_DIR, "smm.jl"))
+println("done."); flush(stdout)
 
-    skilled_params = SkilledParams(
-        rho_S=0.8,
-        gamma_S=0.5,
-        beta_S=0.6,
-        xi_S=0.1,       # OJS flow rate
-        delta_S_end=0.02 # Separation from skilled employment
-    )
+# ═══════════════════════════════════════════════════════════
+# 5. Load transition modules
+# ═══════════════════════════════════════════════════════════
+print("Loading transition modules... "); flush(stdout)
+include(joinpath(TRANSITION_DIR, "transition_params.jl"))
+include(joinpath(TRANSITION_DIR, "transition_solver.jl"))
+println("done."); flush(stdout)
 
-    # Grids (fixed across regimes)
-    grids = CommonGrids(
-        x=build_gl_grid(21, 0.1, 1.0),  # Productivity grid
-        p_S=build_gl_grid(15, 0.0, 1.0)  # Skilled match quality grid
-    )
+@printf("Threads available: %d\n\n", Threads.nthreads())
+flush(stdout)
 
-    @printf("  Regime z₀: z=%.2f, sep_U=%.3f, sep_S=%.3f\n",
-            regime_z0.z, regime_z0.sep_U, regime_z0.sep_S)
-    @printf("  Regime z₁: z=%.2f, sep_U=%.3f, sep_S=%.3f\n",
-            regime_z1.z, regime_z1.sep_U, regime_z1.sep_S)
-    @printf("  Grid: Nx=%d, Np_S=%d\n\n", length(grids.x), length(grids.p_S))
+# ═══════════════════════════════════════════════════════════
+# 6. Determine windows & file paths
+# ═══════════════════════════════════════════════════════════
 
-    # ========================================================================
-    # Step 2: Solve stationary models
-    # ========================================================================
-
-    @printf("Solving stationary model under regime z₀...\n")
-    model_z0 = Model(
-        regime_z0, common_params, unskilled_params, skilled_params, grids
-    )
-    solve_model!(model_z0, verbose=true)
-
-    @printf("\nSolving stationary model under regime z₁...\n")
-    model_z1 = Model(
-        regime_z1, common_params, unskilled_params, skilled_params, grids
-    )
-    solve_model!(model_z1, verbose=true)
-
-    # ========================================================================
-    # Step 3: Setup transition parameters
-    # ========================================================================
-
-    @printf("\n%s\n", "="^70)
-    @printf("Transition Parameters\n")
-    @printf("%s\n", "="^70)
-
-    tp = TransitionParams(
-        T_max=10.0,      # 10 calendar time periods
-        N_steps=100,     # 101 time points (including t=0 and t=T_max)
-        tol=1e-4,        # Convergence tolerance
-        maxit=50,        # Maximum iterations
-        verbose=true,
-        damp=0.5         # Dampening factor
-    )
-
-    # ========================================================================
-    # Step 4: Solve transition dynamics
-    # ========================================================================
-
-    @printf("\n")
-    path = solve_transition(model_z0, model_z1, tp)
-
-    # ========================================================================
-    # Step 5: Post-processing and output
-    # ========================================================================
-
-    @printf("\nTransition Path Results:\n")
-    @printf("  Initial θ_U: %.4f → Final θ_U: %.4f\n",
-            path.theta_U[1], path.theta_U[end])
-    @printf("  Initial θ_S: %.4f → Final θ_S: %.4f\n",
-            path.theta_S[1], path.theta_S[end])
-
-    # Summary statistics
-    @printf("\nDistributions (t=0 to t=T_max):\n")
-    @printf("  ∫ u_U:  %.4f → %.4f\n",
-            sum(path.u_U[:, 1] .* grids.weights_x),
-            sum(path.u_U[:, end] .* grids.weights_x))
-    @printf("  ∫ t:    %.4f → %.4f\n",
-            sum(path.t_dens[:, 1] .* grids.weights_x),
-            sum(path.t_dens[:, end] .* grids.weights_x))
-    @printf("  ∫ u_S:  %.4f → %.4f\n",
-            sum(path.u_S[:, 1] .* grids.weights_x),
-            sum(path.u_S[:, end] .* grids.weights_x))
-    @printf("  m_S:    %.4f → %.4f\n", path.m_S[1], path.m_S[end])
-
-    # ========================================================================
-    # Step 6: Save results (optional)
-    # ========================================================================
-
-    output_dir = joinpath(@__DIR__, "output")
-    mkpath(output_dir)
-
-    # Save to JLD2 (binary format)
-    jld_file = joinpath(output_dir, "transition_path.jld2")
-    @printf("\nSaving transition path to: %s\n", jld_file)
-    save(jld_file,
-         "path", path,
-         "model_z0", model_z0,
-         "model_z1", model_z1,
-         "tp", tp)
-
-    # ========================================================================
-    # Step 7: Visualization (optional)
-    # ========================================================================
-
-    @printf("\nGenerating plots...\n")
-
-    # Plot tightness paths
-    p1 = plot(path.tgrid, path.theta_U, label="θ_U", xlabel="Time", ylabel="Tightness", legend=:topleft)
-    plot!(p1, path.tgrid, path.theta_S, label="θ_S")
-    savefig(p1, joinpath(output_dir, "tightness_paths.png"))
-
-    # Plot distribution paths (selected x-grid points)
-    x_indices = [1, div(length(grids.x), 2), length(grids.x)]
-    p2 = plot(path.tgrid, path.u_U[x_indices[1], :], label="u_U (low x)", xlabel="Time", ylabel="Density")
-    plot!(p2, path.tgrid, path.u_U[x_indices[2], :], label="u_U (mid x)")
-    plot!(p2, path.tgrid, path.u_U[x_indices[3], :], label="u_U (high x)")
-    savefig(p2, joinpath(output_dir, "unskilled_unemployment.png"))
-
-    p3 = plot(path.tgrid, path.u_S[x_indices[1], :], label="u_S (low x)", xlabel="Time", ylabel="Density")
-    plot!(p3, path.tgrid, path.u_S[x_indices[2], :], label="u_S (mid x)")
-    plot!(p3, path.tgrid, path.u_S[x_indices[3], :], label="u_S (high x)")
-    savefig(p3, joinpath(output_dir, "skilled_unemployment.png"))
-
-    # Plot training density
-    p4 = plot(path.tgrid, path.t_dens[x_indices[1], :], label="t (low x)", xlabel="Time", ylabel="Density")
-    plot!(p4, path.tgrid, path.t_dens[x_indices[2], :], label="t (mid x)")
-    plot!(p4, path.tgrid, path.t_dens[x_indices[3], :], label="t (high x)")
-    savefig(p4, joinpath(output_dir, "training_density.png"))
-
-    # Plot skilled segment mass
-    p5 = plot(path.tgrid, path.m_S, label="m_S", xlabel="Time", ylabel="Mass", legend=:topleft)
-    savefig(p5, joinpath(output_dir, "skilled_mass.png"))
-
-    @printf("Plots saved to: %s\n", output_dir)
-
-    @printf("\n%s\n", "="^70)
-    @printf("Transition dynamics solved successfully!\n")
-    @printf("%s\n", "="^70)
-
-    return path, model_z0, model_z1
+function _w_suffix(cond_target::Float64)
+    cond_target == 0.0 && return "_diagonalW"
+    cond_target == 1.0 && return "_compressedW"
+    cond_target == 2.0 && return "_equalW"
+    return "_fullW"
 end
 
-# ============================================================================
-# Run main if executed as script
-# ============================================================================
+const W_SUFFIX = _w_suffix(W_COND_TARGET)
 
-if abspath(PROGRAM_FILE) == @__FILE__
-    path, model_z0, model_z1 = main()
+if SCENARIO == :fc
+    base_window   = :base_fc
+    crisis_window = :crisis_fc
+elseif SCENARIO == :covid
+    base_window   = :base_covid
+    crisis_window = :crisis_covid
+else
+    error("Unknown SCENARIO: $SCENARIO. Must be :fc or :covid.")
 end
+
+base_jls   = joinpath(SMM_OUT_DIR, "smm_result_$(base_window)$(W_SUFFIX).jls")
+crisis_jls = joinpath(SMM_OUT_DIR, "smm_result_$(crisis_window)$(W_SUFFIX).jls")
+
+@printf("  Baseline file:  %s\n", base_jls)
+@printf("  Crisis file:    %s\n\n", crisis_jls)
+flush(stdout)
+
+# ═══════════════════════════════════════════════════════════
+# 7. Load SMM bundles and reconstruct parameters
+# ═══════════════════════════════════════════════════════════
+
+function _load_bundle_or_error(path, label)
+    isfile(path) || error("$label not found: $path\n" *
+        "Run the SMM estimation first (code/smm/main.jl).")
+    bundle = _load_smm_bundle(path; delete_on_fail=false, label=label)
+    isnothing(bundle) && error("$label is unreadable or stale: $path")
+    return bundle
+end
+
+println("Loading SMM results...")
+flush(stdout)
+
+base_bundle   = _load_bundle_or_error(base_jls,   "Baseline SMM result")
+crisis_bundle = _load_bundle_or_error(crisis_jls, "Crisis SMM result")
+
+# Reconstruct the four parameter structs from each optimum
+cp_base, rp_base, up_base, sp_base = unpack_θ(
+    base_bundle.result.theta_opt, base_bundle.spec)
+cp_crisis, rp_crisis, up_crisis, sp_crisis = unpack_θ(
+    crisis_bundle.result.theta_opt, crisis_bundle.spec)
+
+# SimParams for solving (use the one from the SMM run, but raise verbosity)
+sim = base_bundle.sim
+sim_solve = SimParams(
+    tol_inner    = sim.tol_inner,
+    tol_outer_U  = sim.tol_outer_U,
+    tol_outer_S  = sim.tol_outer_S,
+    tol_global   = sim.tol_global,
+    maxit_inner  = sim.maxit_inner,
+    maxit_outer  = sim.maxit_outer,
+    maxit_global = sim.maxit_global,
+    conv_streak  = sim.conv_streak,
+    use_anderson = sim.use_anderson,
+    anderson_m   = sim.anderson_m,
+    anderson_reg = sim.anderson_reg,
+    damp_pstar_U = sim.damp_pstar_U,
+    damp_pstar_S = sim.damp_pstar_S,
+    verbose      = 1,
+    verbose_stride = sim.verbose_stride,
+)
+
+# Grid sizes (use whatever the SMM estimation used)
+const Nx   = base_bundle.spec.run.Nx
+const Np_U = base_bundle.spec.run.Np_U
+const Np_S = base_bundle.spec.run.Np_S
+@printf("  Grid sizes: Nx=%d  Np_U=%d  Np_S=%d\n", Nx, Np_U, Np_S)
+
+@printf("  Baseline Q  = %.6e  (converged = %s)\n",
+        base_bundle.result.loss_opt, base_bundle.result.converged)
+@printf("  Crisis Q    = %.6e  (converged = %s)\n\n",
+        crisis_bundle.result.loss_opt, crisis_bundle.result.converged)
+flush(stdout)
+
+# ═══════════════════════════════════════════════════════════
+# 8. Solve both stationary equilibria
+# ═══════════════════════════════════════════════════════════
+
+println("Solving baseline (z₀) stationary equilibrium...")
+flush(stdout)
+model_z0, sr_z0 = solve_model(cp_base, rp_base, up_base, sp_base, sim_solve;
+                               Nx = Nx, Np_U = Np_U, Np_S = Np_S)
+sr_z0.ok || @warn "Baseline model did not converge — transition results may be unreliable."
+eq_z0 = compute_equilibrium_objects(model_z0)
+@printf("  θ_U = %.4f   θ_S = %.4f   ur_total = %.4f\n\n",
+        eq_z0.thetaU, eq_z0.thetaS, eq_z0.ur_total)
+flush(stdout)
+
+println("Solving crisis (z₁) stationary equilibrium...")
+flush(stdout)
+model_z1, sr_z1 = solve_model(cp_crisis, rp_crisis, up_crisis, sp_crisis, sim_solve;
+                               Nx = Nx, Np_U = Np_U, Np_S = Np_S)
+sr_z1.ok || @warn "Crisis model did not converge — transition results may be unreliable."
+eq_z1 = compute_equilibrium_objects(model_z1)
+@printf("  θ_U = %.4f   θ_S = %.4f   ur_total = %.4f\n\n",
+        eq_z1.thetaU, eq_z1.thetaS, eq_z1.ur_total)
+flush(stdout)
+
+# ═══════════════════════════════════════════════════════════
+# 9. Transition parameters
+# ═══════════════════════════════════════════════════════════
+
+tp = TransitionParams(
+    T_max   = 120.0,   # 10 years in months
+    N_steps = 240,     # half-month steps
+    tol     = 1e-4,
+    maxit   = 200,
+    damp    = 0.3,
+    verbose = true,
+)
+
+# ═══════════════════════════════════════════════════════════
+# 10. Solve transition
+# ═══════════════════════════════════════════════════════════
+
+result = solve_transition(model_z0, model_z1, tp; scenario = SCENARIO)
+
+# ═══════════════════════════════════════════════════════════
+# 11. Summary
+# ═══════════════════════════════════════════════════════════
+
+println("="^65)
+println("  Transition Results Summary")
+println("="^65)
+
+Nt = tp.N_steps + 1
+@printf("  Converged: %s  (%d iterations, final dist = %.3e)\n",
+        result.converged, result.n_iterations, result.final_dist)
+@printf("\n  Tightness:\n")
+@printf("    θ_U:  %.4f → %.4f\n", result.θU[1], result.θU[end])
+@printf("    θ_S:  %.4f → %.4f\n", result.θS[1], result.θS[end])
+@printf("\n  Unemployment rates:\n")
+@printf("    ur_U:     %.4f → %.4f\n", result.ur_U[1], result.ur_U[end])
+@printf("    ur_S:     %.4f → %.4f\n", result.ur_S[1], result.ur_S[end])
+@printf("    ur_total: %.4f → %.4f\n", result.ur_total[1], result.ur_total[end])
+@printf("\n  Job-finding rates:\n")
+@printf("    f_U:  %.4f → %.4f\n", result.fU[1], result.fU[end])
+@printf("    f_S:  %.4f → %.4f\n", result.fS[1], result.fS[end])
+@printf("\n  Composition:\n")
+@printf("    skilled_share:  %.4f → %.4f\n",
+        result.skilled_share[1], result.skilled_share[end])
+@printf("    training_share: %.4f → %.4f\n",
+        result.training_share[1], result.training_share[end])
+flush(stdout)
+
+# ═══════════════════════════════════════════════════════════
+# 12. Save results
+# ═══════════════════════════════════════════════════════════
+
+mkpath(TRANS_OUT_DIR)
+
+out_file = joinpath(TRANS_OUT_DIR, "transition_$(SCENARIO)$(W_SUFFIX).jld2")
+@printf("\nSaving transition result → %s\n", out_file)
+flush(stdout)
+
+jldsave(out_file;
+    result   = result,
+    eq_z0    = eq_z0,
+    eq_z1    = eq_z1,
+    tp       = tp,
+    scenario = SCENARIO,
+)
+
+@printf("\nDone.\n")
+println("="^65)
+flush(stdout)

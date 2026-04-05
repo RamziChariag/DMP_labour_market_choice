@@ -1,0 +1,31 @@
+block,name,label,estimate,lb,ub,fixed
+common,a_ℓ,worker type shape a_ℓ,1.06876381,0.30000000,6.00000000,false
+common,b_ℓ,worker type shape b_ℓ,2.56120225,0.30000000,6.00000000,false
+common,c,training cost coeff c,2.91535521,0.01000000,3.00000000,false
+regime,PU,unskilled productivity PU,2.73686461,0.05000000,3.00000000,false
+regime,PS,skilled productivity PS,3.95146719,0.10000000,5.00000000,false
+regime,bU,unskilled UI flow bU,0.23613046,0.00000000,2.00000000,false
+regime,bT,training flow bT,1.11815498,0.00000000,2.00000000,false
+regime,bS,skilled UI flow bS,0.43459860,0.00000000,2.00000000,false
+regime,α_U,unskilled damage shape α_U,5.43223850,0.10000000,8.00000000,false
+regime,a_Γ,skilled offer shape a_Γ,3.39435017,0.30000000,6.00000000,false
+regime,b_Γ,skilled offer shape b_Γ,1.00197750,0.30000000,6.00000000,false
+unsk,μ,unskilled matching eff μ_U,0.02687078,0.01000000,1.50000000,false
+unsk,k,unskilled vacancy cost k_U,0.00207104,0.00100000,1.50000000,false
+unsk,λ,unskilled damage rate λ_U,0.32072778,0.00100000,0.95000000,false
+skl,μ,skilled matching eff μ_S,0.84932840,0.01000000,1.50000000,false
+skl,k,skilled vacancy cost k_S,0.16986178,0.00100000,1.50000000,false
+skl,ξ,skilled exog. sep rate ξ,0.00000011,0.00000010,0.15000000,false
+skl,λ,skilled quality shock λ_S,0.43894831,0.00100000,0.50000000,false
+fixed,unsk_η,unsk_η,0.50000000,,,true
+fixed,skl_η,skl_η,0.50000000,,,true
+fixed,unsk_β,unsk_β,0.50000000,,,true
+fixed,skl_β,skl_β,0.50000000,,,true
+fixed,skl_σ,skl_σ,1.10000000,,,true
+fixed,r,r,0.00416667,,,true
+fixed,ν,ν,0.03841185,,,true
+fixed,φ,φ,0.02222129,,,true
+
+# Q = 1.3800575212e+06
+# converged = false
+# iterations = 3000
