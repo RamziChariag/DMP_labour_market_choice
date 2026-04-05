@@ -292,7 +292,7 @@ function initialise_model(;
         τT        = zeros(Nx),
         u         = 0.4 .* ℓvals,
         t         = t_seed,
-        θ         = 1.0,
+        θ         = 0.5,     # avoid 1.0 sentinel; will be overwritten on first outer iteration
     )
 
     US_init = fill(regime.bS / (r + ν), Nx)
@@ -307,7 +307,7 @@ function initialise_model(;
         poj   = fill(0.60, Nx),
         u     = zeros(Nx),
         e     = zeros(Nx, Np_S),
-        θ     = 1.0,
+        θ     = 0.5,     # avoid 1.0 sentinel; will be overwritten on first outer iteration
     )
 
     return Model(

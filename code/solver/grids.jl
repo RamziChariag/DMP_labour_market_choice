@@ -38,7 +38,7 @@ end
 
 # ============================================================
 # Training cost
-#   c_of_x = x -> cp.c * (1.0 - x) * exp(-x)   [decreasing in worker quality x]
+#   c_of_x = x -> exp(cp.c) * (1.0 - x) * exp(-x)   [decreasing in worker quality x]
 # ============================================================
 
 @inline training_cost(x::Float64, c::Float64) = exp(c) * (1.0 - x) * exp(-x)

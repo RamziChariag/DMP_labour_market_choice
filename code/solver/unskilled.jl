@@ -275,7 +275,9 @@ function update_theta_unskilled(model::Model)
     Jbar    = dot(uc.Jfrontier .* uc.u, gp.wx)
 
     if Jbar < 1e-14 || U_total < 1e-14 || !isfinite(Jbar) || !isfinite(U_total)
-        return uc.θ
+        # Dead market: no profitable matches → θ should be near-zero,
+        # not the stale cache value (which may be the 1.0 initial seed).
+        return 1e-14
     end
 
     q     = up.k * U_total / Jbar

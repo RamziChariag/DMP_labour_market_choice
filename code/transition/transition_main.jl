@@ -41,7 +41,7 @@ const SCENARIO = :fc
 #   1.0  →  "_compressedW"
 #   2.0  →  "_equalW"
 #   >2.0 →  "_fullW"       (e.g. 1e8 → "_cW1e8" style — see below)
-const W_COND_TARGET = 0.0
+const W_COND_TARGET = 1e8
 
 # ═══════════════════════════════════════════════════════════
 # 2. Packages
@@ -227,8 +227,8 @@ flush(stdout)
 # ═══════════════════════════════════════════════════════════
 
 tp = TransitionParams(
-    T_max   = 120.0,   # 10 years in months
-    N_steps = 240,     # half-month steps
+    T_max   = 12.0,   # 1 year in months
+    N_steps = 12,     # half-month steps
     tol     = 1e-4,
     maxit   = 200,
     damp    = 0.3,

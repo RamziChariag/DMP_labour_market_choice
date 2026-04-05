@@ -522,7 +522,9 @@ function update_theta_skilled(model::Model)
     sc   = model.skl_cache
     Jbar = compute_Jbar_skilled(model)
 
-    (Jbar < 1e-12 || !isfinite(Jbar)) && return sc.θ
+    # Dead market: no profitable matches → θ should be near-zero,
+    # not the stale cache value (which may be the 1.0 initial seed).
+    (Jbar < 1e-12 || !isfinite(Jbar)) && return 1e-14
 
     q     = sp.k / Jbar
     θ_raw = theta_from_q(q, sp.μ, sp.η)

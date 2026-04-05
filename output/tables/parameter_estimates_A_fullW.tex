@@ -1,0 +1,35 @@
+\begin{table}[htbp]
+  \centering
+  \caption{Parameter Estimates (A): Calibrated and Deep Structural}
+  \label{tab:param_estimates_a}
+  \small
+  \begin{tabular}{llcccccc}
+    \toprule
+    & & \multicolumn{3}{c}{Financial Crisis} & \multicolumn{3}{c}{COVID} \\
+    \cmidrule(lr){3-5} \cmidrule(lr){6-8}
+    Parameter & Description & Baseline & Crisis & $\Delta$ & Baseline & Crisis & $\Delta$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Externally calibrated}} \\[2pt]
+    \quad $r$ & Discount rate & 0.00417 & 0.00417 & --- & 0.00417 & 0.00417 & --- \\
+    \quad $\nu$ & Demographic exit rate & 0.03841 & 0.03841 & --- & 0.03841 & 0.03841 & --- \\
+    \quad $\varphi$ & Training completion rate & 0.02222 & 0.02222 & --- & 0.02222 & 0.02222 & --- \\
+    [4pt]
+    \hline
+    \multicolumn{8}{l}{\textit{Deep structural}} \\[2pt]
+    \quad $a_\ell$ & Worker type shape & 1.50538 & 1.50538 & --- & 1.06876 & 1.50538 & --- \\
+    \quad $b_\ell$ & Worker type shape & 2.87219 & 2.87219 & --- & 2.56120 & 2.87219 & --- \\
+    \quad $c$ & Training cost coeff. & 2.94357 & 2.94357 & --- & 2.91536 & 2.94357 & --- \\
+    \quad $b_U$ & Unskilled UI flow & 0.19600 & 0.19600 & --- & 0.23613 & 0.19600 & --- \\
+    \quad $b_T$ & Training flow & 1.02176 & 1.02176 & --- & 1.11815 & 1.02176 & --- \\
+    \quad $b_S$ & Skilled UI flow & 0.56562 & 0.56562 & --- & 0.43460 & 0.56562 & --- \\
+    \quad $\mu_U$ & Unskilled matching eff. & 0.04330 & 0.04330 & --- & 0.02687 & 0.04330 & --- \\
+    \quad $\eta_U$ & Unskilled matching elas. & 0.50000 & 0.50000 & --- & 0.50000 & 0.50000 & --- \\
+    \quad $\beta_U$ & Unskilled bargaining & 0.50000 & 0.50000 & --- & 0.50000 & 0.50000 & --- \\
+    \quad $\mu_S$ & Skilled matching eff. & 1.18859 & 1.18859 & --- & 0.84933 & 1.18859 & --- \\
+    \quad $\eta_S$ & Skilled matching elas. & 0.50000 & 0.50000 & --- & 0.50000 & 0.50000 & --- \\
+    \quad $\beta_S$ & Skilled bargaining & 0.50000 & 0.50000 & --- & 0.50000 & 0.50000 & --- \\
+    \quad $\sigma_S$ & OJS flow cost & 1.10000 & 1.10000 & --- & 1.10000 & 1.10000 & --- \\
+    [4pt]
+    \bottomrule
+  \end{tabular}
+\end{table}

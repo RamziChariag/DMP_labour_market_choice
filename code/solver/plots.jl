@@ -72,7 +72,7 @@ function fig_unskilled_values(obj)
         annotate!(p2, xg[end]*0.95, minimum(obj.Usearch)*1.02,
                   text(L"\bar{x} \approx %$(round(x_bar, digits=3))", :right, 8, :darkgray))
     end
-    title!(p2, "Unskilled unemployment values")
+    #title!(p2, "Unskilled unemployment values")
     xlabel!(p2, L"x")
     ylabel!(p2, "Value")
     p2
@@ -159,7 +159,7 @@ end
 function fig_training_policy(obj)
     p4 = plot(obj.xg, obj.tauT,
               label=L"\tau(x)", color=_C2, lw=2, legend=false)
-    title!(p4, L"Training policy $\tau(x)$")
+    #title!(p4, L"Training policy $\tau(x)$")
     xlabel!(p4, L"x")
     ylabel!(p4, L"\tau(x)")
     plot!(p4, yguidefontrotation=-90)
@@ -218,7 +218,7 @@ function fig_skilled_cutoffs(obj)
     xg = obj.xg
     p7 = plot(xg, obj.pstar_S, label=L"p_S^*(x)", color=_C1, legend=false)
     plot!(p7, xg, obj.poj, label=L"p^{\rm oj}(x)", color=_C2, legend=false)
-    title!(p7, "Skilled cutoffs by type")
+    #title!(p7, "Skilled cutoffs by type")
     xlabel!(p7, L"x")
     ylabel!(p7, L"p")
     plot!(p7, yguidefontrotation=-90, left_margin=5Plots.mm)
@@ -302,7 +302,7 @@ function fig_unemployment_values(obj)
     xg = obj.xg
     p11 = plot(xg, obj.US, label=L"U_S(x)", color=_C3, lw=2)
     plot!(p11, xg, obj.UU, label=L"U_U(x)", color=_C1, lw=2)
-    title!(p11, "Unemployment values")
+    #title!(p11, "Unemployment values")
     xlabel!(p11, L"x")
     ylabel!(p11, "Value")
     p11
@@ -314,7 +314,7 @@ function fig_unskilled_wage(obj)
 
     pW1 = heatmap(xg, pgU, obj.wU_surface',
                   xlabel=L"x", ylabel=L"p",
-                  title=L"Unskilled wage $w_U(x,p)$", color=:plasma,
+                  #title=L"Unskilled wage $w_U(x,p)$", color=:plasma,
                   legend=false, grid=false, yguidefontrotation=-90,
                   left_margin=12Plots.mm)
     contour!(pW1, xg, pgU, obj.wU_surface',
@@ -480,7 +480,7 @@ function fig_wage_pooled_density(obj)
           color=_C1, lw=1.4, ls=:dash)
     plot!(pW5a, obj.wmid, obj.dens_S ./ Z_w, label="Skilled",
           color=_C2, lw=1.4, ls=:dash)
-    title!(pW5a, "Pooled wage density")
+    #title!(pW5a, "Pooled wage density")
     xlabel!(pW5a, "Wage")
     ylabel!(pW5a, "Density")
     plot(pW5a, size=(720,480), margin=5Plots.mm)
