@@ -200,102 +200,125 @@ end
 
 
 """
+    _write_standalone_latex_file(path, caption, label, all_results, col_heads; notes)
+
+Write a single self-contained LaTeX table environment to `path`.
+"""
+function _write_standalone_latex_file(
+    path        :: String,
+    caption     :: String,
+    label       :: String,
+    all_results,
+    col_heads;
+    notes :: String = "",
+)
+    lines = String[]
+    push!(lines, "\\begin{table}[htbp]")
+    push!(lines, "\\centering")
+    push!(lines, "\\caption{$caption}")
+    push!(lines, "\\label{$label}")
+    push!(lines, "\\small")
+    _write_one_latex_table!(lines, all_results, col_heads)
+    if !isempty(notes)
+        push!(lines, "\\\\[2pt]")
+        push!(lines, "\\footnotesize")
+        push!(lines, notes)
+    end
+    push!(lines, "\\end{table}")
+
+    open(path, "w") do io
+        for line in lines;  println(io, line)  end
+    end
+    @printf("  Saved LaTeX table → %s\n", path)
+end
+
+
+"""
     write_policy_latex(table, path)
 
-Write a LaTeX table suitable for inclusion in the paper.
-Automatically detects the exercise type and formats accordingly.
+Write LaTeX tables for the policy exercise.  Each panel becomes its own
+file so you can `\\input` them independently and let LaTeX place them
+wherever they fit.
+
+The `path` argument is used as the base: for a single-panel exercise the
+file is written to `path` directly; for multi-panel exercises the files
+are `path_a.tex`, `path_b.tex`, `path_c.tex`.
 """
 function write_policy_latex(table::PolicyTable, path::String)
     results = table.results
     baseline = results[1]
     non_base = filter(r -> r.spec.policy != :baseline, results)
 
-    # Detect exercise type
     policies_present = unique([r.spec.policy for r in non_base])
     is_educ = any(p -> p in (:A, :B), policies_present)
     is_oo   = any(p -> p in (:bU, :bS, :bUS), policies_present)
 
-    lines = String[]
-    push!(lines, "\\begin{table}[htbp]")
-    push!(lines, "\\centering")
-
     suffix_label = replace(lowercase(table.baseline_label), " " => "_")
+    base_path    = replace(path, ".tex" => "")
+
+    educ_notes = "\\textit{Notes:} " *
+        "Policy~A raises \\(b_T\\) by the stated percentage. " *
+        "Policy~B reduces \\(e^c\\) (and hence \\(c(x) = (1-x)e^{c-x}\\)) by the stated percentage. " *
+        "\\(^{\\dagger}\\) indicates non-convergence."
+
+    oo_notes = "\\textit{Notes:} " *
+        "Each column raises the indicated flow payoff by the stated percentage, " *
+        "holding all other parameters at their estimated baseline values. " *
+        "\\(^{\\dagger}\\) indicates non-convergence."
 
     if is_oo
-        # ── Outside-option table: Panel A (separate) + Panel B (joint) ──
         pol_bU  = filter(r -> r.spec.policy == :bU,  non_base)
         pol_bS  = filter(r -> r.spec.policy == :bS,  non_base)
         pol_bUS = filter(r -> r.spec.policy == :bUS, non_base)
+        lbl = table.baseline_label
 
-        push!(lines, "\\caption{Outside-option counterfactuals — $(table.baseline_label)}")
-        push!(lines, "\\label{tab:oo_$(suffix_label)}")
-        push!(lines, "\\small")
+        # Panel A: bU
+        ha = ["Baseline"]; ra = [baseline]
+        for r in pol_bU;  push!(ha, _latex_col_header(r.spec)); push!(ra, r)  end
+        _write_standalone_latex_file(
+            base_path * "_a.tex",
+            "Outside options: \\(b_U\\) raised — $lbl",
+            "tab:oo_bU_$(suffix_label)",
+            ra, ha; notes = oo_notes)
 
-        # Panel A: bU only
-        push!(lines, "\\textit{Panel A: \\(b_U\\) raised}")
-        push!(lines, "\\\\[4pt]")
-        heads_A = ["Baseline"]
-        res_A   = [baseline]
-        for r in pol_bU;  push!(heads_A, _latex_col_header(r.spec)); push!(res_A, r)  end
-        _write_one_latex_table!(lines, res_A, heads_A)
+        # Panel B: bS
+        hb = ["Baseline"]; rb = [baseline]
+        for r in pol_bS;  push!(hb, _latex_col_header(r.spec)); push!(rb, r)  end
+        _write_standalone_latex_file(
+            base_path * "_b.tex",
+            "Outside options: \\(b_S\\) raised — $lbl",
+            "tab:oo_bS_$(suffix_label)",
+            rb, hb; notes = oo_notes)
 
-        push!(lines, "\\\\[10pt]")
-
-        # Panel B: bS only
-        push!(lines, "\\textit{Panel B: \\(b_S\\) raised}")
-        push!(lines, "\\\\[4pt]")
-        heads_B = ["Baseline"]
-        res_B   = [baseline]
-        for r in pol_bS;  push!(heads_B, _latex_col_header(r.spec)); push!(res_B, r)  end
-        _write_one_latex_table!(lines, res_B, heads_B)
-
-        push!(lines, "\\\\[10pt]")
-
-        # Panel C: bU and bS together
-        push!(lines, "\\textit{Panel C: \\(b_U\\) and \\(b_S\\) raised jointly}")
-        push!(lines, "\\\\[4pt]")
-        heads_C = ["Baseline"]
-        res_C   = [baseline]
-        for r in pol_bUS;  push!(heads_C, _latex_col_header(r.spec)); push!(res_C, r)  end
-        _write_one_latex_table!(lines, res_C, heads_C)
+        # Panel C: bU,bS
+        hc = ["Baseline"]; rc = [baseline]
+        for r in pol_bUS;  push!(hc, _latex_col_header(r.spec)); push!(rc, r)  end
+        _write_standalone_latex_file(
+            base_path * "_c.tex",
+            "Outside options: \\(b_U\\) and \\(b_S\\) raised jointly — $lbl",
+            "tab:oo_bUS_$(suffix_label)",
+            rc, hc; notes = oo_notes)
 
     elseif is_educ
-        # ── Education-subsidy table ──
-        push!(lines, "\\caption{Education-subsidy counterfactuals — $(table.baseline_label)}")
-        push!(lines, "\\label{tab:educ_$(suffix_label)}")
-        push!(lines, "\\small")
-
-        all_res  = vcat([baseline], non_base)
-        heads    = ["Baseline"]
-        for r in non_base;  push!(heads, _latex_col_header(r.spec))  end
-        _write_one_latex_table!(lines, all_res, heads)
-
-    else
-        # Fallback: generic table
-        push!(lines, "\\caption{Policy counterfactuals — $(table.baseline_label)}")
-        push!(lines, "\\label{tab:policy_$(suffix_label)}")
-        push!(lines, "\\small")
-
         all_res = vcat([baseline], non_base)
         heads   = ["Baseline"]
         for r in non_base;  push!(heads, _latex_col_header(r.spec))  end
-        _write_one_latex_table!(lines, all_res, heads)
-    end
+        _write_standalone_latex_file(
+            path,
+            "Education-subsidy counterfactuals — $(table.baseline_label)",
+            "tab:educ_$(suffix_label)",
+            all_res, heads; notes = educ_notes)
 
-    push!(lines, "\\\\[2pt]")
-    push!(lines, "\\footnotesize")
-    push!(lines, "\\textit{Notes:} " *
-                 "Policy~A raises \\(b_T\\) by the stated percentage. " *
-                 "Policy~B reduces \\(e^c\\) (and hence \\(c(x) = (1-x)e^{c-x}\\)) by the stated percentage. " *
-                 "\\(^{\\dagger}\\) indicates non-convergence.")
-    push!(lines, "\\end{table}")
-
-    open(path, "w") do io
-        for line in lines
-            println(io, line)
-        end
+    else
+        all_res = vcat([baseline], non_base)
+        heads   = ["Baseline"]
+        for r in non_base;  push!(heads, _latex_col_header(r.spec))  end
+        _write_standalone_latex_file(
+            path,
+            "Policy counterfactuals — $(table.baseline_label)",
+            "tab:policy_$(suffix_label)",
+            all_res, heads)
     end
-    @printf("  Saved LaTeX table → %s\n", path)
 end
 
 
