@@ -654,7 +654,7 @@ function _build_result(
         fU_path[n] = jobfinding_rate(path.θU[n], up.μ, up.η)
         fS_path[n] = jobfinding_rate(path.θS[n], sp.μ, sp.η)
 
-        agg_uU = 0.0;  agg_tU = 0.0;  agg_mU = 0.0
+        agg_uU = 0.0;  agg_tU = 0.0;  agg_eU = 0.0;  agg_mU = 0.0
         agg_uS = 0.0;  agg_eS = 0.0;  agg_mS = 0.0
         agg_pop = 0.0
 
@@ -674,6 +674,7 @@ function _build_result(
 
             agg_uU  += w * uU_ix
             agg_tU  += w * tU_ix
+            agg_eU  += w * eU_ix
             agg_mU  += w * mU_ix
             agg_uS  += w * uS_ix
             agg_mS  += w * mS_ix
@@ -704,11 +705,13 @@ function _build_result(
             end
         end
 
-        ur_U_path[n]  = agg_mU > 1e-14 ? agg_uU / agg_mU : 0.0
+        lf_U     = agg_uU + agg_eU                    # unskilled LF (excl. training)
+        lf_total = lf_U + agg_mS                       # total LF (excl. training)
+        ur_U_path[n]  = lf_U > 1e-14 ? agg_uU / lf_U : 0.0
         ur_S_path[n]  = agg_mS > 1e-14 ? agg_uS / agg_mS : 0.0
-        ur_total_path[n] = agg_pop > 1e-14 ?
-            (agg_uU + agg_uS) / agg_pop : 0.0
-        skilled_share_path[n]  = agg_pop > 1e-14 ? agg_mS / agg_pop : 0.0
+        ur_total_path[n] = lf_total > 1e-14 ?
+            (agg_uU + agg_uS) / lf_total : 0.0
+        skilled_share_path[n]  = lf_total > 1e-14 ? agg_mS / lf_total : 0.0
         training_share_path[n] = agg_pop > 1e-14 ? agg_tU / agg_pop : 0.0
         mean_wage_U_path[n] = wage_den_U > 1e-14 ? wage_num_U / wage_den_U : 0.0
         mean_wage_S_path[n] = wage_den_S > 1e-14 ? wage_num_S / wage_den_S : 0.0

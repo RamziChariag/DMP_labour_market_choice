@@ -304,9 +304,11 @@ function compute_equilibrium_objects(model::Model)
     agg_mS_flow = (φ / ν) * agg_t
 
     total_pop   = agg_mU + agg_mS
-    ur_U        = agg_mU > 1e-12 ? agg_uU / agg_mU : 1.0
-    ur_S        = agg_mS > 1e-12 ? agg_uS / agg_mS : 1.0
-    ur_total    = total_pop > 1e-12 ? (agg_uU + agg_uS) / total_pop : 1.0
+    lf_U        = agg_uU + agg_eU                           # unskilled LF (excl. training)
+    lf_total    = lf_U + agg_mS                              # total LF (excl. training)
+    ur_U        = lf_U     > 1e-12 ? agg_uU / lf_U     : 1.0
+    ur_S        = agg_mS   > 1e-12 ? agg_uS / agg_mS   : 1.0
+    ur_total    = lf_total > 1e-12 ? (agg_uU + agg_uS) / lf_total : 1.0
 
     # ── Transition rates for model_moments ────────────────────────────────
     # ΓpstarS used by both f_S and sep_rate_S — compute once here.
@@ -433,7 +435,7 @@ function print_accounting(obj)
     @printf("║  Equilibrium accounting                             ║\n")
     @printf("╠═════════════════════════════════════════════════════╣\n")
     @printf("║  UNSKILLED SEGMENT  (share of pop = %6.4f)         ║\n", obj.agg_mU)
-    @printf("║    unemployed  u_U   %6.4f  (%5.1f%% of seg)        ║\n", obj.agg_uU, 100 * obj.ur_U)
+    @printf("║    unemployed  u_U   %6.4f  (%5.1f%% of LF_U)       ║\n", obj.agg_uU, 100 * obj.ur_U)
     @printf("║    employed    e_U   %6.4f                         ║\n", obj.agg_eU)
     @printf("║    training    t     %6.4f                         ║\n", obj.agg_t)
     @printf("║    m_U (flow)        %6.4f                         ║\n", obj.agg_mU)
@@ -444,7 +446,8 @@ function print_accounting(obj)
     @printf("║    m_S (flow)        %6.4f                         ║\n", obj.agg_mS_flow)
     @printf("╠═════════════════════════════════════════════════════╣\n")
     @printf("║  TOTAL POPULATION    %6.4f  (should be 1.000)      ║\n", obj.total_pop)
-    @printf("║  Global u-rate       %6.4f                         ║\n", obj.ur_total)
+    @printf("║  LF (excl training)  %6.4f                         ║\n", obj.agg_uU + obj.agg_eU + obj.agg_mS)
+    @printf("║  Global u-rate (LF)  %6.4f                         ║\n", obj.ur_total)
     @printf("║  θ_U = %6.4f        θ_S = %6.4f                   ║\n", obj.thetaU, obj.thetaS)
     @printf("╚═════════════════════════════════════════════════════╝\n")
 end

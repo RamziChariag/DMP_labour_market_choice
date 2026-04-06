@@ -82,23 +82,23 @@ flush(stdout)
 #    to keep each SMM iteration fast.
 # ============================================================
 sim_smm = SimParams(
-    tol_inner      = 1e-6,
+    tol_inner      = 1e-7,
     tol_outer_U    = 1e-6,
     tol_outer_S    = 1e-6,
-    tol_global     = 1e-3,
+    tol_global     = 1e-4,
 
     maxit_inner    = 300,
     maxit_outer    = 200,
     maxit_global   = 30,
 
-    conv_streak    = 2,
+    conv_streak    = 1,
 
     use_anderson   = true,
     anderson_m     = 1,
     anderson_reg   = 1e-10,
 
-    damp_pstar_U   = 1.00,
-    damp_pstar_S   = 1.00,
+    damp_pstar_U   = 0.90,
+    damp_pstar_S   = 0.90,
 
     verbose        = 0,          # 0: model is silent; 1: print outer convergence info per iteration; 2: also print inner iteration details
     verbose_stride = 100,
@@ -108,7 +108,7 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :crisis_fc
+WINDOW = :base_fc
 
 # ============================================================
 # Moments to exclude from the SMM objective.
@@ -149,6 +149,8 @@ SKIP_MOMENTS = Symbol[
     #:jfr_U,
     #:sep_rate_U,
     #:wage_premium,
+    :theta_U,
+    :theta_S,
 ]
 
 @printf("Estimation window: %s\n", WINDOW)
@@ -596,7 +598,7 @@ run_params = SMMRunParams(
 
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 5_000,  # total SA proposals
-    sa_T0              = 5.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
+    sa_T0              = 90.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
@@ -608,7 +610,7 @@ run_params = SMMRunParams(
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 3_000,       # generations; total evals = max_iter × pop_size
+    de_max_iter  = 2,       # generations; total evals = max_iter × pop_size
     de_pop_size  = 120,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
@@ -617,7 +619,7 @@ run_params = SMMRunParams(
 
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 10_000,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 100,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 

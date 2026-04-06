@@ -93,7 +93,7 @@ function _extract_policy_result(
         obj.agg_uU, obj.agg_t, obj.agg_eU, obj.agg_mU,
         obj.agg_uS, obj.agg_eS, obj.agg_mS,
         obj.ur_U, obj.ur_S, obj.ur_total,
-        obj.agg_mS / max(obj.total_pop, 1e-14),   # skilled_share
+        obj.agg_mS / max(obj.agg_uU + obj.agg_eU + obj.agg_mS, 1e-14),   # skilled_share (LF-based)
         obj.agg_t  / max(obj.total_pop, 1e-14),   # training_share
         obj.thetaU, obj.thetaS,
         obj.f_U, obj.f_S,

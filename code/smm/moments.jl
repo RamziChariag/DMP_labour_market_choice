@@ -454,7 +454,8 @@ function model_moments(obj)
     exp_ur_total   = exp(ur_total)
     exp_ur_U       = exp(ur_U)
     exp_ur_S       = exp(ur_S)
-    skilled_share  = obj.agg_mS  / max(obj.total_pop, 1e-14)
+    _model_lf      = obj.agg_uU + obj.agg_eU + obj.agg_mS   # LF excl. training
+    skilled_share  = obj.agg_mS  / max(_model_lf, 1e-14)
     training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
 
     # emp_var / emp_cm3: variance and third central moment of the employed

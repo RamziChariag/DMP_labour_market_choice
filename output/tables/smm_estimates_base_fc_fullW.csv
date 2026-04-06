@@ -1,22 +1,22 @@
 block,name,label,estimate,lb,ub,fixed
-common,a_ℓ,worker type shape a_ℓ,1.50537819,0.30000000,6.00000000,false
-common,b_ℓ,worker type shape b_ℓ,2.87219178,0.30000000,6.00000000,false
-common,c,training cost coeff c,2.94357055,0.01000000,3.00000000,false
-regime,PU,unskilled productivity PU,2.04376545,0.05000000,3.00000000,false
-regime,PS,skilled productivity PS,3.75854924,0.10000000,5.00000000,false
-regime,bU,unskilled UI flow bU,0.19600165,0.00000000,2.00000000,false
-regime,bT,training flow bT,1.02175880,0.00000000,2.00000000,false
-regime,bS,skilled UI flow bS,0.56562252,0.00000000,2.00000000,false
-regime,α_U,unskilled damage shape α_U,5.89455960,0.10000000,8.00000000,false
-regime,a_Γ,skilled offer shape a_Γ,2.75945703,0.30000000,6.00000000,false
-regime,b_Γ,skilled offer shape b_Γ,0.70915470,0.30000000,6.00000000,false
-unsk,μ,unskilled matching eff μ_U,0.04329549,0.01000000,1.50000000,false
-unsk,k,unskilled vacancy cost k_U,0.00978556,0.00100000,1.50000000,false
-unsk,λ,unskilled damage rate λ_U,0.29196629,0.00100000,0.95000000,false
-skl,μ,skilled matching eff μ_S,1.18859447,0.01000000,1.50000000,false
-skl,k,skilled vacancy cost k_S,0.17943940,0.00100000,1.50000000,false
+common,a_ℓ,worker type shape a_ℓ,0.86699160,0.30000000,6.00000000,false
+common,b_ℓ,worker type shape b_ℓ,2.82665446,0.30000000,6.00000000,false
+common,c,training cost coeff c,2.93074081,0.01000000,3.00000000,false
+regime,PU,unskilled productivity PU,2.22363523,0.05000000,3.00000000,false
+regime,PS,skilled productivity PS,4.05413437,0.10000000,5.00000000,false
+regime,bU,unskilled UI flow bU,0.20872323,0.00000000,2.00000000,false
+regime,bT,training flow bT,1.02678160,0.00000000,2.00000000,false
+regime,bS,skilled UI flow bS,0.61336459,0.00000000,2.00000000,false
+regime,α_U,unskilled damage shape α_U,5.22821513,0.10000000,8.00000000,false
+regime,a_Γ,skilled offer shape a_Γ,3.26273969,0.30000000,6.00000000,false
+regime,b_Γ,skilled offer shape b_Γ,0.57227732,0.30000000,6.00000000,false
+unsk,μ,unskilled matching eff μ_U,0.17525798,0.01000000,1.50000000,false
+unsk,k,unskilled vacancy cost k_U,0.04832006,0.00100000,1.50000000,false
+unsk,λ,unskilled damage rate λ_U,0.57758808,0.00100000,0.95000000,false
+skl,μ,skilled matching eff μ_S,1.41937783,0.01000000,1.50000000,false
+skl,k,skilled vacancy cost k_S,0.22269135,0.00100000,1.50000000,false
 skl,ξ,skilled exog. sep rate ξ,0.00000010,0.00000010,0.15000000,false
-skl,λ,skilled quality shock λ_S,0.42930666,0.00100000,0.50000000,false
+skl,λ,skilled quality shock λ_S,0.47948190,0.00100000,0.50000000,false
 fixed,unsk_η,unsk_η,0.50000000,,,true
 fixed,skl_η,skl_η,0.50000000,,,true
 fixed,unsk_β,unsk_β,0.50000000,,,true
@@ -26,6 +26,6 @@ fixed,r,r,0.00416667,,,true
 fixed,ν,ν,0.03841185,,,true
 fixed,φ,φ,0.02222129,,,true
 
-# Q = 3.1321433719e+05
+# Q = 2.4560653935e+05
 # converged = false
-# iterations = 5000
+# iterations = 1000
