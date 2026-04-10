@@ -412,7 +412,17 @@ function compute_equilibrium_objects(model::Model)
         agg_uS  = agg_uS, agg_eS  = agg_eS,  agg_mS  = agg_mS,
         agg_mS_flow = agg_mS_flow, total_pop = total_pop,
         ur_U    = ur_U,   ur_S    = ur_S,     ur_total = ur_total,
-        thetaU  = uc.θ,   thetaS  = sc.θ,
+        thetaU  = begin
+            _uU = dot(uc.u, wx)
+            _JU = dot(uc.Jfrontier .* uc.u, wx)
+            (_JU > 1e-14 && _uU > 1e-14) ?
+                max(theta_from_q(up.k * _uU / _JU, up.μ, up.η), 1e-14) : 1e-14
+        end,
+        thetaS  = begin
+            _JS = compute_Jbar_skilled(model)
+            _JS > 1e-12 ?
+                max(theta_from_q(sp.k / _JS, sp.μ, sp.η), 1e-14) : 1e-14
+        end,
 
         # job-finding and separation rates
         f_U        = f_U,

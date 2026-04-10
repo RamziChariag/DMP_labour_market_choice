@@ -89,7 +89,7 @@ sim_smm = SimParams(
 
     maxit_inner    = 300,
     maxit_outer    = 200,
-    maxit_global   = 30,
+    maxit_global   = 20,
 
     conv_streak    = 1,
 
@@ -97,8 +97,8 @@ sim_smm = SimParams(
     anderson_m     = 1,
     anderson_reg   = 1e-10,
 
-    damp_pstar_U   = 0.90,
-    damp_pstar_S   = 0.90,
+    damp_pstar_U   = 1.00,
+    damp_pstar_S   = 0.50,
 
     verbose        = 0,          # 0: model is silent; 1: print outer convergence info per iteration; 2: also print inner iteration details
     verbose_stride = 100,
@@ -124,12 +124,12 @@ WINDOW = :base_fc
 #   :wage_premium, :theta_U, :theta_S
 # ============================================================
 SKIP_MOMENTS = Symbol[
-    :ur_total,
-    #:exp_ur_total,
-    #:exp_ur_U,
-    :ur_U,
-    #:exp_ur_S,
-    :ur_S,
+    #:ur_total,
+    :exp_ur_total,
+    :exp_ur_U,
+    #:ur_U,
+    :exp_ur_S,
+    #:ur_S,
     #:exp_ur_S,
     #:skilled_share,
     #:training_share,
@@ -149,8 +149,8 @@ SKIP_MOMENTS = Symbol[
     #:jfr_U,
     #:sep_rate_U,
     #:wage_premium,
-    :theta_U,
-    :theta_S,
+    #:theta_U,
+    #:theta_S,
 ]
 
 @printf("Estimation window: %s\n", WINDOW)
@@ -185,17 +185,17 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :a_Gam    => 4.77377,
     # :b_Gam    => 2.28169,
     # :unsk_mu  => 0.25585,
-     :unsk_eta => 0.50000,
+    # :unsk_eta => 0.50000,
     # :unsk_k   => 0.10061,
-     :unsk_bet => 0.50000,
+    # :unsk_bet => 0.50000,
     # :unsk_lam => 0.20263,
     # :skl_mu   => 0.22462,
-     :skl_eta  => 0.50000,
+    # :skl_eta  => 0.50000,
     # :skl_k    => 0.03317,
-     :skl_bet  => 0.50000,
+    # :skl_bet  => 0.50000,
     # :skl_xi   => 0.00100,
     # :skl_lam  => 0.17788,
-     :skl_sig  => 1.10000,
+    # :skl_sig  => 1.10000,
 )
 
 # ============================================================
@@ -598,7 +598,7 @@ run_params = SMMRunParams(
 
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 5_000,  # total SA proposals
-    sa_T0              = 90.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
+    sa_T0              = 5.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
@@ -610,16 +610,15 @@ run_params = SMMRunParams(
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 2,       # generations; total evals = max_iter × pop_size
-    de_pop_size  = 120,       # 0 = auto (100 × n_free_params)
+    de_max_iter  = 1_000,       # generations; total evals = max_iter × pop_size
+    de_pop_size  = 230,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
-    de_patience  = 5,           # how many generations to wait for improvement before early stopping
-    de_avg_tol   = 0.01,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
-
+    de_patience  = 2,           # how many generations to wait for improvement before early stopping
+    de_avg_tol   = 0.0,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 100,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 2_000,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 

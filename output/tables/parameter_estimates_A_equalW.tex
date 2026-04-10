@@ -1,0 +1,35 @@
+\begin{table}[htbp]
+  \centering
+  \caption{Parameter Estimates (A): Calibrated and Deep Structural}
+  \label{tab:param_estimates_a}
+  \small
+  \begin{tabular}{llcccccc}
+    \toprule
+    & & \multicolumn{3}{c}{Financial Crisis} & \multicolumn{3}{c}{COVID} \\
+    \cmidrule(lr){3-5} \cmidrule(lr){6-8}
+    Parameter & Description & Baseline & Crisis & $\Delta$ & Baseline & Crisis & $\Delta$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Externally calibrated}} \\[2pt]
+    \quad $r$ & Discount rate & 0.00417 & 0.00417 & --- & 0.00417 & 0.00417 & --- \\
+    \quad $\nu$ & Demographic exit rate & 0.03841 & 0.03841 & --- & 0.03841 & 0.03841 & --- \\
+    \quad $\varphi$ & Training completion rate & 0.02222 & 0.02222 & --- & 0.02222 & 0.02222 & --- \\
+    [4pt]
+    \hline
+    \multicolumn{8}{l}{\textit{Deep structural}} \\[2pt]
+    \quad $a_\ell$ & Worker type shape & 0.96239 & 0.96239 & --- & -- & -- & --- \\
+    \quad $b_\ell$ & Worker type shape & 0.87924 & 0.87924 & --- & -- & -- & --- \\
+    \quad $c$ & Training cost coeff. & 4.87513 & 4.87513 & --- & -- & -- & --- \\
+    \quad $b_U$ & Unskilled UI flow & 0.00040 & 0.00040 & --- & -- & -- & --- \\
+    \quad $b_T$ & Training flow & 1.77908 & 1.77908 & --- & -- & -- & --- \\
+    \quad $b_S$ & Skilled UI flow & 0.14815 & 0.14815 & --- & -- & -- & --- \\
+    \quad $\mu_U$ & Unskilled matching eff. & 0.47015 & 0.47015 & --- & -- & -- & --- \\
+    \quad $\eta_U$ & Unskilled matching elas. & 0.39635 & 0.39635 & --- & -- & -- & --- \\
+    \quad $\beta_U$ & Unskilled bargaining & 0.92730 & 0.92730 & --- & -- & -- & --- \\
+    \quad $\mu_S$ & Skilled matching eff. & 0.59493 & 0.59493 & --- & -- & -- & --- \\
+    \quad $\eta_S$ & Skilled matching elas. & 0.56867 & 0.56867 & --- & -- & -- & --- \\
+    \quad $\beta_S$ & Skilled bargaining & 0.81022 & 0.81022 & --- & -- & -- & --- \\
+    \quad $\sigma_S$ & OJS flow cost & 0.00070 & 0.00070 & --- & -- & -- & --- \\
+    [4pt]
+    \bottomrule
+  \end{tabular}
+\end{table}
