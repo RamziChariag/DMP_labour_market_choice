@@ -108,7 +108,7 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :base_fc
+WINDOW = :base_covid
 
 # ============================================================
 # Moments to exclude from the SMM objective.
@@ -149,8 +149,8 @@ SKIP_MOMENTS = Symbol[
     #:jfr_U,
     #:sep_rate_U,
     #:wage_premium,
-    :theta_U,
-    :theta_S,
+    #:theta_U,
+    #:theta_S,
 ]
 
 @printf("Estimation window: %s\n", WINDOW)
@@ -322,7 +322,7 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 #      2.0   →  equal weights (identity, no W matrix)
 #      >2.0  →  full optimal W (shrunk if κ > target)
 # ============================================================
-W_COND_TARGET = 1e8  # also set in run_params below; keep in sync
+W_COND_TARGET = 2.0  # also set in run_params below; keep in sync
 
 """
     _w_suffix(cond_target) → String
@@ -618,7 +618,7 @@ run_params = SMMRunParams(
     de_avg_tol   = 0.0,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 3_000,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 5_000,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 
@@ -648,7 +648,7 @@ print_spec(spec)
 println("Starting SMM optimisation..."); flush(stdout)
 
 # Stage 1: global search :sa or :de 
-res = run_smm(spec; method = :de)
+res = run_smm(spec; method = :sa)
 
 # Stage 2: polish from global optimizer solution
 res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead)
