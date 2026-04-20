@@ -176,6 +176,23 @@ end
     return clamp((poj - pj) / cell, 0.0, 1.0)
 end
 
+# ---------------------------------------------------------------------------
+# Smooth non-negative part:  smooth_pos(x) ≈ max(x, 0) but C^∞.
+#
+#   smooth_pos(x, ε) = 0.5 · (x + √(x² + ε²))
+#
+# For |x| ≫ ε this returns max(x, 0) to machine precision; within a band
+# of width ~ε around zero it transitions smoothly.  Used to replace the
+# hard max(·, 0) clamps on raw surpluses S0, S1 in the inner loop, which
+# were introducing a C⁰-but-not-C¹ kink in the outer-loop fixed-point
+# map at the grid-aligned sign changes — a secondary source of Anderson
+# stalls once the hard-threshold issue has been fixed by the soft
+# weights.  ε = 1e-8 gives a bandwidth well below tol_outer_S = 1e-7.
+# ---------------------------------------------------------------------------
+@inline function smooth_pos(x::Float64, ε::Float64 = 1e-8)
+    return 0.5 * (x + sqrt(x * x + ε * ε))
+end
+
 
 # ---------------------------------------------------------------------------
 # Skilled inner loop
@@ -283,16 +300,18 @@ function skilled_inner_loop!(
                     end
 
                     # No-search surplus
-                    # Clamp to ≥ 0: same boundary issue as the unskilled block —
-                    # when pstar is clamped to 1, ω_j=1 at j=Np but the raw
-                    # formula can be negative there, violating S(p) ≥ 0.
-                    S0 = max((PS_x * x * pj - (r + ν) * U_new + λ * I) / base, 0.0)
+                    # Use smooth_pos instead of max(·, 0): the kink at zero
+                    # created a secondary period-2 mode in the outer loop
+                    # around parameter draws where raw S0 crosses zero near
+                    # a grid node.  smooth_pos is C^∞ and agrees with
+                    # max(·, 0) to machine precision outside an ε-band.
+                    S0 = smooth_pos((PS_x * x * pj - (r + ν) * U_new + λ * I) / base)
 
-                    # OJS surplus
+                    # OJS surplus — smooth_pos for the same reason as S0.
                     tail_mass_j = pre.tail_weights[j]
                     tail_Emax_j = tailE[max(j, j0_soft)]
-                    S1 = max((PS_x * x * pj - (r + ν) * U_new - σ + λ * I +
-                          f * β * tail_Emax_j) / (base + f * tail_mass_j), 0.0)
+                    S1 = smooth_pos((PS_x * x * pj - (r + ν) * U_new - σ + λ * I +
+                          f * β * tail_Emax_j) / (base + f * tail_mass_j))
 
                     E0_old = sc.E0[ix, j]
                     E1_old = sc.E1[ix, j]
@@ -538,6 +557,11 @@ end
 #
 # Alternates: inner-loop values → cutoff updates →
 # stationary distribution → free-entry θ update.
+#
+# Anderson(m=1) acceleration on the joint state [θ; p*; gap] where
+# gap = poj − p* ≥ 0.  Fed with the RAW proposals (no pre-damping), so
+# that the period-2 residual signal is preserved.  Damping of p*, poj
+# is only applied when sim.use_anderson = false (pure Picard fallback).
 # ---------------------------------------------------------------------------
 function solve_skilled_block!(
     model :: Model;
@@ -563,7 +587,8 @@ function solve_skilled_block!(
 
     wΓ = pre.γvals .* sg.wp
 
-    # Anderson acceleration on the joint state [theta; pstar; poj]
+    # Anderson acceleration on the joint state [theta; pstar; gap],
+    # where gap = poj − pstar ≥ 0.  See step (E) below for details.
     aa_joint = Anderson1(1 + 2 * Nx)
 
     pst_prop = zeros(Float64, Nx)
@@ -633,36 +658,68 @@ function solve_skilled_block!(
             end
         end
 
-        # (C) Stationary distribution (using proposed cutoffs temporarily)
-        damp = sim.damp_pstar_S
-        @inbounds for ix in 1:Nx
-            sc.pstar[ix] = clamp01(damp * pst_prop[ix] + (1.0 - damp) * pstar_old[ix])
-            sc.poj[ix]   = max(sc.pstar[ix],
-                               clamp01(damp * poj_prop[ix] + (1.0 - damp) * poj_old[ix]))
+        # (C) Install cutoffs for the stationary solve.
+        #
+        #     Fix A: feed Anderson the RAW proposals.  Previously the
+        #     cache was pre-damped before the stationary solve and before
+        #     Anderson, which (i) distorted Anderson's residual r = f − x
+        #     by a factor of `damp`, suppressing the period-2 signal
+        #     Anderson(m=1) is designed to detect, and (ii) made θ_raw
+        #     inconsistent with the p*, poj that Anderson was
+        #     accelerating.  When Anderson is off, damping is still
+        #     applied as the Picard safety net.
+        if sim.use_anderson
+            @inbounds for ix in 1:Nx
+                sc.pstar[ix] = pst_prop[ix]
+                sc.poj[ix]   = max(pst_prop[ix], poj_prop[ix])
+            end
+        else
+            damp = sim.damp_pstar_S
+            @inbounds for ix in 1:Nx
+                sc.pstar[ix] = clamp01(
+                    damp * pst_prop[ix] + (1.0 - damp) * pstar_old[ix])
+                sc.poj[ix]   = max(sc.pstar[ix],
+                    clamp01(damp * poj_prop[ix] + (1.0 - damp) * poj_old[ix]))
+            end
         end
 
         solve_stationary_skilled!(model; mS_in = mS_in)
 
-        # (D) Market tightness θ
+        # (D) Market tightness θ from the stationary distribution
         θ_raw = update_theta_skilled(model)
 
-        # (E) Anderson acceleration on joint state vector [θ; p*; poj]
-        #     x = old state,  f = new (raw) proposal
-        #     Anderson(m=1) detects period-2 cycles and extrapolates
-        #     to the midpoint fixed-point.
+        # (E) Anderson acceleration on the joint state [θ; p*; gap],
+        #     where gap = poj − p* ≥ 0.
+        #
+        #     Fix B: reparameterize as (p*, gap) instead of (p*, poj).
+        #     Previously the code applied Anderson to (p*, poj) and then
+        #     projected poj ← max(p*, poj) post-Anderson.  For worker
+        #     types where the extrapolated poj fell slightly below the
+        #     extrapolated p*, this projection cancelled Anderson's
+        #     move on poj and created a *new* period-2 mode that
+        #     Anderson itself could not see (it happened AFTER the
+        #     update).  The (p*, gap) reparameterization folds the
+        #     constraint poj ≥ p* into the state: clamping gap to
+        #     [0, 1] is a feasibility projection that Anderson can
+        #     actually observe on the next iteration.
         if sim.use_anderson
-            x_old = vcat([θ_old], pstar_old, poj_old)
-            f_raw = vcat([θ_raw], sc.pstar,  sc.poj)
+            gap_old  = poj_old  .- pstar_old          # ≥ 0 by invariant
+            gap_prop = poj_prop .- pst_prop           # ≥ 0 by step (B)
+
+            x_old = vcat([θ_old], pstar_old, gap_old)
+            f_raw = vcat([θ_raw], pst_prop,   gap_prop)
             x_new = anderson1_update!(aa_joint, x_old, f_raw)
 
-            sc.θ  = max(x_new[1], 1e-14)
+            sc.θ = max(x_new[1], 1e-14)
             @inbounds for ix in 1:Nx
-                sc.pstar[ix] = clamp01(x_new[1 + ix])
-                sc.poj[ix]   = clamp01(x_new[1 + Nx + ix])
-                sc.poj[ix]   = max(sc.pstar[ix], sc.poj[ix])  # enforce poj ≥ pstar
+                pstar_new     = clamp01(x_new[1 + ix])
+                gap_new       = clamp(x_new[1 + Nx + ix], 0.0, 1.0)
+                sc.pstar[ix]  = pstar_new
+                sc.poj[ix]    = clamp01(pstar_new + gap_new)   # poj ≥ p* by construction
             end
         else
             sc.θ = θ_raw
+            # sc.pstar, sc.poj already set to damped values above
         end
 
         # NaN/Inf guard — abort immediately

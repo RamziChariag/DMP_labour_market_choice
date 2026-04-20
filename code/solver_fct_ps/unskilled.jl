@@ -96,6 +96,11 @@ end
 #
 # Given θ and pstar held fixed, iterate on Usearch, T, U, Jfrontier.
 # US_in — current skilled unemployment value U_S(x), length Nx.
+#
+# McQueen–Porteus acceleration is applied to Usearch (the primary
+# iteration variable — T is pinned to US_in in one step, and U inherits
+# from Usearch on searching types via the max).  Mirrors the pattern used
+# in skilled_inner_loop! for sc.U.
 # ---------------------------------------------------------------------------
 function unskilled_inner_loop!(
     model :: Model;
@@ -129,6 +134,15 @@ function unskilled_inner_loop!(
     Usearch_old = copy(uc.Usearch)
     U_old       = copy(uc.U)
     T_old       = copy(uc.T)
+
+    # McQueen–Porteus state (for the Usearch iteration)
+    span_prev_U = Inf
+    ρ_pm_U      = 0.5
+
+    # Thread-local accumulators for δ_Usearch across x
+    dUs_abs_tls = zeros(Float64, Threads.nthreads())
+    dUs_min_tls = fill( Inf, Threads.nthreads())
+    dUs_max_tls = fill(-Inf, Threads.nthreads())
 
     streak = 0
     for it in 1:sim.maxit_inner
@@ -175,15 +189,43 @@ function unskilled_inner_loop!(
         end
 
         # (4) Search value: (r + ν + f) Usearch(x) = bU + f · E(x, p=1)
+        #     Track signed increments δ_Usearch for McQueen–Porteus.
+        fill!(dUs_abs_tls, 0.0)
+        fill!(dUs_min_tls,  Inf)
+        fill!(dUs_max_tls, -Inf)
         denom_search = r + ν + f
         @threads for ix in 1:Nx
-            @inbounds uc.Usearch[ix] = (bU + f * E1vec[ix]) / denom_search
+            tid = Threads.threadid()
+            @inbounds begin
+                Us_new = (bU + f * E1vec[ix]) / denom_search
+                δUs    = Us_new - Usearch_old[ix]
+                uc.Usearch[ix]   = Us_new
+                dUs_abs_tls[tid] = max(dUs_abs_tls[tid], abs(δUs))
+                dUs_min_tls[tid] = min(dUs_min_tls[tid], δUs)
+                dUs_max_tls[tid] = max(dUs_max_tls[tid], δUs)
+            end
         end
 
-        # (5) Convergence
-        d1 = supnorm(uc.Usearch, Usearch_old)
-        d2 = supnorm(uc.U,       U_old)
-        d3 = supnorm(uc.T,       T_old)
+        # McQueen–Porteus acceleration on Usearch
+        δ_min_U    = minimum(dUs_min_tls)
+        δ_max_U    = maximum(dUs_max_tls)
+        span_new_U = δ_max_U - δ_min_U
+        if it >= 2 && span_prev_U > 1e-14
+            ρ_pm_U = clamp(span_new_U / span_prev_U, 0.0, 0.9999)
+        end
+        span_prev_U = span_new_U
+        if ρ_pm_U > 1e-8
+            shift_U = ρ_pm_U / (1.0 - ρ_pm_U) * (δ_min_U + δ_max_U) / 2.0
+            @inbounds for ix in 1:Nx
+                uc.Usearch[ix] += shift_U
+            end
+        end
+
+        # (5) Convergence — use RAW (pre-shift) Bellman residuals for Usearch,
+        #     matching the style of skilled_inner_loop!.
+        d1 = maximum(dUs_abs_tls)
+        d2 = supnorm(uc.U, U_old)
+        d3 = supnorm(uc.T, T_old)
         d  = max(d1, d2, d3)
 
         if d < sim.tol_inner
