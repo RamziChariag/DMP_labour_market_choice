@@ -264,7 +264,7 @@ function initialise_model(;
         anderson_m     = 1,
         anderson_reg   = 1e-10,
 
-        damp_pstar_U   = 1.30,
+        damp_pstar_U   = 1.00,
         damp_pstar_S   = 1.00,
 
         verbose        = 2,

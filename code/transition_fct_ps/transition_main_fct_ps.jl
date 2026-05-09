@@ -190,11 +190,23 @@ sim_solve = SimParams(
     verbose_stride = sim.verbose_stride,
 )
 
-# Grid sizes (use whatever the SMM estimation used)
-const Nx   = base_bundle.spec.run.Nx
-const Np_U = base_bundle.spec.run.Np_U
-const Np_S = base_bundle.spec.run.Np_S
-@printf("  Grid sizes: Nx=%d  Np_U=%d  Np_S=%d\n", Nx, Np_U, Np_S)
+# Grid sizes — INTENTIONALLY NOT inherited from the SMM bundle.
+#
+# The SMM uses coarse grids (typically 80–120) for speed across thousands
+# of solves; at that resolution, some converged-SMM parameter regions land
+# in stiff zones where the skilled outer loop falls into a multi-period
+# limit cycle that Anderson(m=1) cannot break.  The single-run notebook
+# uses a finer grid and produces clean convergence on the SAME parameters
+# with the SAME sim — the only thing that changes is grid resolution.
+#
+# Use the single-run grid here so the transition's two stationary
+# endpoints match what the notebook produces.  This does NOT alter sim
+# (tolerances, damping, Anderson, maxit) — only the discretization.
+const Nx   = 200
+const Np_U = 200
+const Np_S = 200
+@printf("  Grid sizes: Nx=%d  Np_U=%d  Np_S=%d  (overriding spec.run.Nx=%d for single-run consistency)\n",
+        Nx, Np_U, Np_S, base_bundle.spec.run.Nx)
 
 @printf("  Baseline Q  = %.6e  (converged = %s)\n",
         base_bundle.result.loss_opt, base_bundle.result.converged)

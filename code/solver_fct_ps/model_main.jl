@@ -1,15 +1,22 @@
 ############################################################
-# code/solver_fct_ps/main.jl — Single model run
+# code/solver_fct_ps/plots_main.jl — Single-run plots from estimation
 #
 # Usage (from project root):
-#   julia --threads auto code/solver_fct_ps/main.jl
+#   julia --threads auto code/solver_fct_ps/plots_main.jl
 #
-# Solves the model once at the parameter values entered below,
-# prints equilibrium accounting and moment diagnostics.
+# Loads parameters from a saved SMM estimation bundle
+# (output/smm/smm_result_<WINDOW><W_SUFFIX>_fct_ps.jls),
+# solves the model once at those estimates, and writes the
+# full set of equilibrium figures defined in single_run_plots.jl
+# to output/plots/<WINDOW><W_SUFFIX>/.
+#
+# To pick which estimation to plot, set WINDOW and
+# W_COND_TARGET in section 1 below — same conventions as
+# code/smm_fct_ps/main.jl and code/solver_fct_ps/main.jl.
 ############################################################
 
 println("="^60)
-println("  Segmented Search Model — Single Run (PS(x) = γ·x^{γ−1})")
+println("  Segmented Search Model — Single-Run Plots from Estimation")
 println("="^60)
 flush(stdout)
 
@@ -18,6 +25,8 @@ const SOLVER_DIR   = @__DIR__
 const SMM_DIR      = joinpath(SOLVER_DIR, "..", "smm_fct_ps")
 const PROJECT_ROOT = joinpath(SOLVER_DIR, "..", "..")
 const OUTPUT_DIR   = joinpath(PROJECT_ROOT, "output")
+const SMM_OUT_DIR  = joinpath(OUTPUT_DIR, "smm")
+const PLOTS_ROOT   = joinpath(OUTPUT_DIR, "plots")
 
 # ── Packages ──────────────────────────────────────────────────────────────────
 print("Loading packages... "); flush(stdout)
@@ -32,6 +41,17 @@ using Interpolations
 using Parameters
 using Printf
 using Base.Threads
+using Serialization
+using Optim          # required by smm.jl at load time
+using CSV            # required by moments.jl at load time
+using DataFrames     # required by moments.jl at load time
+using Clustering     # required by smm.jl at load time
+
+# Plotting stack — must be loaded before including single_run_plots.jl
+# because the figure constructors use the L"..." string macro from
+# LaTeXStrings at function-definition (parse) time.
+using Plots
+using LaTeXStrings
 
 println("done."); flush(stdout)
 
@@ -48,13 +68,96 @@ include(joinpath(SOLVER_DIR, "solver.jl"))
 include(joinpath(SOLVER_DIR, "equilibrium.jl"))
 
 println("done."); flush(stdout)
+
+# ── Load SMM modules (needed to deserialize SMMResult / SMMSpec) ──────────────
+print("Loading SMM modules... "); flush(stdout)
+
+include(joinpath(SMM_DIR, "moments.jl"))
+include(joinpath(SMM_DIR, "smm_params.jl"))
+include(joinpath(SMM_DIR, "smm.jl"))
+
+println("done."); flush(stdout)
+
+# ── Load plotting library ─────────────────────────────────────────────────────
+print("Loading plotting modules... "); flush(stdout)
+
+include(joinpath(SOLVER_DIR, "single_run_plots.jl"))
+
+println("done."); flush(stdout)
 @printf("Threads available: %d\n\n", Threads.nthreads())
 flush(stdout)
 
 # ============================================================
-# 1. Solver settings
+# 1. Estimation to load
+#    Valid windows:  :base_fc, :crisis_fc, :base_covid, :crisis_covid
+#
+#    W_COND_TARGET — must match the value used during SMM:
+#      0.0   →  diagonal weights        (suffix "_diagonalW")
+#      1.0   →  compressed diagonal     (suffix "_compressedW")
+#      2.0   →  equal weights           (suffix "_equalW")
+#      >2.0  →  full optimal W          (suffix "_fullW")
 # ============================================================
-sim = SimParams(
+WINDOW        = :base_fc
+W_COND_TARGET = 2.0
+
+function _w_suffix(cond_target::Float64)
+    cond_target == 0.0 && return "_diagonalW"
+    cond_target == 1.0 && return "_compressedW"
+    cond_target == 2.0 && return "_equalW"
+    return "_fullW"
+end
+const W_SUFFIX = _w_suffix(W_COND_TARGET)
+
+const SMM_JLS_PATH = joinpath(SMM_OUT_DIR,
+    "smm_result_$(WINDOW)$(W_SUFFIX)_fct_ps.jls")
+
+# Plots for this estimation go in their own subfolder so different
+# windows / weighting schemes don't overwrite each other.
+const PLOTS_DIR = joinpath(PLOTS_ROOT, string(WINDOW) * W_SUFFIX)
+
+@printf("Loading estimation bundle:\n  %s\n", SMM_JLS_PATH)
+flush(stdout)
+
+isfile(SMM_JLS_PATH) || error(
+    "Estimation bundle not found at:\n  $SMM_JLS_PATH\n" *
+    "Run code/smm_fct_ps/main.jl first with WINDOW = :$WINDOW and " *
+    "W_COND_TARGET = $W_COND_TARGET.")
+
+bundle = _load_smm_bundle(SMM_JLS_PATH; delete_on_fail=false,
+                          label="estimation bundle")
+isnothing(bundle) && error(
+    "Could not deserialize estimation bundle at:\n  $SMM_JLS_PATH\n" *
+    "Likely a stale on-disk format. Re-run code/smm_fct_ps/main.jl " *
+    "with the same WINDOW and W_COND_TARGET.")
+
+const result_smm = bundle.result   # SMMResult
+const spec_smm   = bundle.spec     # SMMSpec
+const sim_smm    = bundle.sim      # SimParams used during estimation
+
+# Reconstruct the four parameter structs from the SMM optimum.
+common, regime, unsk_par, skl_par = unpack_θ(result_smm.theta_opt, spec_smm)
+
+@printf("Loaded estimation:\n")
+@printf("  Window     = %s\n", WINDOW)
+@printf("  W mode     = %s  (target κ = %.1e)\n",
+        lstrip(W_SUFFIX, '_'), W_COND_TARGET)
+@printf("  SMM Q*     = %.6e\n", result_smm.loss_opt)
+@printf("  Converged  = %s   (iters = %d)\n",
+        result_smm.converged, result_smm.iterations)
+@printf("  Free / Fixed parameters = %d / %d\n",
+        length(spec_smm.free), length(spec_smm.fixed))
+@printf("  Plots will be written to:\n    %s\n", PLOTS_DIR)
+flush(stdout)
+
+# ============================================================
+# 2. Solver settings for this single run
+#    Tighter tolerances than the SMM `sim`, since here we do
+#    one solve rather than thousands.  Set USE_SMM_SIM = true
+#    to instead reuse the bundle's `sim` exactly as estimated.
+# ============================================================
+USE_SMM_SIM = false
+
+sim = USE_SMM_SIM ? sim_smm : SimParams(
     tol_inner      = 1e-8,
     tol_outer_U    = 1e-6,
     tol_outer_S    = 1e-7,
@@ -77,52 +180,39 @@ sim = SimParams(
     verbose_stride = 10,
 )
 
-# ============================================================
-# 2. Parameters — EDIT VALUES HERE
-# ============================================================
-
-common = CommonParams(
-    r   = 0.00417,
-    ν   = 0.03841,
-    φ   = 0.02222,
-    a_ℓ = 1.46357,
-    b_ℓ = 4.90168,
-    c   = 3.50000,
-)
-
-regime = RegimeParams(
-    PU       = 1.01122,
-    gamma_PS = 2.58787,       # ← PS(x) = γ · x^{γ−1}
-    bU       = 0.00000,
-    bT       = 0.70000,
-    bS       = 1.00000,
-    α_U      = 6.32697,
-    a_Γ      = 2.81289,
-    b_Γ      = 0.97088,
-)
-
-unsk_par = UnskilledParams(
-    μ = 0.70375,
-    η = 0.50000,
-    k = 0.06274,
-    β = 0.50000,
-    λ = 0.02563,
-)
-
-skl_par = SkilledParams(
-    μ = 1.45977,
-    η = 0.50000,
-    k = 0.15255,
-    β = 0.50000,
-    ξ = 0.00000,
-    λ = 0.09548,
-    σ = 1.10000,
-)
+if USE_SMM_SIM
+    println("\nUsing SimParams from the SMM bundle (USE_SMM_SIM = true).")
+else
+    println("\nUsing tightened single-run SimParams (USE_SMM_SIM = false).")
+end
+flush(stdout)
 
 # ============================================================
-# 3. Solve
+# 3. Echo the loaded parameter values
 # ============================================================
-println("Solving model...")
+println("\nParameters loaded from estimation:")
+@printf("  CommonParams:    r=%.5f   ν=%.5f   φ=%.5f\n",
+        common.r, common.ν, common.φ)
+@printf("                   a_ℓ=%.5f  b_ℓ=%.5f  c=%.5f\n",
+        common.a_ℓ, common.b_ℓ, common.c)
+@printf("  RegimeParams:    PU=%.5f   γ_PS=%.5f\n",
+        regime.PU, regime.gamma_PS)
+@printf("                   bU=%.5f   bT=%.5f   bS=%.5f\n",
+        regime.bU, regime.bT, regime.bS)
+@printf("                   α_U=%.5f  a_Γ=%.5f  b_Γ=%.5f\n",
+        regime.α_U, regime.a_Γ, regime.b_Γ)
+@printf("  UnskilledParams: μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f\n",
+        unsk_par.μ, unsk_par.η, unsk_par.k, unsk_par.β, unsk_par.λ)
+@printf("  SkilledParams:   μ=%.5f   η=%.5f   k=%.5f   β=%.5f\n",
+        skl_par.μ, skl_par.η, skl_par.k, skl_par.β)
+@printf("                   ξ=%.5f   λ=%.5f   σ=%.5f\n",
+        skl_par.ξ, skl_par.λ, skl_par.σ)
+flush(stdout)
+
+# ============================================================
+# 4. Solve
+# ============================================================
+println("\nSolving model...")
 @time model, result = solve_model(common, regime, unsk_par, skl_par, sim;
                                    Nx=200, Np_U=200, Np_S=200)
 
@@ -132,13 +222,25 @@ if result.ok
 else
     @printf("WARNING: solver did not fully converge  (U=%s  S=%s  global=%s)\n",
             result.converged_U, result.converged_S, result.converged_global)
+    @printf("Plots will still be produced from the (non-converged) model state.\n")
 end
+flush(stdout)
 
 # ============================================================
-# 4. Equilibrium objects and accounting
+# 5. Equilibrium objects and accounting
 # ============================================================
 obj = compute_equilibrium_objects(model)
 print_accounting(obj)
+
+# ============================================================
+# 6. Generate all single-run plots
+#    Pass γ_PS so fig03c_skilled_emp_by_PS is included.
+# ============================================================
+println("\nGenerating figures...")
+flush(stdout)
+
+@time make_all_plots(obj; output_dir = PLOTS_DIR,
+                          gamma_PS    = regime.gamma_PS)
 
 println("\nDone.")
 flush(stdout)

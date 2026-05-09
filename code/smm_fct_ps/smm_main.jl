@@ -108,7 +108,7 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :base_covid
+WINDOW = :crisis_covid
 
 # ============================================================
 # Moments to exclude from the SMM objective.
@@ -589,36 +589,36 @@ flush(stdout)
 # ============================================================
 run_params = SMMRunParams(
     # ── Grids (coarser = faster per iteration) ──────────────
-    Nx      = 80,
-    Np_U    = 80,
-    Np_S    = 80,
+    Nx      = 120,
+    Np_U    = 120,
+    Np_S    = 120,
 
     # ── Weight matrix conditioning ────────────────────────────
     w_cond_target = W_COND_TARGET,
 
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 5_000,  # total SA proposals
-    sa_T0              = 50.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
+    sa_T0              = 10.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
-    sa_reheat_patience = 100,         # proposals without improvement before reheating
+    sa_reheat_patience = 80,         # proposals without improvement before reheating
     sa_reheat_factor   = 2.00,     # temperature multiplier on reheat
-    sa_max_reheats     = 0,       # cap on total reheats (0 = unlimited)
+    sa_max_reheats     = 50,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
     de_max_iter  = 3_000,       # generations; total evals = max_iter × pop_size
-    de_pop_size  = 200,       # 0 = auto (100 × n_free_params)
+    de_pop_size  = 120,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
     de_patience  = 2,           # how many generations to wait for improvement before early stopping
     de_avg_tol   = 0.0,    # stop when (Q_mean − Q_best) / |Q_best| < this (1 %); set 0.0 to disable
 
     # ── Nelder-Mead polish ───────────────────────────────────
-    nm_max_iter  = 5_000,        # maximum iterations for Nelder-Mead local search
+    nm_max_iter  = 2_000,        # maximum iterations for Nelder-Mead local search
     nm_f_tol     = 1e-6,        # stop when |Q_new − Q_old| < this; set 0.0 to disable
     nm_x_tol     = 1e-4,        # stop when max|θ_new − θ_old| < this; set 0.0 to disable
 
@@ -648,7 +648,7 @@ print_spec(spec)
 println("Starting SMM optimisation..."); flush(stdout)
 
 # Stage 1: global search :sa or :de 
-res = run_smm(spec; method = :sa)
+res = run_smm(spec; method = :de)
 
 # Stage 2: polish from global optimizer solution
 res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead)

@@ -1,0 +1,31 @@
+block,name,label,estimate,lb,ub,fixed
+regime,PU,unskilled productivity PU,2.46538403,0.05000000,6.00000000,false
+regime,gamma_PS,skilled productivity γ_PS,4.59465436,0.10000000,10.00000000,false
+regime,α_U,unskilled damage shape α_U,0.93364984,0.10000000,20.00000000,false
+regime,a_Γ,skilled offer shape a_Γ,0.31238075,0.30000000,10.00000000,false
+regime,b_Γ,skilled offer shape b_Γ,3.24147081,0.30000000,10.00000000,false
+unsk,k,unskilled vacancy cost k_U,0.02130205,0.00100000,1.50000000,false
+unsk,λ,unskilled damage rate λ_U,0.32025769,0.00100000,0.40000000,false
+skl,k,skilled vacancy cost k_S,0.06372509,0.00100000,1.50000000,false
+skl,ξ,skilled exog. sep rate ξ,0.00000017,0.00000000,0.05000000,false
+skl,λ,skilled quality shock λ_S,0.04781387,0.00100000,0.40000000,false
+fixed,r,r,0.00416667,,,true
+fixed,ν,ν,0.00323032,,,true
+fixed,φ,φ,0.02222129,,,true
+fixed,a_ℓ,a_ℓ,0.80984950,,,true
+fixed,b_ℓ,b_ℓ,0.30271827,,,true
+fixed,c,c,6.95991285,,,true
+fixed,bU,bU,0.02432191,,,true
+fixed,bT,bT,1.84250578,,,true
+fixed,bS,bS,0.14397495,,,true
+fixed,unsk_μ,unsk_μ,0.11235683,,,true
+fixed,unsk_η,unsk_η,0.55812252,,,true
+fixed,unsk_β,unsk_β,0.90223267,,,true
+fixed,skl_μ,skl_μ,0.35090780,,,true
+fixed,skl_η,skl_η,0.89277764,,,true
+fixed,skl_β,skl_β,0.78967007,,,true
+fixed,skl_σ,skl_σ,0.00870237,,,true
+
+# Q = 2.6579922880e+00
+# converged = true
+# iterations = 873

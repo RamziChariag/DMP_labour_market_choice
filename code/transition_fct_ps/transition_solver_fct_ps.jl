@@ -410,9 +410,22 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
         # Unskilled inner loop: solves Usearch, U, T, Jfrontier, τT
         inner = unskilled_inner_loop!(model; US_in = sc.U)
 
-        # Update pstar_U from surplus
+        # Update pstar_U from surplus.
+        # update_pstar_from_surplus! requires θ_new, E1, T_in as kwargs
+        # (Option-2 fix in unskilled.jl — recomputes Usearch/U against the
+        # tightness about to be installed so the cutoff is consistent with
+        # that θ, avoiding a period-2 orbit in (θ, p*)).  In the transition's
+        # backward pass θ is held fixed at the path iterate during the value
+        # pass, so uc.θ (= path.θU[n], installed at line 304) is exactly the
+        # right θ_new.  E1 comes from the inner loop; T_in is uc.T just
+        # refreshed by that inner loop — matching the stationary call site.
         pstar_new = zeros(Float64, Nx)
-        update_pstar_from_surplus!(pstar_new, model, inner.Ivec)
+        update_pstar_from_surplus!(
+            pstar_new, model, inner.Ivec;
+            θ_new = uc.θ,
+            E1    = inner.E1vec,
+            T_in  = uc.T,
+        )
         copyto!(uc.pstar, pstar_new)
 
         # Store unskilled results into path
