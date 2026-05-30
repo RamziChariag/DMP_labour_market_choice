@@ -108,9 +108,7 @@ function fig_employment_heatmaps(obj; percentile_print = 1.00)
     contour!(p3a, xg_w, pgU_w, eU_w',
              color=:white, alpha=0.4, lw=0.8, levels=15)
     plot!(p3a, xg_w, pstar_U_w, color=:red, lw=2, ls=:dash)
-    xlims!(p3a, 0.00, 0.00)
-    ylims!(p3a, 0.00, 0.00)
-
+    ylims!(p3a, 0.0, 1.0)
     p3b = heatmap(xg_w, pg_w, eS_w',
                   xlabel=L"x", ylabel=L"p",
                   title=L"Skilled employment $e_S(x,p)$",
@@ -120,9 +118,7 @@ function fig_employment_heatmaps(obj; percentile_print = 1.00)
              color=:white, alpha=0.4, lw=0.8, levels=15)
     plot!(p3b, xg_w, pstar_S_w, color=:red, lw=2, ls=:dash)
     plot!(p3b, xg_w, poj_w,     color=:white, lw=2, ls=:dot)
-    xlims!(p3b, 0.00, 0.00)
-    ylims!(p3b, 0.00, 0.00)
-
+    ylims!(p3b, 0.0, 1.0)
     plot(p3a, p3b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
 end
 
@@ -153,6 +149,7 @@ function fig_total_employment(obj; percentile_print = 1.00)
                   yguidefontrotation=-90)
     contour!(p3c, xg_w, pg_w, e_total_w',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    ylims!(p3c, 0.0, 1.0)
     p3c
 end
 
@@ -198,8 +195,7 @@ function fig_unskilled_value_surfaces(obj)
     contour!(p6a, xg, pgU, obj.JU_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
     plot!(p6a, xg, obj.pstar_U, color=:red, lw=2, ls=:dash)
-    xlims!(p6a, 0.00, 0.00)
-    ylims!(p6a, 0.00, 0.00)
+    ylims!(p6a, 0.0, 1.0)
 
     p6b = heatmap(xg, pgU, obj.EU_surface',
                   xlabel=L"x", ylabel=L"p",
@@ -208,8 +204,7 @@ function fig_unskilled_value_surfaces(obj)
     contour!(p6b, xg, pgU, obj.EU_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
     plot!(p6b, xg, obj.pstar_U, color=:red, lw=2, ls=:dash)
-    xlims!(p6b, 0.00, 0.00)
-    ylims!(p6b, 0.00, 0.00)
+    ylims!(p6b, 0.0, 1.0)
 
     plot(p6a, p6b, layout=(1,2), size=(1000,420), margin=5Plots.mm)
 end
@@ -236,6 +231,7 @@ function fig_skilled_worker_values(obj)
                   legend=false, grid=false, yguidefontrotation=-90)
     contour!(p8a, xg, pg, obj.E0_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    ylims!(p8a, 0.0, 1.0)
 
     p8b = heatmap(xg, pg, obj.E1_surface',
                   xlabel=L"x", ylabel=L"p",
@@ -243,6 +239,7 @@ function fig_skilled_worker_values(obj)
                   legend=false, grid=false, yguidefontrotation=-90)
     contour!(p8b, xg, pg, obj.E1_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    ylims!(p8b, 0.0, 1.0)
 
     plot(p8a, p8b, layout=(1,2), size=(1000,400), margin=5Plots.mm)
 end
@@ -257,6 +254,7 @@ function fig_skilled_firm_values(obj)
                   legend=false, grid=false, yguidefontrotation=-90)
     contour!(p9a, xg, pg, obj.J0_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    ylims!(p9a, 0.0, 1.0)
 
     p9b = heatmap(xg, pg, obj.J1_surface',
                   xlabel=L"x", ylabel=L"p",
@@ -264,6 +262,7 @@ function fig_skilled_firm_values(obj)
                   legend=false, grid=false, yguidefontrotation=-90)
     contour!(p9b, xg, pg, obj.J1_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
+    ylims!(p9b, 0.0, 1.0)
 
     plot(p9a, p9b, layout=(1,2), size=(1000,400), margin=5Plots.mm)
 end
@@ -281,8 +280,7 @@ function fig_surplus_heatmaps(obj)
     contour!(p10a, xg, pgU, obj.SU_surface',
              color=:white, alpha=0.4, lw=0.8, levels=15)
     plot!(p10a, xg, obj.pstar_U, color=:red, lw=2, ls=:dash)
-    xlims!(p10a, 0.00, 0.00)
-    ylims!(p10a, 0.00, 0.00)
+    ylims!(p10a, 0.0, 1.0)
 
     p10b = heatmap(xg, pg, obj.Smax_surface',
                    xlabel=L"x", ylabel=L"p",
@@ -292,8 +290,7 @@ function fig_surplus_heatmaps(obj)
              color=:white, alpha=0.4, lw=0.8, levels=15)
     plot!(p10b, xg, obj.pstar_S, color=:red, lw=2, ls=:dash)
     plot!(p10b, xg, obj.poj,     color=:white, lw=2, ls=:dot)
-    xlims!(p10b, 0.00, 0.00)
-    ylims!(p10b, 0.00, 0.00)
+    ylims!(p10b, 0.0, 1.0)
 
     plot(p10a, p10b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
 end
@@ -320,8 +317,7 @@ function fig_unskilled_wage(obj)
     contour!(pW1, xg, pgU, obj.wU_surface',
              color=:white, alpha=0.45, lw=0.8, levels=15)
     plot!(pW1, xg, obj.pstar_U, color=:red, lw=2, ls=:dash)
-    xlims!(pW1, 0.00, 0.00)
-    ylims!(pW1, 0.00, 0.00)
+    ylims!(pW1, 0.0, 1.0)
     pW1
 end
 
@@ -338,8 +334,7 @@ function fig_skilled_wages(obj)
              color=:white, alpha=0.45, lw=0.8, levels=15)
     plot!(pW2a, xg, obj.pstar_S, color=:red, lw=2, ls=:dash)
     plot!(pW2a, xg, obj.poj,     color=:white, lw=2, ls=:dot)
-    xlims!(pW2a, 0.00, 0.00)
-    ylims!(pW2a, 0.00, 0.00)
+    ylims!(pW2a, 0.0, 1.0)
 
     pW2b = heatmap(xg, pg, obj.wS1_surface',
                    xlabel=L"x", ylabel=L"p",
@@ -350,8 +345,7 @@ function fig_skilled_wages(obj)
              color=:white, alpha=0.45, lw=0.8, levels=15)
     plot!(pW2b, xg, obj.pstar_S, color=:red, lw=2, ls=:dash)
     plot!(pW2b, xg, obj.poj,     color=:white, lw=2, ls=:dot)
-    xlims!(pW2b, 0.00, 0.00)
-    ylims!(pW2b, 0.00, 0.00)
+    ylims!(pW2b, 0.0, 1.0)
 
     plot(pW2a, pW2b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
 end
@@ -486,11 +480,83 @@ function fig_wage_pooled_density(obj)
     plot(pW5a, size=(720,480), margin=5Plots.mm)
 end
 
+"""
+    fig_skilled_employment_by_PS(obj, gamma_PS; percentile_print=1.00)
+
+Skilled employment density heatmap with P_S(x) = γ·x^{γ−1} on the
+horizontal axis and match quality p on the vertical axis.
+
+The GL quadrature x-grid is non-uniformly spaced, and the mapping
+x → P_S is a power law that further warps the spacing.  Passing a
+non-uniform vector directly to `heatmap` (GR backend) renders each
+node as an equal-width pixel column, producing an all-zero appearance
+because the mass is spread across hundreds of imperceptible columns.
+
+Fix: compute PSg = P_S(xg) on the GL grid (monotone for γ > 1),
+build a UNIFORM PS grid that spans [PSg[1], γ] with the same number
+of points, then interpolate each p-slice of eS_mat and the cutoff
+curves onto that uniform grid before calling heatmap.
+"""
+function fig_skilled_employment_by_PS(obj, gamma_PS::Float64;
+                                       percentile_print::Float64 = 1.00)
+    xg  = obj.xg
+    pg  = obj.pg
+    Nx  = obj.Nx
+
+    # ── P_S values at each GL node (monotone ↑ for γ > 1) ────────────────
+    PSg = [PS_of_x(x, gamma_PS) for x in xg]   # matches solver convention
+
+    # ── Uniform PS grid: same length as xg, spans [PSg[1], γ] ───────────
+    # PSg[1] ≈ γ·xg[1]^{γ-1} ≈ 0;  PSg[end] ≈ γ (PS at x≈1)
+    PS_lo      = PSg[1]
+    PS_hi      = gamma_PS                        # theoretical max = PS(1) = γ
+    PS_uniform = collect(range(PS_lo, PS_hi; length = Nx))
+
+    # ── Window on p (same convention as other heatmaps) ──────────────────
+    iS    = 0.0 .≤ pg .≤ percentile_print
+    pg_w  = pg[iS]
+    NpW   = sum(iS)
+    eS_w  = obj.eS_mat[:, iS]                   # (Nx × NpW) on original PSg
+
+    # ── Interpolate each p-slice from PSg → PS_uniform ───────────────────
+    # PSg is sorted ↑, so linear_interpolation is valid.
+    # Extrapolation at the left edge (PS < PSg[1] ≈ 0) returns 0 (no mass).
+    eS_on_PS = zeros(Nx, NpW)
+    for jp in 1:NpW
+        itp = linear_interpolation(PSg, eS_w[:, jp]; extrapolation_bc = 0.0)
+        eS_on_PS[:, jp] = max.(itp.(PS_uniform), 0.0)
+    end
+
+    # ── Interpolate cutoff curves from PSg → PS_uniform ──────────────────
+    itp_pstar = linear_interpolation(PSg, obj.pstar_S; extrapolation_bc = NaN)
+    itp_poj   = linear_interpolation(PSg, obj.poj;     extrapolation_bc = NaN)
+    pstar_PS  = itp_pstar.(PS_uniform)
+    poj_PS    = itp_poj.(PS_uniform)
+
+    # ── Plot ──────────────────────────────────────────────────────────────
+    fig = heatmap(PS_uniform, pg_w, eS_on_PS',
+                  xlabel = L"P_S(x) = \gamma\, x^{\gamma-1}",
+                  ylabel = L"p",
+                  title  = L"Skilled employment $e_S$ by $(P_S(x),\, p)$",
+                  color  = :viridis, legend = false, grid = false,
+                  yguidefontrotation = -90)
+    contour!(fig, PS_uniform, pg_w, eS_on_PS',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
+    plot!(fig, PS_uniform, pstar_PS,
+          color = :red,   lw = 2, ls = :dash, label = L"p_S^*(x)")
+    plot!(fig, PS_uniform, poj_PS,
+          color = :white, lw = 2, ls = :dot,  label = L"p^{\rm oj}(x)")
+    xlims!(fig, 0.0, PS_hi)
+    ylims!(fig, 0.0, 1.0)
+    fig
+end
+
+
 # ============================================================
 # Master function — make and save all figures
 # ============================================================
 
-function make_all_plots(obj; output_dir::String = "output/plots")
+function make_all_plots(obj; output_dir::String = "output/plots", gamma_PS::Union{Float64,Nothing} = nothing)
     mkpath(output_dir)
     _set_theme!()
 
@@ -499,6 +565,7 @@ function make_all_plots(obj; output_dir::String = "output/plots")
         ("fig02_unskilled_values",    fig_unskilled_values(obj)),
         ("fig03_employment_heatmaps", fig_employment_heatmaps(obj)),
         ("fig03b_total_employment",   fig_total_employment(obj)),
+        ("fig03c_skilled_emp_by_PS",   isnothing(gamma_PS) ? nothing : fig_skilled_employment_by_PS(obj, gamma_PS)),
         ("fig04_training_policy",     fig_training_policy(obj)),
         ("fig05_unskilled_frontier",  fig_unskilled_frontier(obj)),
         ("fig06_unskilled_surfaces",  fig_unskilled_value_surfaces(obj)),
@@ -516,6 +583,7 @@ function make_all_plots(obj; output_dir::String = "output/plots")
     ]
 
     for (name, fig) in figures
+        isnothing(fig) && continue
         path = joinpath(output_dir, name * ".png")
         savefig(fig, path)
         println("  saved: $path")

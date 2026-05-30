@@ -25,8 +25,8 @@ end
 
 
 Base.@kwdef struct RegimeParams
-    PU  :: Float64    # unskilled sector productivity shifter
-    PS  :: Float64    # skilled sector productivity shifter
+    PU       :: Float64    # unskilled sector productivity shifter
+    gamma_PS :: Float64    # skilled productivity shape: PS(x) = γ·x^{γ−1} (Beta(γ,1) PDF)
 
     bU  :: Float64    # flow payoff in unskilled unemployment
     bT  :: Float64    # flow payoff while in training
@@ -196,8 +196,8 @@ function initialise_model(;
     Np_U :: Int = 200,
     Np_S :: Int = 200,
     regime :: RegimeParams = RegimeParams(
-        PU  = 0.70,
-        PS  = 1.85,
+        PU       = 0.70,
+        gamma_PS = 1.85,
         bU  = 0.00,
         bT  = 0.28,
         bS  = 0.01,
@@ -264,7 +264,7 @@ function initialise_model(;
         anderson_m     = 1,
         anderson_reg   = 1e-10,
 
-        damp_pstar_U   = 1.30,
+        damp_pstar_U   = 1.00,
         damp_pstar_S   = 1.00,
 
         verbose        = 2,

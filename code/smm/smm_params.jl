@@ -302,11 +302,11 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:common, :c,   0.01,  8.00,   1.70,  "training cost coeff c"),
 
         ParamSpec(:regime, :PU,  0.05,  6.00,  0.70,  "unskilled productivity PU"),
-        ParamSpec(:regime, :PS,  0.10,  10.00, 1.85,  "skilled productivity PS"),
+        ParamSpec(:regime, :gamma_PS, 0.10, 10.00, 1.85, "skilled productivity γ_PS"),
         ParamSpec(:regime, :bU,  0.000, 2.00,  0.00,  "unskilled UI flow bU"),
         ParamSpec(:regime, :bT,  0.000, 2.00,  0.28,  "training flow bT"),
         ParamSpec(:regime, :bS,  0.000, 2.00,  0.01,  "skilled UI flow bS"),
-        ParamSpec(:regime, :α_U, 0.10,  20.00, 1.00,  "unskilled damage shape α_U"),
+        ParamSpec(:regime, :α_U, 1.00,  20.00, 1.00,  "unskilled damage shape α_U"),
         ParamSpec(:regime, :a_Γ, 0.30,  10.00, 2.00,  "skilled offer shape a_Γ"),
         ParamSpec(:regime, :b_Γ, 0.30,  10.00, 5.00,  "skilled offer shape b_Γ"),
 
@@ -320,9 +320,9 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:skl, :η,    0.10,  0.90,  0.50,  "skilled matching elas η_S"),
         ParamSpec(:skl, :k,    0.001, 1.50,  0.17,  "skilled vacancy cost k_S"),
         ParamSpec(:skl, :β,    0.05,  0.95,  0.32,  "skilled bargaining β_S"),
-        ParamSpec(:skl, :ξ,    0.0001, 0.050, 0.03,  "skilled exog. sep rate ξ"),
+        ParamSpec(:skl, :ξ,    0.0, 0.150, 0.03,  "skilled exog. sep rate ξ"),
         ParamSpec(:skl, :λ,    0.001, 0.400, 0.07,  "skilled quality shock λ_S"),
-        ParamSpec(:skl, :σ,    0.001, 0.150, 0.01,  "OJS flow cost σ"),
+        ParamSpec(:skl, :σ,    0.0, 0.150, 0.01,  "OJS flow cost σ"),
     ]
 end
 
@@ -398,8 +398,8 @@ function unpack_θ(
     )
 
     rp = RegimeParams(
-        PU  = _get(:PU,  :regime, 0.70),
-        PS  = _get(:PS,  :regime, 1.85),
+        PU       = _get(:PU,       :regime, 0.70),
+        gamma_PS = _get(:gamma_PS, :regime, 1.85),
         bU  = _get(:bU,  :regime, 0.00),
         bT  = _get(:bT,  :regime, 0.28),
         bS  = _get(:bS,  :regime, 0.01),

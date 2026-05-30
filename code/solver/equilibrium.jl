@@ -44,7 +44,7 @@ function compute_equilibrium_objects(model::Model)
     βU = up.β;  λU = up.λ
     βS = sp.β;  λS = sp.λ;  σS = sp.σ
 
-    PU = rp.PU;  PS = rp.PS;  bS = rp.bS;  αU = rp.α_U
+    PU = rp.PU;  γPS = rp.gamma_PS;  bS = rp.bS;  αU = rp.α_U
 
     c_of_x = x -> training_cost(x, cp.c)
 
@@ -190,12 +190,13 @@ function compute_equilibrium_objects(model::Model)
     wS0_surface = fill(NaN, Nx, NpS)
     for ix in 1:Nx
         pst         = clamp01(pstar_S[ix])
+        PS_x        = PS_of_x(xg[ix], γPS)
         flow_out    = (1.0 - βS) * bS
         ladder_term = βS * (1.0 - βS) * κS * I_full[ix]
         for jp in 1:NpS
             ω_j = _soft_weight(pg[jp], pst, pg, jp, NpS)
             if ω_j > 0.0
-                wS0_surface[ix, jp] = βS * PS * xg[ix] * pg[jp] + flow_out + ladder_term
+                wS0_surface[ix, jp] = βS * PS_x * xg[ix] * pg[jp] + flow_out + ladder_term
             end
         end
     end
@@ -204,13 +205,14 @@ function compute_equilibrium_objects(model::Model)
     wS1_surface = fill(NaN, Nx, NpS)
     for ix in 1:Nx
         pst      = clamp01(pstar_S[ix])
+        PS_x     = PS_of_x(xg[ix], γPS)
         flow_out = (1.0 - βS) * (bS + σS)
         for jp in 1:NpS
             ω_j = _soft_weight(pg[jp], pst, pg, jp, NpS)
             if ω_j > 0.0
                 I_low = max(I_full[ix] - tailS[ix, jp], 0.0)
                 wS1_surface[ix, jp] =
-                    βS * PS * xg[ix] * pg[jp] +
+                    βS * PS_x * xg[ix] * pg[jp] +
                     flow_out +
                     βS * (1.0 - βS) * κS * I_low
             end

@@ -1,46 +1,45 @@
 ############################################################
 # plots_and_tables.jl — Post-estimation plots and tables
+#                         (PS(x) = γ·x^{γ−1} variant)
 #
-# Generates:
-#   1. Model fit tables A & B (LaTeX) — data vs model moments + SEs
-#   2. Parameter estimates tables A & B (LaTeX) — 4 windows + deltas
-#   3. Model fit scatter plot — data vs model, 45-degree line
+# LIBRARY FILE — defines functions; does not auto-execute when
+# included.  The supported entry point is transition_main.jl, which
+# loads modules once, then calls:
 #
-# Transition dynamics panels are generated separately by
-# transition_panel.jl — run that script independently.
+#   load_all_smm_bundles!()
+#   make_model_fit_tables()
+#   make_parameter_tables()
+#   make_xbar_table()
+#   make_model_fit_scatter(; window = …)
 #
-# Usage (from project root):
-#   julia code/transition/plots_and_tables.jl
-# (also works from code/smm/ or any code/ subfolder)
+# The file can also be run standalone (`julia plots_and_tables.jl`),
+# in which case it sets up its own paths and runs the full pipeline.
 #
-# Requires completed SMM runs for all four windows.
+# Transition dynamics panels live in transition_panel.jl.
 ############################################################
 
-println("="^60)
-println("  Segmented Search Model — Plots & Tables")
-println("="^60)
-flush(stdout)
+# ════════════════════════════════════════════════════════════
+# Paths — orchestrator defines these; fall back to script-local
+# defaults when invoked standalone.
+# ════════════════════════════════════════════════════════════
 
-# ── Paths ─────────────────────────────────────────────────────
-# This script can live anywhere under code/ (e.g. code/smm/ or
-# code/transition/).  PROJECT_ROOT is always two levels up from
-# @__DIR__, and the SMM source files are in code/smm/.
-SCRIPT_DIR   = @__DIR__
-PROJECT_ROOT = joinpath(SCRIPT_DIR, "..", "..")
-SOLVER_DIR   = joinpath(PROJECT_ROOT, "code", "solver")
-SMM_SRC_DIR  = joinpath(PROJECT_ROOT, "code", "smm")
-OUTPUT_DIR   = joinpath(PROJECT_ROOT, "output")
-PLOTS_DIR    = joinpath(OUTPUT_DIR, "plots")
-TABLES_DIR   = joinpath(OUTPUT_DIR, "tables")
-SMM_OUT_DIR  = joinpath(OUTPUT_DIR, "smm")
-TRANS_DIR    = joinpath(OUTPUT_DIR, "transition")
-DERIVED_DIR  = joinpath(PROJECT_ROOT, "data", "derived")
+if !@isdefined(SCRIPT_DIR);   const SCRIPT_DIR   = @__DIR__;                                       end
+if !@isdefined(PROJECT_ROOT); const PROJECT_ROOT = joinpath(SCRIPT_DIR, "..", "..");               end
+if !@isdefined(SOLVER_DIR);   const SOLVER_DIR   = joinpath(PROJECT_ROOT, "code", "solver"); end
+if !@isdefined(SMM_DIR);      const SMM_DIR      = joinpath(PROJECT_ROOT, "code", "smm");    end
+if !@isdefined(OUTPUT_DIR);   const OUTPUT_DIR   = joinpath(PROJECT_ROOT, "output");                end
+if !@isdefined(PLOTS_DIR);    const PLOTS_DIR    = joinpath(OUTPUT_DIR, "plots");                   end
+if !@isdefined(TABLES_DIR);   const TABLES_DIR   = joinpath(OUTPUT_DIR, "tables");                  end
+if !@isdefined(SMM_OUT_DIR);  const SMM_OUT_DIR  = joinpath(OUTPUT_DIR, "smm");                     end
+if !@isdefined(DERIVED_DIR);  const DERIVED_DIR  = joinpath(PROJECT_ROOT, "data", "derived");       end
 
 mkpath(PLOTS_DIR)
 mkpath(TABLES_DIR)
 
-# ── Packages ──────────────────────────────────────────────────
-print("Loading packages... "); flush(stdout)
+# ════════════════════════════════════════════════════════════
+# Packages
+# ════════════════════════════════════════════════════════════
+print("Loading plots_and_tables packages... "); flush(stdout)
 
 using LinearAlgebra
 using SparseArrays
@@ -63,26 +62,29 @@ using JLD2
 
 println("done."); flush(stdout)
 
-# ── Load solver (needed for structs + model_moments) ──────────
-print("Loading solver modules... "); flush(stdout)
+# ════════════════════════════════════════════════════════════
+# Load solver / SMM modules — only if the orchestrator has not
+# already done so (avoids struct-redefinition errors).
+# ════════════════════════════════════════════════════════════
 
-include(joinpath(SOLVER_DIR, "grids.jl"))
-include(joinpath(SOLVER_DIR, "params.jl"))
-include(joinpath(SOLVER_DIR, "unskilled.jl"))
-include(joinpath(SOLVER_DIR, "skilled.jl"))
-include(joinpath(SOLVER_DIR, "solver.jl"))
-include(joinpath(SOLVER_DIR, "equilibrium.jl"))
+if !@isdefined(solve_model)
+    print("Loading solver modules... "); flush(stdout)
+    include(joinpath(SOLVER_DIR, "grids.jl"))
+    include(joinpath(SOLVER_DIR, "params.jl"))
+    include(joinpath(SOLVER_DIR, "unskilled.jl"))
+    include(joinpath(SOLVER_DIR, "skilled.jl"))
+    include(joinpath(SOLVER_DIR, "solver.jl"))
+    include(joinpath(SOLVER_DIR, "equilibrium.jl"))
+    println("done."); flush(stdout)
+end
 
-println("done."); flush(stdout)
-
-# ── Load SMM modules ─────────────────────────────────────────
-print("Loading SMM modules... "); flush(stdout)
-
-include(joinpath(SMM_SRC_DIR, "moments.jl"))
-include(joinpath(SMM_SRC_DIR, "smm_params.jl"))
-include(joinpath(SMM_SRC_DIR, "smm.jl"))
-
-println("done."); flush(stdout)
+if !@isdefined(MOMENT_NAMES)
+    print("Loading SMM modules... "); flush(stdout)
+    include(joinpath(SMM_DIR, "moments.jl"))
+    include(joinpath(SMM_DIR, "smm_params.jl"))
+    include(joinpath(SMM_DIR, "smm.jl"))
+    println("done."); flush(stdout)
+end
 
 
 # ============================================================
@@ -90,15 +92,21 @@ println("done."); flush(stdout)
 # ============================================================
 
 # Weight matrix suffix — must match what was used in estimation
-W_COND_TARGET = 1e8
+if !@isdefined(W_COND_TARGET)
+    const W_COND_TARGET = 2.0
+end
 
-# _w_suffix may already be defined via smm.jl include; define only if missing
+# _w_suffix may already be defined by the orchestrator; provide a local
+# helper that doesn't clash.
 if !isdefined(Main, :_w_suffix_pt)
     _w_suffix_pt(ct::Float64) = ct == 0.0 ? "_diagonalW" :
                                  ct == 1.0 ? "_compressedW" :
                                  ct == 2.0 ? "_equalW" : "_fullW"
 end
-W_SUFFIX = _w_suffix_pt(W_COND_TARGET)
+
+if !@isdefined(W_SUFFIX)
+    const W_SUFFIX = _w_suffix_pt(W_COND_TARGET)
+end
 
 # The four estimation windows (ordered for tables)
 WINDOW_PAIRS = [
@@ -116,27 +124,43 @@ WINDOW_LABELS = Dict(
 )
 
 # ============================================================
-# 0. Load all SMM bundles
+# SMM bundle store — populated by load_all_smm_bundles!()
 # ============================================================
-println("\nLoading SMM results..."); flush(stdout)
 
-smm_bundles = Dict{Symbol, Any}()
-for w in ALL_WINDOWS
-    jls_path = joinpath(SMM_OUT_DIR, "smm_result_$(w)$(W_SUFFIX).jls")
-    if isfile(jls_path)
-        data = _load_smm_bundle(jls_path; label=string(w))
-        if !isnothing(data)
-            smm_bundles[w] = data
-            @printf("  %-18s  Q = %.6e  converged = %s\n",
-                    w, data.result.loss_opt, data.result.converged)
+const smm_bundles = Dict{Symbol, Any}()
+
+"""
+    load_all_smm_bundles!(; cond_target = W_COND_TARGET, smm_dir = SMM_OUT_DIR)
+
+Populate the package-level `smm_bundles` Dict (window symbol → bundle)
+by reading the .jls files in `smm_dir`.  Safe to call multiple times —
+the existing entries are cleared first.
+"""
+function load_all_smm_bundles!(;
+    cond_target::Float64 = W_COND_TARGET,
+    smm_dir::String      = SMM_OUT_DIR,
+)
+    suffix = _w_suffix_pt(cond_target)
+    empty!(smm_bundles)
+    println("\nLoading SMM results..."); flush(stdout)
+    for w in ALL_WINDOWS
+        jls_path = joinpath(smm_dir, "smm_result_$(w)$(suffix).jls")
+        if isfile(jls_path)
+            data = _load_smm_bundle(jls_path; label=string(w))
+            if !isnothing(data)
+                smm_bundles[w] = data
+                @printf("  %-18s  Q = %.6e  converged = %s\n",
+                        w, data.result.loss_opt, data.result.converged)
+            else
+                @warn "Could not read SMM bundle for $w at $jls_path"
+            end
         else
-            @warn "Could not read SMM bundle for $w at $jls_path"
+            @warn "SMM result file not found: $jls_path"
         end
-    else
-        @warn "SMM result file not found: $jls_path"
     end
+    flush(stdout)
+    return smm_bundles
 end
-flush(stdout)
 
 
 # ============================================================
@@ -668,7 +692,7 @@ end
 # Parameter classification
 # Externally calibrated: r, ν, φ
 # Deep structural (13): a_ℓ, b_ℓ, c, bU, bT, bS, μ_U, η_U, β_U, μ_S, η_S, β_S, σ_S
-# Regime-specific (10): PU, PS, α_U, a_Γ, b_Γ, k_U, λ_U, k_S, ξ_S, λ_S
+# Regime-specific (10): PU, gamma_PS, α_U, a_Γ, b_Γ, k_U, λ_U, k_S, ξ_S, λ_S
 
 EXTERNALLY_CALIBRATED = [
     (:r,   "r",            raw"$r$",              "Discount rate"),
@@ -694,7 +718,7 @@ DEEP_STRUCTURAL = [
 
 REGIME_SPECIFIC = [
     (:PU,   :regime, raw"$P_U$",            "Unskilled productivity"),
-    (:PS,   :regime, raw"$P_S$",            "Skilled productivity"),
+    (:gamma_PS, :regime, raw"$\gamma_{PS}$",  "Skilled prod. shape"),
     (:α_U,  :regime, raw"$\alpha_U$",       "Unskilled damage shape"),
     (:a_Γ,  :regime, raw"$a_\Gamma$",       "Skilled offer shape"),
     (:b_Γ,  :regime, raw"$b_\Gamma$",       "Skilled offer shape"),
@@ -1069,31 +1093,27 @@ end
 
 
 # ============================================================
-# MAIN — Generate everything
+# Stand-alone entry point — only fires when this file IS the
+# script invoked from the command line.  Otherwise it is a
+# library called from transition_main.jl.
 # ============================================================
 
-println("\n" * "="^60)
-println("  Generating all outputs")
-println("="^60)
-flush(stdout)
+if abspath(PROGRAM_FILE) == @__FILE__
+    println("\n" * "="^60)
+    println("  Plots & Tables — standalone run")
+    println("="^60)
+    flush(stdout)
 
-# 1. Model fit tables (A & B)
-make_model_fit_tables()
+    load_all_smm_bundles!()
+    make_model_fit_tables()
+    make_parameter_tables()
+    make_xbar_table()
+    for w in [:base_fc, :base_covid]
+        make_model_fit_scatter(; window=w)
+    end
 
-# 2. Parameter estimates tables (A & B)
-make_parameter_tables()
-
-# 3. Training cutoff (x̄) table
-make_xbar_table()
-
-# 4. Model fit scatter plots (one per baseline window)
-for w in [:base_fc, :base_covid]
-    make_model_fit_scatter(; window=w)
+    println("\n" * "="^60)
+    println("  All outputs generated successfully.")
+    println("="^60)
+    flush(stdout)
 end
-
-# Note: Transition dynamics panels are generated by transition_panel.jl.
-# Run that script separately to produce the transition dynamics plots.
-
-println("\n" * "="^60)
-println("  All outputs generated successfully.")
-println("="^60)

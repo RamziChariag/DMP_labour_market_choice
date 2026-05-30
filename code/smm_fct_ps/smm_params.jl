@@ -302,7 +302,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:common, :c,   0.01,  8.00,   1.70,  "training cost coeff c"),
 
         ParamSpec(:regime, :PU,  0.05,  6.00,  0.70,  "unskilled productivity PU"),
-        ParamSpec(:regime, :gamma_PS, 0.10, 10.00, 1.85, "skilled productivity γ_PS"),
+        ParamSpec(:regime, :gamma_PS, 1.00, 10.00, 1.85, "skilled productivity γ_PS"),
         ParamSpec(:regime, :bU,  0.000, 2.00,  0.00,  "unskilled UI flow bU"),
         ParamSpec(:regime, :bT,  0.000, 2.00,  0.28,  "training flow bT"),
         ParamSpec(:regime, :bS,  0.000, 2.00,  0.01,  "skilled UI flow bS"),
@@ -320,7 +320,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:skl, :η,    0.10,  0.90,  0.50,  "skilled matching elas η_S"),
         ParamSpec(:skl, :k,    0.001, 1.50,  0.17,  "skilled vacancy cost k_S"),
         ParamSpec(:skl, :β,    0.05,  0.95,  0.32,  "skilled bargaining β_S"),
-        ParamSpec(:skl, :ξ,    0.0, 0.050, 0.03,  "skilled exog. sep rate ξ"),
+        ParamSpec(:skl, :ξ,    0.0, 0.10, 0.03,  "skilled exog. sep rate ξ"),
         ParamSpec(:skl, :λ,    0.001, 0.400, 0.07,  "skilled quality shock λ_S"),
         ParamSpec(:skl, :σ,    0.0, 0.150, 0.01,  "OJS flow cost σ"),
     ]

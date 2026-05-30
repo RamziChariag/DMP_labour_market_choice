@@ -1,5 +1,6 @@
 ############################################################
 # transition_solver.jl — Backward-forward transition dynamics
+#                         (PS(x) = γ·x^{γ−1} variant)
 #
 # Core algorithm (Section 11.9 of the model notes):
 #   Step 0  Compute stationary equilibria z₀, z₁  (external)
@@ -8,6 +9,39 @@
 #   Step 3  Forward pass:  laws of motion for distributions
 #   Step 4  Update tightness via free entry
 #   Step 5  Iterate 2-4 until convergence
+#
+# Key difference from the equilibrium solver
+# ──────────────────────────────────────────
+# The equilibrium solver enforces distributions to satisfy the
+# Kolmogorov forward equations at steady state.  In particular,
+# eS(x,p) = 0 for p < p*_S(x) falls out of the KFE algebra, and
+# mS is pinned to (φ/ν)·t by the steady-state flow balance.
+#
+# This solver does NOT enforce either condition:
+#
+#  1. mS evolves via  ∂_t mS = φ·t − ν·mS  (a proper law of motion).
+#
+#  2. eS(x,p,t) for p < p*_S(x,t) is NOT set to zero.
+#     Instead, the existing mass below the cutoff decays at the natural
+#     outflow rate (ν + ξ + λ) with no new inflow.  Workers below the
+#     cutoff who receive a quality shock (rate λ) draw p' from Γ:
+#       · p' ≥ p*_S → rehired above the cutoff (contributes to inflow_λ)
+#       · p' < p*_S → flow to skilled unemployment (captured in u_S LOM)
+#     In both cases they leave the sub-cutoff cell, so the outflow rate
+#     is the full (ν + ξ + λ) regardless of where p' lands.
+#
+#  3. uU, tU, uS are also inherited from z₀ and evolved via their LOMs,
+#     with no hard enforcement of equilibrium stock conditions.
+#     For unskilled employment (not tracked per (x,p)), natural decay
+#     is already embedded in  δU = λU · G(p*_U(x,t))  in the uU LOM.
+#
+# Productivity function
+# ─────────────────────
+# The old model used a constant rp.PS.  This variant uses
+#   PS(x) = γ · x^{γ−1},   γ = rp.gamma_PS,
+# via the PS_of_x(x, γ) helper defined in params.jl / skilled.jl.
+# Every place that previously wrote  rp.PS * x * p  now reads
+#   PS_of_x(x, rp.gamma_PS) * x * p.
 #
 # Public API
 #   solve_transition(model_z0, model_z1, tp; scenario)
@@ -114,15 +148,17 @@ function _initialise_path(model_z0::Model, model_z1::Model, tp::TransitionParams
         path.θS[n] = θS0 + α * (θS1 - θS0)
     end
 
-    # ── Distributions at t = 0: copy from z₀ ────────────
+    # ── Distributions at t = 0: inherited from z₀ SS ─────
+    # These are NOT enforced to satisfy any equilibrium condition
+    # at later dates — they evolve freely via their laws of motion.
     @inbounds for ix in 1:Nx
-        path.uU[ix, 1] = model_z0.unsk_cache.u[ix]
-        path.tU[ix, 1] = model_z0.unsk_cache.t[ix]
-        path.uS[ix, 1] = model_z0.skl_cache.u[ix]
+        path.uU[ix, 1] = model_z0.unsk_cache.u[ix]   # unskilled unemployed
+        path.tU[ix, 1] = model_z0.unsk_cache.t[ix]   # training density
+        path.uS[ix, 1] = model_z0.skl_cache.u[ix]    # skilled unemployed
     end
 
-    # mS(x, t=0):  skilled segment mass per type
-    # mS(x) = uS(x) + ∫ eS(x,p) dp
+    # mS(x, t=0):  skilled segment mass = uS(x) + ∫ eS(x,p) dp
+    # Computed from z₀ SS values; will NOT be pinned to (φ/ν)·t afterwards.
     wpS = model_z0.skl_grids.wp
     @inbounds for ix in 1:Nx
         mass = model_z0.skl_cache.u[ix]
@@ -132,6 +168,8 @@ function _initialise_path(model_z0::Model, model_z1::Model, tp::TransitionParams
         path.mS[ix, 1] = mass
     end
 
+    # eS(x, p, t=0): inherited from z₀ SS, including any mass that may
+    # lie below the z₁ cutoff.  That mass decays naturally in the forward pass.
     @inbounds for ix in 1:Nx, jp in 1:NpS
         path.eS[ix, jp, 1] = model_z0.skl_cache.e[ix, jp]
     end
@@ -229,6 +267,9 @@ set θ = θ(n), then run the inner loops (which solve the stationary
 Bellman given that θ).  This is correct because, with θ given,
 the value functions are uniquely pinned down by the parameters;
 the backward structure enters only through the θ path.
+
+PS(x) is evaluated via PS_of_x(x, rp.gamma_PS) everywhere the old
+solver used the constant rp.PS.
 """
 function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
     Nt  = tp.N_steps + 1
@@ -297,6 +338,9 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
             j0_prev   = pcut_index(sg.p, pstar_cur)
             j0_soft   = max(j0_prev - 1, 1)
 
+            # PS(x) for this worker type — fct_ps variant
+            PS_x = PS_of_x(x_val, rp.gamma_PS)
+
             # Recompute tail integral I
             tailE = zeros(Float64, NpS)
             acc = 0.0
@@ -306,18 +350,20 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
                 tailE[j]   = acc
             end
 
-            # Raw surplus for cutoff search
+            # Raw surplus for cutoff search — uses PS(x)·x·p as flow output
             Smax_raw = zeros(Float64, NpS)
             diff_raw = zeros(Float64, NpS)
-            base = cp.r + cp.ν + sp.ξ + sp.λ
+            base  = cp.r + cp.ν + sp.ξ + sp.λ
             I_val = tailE[j0_soft]
 
             @inbounds for j in 1:NpS
                 pj = sg.p[j]
-                raw_S0 = (rp.PS * x_val * pj - (cp.r + cp.ν) * U_x + sp.λ * I_val) / base
+                # Match flow output:  PS(x) · x · p  (fct_ps vs old constant rp.PS)
+                flow = PS_x * x_val * pj
+                raw_S0 = (flow - (cp.r + cp.ν) * U_x + sp.λ * I_val) / base
                 tail_mass_j = pre.tail_weights[j]
                 tail_Emax_j = tailE[max(j, j0_soft)]
-                raw_S1 = (rp.PS * x_val * pj - (cp.r + cp.ν) * U_x - sp.σ + sp.λ * I_val +
+                raw_S1 = (flow - (cp.r + cp.ν) * U_x - sp.σ + sp.λ * I_val +
                            fS * sp.β * tail_Emax_j) / (base + fS * tail_mass_j)
                 Smax_raw[j] = max(raw_S0, raw_S1)
                 diff_raw[j] = raw_S1 - raw_S0
@@ -364,9 +410,22 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
         # Unskilled inner loop: solves Usearch, U, T, Jfrontier, τT
         inner = unskilled_inner_loop!(model; US_in = sc.U)
 
-        # Update pstar_U from surplus
+        # Update pstar_U from surplus.
+        # update_pstar_from_surplus! requires θ_new, E1, T_in as kwargs
+        # (Option-2 fix in unskilled.jl — recomputes Usearch/U against the
+        # tightness about to be installed so the cutoff is consistent with
+        # that θ, avoiding a period-2 orbit in (θ, p*)).  In the transition's
+        # backward pass θ is held fixed at the path iterate during the value
+        # pass, so uc.θ (= path.θU[n], installed at line 304) is exactly the
+        # right θ_new.  E1 comes from the inner loop; T_in is uc.T just
+        # refreshed by that inner loop — matching the stationary call site.
         pstar_new = zeros(Float64, Nx)
-        update_pstar_from_surplus!(pstar_new, model, inner.Ivec)
+        update_pstar_from_surplus!(
+            pstar_new, model, inner.Ivec;
+            θ_new = uc.θ,
+            E1    = inner.E1vec,
+            T_in  = uc.T,
+        )
         copyto!(uc.pstar, pstar_new)
 
         # Store unskilled results into path
@@ -390,12 +449,44 @@ end
 Evolve distributions forward from t = 0 to t = T_max using
 explicit Euler, given the policy paths from the backward pass.
 
-Laws of motion (eqs 34-38 of the notes):
-  ∂_t t(x)  = τ(x)·uU(x) − (φ+ν)·t(x)
-  ∂_t uU(x) = ν·ℓ(x) + δU(x)·eU(x) − (fU + τ(x) + ν)·uU(x)
-  ∂_t uS(x) = φ·t(x) + (ξ+δ^end_S(x))·eS_tot(x) − (ν + fS·(1−Γ(p*S)))·uS(x)
-  ∂_t mS(x) = φ·t(x) − ν·mS(x)
-  ∂_t eS(x,p) = inflow − outflow
+## Inherited distributions and their laws of motion
+
+All five distributions are inherited from z₀ and evolved forward.
+No equilibrium conditions are enforced at any date:
+
+  uU(x,t):  ∂_t uU = ν·ℓ(x) + δU(x,t)·eU(x,t) − (fU + τ + ν)·uU
+             where δU = λU·G(p*_U(x,t)) is the endogenous separation rate.
+             Workers at p < p*_U(x,t) who receive a quality shock are
+             separated at rate λU, with probability G(p*_U) of drawing
+             a new p below the cutoff.  This IS the natural decay mechanism
+             for sub-cutoff unskilled employment — no hard zeroing needed.
+
+  tU(x,t):  ∂_t tU = τ(x,t)·uU(x,t) − (φ+ν)·tU(x,t)
+
+  mS(x,t):  ∂_t mS = φ·tU(x,t) − ν·mS(x,t)
+             NOT pinned to (φ/ν)·tU; that steady-state relation
+             is enforced only in the equilibrium solver.
+
+  uS(x,t):  ∂_t uS = φ·tU + (ξ+λ·Γ(p*_S))·eS_tot − (ν + fS·(1−Γ(p*_S)))·uS
+             Here eS_tot includes mass from below-cutoff cells.
+             Workers below the cutoff who receive a quality shock
+             flow into uS if p' < p*_S, or are rehired above if p' ≥ p*_S.
+             The rate (ξ + λ·Γ(p*_S)) applied to total employment
+             correctly accounts for both sub- and super-cutoff workers.
+
+  eS(x,p,t): ∂_t eS = inflow_u + inflow_λ − outflow
+             For p ≥ p*_S(x,t) (above cutoff):
+               inflow_u  = fS · γ(p) · uS           (new hires)
+               inflow_λ  = λS · γ(p) · ∫₀ᵖ eS dp'  (quality-shock upgrades,
+                            includes mass from below-cutoff via cum_e)
+               outflow   = (ν + ξ + λ + 1[p<poj]·fS·(1−Γ(p))) · eS
+             For p < p*_S(x,t) (below cutoff):  ← KEY DIFFERENCE ←
+               inflow_u  = 0  (firms reject these matches)
+               inflow_λ  = 0  (workers drawing p' < p*_S go to unemployment,
+                               not into another below-cutoff cell)
+               outflow   = (ν + ξ + λ) · eS  (full natural outflow rate)
+               The λ component: workers drawing p' > p*_S contribute to
+               inflow_λ for above-cutoff cells (tracked via cum_e).
 """
 function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
     Nt  = tp.N_steps + 1
@@ -422,6 +513,7 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
         fS = jobfinding_rate(path.θS[n], sp.μ, sp.η)
 
         # ── Training density ─────────────────────────────
+        # Inherited: tU(x,0) = z₀ SS value; evolves freely.
         @inbounds for ix in 1:Nx
             τ_ix   = path.τT[ix, n]
             uU_ix  = path.uU[ix, n]
@@ -432,6 +524,12 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
         end
 
         # ── Unskilled unemployed ─────────────────────────
+        # Inherited: uU(x,0) = z₀ SS value; evolves freely.
+        # δU = λU·G(p*_U) is the NATURAL endogenous separation rate for
+        # the unskilled sector — workers at p < p*_U are naturally separated
+        # when they receive a quality shock landing below the cutoff.
+        # No explicit enforcement of eU = 0 below p*_U is needed because
+        # uU and eU are tracked only as aggregates (not per (x,p)).
         @inbounds for ix in 1:Nx
             ℓ_ix    = gp.ℓ[ix]
             uU_ix   = path.uU[ix, n]
@@ -444,6 +542,8 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
             mU_ix = max(ℓ_ix - mS_ix, 0.0)
             eU_ix = max(mU_ix - uU_ix - tU_ix, 0.0)
 
+            # Natural separation rate: workers at p < p*_U who draw
+            # a new quality ← below the cutoff, at rate λU·G(p*_U).
             δU = λU * G_cdf_unskilled(pstar_ix, αU)
 
             du_dt = ν * ℓ_ix + δU * eU_ix - (fU + τ_ix + ν) * uU_ix
@@ -451,6 +551,8 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
         end
 
         # ── Skilled segment mass ─────────────────────────
+        # Inherited: mS(x,0) = z₀ SS value; evolves via proper LOM.
+        # NOT pinned to (φ/ν)·tU — that is the equilibrium solver's trick.
         @inbounds for ix in 1:Nx
             tU_ix = path.tU[ix, n]
             mS_ix = path.mS[ix, n]
@@ -460,12 +562,15 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
         end
 
         # ── Skilled unemployed ───────────────────────────
+        # Inherited: uS(x,0) = z₀ SS value; evolves freely.
+        # eS_tot includes below-cutoff mass; (ξ + λ·Γ(p*_S)) applied to
+        # that total correctly accounts for flows from sub-cutoff employment.
         @inbounds for ix in 1:Nx
             tU_ix    = path.tU[ix, n]
             uS_ix    = path.uS[ix, n]
             pstar_ix = clamp01(path.pstar_S[ix, n])
 
-            # Total skilled employment
+            # Total skilled employment (includes below-cutoff mass during transition)
             eS_tot = 0.0
             for jp in 1:NpS
                 eS_tot += path.eS[ix, jp, n] * sg.wp[jp]
@@ -481,42 +586,70 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
         end
 
         # ── Skilled employment density e_S(x, p) ────────
+        # Inherited: eS(x,p,0) = z₀ SS value; evolves freely.
+        #
+        # KEY CHANGE from the old transition solver:
+        #
+        # Old:  eS[ix, jp, n+1] = 0.0  for jp < j0  (hard enforcement)
+        #
+        # New:  eS[ix, jp, n+1] = max(eS[ix,jp,n] - dt*(ν+ξ+λ)*eS, 0)
+        #       Workers below the current p*_S(x,t) receive no new hiring
+        #       and no quality-shock inflow from within the sub-cutoff region.
+        #       They leave via demographic exit (ν), exogenous separation (ξ),
+        #       or quality shock (λ, regardless of where p' lands — they exit
+        #       this cell in both cases).
+        #       When they draw p' ≥ p*_S via quality shock they contribute to
+        #       inflow_λ for the above-cutoff cells (tracked via cum_e below).
         @inbounds for ix in 1:Nx
             pstar_ix = clamp01(path.pstar_S[ix, n])
             poj_ix   = clamp01(path.poj[ix, n])
             j0       = pcut_index(sg.p, pstar_ix)
             uS_ix    = path.uS[ix, n]
 
-            cum_e = 0.0   # ∫_{p' < p} eS(x, p') dp'
+            cum_e = 0.0   # ∫_{p' < p} eS(x, p') dp'  — used in inflow_λ above
 
             for jp in 1:NpS
                 e_old = path.eS[ix, jp, n]
                 pj    = sg.p[jp]
 
                 if jp < j0
-                    # Below reservation quality — employment destroyed
-                    path.eS[ix, jp, n + 1] = 0.0
+                    # ── Below current reservation quality ──────────────────
+                    # No new hiring, no inflow from quality shocks within the
+                    # sub-cutoff region.  Existing mass decays at natural rates.
+                    #
+                    # Outflow channels:
+                    #   ν  : demographic exit → out of model
+                    #   ξS : exogenous separation → skilled unemployment
+                    #   λS : quality shock → new p' drawn from Γ
+                    #        · p' ≥ p*_S : worker gets rehired above cutoff
+                    #          (this mass enters inflow_λ for jp ≥ j0 via cum_e)
+                    #        · p' < p*_S : worker flows to skilled unemployment
+                    #        Either way the worker leaves this (x,p) cell,
+                    #        so the full λS rate applies as outflow.
+                    outflow_below = (ν + ξS + λS) * e_old
+                    path.eS[ix, jp, n + 1] = max(e_old - dt * outflow_below, 0.0)
+                    # Include in cum_e so above-cutoff cells receive the
+                    # quality-shock inflow from this below-cutoff mass.
                     cum_e += e_old * sg.wp[jp]
                     continue
                 end
 
+                # ── Above current reservation quality ───────────────────────
                 γj = pre.γvals[jp]
                 Γj = pre.Γvals[jp]
 
-                # Inflow from unemployment (new hires)
+                # Inflow from unemployment (new hires at quality p_j)
                 inflow_u = fS * γj * uS_ix
 
-                # Inflow from quality shocks (redistribution from below)
+                # Inflow from quality shocks (workers at p' < p_j draw p_j)
+                # cum_e includes mass from both below-cutoff and above-cutoff
+                # cells with p' < p_j.
                 inflow_λ = λS * γj * cum_e
 
-                # OJS: employed workers searching on the job
-                # Workers at (x, p) do OJS if p < poj(x)
+                # OJS: employed workers searching on the job if p < poj(x)
                 is_ojs = (pj < poj_ix) ? 1.0 : 0.0
 
-                # Outflow: quality shock at rate λ removes worker from (x,p)
-                # regardless of new draw (they move to a new p'), plus
-                # demographic exit (ν), exogenous separation (ξ), and
-                # OJS outflow if searching on the job.
+                # Outflow from this (x, p) cell (above cutoff)
                 outflow = (ν + ξS + λS + is_ojs * fS * (1.0 - Γj)) * e_old
 
                 path.eS[ix, jp, n + 1] = max(e_old + dt * (inflow_u + inflow_λ - outflow), 0.0)
@@ -688,12 +821,14 @@ function _build_result(
                 wage_den_U += w * eU_ix
             end
 
-            # Skilled wages (average over employed)
+            # Skilled wages: PS(x)·x·p·β + (1-β)·(r+ν)·US(x)
+            # Uses PS_of_x(x, gamma_PS) — fct_ps variant
             for jp in 1:NpS
                 e_ij = path.eS[ix, jp, n]
                 if e_ij > 1e-14
-                    pj = sg.p[jp]
-                    w_S_ij = rp.PS * gp.x[ix] * pj * sp.β +
+                    pj    = sg.p[jp]
+                    PS_xi = PS_of_x(gp.x[ix], rp.gamma_PS)   # ← fct_ps
+                    w_S_ij = PS_xi * gp.x[ix] * pj * sp.β +
                              (1.0 - sp.β) * (cp.r + cp.ν) * path.US[ix, n]
                     wage_num_S += w * e_ij * wpS[jp] * w_S_ij
                     wage_den_S += w * e_ij * wpS[jp]

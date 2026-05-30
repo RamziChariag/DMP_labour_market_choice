@@ -1,6 +1,7 @@
 ############################################################
 # transition_params.jl — Parameters and path storage for
 #                         backward-forward transition dynamics
+#                         (PS(x) = γ·x^{γ−1} variant)
 #
 # Contains:
 #   TransitionParams   — algorithm control knobs
@@ -65,6 +66,21 @@ Nt = N_steps + 1  is the number of time-grid points (including t=0
 and t=T_max).
 
 Convention: column n  ↔  time tgrid[n].
+
+## Inherited distributions (initialized from z₀ SS, evolved forward)
+
+The following fields are set to z₀ stationary values at t=0 and
+then evolved via their laws of motion.  NO equilibrium condition
+(e.g. eS = 0 below the cutoff) is enforced at any later date:
+they are allowed to decay naturally.
+
+  - uU  : unskilled unemployed density
+  - tU  : training density
+  - uS  : skilled unemployed density
+  - mS  : skilled segment mass  (NOT pinned to (φ/ν)·t during transition)
+  - eS  : skilled employment density on (x, p) grid
+           ↳ workers at p < p*_S(x,t) face natural outflow at (ν+ξ+λ)
+             and receive no new inflow; they are NOT instantly zeroed out.
 """
 mutable struct TransitionPath
     # ── Time grid ─────────────────────────────────────────
@@ -95,13 +111,13 @@ mutable struct TransitionPath
     pstar_S :: Matrix{Float64}
     poj     :: Matrix{Float64}
 
-    # ── Distributions  (Nx × Nt) ─────────────────────────
+    # ── Distributions  (Nx × Nt) — all inherited from z₀ ─
     uU :: Matrix{Float64}             # unskilled unemployed density
     tU :: Matrix{Float64}             # training density
     uS :: Matrix{Float64}             # skilled unemployed density
     mS :: Matrix{Float64}             # skilled segment mass  m_S(x,t)
 
-    # ── Skilled employment  (Nx × NpS × Nt) ──────────────
+    # ── Skilled employment  (Nx × NpS × Nt) — inherited ──
     eS :: Array{Float64, 3}
 end
 
@@ -132,9 +148,9 @@ function TransitionPath(model_z0::Model, ::Model, tp::TransitionParams)
         zeros(Nx, NpS, Nt), zeros(Nx, NpS, Nt),           # J0, J1
         # skilled policies
         zeros(Nx, Nt), zeros(Nx, Nt),
-        # distributions
+        # distributions (all inherited from z₀ SS at t=0)
         zeros(Nx, Nt), zeros(Nx, Nt), zeros(Nx, Nt), zeros(Nx, Nt),
-        # skilled employment
+        # skilled employment (inherited, no cutoff enforcement)
         zeros(Nx, NpS, Nt),
     )
 end

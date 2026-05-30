@@ -78,10 +78,13 @@ function _initialise_caches(
     pstar_U_init = [clamp(regime.bU / (PU_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
                     for ix in 1:Nx]
 
-    # pstar_S(x) ≈ (r+ν)·US / (PS·x);  US ≈ bS/(r+ν)  →  pstar_S ≈ bS/(PS·x)
-    PS_init = max(regime.PS, 1e-6)
+    # pstar_S(x) ≈ (r+ν)·US / (PS(x)·x);  US ≈ bS/(r+ν)
     US_guess_init = regime.bS / max(r + ν, 1e-6)
-    pstar_S_init = [clamp(regime.bS / (PS_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
+    pstar_S_init = [begin
+                        xi = max(grids.x[ix], 1e-3)
+                        PS_xi = max(PS_of_x(xi, regime.gamma_PS), 1e-6)
+                        clamp(regime.bS / (PS_xi * xi), 0.05, 0.90)
+                    end
                     for ix in 1:Nx]
     poj_init = clamp.(pstar_S_init .+ 0.30, pstar_S_init, 0.95)
 
@@ -193,6 +196,19 @@ function solve_model!(model::Model) :: SolveResult
     aa     = Anderson1(2 * Nx)
     mS_cur = [max((φ / ν) * uc.t[ix], 0.0) for ix in 1:Nx]
 
+    # Component-wise scales for the joint Anderson on [U_S; m_S].
+    # U_S and m_S typically live on different magnitudes (U_S is a value
+    # in monetary units; m_S = (φ/ν)·t is a density), so the unscaled
+    # joint residual ‖[r_U; r_M]‖² is dominated by whichever block has
+    # the larger norm.  Anderson then chooses α to tame that block and
+    # the other rides along — defeating the point of joint acceleration
+    # if the period-2 mode lives in the small-norm block.  We set the
+    # scales ONCE from the first iteration's raw outputs (so they are
+    # the same across all Anderson calls), with a floor of 1.0 to keep
+    # the no-op behavior when the initial block is near-zero.
+    s_U = 1.0
+    s_M = 1.0
+
     # Track convergence flags from the LAST global iteration's block solves
     last_conv_U = false
     last_conv_S = false
@@ -225,15 +241,26 @@ function solve_model!(model::Model) :: SolveResult
 
         US_raw = copy(sc.U)
 
-        # Step C: Anderson mixing on joint [U_S; m_S]
-        x_vec = vcat(US_old, mS_old)
-        f_vec = vcat(US_raw, mS_raw)
+        # Lock in the Anderson scales on the first iteration, once both
+        # blocks have produced outputs in their natural magnitudes.
+        # Anderson's first call returns f unchanged regardless of scale,
+        # so doing this at it=1 is safe.
+        if it == 1
+            s_U = max(maximum(abs, US_raw), 1.0)
+            s_M = max(maximum(abs, mS_raw), 1.0)
+        end
 
-        x_new = sim.use_anderson ?
-                anderson1_update!(aa, x_vec, f_vec) : f_vec
+        # Step C: Anderson mixing on joint [U_S; m_S] with per-block scaling.
+        #         Divide each block by its scale so the residual norm gives
+        #         equal weight to both; multiply back after the update.
+        x_vec = vcat(US_old ./ s_U, mS_old ./ s_M)
+        f_vec = vcat(US_raw ./ s_U, mS_raw ./ s_M)
 
-        US_new = x_new[1:Nx]
-        mS_new = max.(x_new[Nx+1:end], 0.0)
+        x_new_s = sim.use_anderson ?
+                  anderson1_update!(aa, x_vec, f_vec) : f_vec
+
+        US_new = x_new_s[1:Nx]           .* s_U
+        mS_new = max.(x_new_s[Nx+1:end] .* s_M, 0.0)
 
         copyto!(sc.U, US_new)
         mS_cur = mS_new

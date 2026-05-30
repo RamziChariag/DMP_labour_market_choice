@@ -18,7 +18,7 @@
 ############################################################
 
 println("="^60)
-println("  Segmented Search Model — SMM Estimation")
+println("  Segmented Search Model — SMM Estimation (PS(x) = γ·x^{γ−1})")
 println("="^60)
 flush(stdout)
 
@@ -108,7 +108,7 @@ sim_smm = SimParams(
 # 2. Select estimation window
 #    Valid windows: :base_fc, :crisis_fc, :base_covid, :crisis_covid
 # ============================================================
-WINDOW = :base_fc
+WINDOW = :crisis_covid
 
 # ============================================================
 # Moments to exclude from the SMM objective.
@@ -167,7 +167,7 @@ flush(stdout)
 #
 # Key convention (ASCII) — same as DEFAULT_PARAMS:
 #   common:  :a_l  :b_l  :c
-#   regime:  :PU  :PS  :bU  :bT  :bS  :alpha_U  :a_Gam  :b_Gam
+#   regime:  :PU  :gamma_PS  :bU  :bT  :bS  :alpha_U  :a_Gam  :b_Gam
 #   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam
 #   skl:     :skl_mu   :skl_eta   :skl_k   :skl_bet
 #            :skl_xi   :skl_lam   :skl_sig
@@ -177,7 +177,7 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :b_l      => 2.42423,
     # :c        => 2.94633,
     # :PU       => 1.05948,
-    # :PS       => 3.83639,
+    # :gamma_PS => 3.83639,
     # :bU       => 0.00000,
     # :bT       => 0.35082,
     # :bS       => 0.56935,
@@ -213,7 +213,7 @@ const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :b_l      => 2.42423,
     :c        => 2.94633,
     :PU       => 1.05948,
-    :PS       => 3.83639,
+    :gamma_PS => 3.83639,
     :bU       => 0.00000,
     :bT       => 0.35082,
     :bS       => 0.56935,
@@ -238,7 +238,7 @@ const DEFAULT_PARAMS = Dict{Symbol,Float64}(
 # Used only when USE_DEFAULT_PARAMS = true.
 const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:common, :a_ℓ) => :a_l,     (:common, :b_ℓ)  => :b_l,     (:common, :c)   => :c,
-    (:regime, :PU)  => :PU,      (:regime, :PS)   => :PS,
+    (:regime, :PU)  => :PU,      (:regime, :gamma_PS) => :gamma_PS,
     (:regime, :bU)  => :bU,      (:regime, :bT)   => :bT,      (:regime, :bS)  => :bS,
     (:regime, :α_U) => :alpha_U, (:regime, :a_Γ)  => :a_Gam,  (:regime, :b_Γ) => :b_Gam,
     (:unsk,   :μ)   => :unsk_mu, (:unsk,   :η)    => :unsk_eta, (:unsk,  :k)   => :unsk_k,
@@ -259,7 +259,7 @@ const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :b_l      => :b_ℓ,
     :c        => :c,
     :PU       => :PU,
-    :PS       => :PS,
+    :gamma_PS => :gamma_PS,
     :bU       => :bU,
     :bT       => :bT,
     :bS       => :bS,
@@ -322,7 +322,7 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 #      2.0   →  equal weights (identity, no W matrix)
 #      >2.0  →  full optimal W (shrunk if κ > target)
 # ============================================================
-W_COND_TARGET = 1e8  # also set in run_params below; keep in sync
+W_COND_TARGET = 2.0  # also set in run_params below; keep in sync
 
 """
     _w_suffix(cond_target) → String
@@ -377,14 +377,14 @@ flush(stdout)
 #      skl:     μ, η, β, σ          (technology / institutions)
 #
 #    Regime-specific (re-estimated per crisis window):
-#      regime:  PU, PS, α_U, a_Γ, b_Γ
+#      regime:  PU, gamma_PS, α_U, a_Γ, b_Γ
 #      unsk:    k, λ
 #      skl:     k, λ, ξ
 # ============================================================
 
 # Set of (block, name) pairs that are regime-specific
 REGIME_SPECIFIC_PARAMS = Set([
-    (:regime, :PU), (:regime, :PS), (:regime, :α_U), (:regime, :a_Γ), (:regime, :b_Γ),
+    (:regime, :PU), (:regime, :gamma_PS), (:regime, :α_U), (:regime, :a_Γ), (:regime, :b_Γ),
     (:unsk, :k), (:unsk, :λ),
     (:skl, :k), (:skl, :λ), (:skl, :ξ),
 ])
@@ -589,29 +589,29 @@ flush(stdout)
 # ============================================================
 run_params = SMMRunParams(
     # ── Grids (coarser = faster per iteration) ──────────────
-    Nx      = 80,
-    Np_U    = 80,
-    Np_S    = 80,
+    Nx      = 120,
+    Np_U    = 120,
+    Np_S    = 120,
 
     # ── Weight matrix conditioning ────────────────────────────
     w_cond_target = W_COND_TARGET,
 
     # ── SA global search ────────────────────────────────────
     sa_max_iter        = 5_000,  # total SA proposals
-    sa_T0              = 5.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
+    sa_T0              = 10.00,     # initial temperature (higher = more uphill acceptance early). 0.0 auto.
     sa_step            = 0.20,    # initial random-walk step in logit space
     sa_cooling_rate    = 1.0,     # scales t in cooling schedule denominator
     sa_cooling_exp     = 1.0,     # exponent: T0/log(1+rate*t)^exp  (<1 = slower cooling)
-    sa_reheat_patience = 100,         # proposals without improvement before reheating
+    sa_reheat_patience = 80,         # proposals without improvement before reheating
     sa_reheat_factor   = 2.00,     # temperature multiplier on reheat
-    sa_max_reheats     = 8.0,       # cap on total reheats (0 = unlimited)
+    sa_max_reheats     = 50,       # cap on total reheats (0 = unlimited)
     sa_adapt_window    = 50,      # rolling window for adaptive step (0 = off)
     sa_target_fin      = 0.90,    # target feasibility rate for adaptive step
     sa_random_init     = false ,   # whether to randomize initial solution for SA (instead of using free_params.init)
 
     # ── DE global search ────────────────────────────────────
-    de_max_iter  = 1_000,       # generations; total evals = max_iter × pop_size
-    de_pop_size  = 230,       # 0 = auto (100 × n_free_params)
+    de_max_iter  = 3_000,       # generations; total evals = max_iter × pop_size
+    de_pop_size  = 120,       # 0 = auto (100 × n_free_params)
     de_f         = 0.70,        #factor for mutation (0.5-0.9 typical)
     de_cr        = 0.85,        #crossover probability (0-1)
     de_patience  = 2,           # how many generations to wait for improvement before early stopping

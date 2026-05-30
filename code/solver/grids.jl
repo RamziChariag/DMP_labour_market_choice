@@ -38,10 +38,23 @@ end
 
 # ============================================================
 # Training cost
-#   c_of_x = x -> exp(cp.c) * (1.0 - x) * exp(-x)   [decreasing in worker quality x]
+#   c_of_x = x -> (1.0 - x) * exp(cp.c-x)   [decreasing in worker quality x]
 # ============================================================
 
-@inline training_cost(x::Float64, c::Float64) = exp(c) * (1.0 - x) * exp(-x)
+@inline training_cost(x::Float64, c::Float64) = (1.0 - x) * exp(c-x)
+
+
+# ============================================================
+# Skilled productivity shifter  PS(x) = γ · x^{γ−1}
+#   PDF of Beta(γ, 1) evaluated at x.
+#   Zero at x = 0 (for γ > 1), monotonically increasing,
+#   equals γ at x = 1.  Single parameter γ controls shape & level.
+# ============================================================
+
+@inline function PS_of_x(x::Float64, γ::Float64)
+    x <= 0.0 && return 0.0
+    return γ * x^(γ - 1.0)
+end
 
 
 # ============================================================

@@ -2,49 +2,62 @@
 # transition_panel.jl — 2×3 time-series panel plot
 #                        (PS(x) = γ·x^{γ−1} variant)
 #
-# Generates one 3×2 panel figure per episode (FC, COVID).
-# Each panel overlays:
-#   - Data line (black solid): actual monthly time series
-#   - SE band (light gray, semi-transparent): ±1.96 × SE
-#   - Model line (steelblue solid): flat at baseline SS
-#     before the switch, then follows transition path
-#   - Vertical line (firebrick dashed): regime switch date
+# LIBRARY FILE — defines plotting functions; does not auto-execute
+# when included.  The supported entry point is transition_main.jl.
 #
-# Usage (from project root):
-#   julia code/transition_fct_ps/transition_panel.jl
+# Generates two figures per scenario:
+#   1. Data-vs-model panel  (output/plots/transition_panel_<sc><W>_fct_ps.png)
+#   2. Model decomposition  (output/plots/model_transition_<sc><W>_fct_ps.png)
 #
-# Outputs:
-#   output/plots/transition_panel_fc_equalW_fct_ps.png
-#   output/plots/transition_panel_covid_equalW_fct_ps.png
+# Public API:
+#   make_transition_panel(; scenario, suffix)
+#   make_model_decomposition_panel(; scenario, suffix)
+#
+# Expects the following to be in scope (provided by transition_main.jl):
+#   - W_SUFFIX, TRANSITION_DIR, PROJECT_ROOT, DERIVED_DIR,
+#     TRANS_OUT_DIR, PLOTS_DIR
+#   If invoked standalone, those constants are filled in below from
+#   sensible defaults.
 ############################################################
 
 # ═══════════════════════════════════════════════════════════
 # Configuration
 # ═══════════════════════════════════════════════════════════
 
-const SHOW_SE_BANDS = false
-
-# Weight-matrix suffix (must match transition output files)
-const W_COND_TARGET = 2.0
-const W_SUFFIX      = W_COND_TARGET == 0.0 ? "_diagonalW"    :
-                      W_COND_TARGET == 1.0 ? "_compressedW"  :
-                      W_COND_TARGET == 2.0 ? "_equalW"       : "_fullW"
+if !@isdefined(SHOW_SE_BANDS)
+    const SHOW_SE_BANDS = false
+end
 
 # ═══════════════════════════════════════════════════════════
-# Paths (script lives in code/transition/)
+# Paths — orchestrator defines these; we only fall back to script-
+# local defaults when the file is included standalone.
 # ═══════════════════════════════════════════════════════════
 
-const TRANSITION_DIR = @__DIR__
-const PROJECT_ROOT   = joinpath(TRANSITION_DIR, "..", "..")
-const DERIVED_DIR    = joinpath(PROJECT_ROOT, "data", "derived")
-const TRANS_OUT_DIR  = joinpath(PROJECT_ROOT, "output", "transition_fct_ps")
-const PLOTS_DIR      = joinpath(PROJECT_ROOT, "output", "plots")
+if !@isdefined(TRANSITION_DIR)
+    const TRANSITION_DIR = @__DIR__
+end
+if !@isdefined(PROJECT_ROOT)
+    const PROJECT_ROOT = joinpath(TRANSITION_DIR, "..", "..")
+end
+if !@isdefined(DERIVED_DIR)
+    const DERIVED_DIR = joinpath(PROJECT_ROOT, "data", "derived")
+end
+if !@isdefined(TRANS_OUT_DIR)
+    const TRANS_OUT_DIR = joinpath(PROJECT_ROOT, "output", "transition_fct_ps")
+end
+if !@isdefined(PLOTS_DIR)
+    const PLOTS_DIR = joinpath(PROJECT_ROOT, "output", "plots")
+end
+if !@isdefined(W_SUFFIX)
+    # Default to equal-W when invoked standalone
+    const W_SUFFIX = "_equalW"
+end
 
 # ═══════════════════════════════════════════════════════════
 # Packages
 # ═══════════════════════════════════════════════════════════
 
-print("Loading packages... "); flush(stdout)
+print("Loading panel packages... "); flush(stdout)
 
 using LinearAlgebra
 using Plots
@@ -60,19 +73,15 @@ using Dates
 println("done."); flush(stdout)
 
 # ═══════════════════════════════════════════════════════════
-# TransitionResult struct definition
+# TransitionResult struct
 #
-# Copied from transition_params.jl so this script can run
-# without loading the full solver (which requires Model etc.).
-# Keep in sync with transition_params.jl.
+# Load TransitionParams and TransitionResult from transition_params.jl
+# only if the orchestrator hasn't already.  We need a stub for `Model`
+# to avoid a load error from the TransitionPath constructor signature —
+# it is never called here.
 # ═══════════════════════════════════════════════════════════
 
-# Load TransitionParams and TransitionResult from transition_params.jl.
-# We need a stub for Model to avoid a load error from the TransitionPath
-# constructor signature — it is never called here.
 if !isdefined(Main, :TransitionResult)
-    # Define a minimal Model stub so that transition_params.jl can be included
-    # (the TransitionPath constructor references Model but we never call it).
     if !isdefined(Main, :Model)
         struct Model end
     end
@@ -733,7 +742,7 @@ function _avg_pair(a::Float64, b::Float64) :: Float64
 end
 
 # ═══════════════════════════════════════════════════════════
-# Main function
+# Main function — data-vs-model panel
 # ═══════════════════════════════════════════════════════════
 
 """
@@ -763,7 +772,7 @@ function make_transition_panel(;
     trans_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(suffix)_fct_ps.jld2")
     if !isfile(trans_file)
         @warn "Transition result not found: $trans_file\n" *
-              "Run transition_main.jl first.  Skipping panel."
+              "Run the simulation first.  Skipping panel."
         return nothing
     end
     trans = JLD2.load(trans_file, "result")
@@ -1077,19 +1086,23 @@ end
 
 
 # ═══════════════════════════════════════════════════════════
-# Entry point — generate all panels
+# Stand-alone entry point — only fires if THIS file is the
+# script invoked from the command line.  Otherwise this file
+# is a library called by transition_main.jl.
 # ═══════════════════════════════════════════════════════════
 
-println("="^65)
-println("  Segmented Search Model — Transition Panel Plots")
-println("="^65)
-flush(stdout)
+if abspath(PROGRAM_FILE) == @__FILE__
+    println("="^65)
+    println("  Segmented Search Model — Transition Panel Plots (standalone)")
+    println("="^65)
+    flush(stdout)
 
-for sc in [:fc, :covid]
-    make_transition_panel(; scenario=sc, suffix=W_SUFFIX)
-    make_model_decomposition_panel(; scenario=sc, suffix=W_SUFFIX)
+    for sc in [:fc, :covid]
+        make_transition_panel(; scenario=sc, suffix=W_SUFFIX)
+        make_model_decomposition_panel(; scenario=sc, suffix=W_SUFFIX)
+    end
+
+    println("\nDone.")
+    println("="^65)
+    flush(stdout)
 end
-
-println("\nDone.")
-println("="^65)
-flush(stdout)
