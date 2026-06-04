@@ -1,0 +1,5 @@
+window,label,cps_pop_16_64,cps_enrolled,cps_share_raw,nsc_fall_years,nsc_enrolled,nsc_share,kappa,cps_share_adj
+base_fc,Pre-FC baseline,191115454,8575138,0.0449,2003–2007,17533398,0.0917,2.0447,0.0917
+crisis_fc,Financial crisis,197874433,9452202,0.0478,2008–2010,20182116,0.102,2.1352,0.102
+base_covid,Pre-COVID baseline,205645305,12938466,0.0629,2015–2019,19992237,0.0972,1.5452,0.0972
+crisis_covid,COVID crisis,206129949,11754631,0.057,2020–2022,18927653,0.0918,1.6102,0.0918

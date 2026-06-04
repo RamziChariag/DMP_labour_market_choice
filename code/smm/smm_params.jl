@@ -1,36 +1,58 @@
 ############################################################
-# smm_params.jl — SMM parameter specification
+# smm_params.jl — SMM parameter specification (v7)
 #
-# Key types
-# ─────────────────────────────────────────────────────────
+# Types
 #   ParamSpec      metadata for a single free parameter
-#   SMMSpec        full SMM problem specification
+#   SMMRunParams   runtime settings (grids, DE / SA / NM, tracing)
+#   SMMSpec        full estimation problem
 #
-# Key functions
-# ─────────────────────────────────────────────────────────
+# Functions
 #   build_smm_spec(...)    construct an SMMSpec
-#   unpack_θ(θ, spec)      free vector → (Common, Regime, Unsk, Skl) structs
-#   pack_θ(spec)           initial values → free vector
+#   default_free_params()  full list of estimable parameters
+#   pack_θ(spec)           initial values → unconstrained vector
+#   unpack_θ(θ, spec)      unconstrained vector → 4 model structs
 #   print_spec(spec)       display the estimation problem
+#
+# Parameter classification (Model Notes §2 / data_and_moments.pdf §18)
+#
+#   Externally set, always fixed at SMM runtime:
+#     r       calibrated to 4% annual real risk-free rate (monthly r = 0.05/12)
+#     ν       pre-estimated from CPS life-table (one row per crisis pair)
+#     φ       pre-estimated from NSC/IPEDS (pooled across Fall semesters)
+#
+#   Deep structural (estimated on base_fc, then HELD FIXED at the baseline
+#   estimates during crisis re-estimation):
+#     common:  a_ℓ, b_ℓ          worker-type Beta shapes
+#     regime:  bU, bT, bS         institutional flow values (UBI/UI/training stipend)
+#
+#   Regime-specific (re-estimated within EACH window):
+#     common:  c                              training cost coefficient
+#     regime:  PU, gamma_PS, α_U, a_Γ, b_Γ    aggregate state / offer shape
+#     unsk:    μ, η, k, β, λ                  matching, vacancy cost,
+#                                              bargaining, damage hazard
+#     skl:     μ, η, k, β, λ, σ               same + OJS flow cost
+#
+# Note on ξ_S: the current model variant sets ξ_S = 0 (all skilled
+# separations are endogenous via λ_S · Γ(p*_S)). SkilledParams therefore
+# does not contain a ξ_S field, and no parameter is dropped here.
 ############################################################
 
 
 # ============================================================
-# ParamSpec — metadata for one free parameter
+# ParamSpec
 # ============================================================
 
 """
     ParamSpec
 
-Describes a single free parameter in the SMM problem.
+Metadata for one free parameter.
 
 Fields
-──────
   block   :: Symbol   which struct (:common, :regime, :unsk, :skl)
   name    :: Symbol   field name within that struct
-  lb      :: Float64  lower bound (used for log/logit transform)
+  lb      :: Float64  lower bound (used for the logit transform)
   ub      :: Float64  upper bound
-  init    :: Float64  starting value
+  init    :: Float64  starting value (constrained space)
   label   :: String   human-readable label for printing
 """
 struct ParamSpec
@@ -44,109 +66,60 @@ end
 
 
 # ============================================================
-# SMMRunParams — optimisation and grid settings
+# SMMRunParams
 # ============================================================
 
 """
     SMMRunParams
 
-All runtime settings for the SMM estimation: grid sizes,
-global search (DE), local polish (Nelder-Mead), and tracing.
-
-Construct with keyword arguments; all have defaults.
-
-Fields — grids
-──────────────
-  Nx, Np_U, Np_S      grid sizes passed to the solver
-                      (coarser = faster iterations)
-
-Fields — global search (DE)
-───────────────────────────
-  de_max_iter         maximum generations
-  de_pop_size         population size (0 = auto: 100 × n_free_params)
-  de_f                mutation scale ∈ (0, 2), typically 0.5–0.9
-  de_cr               crossover probability ∈ (0, 1), typically 0.7–0.9
-  de_patience         early-stop after this many stagnant generations
-  de_avg_tol          early-stop when (Q_mean − Q_best) / |Q_best| < this
-                      value (population has converged around the best).
-                      Set to 0.0 to disable. Default: 0.01 (1 %).
-
-Fields — weight matrix conditioning
-────────────────────────────────────
-  w_cond_target       weight-matrix mode selector.
-                      0.0   →  diagonal from Σ (weights = 1/σ²)
-                      1.0   →  compressed diagonal: log(1 + 1/σ²)
-                      2.0   →  equal weights (identity, no W matrix)
-                      >2.0  →  full optimal W (shrunk if κ > target)
-                      Should match TARGET_KAPPA in the data pipeline.
-
-Fields — local polish (Nelder-Mead)
-────────────────────────────────────
-  nm_max_iter         maximum iterations
-  nm_f_tol            function value tolerance
-  nm_x_tol            parameter tolerance
-
-Fields — tracing
-────────────────
-  show_trace_members     print within-generation member progress
-  show_trace_generations print end-of-generation summary line
-  trace_stride           print member line every N members
+Runtime settings for the SMM estimation — grid sizes, DE, SA, NM,
+weighting and tracing options.  Construct with keyword arguments;
+all have defaults.
 """
 Base.@kwdef struct SMMRunParams
-    # ── Grids ─────────────────────────────────────────────────────────
+    # Grids
     Nx      :: Int     = 80
     Np_U    :: Int     = 80
     Np_S    :: Int     = 80
 
-    # ── DE global search ──────────────────────────────────────────────
+    # Differential evolution
     de_max_iter  :: Int     = 200
-    de_pop_size  :: Int     = 0        # 0 = 100 × n_free_params
+    de_pop_size  :: Int     = 0        # 0 ⇒ 10 × n_free_params
     de_f         :: Float64 = 0.65
     de_cr        :: Float64 = 0.85
     de_patience  :: Int     = 20
-    de_avg_tol   :: Float64 = 0.01   # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 = off
+    de_avg_tol   :: Float64 = 0.01     # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 disables
 
-    # ── Simulated annealing global search ────────────────────────────
-    sa_max_iter      :: Int     = 5_000   # total SA proposals
-    sa_T0            :: Float64 = 2.0     # initial temperature
-    sa_step          :: Float64 = 0.15    # initial random-walk step (logit space)
-    # Cooling schedule: T(t) = T0 / (1 + cooling_rate * t)^cooling_exp
-    # Default is log-cooling (cooling_rate=1, exp≈0 absorbed into log);
-    # increase cooling_exp toward 1.0 to cool faster, decrease toward 0 to cool slower.
-    sa_cooling_rate  :: Float64 = 1.0     # scales t in denominator
-    sa_cooling_exp   :: Float64 = 0.5     # exponent on log: T0 / log(1 + rate*t)^exp
-    # Reheating: if best hasn't improved for sa_reheat_patience steps, reset
-    # current→best and multiply T by sa_reheat_factor (>1 to warm back up).
-    # Set sa_reheat_patience=0 to disable.
-    sa_reheat_patience :: Int     = 200   # proposals without improvement before reheat
-    sa_reheat_factor   :: Float64 = 2.0   # T multiplier on reheat
-    sa_max_reheats     :: Int     = 5     # cap on total reheats (0 = unlimited)
-    # Adaptive step: every sa_adapt_window proposals, rescale step so that
-    # the feasibility rate (fin/total) stays near sa_target_fin.
-    # Set sa_adapt_window=0 to disable.
-    sa_adapt_window  :: Int     = 50      # rolling window for step adaptation
-    sa_target_fin    :: Float64 = 0.90    # target feasibility rate
-    sa_random_init     :: Bool    = false     # whether to randomize initial solution for SA (instead of using free_params.init)
+    # Simulated annealing
+    sa_max_iter      :: Int     = 5_000
+    sa_T0            :: Float64 = 2.0
+    sa_step          :: Float64 = 0.15
+    sa_cooling_rate  :: Float64 = 1.0
+    sa_cooling_exp   :: Float64 = 0.5
+    sa_reheat_patience :: Int     = 200
+    sa_reheat_factor   :: Float64 = 2.0
+    sa_max_reheats     :: Int     = 5
+    sa_adapt_window  :: Int     = 50
+    sa_target_fin    :: Float64 = 0.90
+    sa_random_init   :: Bool    = false
 
-     # ── DE global search ──────────────────────────────────────────────
+    # Weight-matrix mode (see load_weight_matrix)
+    w_cond_target :: Float64 = 1e8
 
-    # ── Weight matrix conditioning ──────────────────────────────────────
-    w_cond_target :: Float64 = 1e8   # 0=diagonal, 1=compressed, 2=equal, >2=full W (shrink if κ>target)
-
-    # ── Nelder-Mead polish ────────────────────────────────────────────
+    # Nelder-Mead polish
     nm_max_iter  :: Int     = 5_000
     nm_f_tol     :: Float64 = 1e-6
     nm_x_tol     :: Float64 = 1e-5
 
-    # ── Tracing ───────────────────────────────────────────────────────
-    show_trace_members     :: Bool = false   # within-generation member lines
-    show_trace_generations :: Bool = true    # end-of-generation summary lines
+    # Tracing
+    show_trace_members     :: Bool = false
+    show_trace_generations :: Bool = true
     trace_stride           :: Int  = 10
 end
 
 
 # ============================================================
-# SMMSpec — full problem specification
+# SMMSpec
 # ============================================================
 
 """
@@ -155,14 +128,12 @@ end
 Holds everything the SMM estimation needs.
 
 Fields
-──────
-  free        vector of ParamSpec (parameters to estimate)
-  fixed       NamedTuple of pinned parameter values
-  moments     NamedTuple from load_data_moments() — (value, weight) pairs
-  sim         SimParams — solver settings (tolerances, maxit, verbose…)
-  run         SMMRunParams — grid sizes and optimiser settings
-  W           Union{Nothing, Matrix{Float64}} — weight matrix
-              (Nothing = equal weights; Matrix = diagonal/compressed/full W)
+  free     vector of ParamSpec (parameters to estimate)
+  fixed    NamedTuple of pinned parameter values
+  moments  NamedTuple from load_data_moments() — (value, weight) pairs
+  sim      SimParams — solver settings
+  run      SMMRunParams — grid sizes, optimiser settings, weighting
+  W        Union{Nothing, Matrix} — weight matrix (nothing = equal weights)
 """
 struct SMMSpec
     free    :: Vector{ParamSpec}
@@ -188,28 +159,20 @@ end
 
 Build an `SMMSpec`.
 
-- `fixed`: a NamedTuple of parameter values to hold fixed during
-  estimation.  Any field name from CommonParams / RegimeParams /
-  UnskilledParams / SkilledParams is valid.
-  Example: `fixed = (r = 0.05, ν = 0.05, ξ = 0.03)`
+- `fixed` is a NamedTuple of parameter values to pin.  Keys may be
+  plain names (e.g. `:r`) or block-qualified (e.g. `:unsk_μ`, `:skl_μ`)
+  to disambiguate shared field names across the unskilled and
+  skilled blocks.  Any free spec whose name matches an entry in
+  `fixed` is silently dropped from the free list.
 
-- `free_specs`: vector of ParamSpec.  Any entry whose name also
-  appears in `fixed` is silently dropped.
+- `skip_moments` is a vector of moment Symbols to deactivate.  Their
+  weights are zeroed in the stored moments NamedTuple so that both
+  `compute_loss` and `compute_loss_matrix` skip them automatically.
+  Unknown names produce a warning.
 
-- `run`: an `SMMRunParams` controlling grid sizes, DE settings,
-  Nelder-Mead settings, and tracing.
-
-- `W`: optional weight matrix from influence functions, already
-  subsetted to the active moments by `load_weight_matrix`.
-  If nothing (default), uses diagonal weights from moment variances.
-
-- `skip_moments`: vector of moment name Symbols to exclude from the
-  SMM objective.  Their weights are set to zero in the stored moments
-  NamedTuple, so both `compute_loss` and `compute_loss_matrix` skip
-  them automatically.  The moment values are still stored and visible
-  in diagnostics (they just show as inactive in `print_spec`).
-  Example: `skip_moments = [:emp_cm3_U, :emp_cm3_S]`
-  Unknown names produce a warning at spec-build time.
+- `W`, if provided, must be square with size equal to the number of
+  active moments.  A mismatch raises an error — typically a sign
+  that `W` was built with a different `skip_moments` list.
 """
 function build_smm_spec(
     moments      :: NamedTuple,
@@ -220,13 +183,9 @@ function build_smm_spec(
     W            :: Union{Nothing, Matrix{Float64}} = nothing,
     skip_moments :: Vector{Symbol}                = Symbol[],
 )
-    # Coerce () or any non-NamedTuple to an empty NamedTuple
     fixed_nt    = (fixed isa NamedTuple) ? fixed : NamedTuple()
     fixed_names = keys(fixed_nt)
 
-    # Drop any free spec whose field appears in `fixed`
-    # Supports both plain names (e.g. :r) and block-qualified names
-    # (e.g. :unsk_μ, :skl_μ) for disambiguating shared names across blocks.
     active_free = filter(ps -> begin
         qualified = Symbol(string(ps.block) * "_" * string(ps.name))
         !(ps.name in fixed_names || qualified in fixed_names)
@@ -240,8 +199,6 @@ function build_smm_spec(
                 join(string.(dropped), ", "))
     end
 
-    # Zero out weights for any moments in skip_moments.
-    # Unknown names get a warning so typos are caught immediately.
     if !isempty(skip_moments)
         unknown = setdiff(skip_moments, keys(moments))
         if !isempty(unknown)
@@ -259,18 +216,13 @@ function build_smm_spec(
         end
     end
 
-    # Validate that W, if provided, matches the number of active moments.
-    # Catches stale W matrices (e.g. loaded from a previous .jls bundle or CSV
-    # with a different SKIP_MOMENTS list) before the optimisation starts.
     if !isnothing(W)
         K_active = count(v -> v.weight > 0.0, values(moments))
         if size(W, 1) != K_active || size(W, 2) != K_active
             error(
                 "W matrix size $(size(W,1))×$(size(W,2)) does not match the number of " *
-                "active moments ($K_active). This usually means a stale W was loaded from " *
-                "a previous run with a different SKIP_MOMENTS list. " *
-                "Call load_weight_matrix(..., skip_moments=SKIP_MOMENTS) with the current " *
-                "SKIP_MOMENTS so the matrix is subsetted correctly before building the spec."
+                "active moments ($K_active). Rebuild spec via build_smm_spec with the " *
+                "correct W from load_weight_matrix(..., skip_moments=SKIP_MOMENTS)."
             )
         end
     end
@@ -281,64 +233,89 @@ end
 
 # ============================================================
 # Default free parameter list
-# All structural parameters across the four structs.
-# Modify bounds/inits here to tune the estimation.
 # ============================================================
 
 """
     default_free_params() → Vector{ParamSpec}
 
-Returns the full list of estimable parameters with default
-bounds and starting values.  Pass a subset to `build_smm_spec`
-to estimate only selected parameters.
+Full list of estimable parameters with default bounds and starting
+values.  Pass a subset to `build_smm_spec` to estimate only some.
+
+Excluded from this list because they are always fixed:
+  r       calibrated externally at 4% annual → monthly r = 0.05/12
+  ν       pre-estimated from CPS data (one value per crisis pair)
+  φ       pre-estimated from NSC/IPEDS data (pooled)
 """
 function default_free_params() :: Vector{ParamSpec}
     return [
-        ParamSpec(:common, :r,   0.001, 0.010,  0.005,  "discount rate r"),
-        ParamSpec(:common, :ν,   0.005, 0.060,  0.025,  "demographic exit ν"),
-        ParamSpec(:common, :φ,   0.008, 0.083,  0.0020,  "training completion φ"),
-        ParamSpec(:common, :a_ℓ, 0.30,  10.00,  2.00,  "worker type shape a_ℓ"),
-        ParamSpec(:common, :b_ℓ, 0.30,  10.00,  5.00,  "worker type shape b_ℓ"),
-        ParamSpec(:common, :c,   0.01,  8.00,   1.70,  "training cost coeff c"),
+        # Deep structural — common block
+        ParamSpec(:common, :a_ℓ, 0.01,  07.00,  2.00,  "worker type shape a_ℓ"),
+        ParamSpec(:common, :b_ℓ, 0.01,  07.00,  5.00,  "worker type shape b_ℓ"),
 
-        ParamSpec(:regime, :PU,  0.05,  6.00,  0.70,  "unskilled productivity PU"),
+        # Deep structural — regime block (institutional flow values)
+        ParamSpec(:regime, :bU,  0.000, 2.00,  0.00,  "unskilled outside flow b_U"),
+        ParamSpec(:regime, :bT,  0.000, 2.00,  0.28,  "training flow b_T"),
+        ParamSpec(:regime, :bS,  0.000, 2.00,  0.01,  "skilled outside flow b_S"),
+
+        # Regime-specific — common block
+        ParamSpec(:common, :c,   0.01,  12.00,   1.70,  "training cost coeff c"),
+
+        # Regime-specific — regime block (aggregate state / offer shape)
+        ParamSpec(:regime, :PU,  0.05,  6.00,  0.70,  "unskilled productivity P_U"),
         ParamSpec(:regime, :gamma_PS, 0.10, 10.00, 1.85, "skilled productivity γ_PS"),
-        ParamSpec(:regime, :bU,  0.000, 2.00,  0.00,  "unskilled UI flow bU"),
-        ParamSpec(:regime, :bT,  0.000, 2.00,  0.28,  "training flow bT"),
-        ParamSpec(:regime, :bS,  0.000, 2.00,  0.01,  "skilled UI flow bS"),
-        ParamSpec(:regime, :α_U, 1.00,  20.00, 1.00,  "unskilled damage shape α_U"),
-        ParamSpec(:regime, :a_Γ, 0.30,  10.00, 2.00,  "skilled offer shape a_Γ"),
-        ParamSpec(:regime, :b_Γ, 0.30,  10.00, 5.00,  "skilled offer shape b_Γ"),
+        ParamSpec(:regime, :α_U, 0.01,  20.00, 1.00,  "unskilled damage shape α_U"),
+        ParamSpec(:regime, :a_Γ, 0.01,  10.00, 2.00,  "skilled offer shape a_Γ"),
+        ParamSpec(:regime, :b_Γ, 0.01,  10.00, 5.00,  "skilled offer shape b_Γ"),
 
-        ParamSpec(:unsk, :μ,    0.01,  1.50,  0.74,  "unskilled matching eff μ_U"),
+        # Regime-specific — unskilled block
+        ParamSpec(:unsk, :μ,    0.001,  1.50,  0.74,  "unskilled matching eff μ_U"),
         ParamSpec(:unsk, :η,    0.10,  0.90,  0.60,  "unskilled matching elas η_U"),
         ParamSpec(:unsk, :k,    0.001, 1.50,  0.25,  "unskilled vacancy cost k_U"),
         ParamSpec(:unsk, :β,    0.05,  0.95,  0.40,  "unskilled bargaining β_U"),
-        ParamSpec(:unsk, :λ,    0.001, 0.400, 0.08,  "unskilled damage rate λ_U"),
+        ParamSpec(:unsk, :λ,    0.001, 0.70, 0.08,  "unskilled damage rate λ_U"),
 
+        # Regime-specific — skilled block
         ParamSpec(:skl, :μ,    0.01,  1.50,  0.90,  "skilled matching eff μ_S"),
         ParamSpec(:skl, :η,    0.10,  0.90,  0.50,  "skilled matching elas η_S"),
         ParamSpec(:skl, :k,    0.001, 1.50,  0.17,  "skilled vacancy cost k_S"),
         ParamSpec(:skl, :β,    0.05,  0.95,  0.32,  "skilled bargaining β_S"),
-        ParamSpec(:skl, :ξ,    0.0, 0.150, 0.03,  "skilled exog. sep rate ξ"),
-        ParamSpec(:skl, :λ,    0.001, 0.400, 0.07,  "skilled quality shock λ_S"),
-        ParamSpec(:skl, :σ,    0.0, 0.150, 0.01,  "OJS flow cost σ"),
+        ParamSpec(:skl, :λ,    0.001, 0.70, 0.07,  "skilled quality shock λ_S"),
+        ParamSpec(:skl, :σ,    0.0, 0.150, 0.01,  "OJS flow cost σ_S"),
     ]
 end
 
 
+# Regime-specific (block, name) pairs.  Used by smm_main to decide
+# which parameters to free in a crisis re-estimation (deep parameters
+# get fixed at the baseline estimate; regime-specific ones stay free).
+const REGIME_SPECIFIC_PARAMS = Set([
+    (:common, :c),
+    (:regime, :PU),  (:regime, :gamma_PS),
+    (:regime, :α_U), (:regime, :a_Γ),   (:regime, :b_Γ),
+    (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),
+    (:skl,    :μ),   (:skl, :η),    (:skl, :k),   (:skl, :β),   (:skl, :λ),
+    (:skl,    :σ),
+])
+
+# Convenience: the complement is the deep set (everything in
+# default_free_params that is NOT regime-specific).  Useful for
+# pinning baseline-derived deep parameters in a crisis run.
+const DEEP_PARAMS = Set([
+    (:common, :a_ℓ), (:common, :b_ℓ),
+    (:regime, :bU),  (:regime, :bT),  (:regime, :bS),
+])
+
+
 # ============================================================
-# Parameter transforms: map (lb, ub) → ℝ for unconstrained optimisation
+# Bounds-aware transforms:  (lb, ub) ↔ ℝ
 # ============================================================
 
-# logit transform: x ∈ (lb, ub) ↦ t ∈ ℝ
 @inline function _to_unconstrained(x::Float64, lb::Float64, ub::Float64)
     p = (x - lb) / (ub - lb)
     p = clamp(p, 1e-8, 1.0 - 1e-8)
     return log(p / (1.0 - p))
 end
 
-# inverse logit: t ∈ ℝ ↦ x ∈ (lb, ub)
 @inline function _to_constrained(t::Float64, lb::Float64, ub::Float64)
     sig = 1.0 / (1.0 + exp(-t))
     return lb + (ub - lb) * sig
@@ -352,7 +329,7 @@ end
 """
     pack_θ(spec) → Vector{Float64}
 
-Return the initial free-parameter vector in *unconstrained* space.
+Return the initial free-parameter vector in unconstrained space.
 """
 function pack_θ(spec::SMMSpec) :: Vector{Float64}
     return [_to_unconstrained(ps.init, ps.lb, ps.ub) for ps in spec.free]
@@ -369,15 +346,14 @@ function unpack_θ(
     θ_unc :: AbstractVector{Float64},
     spec  :: SMMSpec
 )
-    # Step 1: constrained free values
+    # 1. Constrained free values
     free_vals = Dict{Symbol, Float64}()
     for (i, ps) in enumerate(spec.free)
         free_vals[ps.name] = _to_constrained(θ_unc[i], ps.lb, ps.ub)
     end
 
-    # Step 2: merge helper — fixed takes priority, then free, then default
-    # Supports block-qualified fixed keys (e.g. :unsk_μ, :skl_μ) to
-    # disambiguate shared field names across unskilled/skilled blocks.
+    # 2. Merge helper.  Fixed takes priority, then free, then default.
+    #    Supports block-qualified fixed keys (e.g. :unsk_μ, :skl_μ).
     function _get(name::Symbol, block::Symbol, default::Float64) :: Float64
         qualified = Symbol(string(block) * "_" * string(name))
         haskey(spec.fixed, qualified)   && return Float64(spec.fixed[qualified])
@@ -386,8 +362,6 @@ function unpack_θ(
         return default
     end
 
-    # Step 3: build each struct using defaults from initialise_model()
-    #  (defaults are the notebook's calibrated values)
     cp = CommonParams(
         r   = _get(:r,   :common, 0.05),
         ν   = _get(:ν,   :common, 0.05),
@@ -409,9 +383,9 @@ function unpack_θ(
     )
 
     up = UnskilledParams(
-        μ = _get(:μ,  :unsk, 0.74),   # note: μ and other names shared across blocks
-        η = _get(:η,  :unsk, 0.60),   # disambiguation via block-qualified fixed keys
-        k = _get(:k,  :unsk, 0.25),   # (e.g. :unsk_μ vs :skl_μ in spec.fixed)
+        μ = _get(:μ,  :unsk, 0.74),
+        η = _get(:η,  :unsk, 0.60),
+        k = _get(:k,  :unsk, 0.25),
         β = _get(:β,  :unsk, 0.40),
         λ = _get(:λ,  :unsk, 0.08),
     )
@@ -421,21 +395,18 @@ function unpack_θ(
         η = _get(:η,  :skl, 0.50),
         k = _get(:k,  :skl, 0.17),
         β = _get(:β,  :skl, 0.32),
-        ξ = _get(:ξ,  :skl, 0.03),
         λ = _get(:λ,  :skl, 0.07),
         σ = _get(:σ,  :skl, 0.01),
     )
 
-    # ── Handle shared field names (μ, η, k, β, λ) ─────────────────────
-    # The structs UnskilledParams and SkilledParams share field names.
-    # We disambiguate by walking the free list in order and applying each
-    # value to the correct block.
+    # 3. Disambiguate shared field names (μ, η, k, β, λ) across the
+    #    unskilled and skilled blocks.
     up_fields = Dict{Symbol,Float64}(
         :μ => up.μ, :η => up.η, :k => up.k, :β => up.β, :λ => up.λ
     )
     sp_fields = Dict{Symbol,Float64}(
         :μ => sp.μ, :η => sp.η, :k => sp.k, :β => sp.β,
-        :ξ => sp.ξ, :λ => sp.λ, :σ => sp.σ
+        :λ => sp.λ, :σ => sp.σ
     )
 
     for (i, ps) in enumerate(spec.free)
@@ -446,7 +417,7 @@ function unpack_θ(
             sp_fields[ps.name] = v
         end
     end
-    # Apply block-qualified fixed overrides (e.g. :unsk_μ, :skl_η)
+
     for (nm, val) in pairs(spec.fixed)
         s = string(nm)
         if startswith(s, "unsk_")
@@ -466,8 +437,7 @@ function unpack_θ(
     sp = SkilledParams(
         μ = sp_fields[:μ], η = sp_fields[:η],
         k = sp_fields[:k], β = sp_fields[:β],
-        ξ = sp_fields[:ξ], λ = sp_fields[:λ],
-        σ = sp_fields[:σ],
+        λ = sp_fields[:λ], σ = sp_fields[:σ],
     )
 
     return cp, rp, up, sp
@@ -481,14 +451,14 @@ end
 """
     print_spec(spec)
 
-Display the estimation problem: free parameters with bounds,
-fixed overrides, and active moments.
+Display the estimation problem: free parameters with bounds, fixed
+overrides, and active / skipped moments.
 """
 function print_spec(spec::SMMSpec)
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimation Specification                        ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    @printf("║  Free parameters (%d)                                 ║\n",
+    @printf("║  Free parameters (%d)                                ║\n",
             length(spec.free))
     @printf("╠══════════════════════════════════════════════════════╣\n")
     @printf("  %-6s  %-22s  %8s  %8s  %8s\n",
@@ -509,7 +479,6 @@ function print_spec(spec::SMMSpec)
         end
     end
 
-    # Partition moments into active (weight > 0) and skipped (weight == 0)
     active_moments  = [(k, v) for (k, v) in pairs(spec.moments) if v.weight > 0.0]
     skipped_moments = [(k, v) for (k, v) in pairs(spec.moments) if v.weight <= 0.0]
 

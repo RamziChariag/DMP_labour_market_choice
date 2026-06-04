@@ -1,43 +1,41 @@
 ############################################################
 # solver.jl — Global equilibrium solver
 #
-# Exports:
+# Public entry points
 #   solve_model(common, regime, unsk_par, skl_par, sim; Nx, Np_U, Np_S)
-#       → builds a fresh Model, solves it, returns it.
-#
+#       → build grids and caches, run the global loop, return (Model, SolveResult).
 #   solve_model!(model)
-#       → solves an already-initialised Model in place.
+#       → run the global loop in place on an existing Model.
 #
-# Algorithm (global fixed-point):
-#   Link variables: U_S(x) (skilled unemployment value, length Nx)
-#                   m_S(x) (trained worker inflow density, length Nx)
+# Global fixed point on the link variables (U_S, m_S), both Anderson(m=1)
+# accelerated.  The remaining link objects are derived deterministically
+# within each global pass:
+#   f_U        = θ_U · q_U(θ_U)                   from the unskilled solve
+#   E_U(x, 1)  = U_U(x) + β_U · S_U(x, 1)         from the frontier surplus
+#   d(x) u_S(x)                                    from the skilled solve
+#   m_S(x)     = ϕ t(x) / (ν + d(x) f_U)
 #
-#   1. Given U_S in sc.U, solve unskilled block → uc.t
-#   2. m_S_raw = (φ/ν) · uc.t
-#   3. Given m_S_raw, solve skilled block → updates sc.U
-#   4. Anderson(m=1) mix on joint [U_S; m_S]
-#   5. Write mixed U_S back to sc.U; repeat.
+# Per global iteration:
+#   A. Solve the unskilled block with the carried d·u_S.
+#   B. Form f_U and E_U(·, 1).
+#   C. Build m_S using sc.d (= d from previous pass).
+#   D. Solve the skilled block (inner loop updates sc.d).
+#   E. Recompute m_S using the updated sc.d.
+#   F. Anderson on the joint [U_S; m_S] with per-block scaling.
+#   G. Write back: sc.U ← new U_S;  uc.duS_carry ← new d · u_S.
 ############################################################
 
-# packages loaded by main.jl
 
 # ============================================================
-# SolveResult — convergence report from one model solve
+# SolveResult
 # ============================================================
 
 """
     SolveResult
 
 Records whether each layer of the solver converged on the final
-global iteration.  All three must be `true` for the solve to be
-considered valid in SMM.
-
-Fields
-──────
-  converged_U      :: Bool    unskilled outer loop converged
-  converged_S      :: Bool    skilled outer loop converged
-  converged_global :: Bool    global fixed-point converged
-  ok               :: Bool    all three true (convenience)
+global iteration.  All three flags must be `true` for `result.ok`
+to be `true`.
 """
 struct SolveResult
     converged_U      :: Bool
@@ -48,8 +46,9 @@ end
 
 SolveResult(cU::Bool, cS::Bool, cG::Bool) = SolveResult(cU, cS, cG, cU && cS && cG)
 
+
 # ---------------------------------------------------------------------------
-# Cache initialisation (internal helper)
+# Cache initialisation
 # ---------------------------------------------------------------------------
 function _initialise_caches(
     common   :: CommonParams,
@@ -71,15 +70,10 @@ function _initialise_caches(
     U_init       = max.(Usearch_init, T_init)
     t_seed       = [(ν / (ν + φ + ν)) * grids.ℓ[ix] for ix in 1:Nx]
 
-    # ── Parameter-informed initial cutoffs ───────────────────────────────
-    # pstar_U(x) ≈ (r+ν)·U / (PU·x);  U ≈ bU/(r+ν)  →  pstar_U ≈ bU/(PU·x)
-    # Clamped away from corners so the solver has a sensible starting bracket.
     PU_init = max(regime.PU, 1e-6)
     pstar_U_init = [clamp(regime.bU / (PU_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
                     for ix in 1:Nx]
 
-    # pstar_S(x) ≈ (r+ν)·US / (PS(x)·x);  US ≈ bS/(r+ν)
-    US_guess_init = regime.bS / max(r + ν, 1e-6)
     pstar_S_init = [begin
                         xi = max(grids.x[ix], 1e-3)
                         PS_xi = max(PS_of_x(xi, regime.gamma_PS), 1e-6)
@@ -97,7 +91,8 @@ function _initialise_caches(
         τT        = zeros(Nx),
         u         = 0.4 .* grids.ℓ,
         t         = t_seed,
-        θ         = 0.5,     # avoid 1.0 sentinel; will be overwritten on first outer iteration
+        duS_carry = zeros(Nx),
+        θ         = 0.5,
     )
 
     US_init = fill(regime.bS / (r + ν), Nx)
@@ -110,9 +105,10 @@ function _initialise_caches(
         J1    = zeros(Nx, Np_S),
         pstar = pstar_S_init,
         poj   = poj_init,
+        d     = zeros(Nx),
         u     = zeros(Nx),
         e     = zeros(Nx, Np_S),
-        θ     = 0.5,     # avoid 1.0 sentinel; will be overwritten on first outer iteration
+        θ     = 0.5,
     )
 
     return uc, sc
@@ -120,14 +116,11 @@ end
 
 
 # ---------------------------------------------------------------------------
-# solve_model — allocates fresh model and solves
+# solve_model — allocate grids and caches, then solve
 # ---------------------------------------------------------------------------
 """
     solve_model(common, regime, unsk_par, skl_par, sim; Nx, Np_U, Np_S)
         → (Model, SolveResult)
-
-Builds grids and caches from scratch, runs the global fixed-point loop,
-and returns the solved Model together with a SolveResult convergence report.
 """
 function solve_model(
     common   :: CommonParams,
@@ -174,42 +167,52 @@ end
 
 
 # ---------------------------------------------------------------------------
-# solve_model! — in-place solver (operates on an existing Model)
+# m_S(x) = ϕ t(x) / (ν + d(x) f_U)
+# ---------------------------------------------------------------------------
+function _mS_from_t(t::AbstractVector{Float64}, d::AbstractVector{Float64},
+                    φ::Float64, ν::Float64, fU::Float64)
+    Nx = length(t)
+    mS = zeros(Nx)
+    @inbounds for ix in 1:Nx
+        denom = ν + clamp(d[ix], 0.0, 1.0) * fU
+        mS[ix] = denom > 1e-14 ? max(φ * t[ix] / denom, 0.0) : 0.0
+    end
+    return mS
+end
+
+
+# ---------------------------------------------------------------------------
+# solve_model! — in-place global fixed point
 # ---------------------------------------------------------------------------
 """
     solve_model!(model) → SolveResult
 
-Run the global fixed-point loop on `model`, updating caches in place.
-Returns a `SolveResult` indicating whether each layer converged.
-All three flags (converged_U, converged_S, converged_global) must be
-`true` for `result.ok` to be `true`.
+Run the global fixed-point loop in place on `model`.  Returns a
+`SolveResult` indicating whether each layer converged.
 """
 function solve_model!(model::Model) :: SolveResult
     cp  = model.common
     sc  = model.skl_cache
     uc  = model.unsk_cache
+    up  = model.unsk_par
     sim = model.sim
 
     φ  = cp.φ;   ν  = cp.ν
     Nx = length(model.grids.x)
+    βU = up.β
 
-    aa     = Anderson1(2 * Nx)
+    aa = Anderson1(2 * Nx)
+
+    # First-pass m_S uses d ≡ 0  →  (ϕ/ν) · t.
     mS_cur = [max((φ / ν) * uc.t[ix], 0.0) for ix in 1:Nx]
 
-    # Component-wise scales for the joint Anderson on [U_S; m_S].
-    # U_S and m_S typically live on different magnitudes (U_S is a value
-    # in monetary units; m_S = (φ/ν)·t is a density), so the unscaled
-    # joint residual ‖[r_U; r_M]‖² is dominated by whichever block has
-    # the larger norm.  Anderson then chooses α to tame that block and
-    # the other rides along — defeating the point of joint acceleration
-    # if the period-2 mode lives in the small-norm block.  We set the
-    # scales ONCE from the first iteration's raw outputs (so they are
-    # the same across all Anderson calls), with a floor of 1.0 to keep
-    # the no-op behavior when the initial block is near-zero.
+    # Per-block Anderson scales for [U_S; m_S], locked on the first
+    # iteration so both blocks contribute to the residual norm on
+    # comparable scales.  Anderson's first call is a no-op regardless
+    # of scale, so setting them at it = 1 is safe.
     s_U = 1.0
     s_M = 1.0
 
-    # Track convergence flags from the LAST global iteration's block solves
     last_conv_U = false
     last_conv_S = false
     global_converged = false
@@ -220,39 +223,45 @@ function solve_model!(model::Model) :: SolveResult
         US_old = copy(sc.U)
         mS_old = copy(mS_cur)
 
-        # Step A: unskilled block — returns Bool
+        # A. Unskilled block with carried d · u_S in uc.duS_carry.
         last_conv_U = solve_unskilled_block!(model; US_in = sc.U)
 
-        # NaN propagation check before continuing — covers θ and all key outputs
         if !isfinite(uc.θ) || any(!isfinite, uc.t) || any(!isfinite, uc.U) || any(!isfinite, uc.pstar)
             sim.verbose >= 1 && @printf("[global]  NaN/Inf in unskilled block at it=%d — aborting\n", it)
             return SolveResult(false, false, false)
         end
 
-        mS_raw = [max((φ / ν) * uc.t[ix], 0.0) for ix in 1:Nx]
+        # B. Form unskilled-side outputs consumed by the skilled block.
+        fU  = jobfinding_rate(uc.θ, up.μ, up.η)
+        SU1 = uc.Jfrontier ./ max(1.0 - βU, 1e-14)
+        EU1 = uc.U .+ βU .* SU1
 
-        # Step B: skilled block — returns Bool
-        last_conv_S = solve_skilled_block!(model; mS_in = mS_raw)
+        # C. m_S using the previous-pass d.
+        mS_raw_pre = _mS_from_t(uc.t, sc.d, φ, ν, fU)
 
-        if !isfinite(sc.θ) || any(!isfinite, sc.U) || any(!isfinite, sc.pstar)
+        # D. Skilled block; inner loop updates sc.d.
+        last_conv_S = solve_skilled_block!(model;
+                                            mS_in = mS_raw_pre,
+                                            fU    = fU,
+                                            EU1   = EU1)
+
+        if !isfinite(sc.θ) || any(!isfinite, sc.U) || any(!isfinite, sc.pstar) ||
+           any(!isfinite, sc.d) || any(!isfinite, sc.u)
             sim.verbose >= 1 && @printf("[global]  NaN/Inf in skilled block at it=%d — aborting\n", it)
             return SolveResult(false, false, false)
         end
 
         US_raw = copy(sc.U)
 
-        # Lock in the Anderson scales on the first iteration, once both
-        # blocks have produced outputs in their natural magnitudes.
-        # Anderson's first call returns f unchanged regardless of scale,
-        # so doing this at it=1 is safe.
+        # E. m_S using the just-updated sc.d.
+        mS_raw = _mS_from_t(uc.t, sc.d, φ, ν, fU)
+
         if it == 1
             s_U = max(maximum(abs, US_raw), 1.0)
             s_M = max(maximum(abs, mS_raw), 1.0)
         end
 
-        # Step C: Anderson mixing on joint [U_S; m_S] with per-block scaling.
-        #         Divide each block by its scale so the residual norm gives
-        #         equal weight to both; multiply back after the update.
+        # F. Joint Anderson on [U_S; m_S] with per-block scaling.
         x_vec = vcat(US_old ./ s_U, mS_old ./ s_M)
         f_vec = vcat(US_raw ./ s_U, mS_raw ./ s_M)
 
@@ -265,13 +274,18 @@ function solve_model!(model::Model) :: SolveResult
         copyto!(sc.U, US_new)
         mS_cur = mS_new
 
-        # Step D: convergence
+        # G. Refresh the cross-market contribution for the next pass.
+        @inbounds for ix in 1:Nx
+            uc.duS_carry[ix] = max(clamp(sc.d[ix], 0.0, 1.0) * sc.u[ix], 0.0)
+        end
+
+        # Convergence on (ΔU_S, Δm_S).
         dU = supnorm(US_new, US_old)
         dM = supnorm(mS_new, mS_old)
         d  = max(dU, dM)
 
         if sim.verbose >= 1 && (it == 1 || it % sim.verbose_stride == 0)
-            @printf("[global it=%d]  maxΔ=%.3e  (ΔUS=%.3e  ΔmS=%.3e)  θU=%.4f  θS=%.4f\n",
+            @printf("[global it=%d]  maxΔ=%.3e  (ΔU_S=%.3e  Δm_S=%.3e)  θ_U=%.4f  θ_S=%.4f\n",
                     it, d, dU, dM, uc.θ, sc.θ)
         end
 

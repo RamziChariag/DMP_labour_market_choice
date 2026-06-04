@@ -1,95 +1,145 @@
 ############################################################
-# moments.jl — Empirical moment targets
+# moments.jl — Empirical moment targets (v7)
 #
-# Supports loading moments from CSV files produced by the data
-# pipeline, with fallback to placeholder values.
-#
-# Returns a NamedTuple of (value, weight) pairs.
-# Weight = 1 / variance of the moment estimator (or a proxy).
-# Higher weight = more tightly targeted.
+# Loads moments from CSV files produced by data_pipeline_v7 and
+# computes the matching model moments from a solved equilibrium.
 #
 # Wage premium convention
-# ───────────────────────
-# wage_premium  ≡  E[log w_S] − E[log w_U]
+#   wage_premium  ≡  E[log w_S] − E[log w_U]
 #
-# This is the standard Mincer / OLS skill-premium: scale-invariant,
-# directly estimable from micro data, and orthogonal to the level
-# moments mean_wage_U / mean_wage_S already in the objective.
-# Do NOT use E[log w_S]/E[log w_U]: with wages normalised below 1
-# the logs are negative and the ratio is non-monotone in the premium.
-# Do NOT use E[w_S]/E[w_U]: collinear with the two level means.
+# Changes vs. previous version (data_and_moments.pdf Part VII):
+#   - 24 moments (dropped exp_ur_total / exp_ur_U / exp_ur_S).
+#   - Added train_entry_rate_U: monthly hazard of an
+#     unskilled-unemployed worker becoming enrolled in training.
+#     Model counterpart: ∫_{x̄}^1 u_U(x) dx / agg_uU, equivalently
+#     the τ-weighted share of unskilled unemployment.
+#   - load_calibrated_params now reads nu_estimation.csv (two rows)
+#     and accepts a `window` so each crisis pair gets the ν of its
+#     own baseline (FC pair → ν_base_fc; COVID pair → ν_base_covid).
+#
+# v7.1 — NSC-based training_share level adjustment (κ_w):
+#   - The CPS SCHLCOLL universe expanded in Jan 2013 (16–24 → 16–54),
+#     so the raw CPS training_share level is not directly comparable
+#     across the FC and COVID windows. The new pipeline cell
+#     "CPS vs NSC enrolment — per-window level adjustment (κ)" writes
+#     derived/training_share_scale.csv with one κ_w per window,
+#     κ_w = NSC_IPEDS_enr_w / CPS_enr_w.
+#   - Strategy (Option B from the design discussion):
+#       data_target          ←  κ_w · CPS_training_share
+#       Σ̂[ts, ts]            ←  κ_w² · Σ̂[ts, ts]
+#       Σ̂[ts,  ·] (off-diag) ←  κ_w  · Σ̂[ts,  ·]
+#     The full CPS off-diagonal covariance structure is preserved up
+#     to the linear κ scaling on the training_share row/column.
+#   - The model-side training_share is already age-uncapped
+#     (agg_t / total_pop), so κ-scaling the data target makes the two
+#     conceptually comparable.
+#   - If training_share_scale.csv is missing, κ_w defaults to 1.0
+#     with a warning (back-compat with older pipeline runs).
 ############################################################
 
 
 # ============================================================
-# Moment names (in order)
+# Moment names (canonical order — 24 moments)
 # ============================================================
 
 const MOMENT_NAMES = [
     :ur_total, :ur_U, :ur_S,
-    :exp_ur_total, :exp_ur_U, :exp_ur_S,
     :skilled_share, :training_share,
     :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
-    :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :ee_rate_S,
+    :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S,
+    :ee_rate_S, :train_entry_rate_U,
     :mean_wage_U, :mean_wage_S,
     :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
     :wage_premium, :theta_U, :theta_S,
 ]
 
+@assert length(MOMENT_NAMES) == 24 "Expected 24 moments, got $(length(MOMENT_NAMES))"
+
+
+"""
+    load_training_share_scale(; window::Symbol, derived_dir::String) → Float64
+
+Return κ_w for the given window, read from
+`derived/training_share_scale.csv` produced by the "CPS vs NSC
+enrolment" cell in data_pipeline_v7. Returns 1.0 with a warning if
+the file is missing or the window has no row (back-compat with
+older pipeline runs that did not write the file).
+"""
+function load_training_share_scale(; window::Symbol, derived_dir::String) :: Float64
+    path = joinpath(derived_dir, "training_share_scale.csv")
+    if !isfile(path)
+        @warn "training_share_scale.csv not found in $derived_dir — using κ = 1.0 " *
+              "(no NSC-based level adjustment applied). Re-run the CPS-vs-NSC " *
+              "cell in data_pipeline_v7 to enable κ."
+        return 1.0
+    end
+    df = CSV.read(path, DataFrame)
+    df.window = Symbol.(df.window)
+    rows = filter(:window => ==(window), df)
+    if isempty(rows)
+        @warn "No row for window=:$window in $path — using κ = 1.0."
+        return 1.0
+    end
+    κ = Float64(rows.kappa_training_share[1])
+    if !isfinite(κ) || κ <= 0
+        @warn @sprintf("κ for :%s is non-finite or non-positive (%.4e) — using κ = 1.0.",
+                       window, κ)
+        return 1.0
+    end
+    return κ
+end
+
 
 """
     load_data_moments(; window::Symbol = :base_fc, derived_dir::String) → NamedTuple
 
-Returns the empirical moment targets used in SMM estimation.
-Each field is a (value, weight) tuple.
+Return the empirical moment targets used in SMM estimation.  Each
+field is a (value, weight) tuple.  Reads from
+`moments_{window}.csv` produced by data_pipeline_v7.
 
-Reads from CSV files produced by the data pipeline:
-  - moments_{window}.csv: moment values and standard errors
+The training_share row is rescaled by κ_w from
+`training_share_scale.csv` so the data target reflects the NSC
+IPEDS-Universe level (age-comparable across the FC and COVID
+windows). If the κ file is missing, κ = 1.0 and a warning is
+emitted.
 
-# Arguments
-- `window::Symbol`: window identifier (default `:base_fc`)
-- `derived_dir::String`: directory containing derived CSV files
+Moment list
+  Labour-market stocks (5)
+    ur_total, ur_U, ur_S, skilled_share, training_share
 
-# Moment list (23 moments, matches data_pipeline_v6)
-───────────────────────────────────────────────────────────
-  Labour market stocks
-    ur_U              unskilled unemployment rate
-    ur_S              skilled unemployment rate
-    ur_total          aggregate (population-weighted) unemployment rate
-    skilled_share     share of population in skilled segment
-    training_share    share of population in training
-    emp_var_U         variance of wages among unskilled employed
-    emp_cm3_U         third central moment of wages, unskilled employed
-    emp_var_S         variance of wages among skilled employed
-    emp_cm3_S         third central moment of wages, skilled employed
+  Wage shape (4)
+    emp_var_U, emp_cm3_U, emp_var_S, emp_cm3_S
 
-  Transition rates
-    jfr_U             unskilled job-finding rate
-    sep_rate_U        unskilled separation rate
-    jfr_S             skilled job-finding rate
-    sep_rate_S        skilled (endogenous+exogenous) separation rate
-    ee_rate_S         skilled employment-to-employment transition rate
+  Transition rates (6)
+    jfr_U, sep_rate_U, jfr_S, sep_rate_S, ee_rate_S, train_entry_rate_U
 
-  Wages
-    mean_wage_U       mean wage, unskilled employed
-    mean_wage_S       mean wage, skilled employed
-    p25_wage_U        25th percentile wage, unskilled
-    p25_wage_S        25th percentile wage, skilled
-    p50_wage_U        median wage, unskilled
-    p50_wage_S        median wage, skilled
-    wage_premium      E[log w_S] − E[log w_U]  (log skill premium)
+  Wages (7)
+    mean_wage_U, mean_wage_S,
+    p25_wage_U, p25_wage_S, p50_wage_U, p50_wage_S,
+    wage_premium
 
-  Tightness (if vacancy data available)
-    theta_U           unskilled vacancy-unemployment ratio
-    theta_S           skilled vacancy-unemployment ratio
-───────────────────────────────────────────────────────────
+  Tightness (2)
+    theta_U, theta_S
 """
 function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
-
     moments_file = joinpath(derived_dir, "moments_$(window).csv")
-    isfile(moments_file) || error("Moments file not found: $moments_file — run the data pipeline first.")
+    isfile(moments_file) || error("Moments file not found: $moments_file — run data_pipeline_v7 first.")
+    raw = _read_moments_csv(moments_file)
 
-    return _read_moments_csv(moments_file)
+    # κ-rescale training_share to NSC level (see header note).
+    κ = load_training_share_scale(; window=window, derived_dir=derived_dir)
+    if haskey(raw, :training_share) && κ != 1.0
+        old_val = raw.training_share.value
+        new_val = κ * old_val
+        @printf("  Applied κ_w to training_share level: %.5f → %.5f  (κ_%s = %.4f)\n",
+                old_val, new_val, window, κ)
+        # Rebuild NamedTuple with the scaled training_share entry.
+        scaled_pairs = [k => (k === :training_share ?
+                              (value = new_val, weight = v.weight) : v)
+                        for (k, v) in Base.pairs(raw)]
+        return NamedTuple(scaled_pairs)
+    end
+    return raw
 end
 
 
@@ -97,35 +147,18 @@ end
     load_weight_matrix(; window, derived_dir, cond_target,
                          skip_moments) → Union{Nothing, Matrix{Float64}}
 
-Load the optimal weight matrix from influence functions.
-
-Returns a matrix already subsetted to the active moments (i.e. all
-moments NOT in `skip_moments`), or `nothing` for the equal-weight case.
-The returned matrix is always K_active × K_active where
-K_active = K − |skip_moments|, so it is dimensionally consistent with
-the deviation vector built by `compute_loss_matrix`.
+Build the SMM weighting matrix from `sigma_{window}.csv`,
+subsetted to the active moments (i.e. those in `MOMENT_NAMES`
+that are not in `skip_moments`).
 
 Conditioning behaviour (controlled by `cond_target`):
-  - cond_target == 0.0:  Pure diagonal matrix from sigma_{window}.csv.
-    Weights are 1/σ² for each moment.
-  - cond_target == 1.0:  Compressed diagonal — loads diagonal weights
-    (1/σ²) from sigma_{window}.csv, then applies log(1 + d) element-wise
-    to compress the dynamic range while preserving ranking.
-  - cond_target == 2.0:  Equal weights — returns `nothing`.
-    The loss function will use compute_loss with unit diagonal weights,
-    i.e. all moments weighted equally (no W matrix).
-  - cond_target > 2.0:  Full optimal W = Σ⁻¹ computed fresh from
-    sigma_{window}.csv.  The pipeline generates this file already
-    subsetted to the active moments, so it is used as-is — no size
-    checks, no index subsetting, no dependency on any saved W file.
-    If κ(W) > cond_target, shrink off-diagonal elements toward zero via
-        W_shrunk = (1 − α) W  +  α diag(W)
-    until κ(W_shrunk) ≤ cond_target.  The shrinkage factor α is found
-    by bisection.  Shrinkage is applied AFTER subsetting, so the
-    condition number is evaluated on the active submatrix only.
-
-- `skip_moments`: vector of moment Symbols to exclude.  Must match
-  what is passed to `build_smm_spec`.  Unknown names produce a warning.
+  cond_target == 0.0  pure diagonal W = inv(diag(Σ))
+  cond_target == 1.0  compressed diagonal:  W_kk = log(1 + 1/σ_k²)
+  cond_target == 2.0  equal weights — returns `nothing`
+  cond_target  > 2.0  full optimal W = inv(Σ); if κ(Σ) > cond_target,
+                       Σ is shrunk toward its diagonal by bisection
+                       on ρ ∈ [0, 1] in  Σ(ρ) = (1−ρ) diag(Σ) + ρ Σ
+                       until κ(Σ(ρ)) ≤ cond_target, then W = inv(Σ(ρ)).
 """
 function load_weight_matrix(;
     window::Symbol = :base_fc,
@@ -133,10 +166,8 @@ function load_weight_matrix(;
     cond_target::Float64 = 1e8,
     skip_moments::Vector{Symbol} = Symbol[],
 )
-
     K = length(MOMENT_NAMES)
 
-    # Compute active indices (into MOMENT_NAMES) once — used by all branches.
     unknown = setdiff(skip_moments, MOMENT_NAMES)
     if !isempty(unknown)
         @printf("  load_weight_matrix: skip_moments — unrecognised names (ignored): %s\n",
@@ -149,35 +180,54 @@ function load_weight_matrix(;
                 K_active, K, join(string.(skip_moments), ", "))
     end
 
-    # ── cond_target == 2.0  →  equal weights (identity / nothing) ─────
     if cond_target == 2.0
         @printf("  cond_target == 2.0 → equal weights (no W matrix)\n")
-        return nothing   # compute_loss uses unit weights; no subsetting needed
+        return nothing
     end
 
-    # ── cond_target == 0.0  →  pure diagonal from active submatrix of Σ ──
+    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+    isfile(sigma_file) || error(
+        "sigma_$(window).csv not found in $derived_dir — run data_pipeline_v7 first.")
+    df_sig   = CSV.read(sigma_file, DataFrame)
+    csv_cols = Symbol.(names(df_sig))
+    active_col_idx = [findfirst(==(nm), csv_cols) for nm in active_names]
+    missing_cols = active_names[isnothing.(active_col_idx)]
+    isempty(missing_cols) || error(
+        "sigma_$(window).csv is missing columns for active moments: " *
+        join(string.(missing_cols), ", ") *
+        " — re-run data_pipeline_v7.")
+
+    # Convert to Matrix once; all downstream operations work on Σ_full.
+    Σ_full = Matrix{Float64}(df_sig)
+
+    # Apply κ_w to the training_share row/column of Σ̂ so it stays
+    # consistent with the κ-scaled data target produced by
+    # load_data_moments. Off-diagonals × κ, diagonal × κ². Done on
+    # the FULL Σ̂ before subsetting so it works whether or not
+    # training_share is in `active_names`.
+    κ = load_training_share_scale(; window=window, derived_dir=derived_dir)
+    if κ != 1.0
+        ts_idx = findfirst(==(:training_share), csv_cols)
+        if isnothing(ts_idx)
+            @warn "Σ̂ has no training_share column — κ scaling on Σ̂ skipped."
+        else
+            Σ_full[ts_idx, :] .*= κ
+            Σ_full[:, ts_idx] .*= κ
+            # The (ts_idx, ts_idx) cell got multiplied twice → κ², which is
+            # the correct rescaling for the variance of a κ-scaled moment.
+            @printf("  Applied κ_w = %.4f to training_share row/col of Σ̂  (diagonal × κ² = %.4f).\n", κ, κ^2)
+        end
+    end
+
     if cond_target == 0.0
-        sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-        isfile(sigma_file) || error(
-            "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
-        df_sig   = CSV.read(sigma_file, DataFrame)
-        csv_cols = Symbol.(names(df_sig))
-        active_col_idx = [findfirst(==(nm), csv_cols) for nm in active_names]
-        d = diag(Matrix{Float64}(df_sig)[active_col_idx, active_col_idx])
+        d = diag(Σ_full[active_col_idx, active_col_idx])
         W = Diagonal(1.0 ./ max.(d, 1e-14))
         @printf("  cond_target == 0.0 → diagonal W from active submatrix of %s\n", sigma_file)
         return Matrix(W)
     end
 
-    # ── cond_target == 1.0  →  compressed diagonal from active submatrix of Σ
     if cond_target == 1.0
-        sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-        isfile(sigma_file) || error(
-            "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
-        df_sig   = CSV.read(sigma_file, DataFrame)
-        csv_cols = Symbol.(names(df_sig))
-        active_col_idx = [findfirst(==(nm), csv_cols) for nm in active_names]
-        d            = diag(Matrix{Float64}(df_sig)[active_col_idx, active_col_idx])
+        d            = diag(Σ_full[active_col_idx, active_col_idx])
         d_inv        = 1.0 ./ max.(d, 1e-14)
         d_compressed = log.(1.0 .+ d_inv)
         W = Diagonal(d_compressed)
@@ -187,29 +237,9 @@ function load_weight_matrix(;
         return Matrix(W)
     end
 
-    # ── Full optimal W = inv(Σ_active) ────────────────────────────────────────
-    # Read the full K×K sigma CSV, subset to active moments by column name, then
-    # invert. Shrinkage is applied to Σ BEFORE inverting: shrinking W = inv(Σ)
-    # toward diag(inv(Σ)) is wrong because diag(inv(Σ)) can be negative when Σ
-    # is ill-conditioned, producing a negative-definite W. Shrinking Σ first
-    # guarantees Σ_shrunk is PD, so W = inv(Σ_shrunk) has positive diagonal.
-    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-    isfile(sigma_file) || error(
-        "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
-
-    df_sig   = CSV.read(sigma_file, DataFrame)
-    csv_cols = Symbol.(names(df_sig))
-
-    col_pos = Dict(nm => findfirst(==(nm), csv_cols) for nm in csv_cols)
-    missing_cols = [nm for nm in active_names if !haskey(col_pos, nm)]
-    isempty(missing_cols) || error(
-        "sigma_$(window).csv is missing columns for active moments: " *
-        join(string.(missing_cols), ", ") *
-        " — re-run the data pipeline.")
-    active_col_idx = [col_pos[nm] for nm in active_names]
-
-    Σ_full = Matrix{Float64}(df_sig)
-    Σ      = Σ_full[active_col_idx, active_col_idx]   # K_active × K_active
+    # Full W.  Shrinkage is applied to Σ before inverting so that
+    # W = inv(Σ_shrunk) is guaranteed PD with positive diagonal.
+    Σ      = Σ_full[active_col_idx, active_col_idx]
     Σsym   = Symmetric(Σ)
     cond_Σ = cond(Σsym)
 
@@ -225,9 +255,6 @@ function load_weight_matrix(;
             return Matrix(Diagonal(1.0 ./ max.(diag(Σ), 1e-14)))
         end
 
-        # Bisect on ρ: Σ(ρ) = (1−ρ)·diag(Σ) + ρ·Σ.
-        # ρ = 0 → pure diagonal; ρ = 1 → original Σ.
-        # Find largest ρ such that κ(Σ(ρ)) ≤ cond_target.
         ρ_lo, ρ_hi, best_ρ = 0.0, 1.0, 0.0
         Σ_mid = similar(Matrix(Σsym))
         for _ in 1:60
@@ -256,16 +283,8 @@ end
 """
     _shrink_to_target(W, cond_target; tol, maxiter) → (W_shrunk, α)
 
-Shrink the off-diagonal elements of symmetric matrix W so that
-    κ(W_shrunk) ≤ cond_target
-using the convex combination
-    W(α) = (1 − α) W  +  α diag(W),       α ∈ [0, 1]
-
-At α = 0 we have the original W; at α = 1, a pure diagonal.
-The condition number is monotonically non-increasing in α, so
-bisection is guaranteed to converge.
-
-Returns the shrunk matrix and the shrinkage factor α used.
+Shrink the off-diagonals of symmetric W so that κ(W_shrunk) ≤ cond_target
+via the convex combination W(α) = (1−α) W + α diag(W),  α ∈ [0, 1].
 """
 function _shrink_to_target(
     W::Matrix{Float64},
@@ -275,7 +294,6 @@ function _shrink_to_target(
 )
     D = Diagonal(diag(W))
 
-    # Sanity: if pure diagonal already exceeds target, just return it
     if cond(Matrix(D)) > cond_target
         return Matrix(D), 1.0
     end
@@ -289,14 +307,13 @@ function _shrink_to_target(
         W_shrunk .= (1.0 - alpha) .* W .+ alpha .* D
         κ = cond(W_shrunk)
         if κ <= cond_target
-            hi = alpha          # can shrink less
+            hi = alpha
         else
-            lo = alpha          # need to shrink more
+            lo = alpha
         end
         (hi - lo) < tol && break
     end
 
-    # Use the conservative (higher-α) endpoint to guarantee κ ≤ target
     alpha = hi
     W_shrunk .= (1.0 - alpha) .* W .+ alpha .* D
     return W_shrunk, alpha
@@ -306,54 +323,81 @@ end
 """
     load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String) → Vector{Float64}
 
-Load the standard error vector from sigma_{window}.csv.
-
-Returns a K-element vector of standard errors (σ), where K = number of moments.
+Read `sigma_{window}.csv` and return the vector of standard errors
+(square root of the diagonal). The training_share entry is scaled
+by κ_w so the returned σ refers to the κ-rescaled data target.
 """
 function load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String)
-
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-    isfile(sigma_file) || error("Sigma file not found: $sigma_file — run the data pipeline first.")
+    isfile(sigma_file) || error("Sigma file not found: $sigma_file — run data_pipeline_v7 first.")
+    σ_vec = _read_sigma_csv(sigma_file)
 
-    return _read_sigma_csv(sigma_file)
+    κ = load_training_share_scale(; window=window, derived_dir=derived_dir)
+    if κ != 1.0
+        df = CSV.read(sigma_file, DataFrame)
+        ts_idx = findfirst(==(:training_share), Symbol.(names(df)))
+        if !isnothing(ts_idx)
+            σ_vec[ts_idx] *= κ
+        end
+    end
+    return σ_vec
 end
 
 
 # ============================================================
-# Load externally calibrated parameters from data pipeline
+# Externally calibrated parameters from the data pipeline
 # ============================================================
 
 """
-    load_calibrated_params(; derived_dir::String) -> NamedTuple{(:r, :nu, :phi)}
+    load_calibrated_params(; window::Symbol = :base_fc,
+                            derived_dir::String) → NamedTuple
 
-Load the three externally calibrated parameters:
-  - r   = 0.05/12 ≈ 0.00417  (monthly discount rate; 5% annual / 12 months)
-  - nu  from nu_estimate.csv  (demographic turnover from CPS matched panels)
-  - phi from phi_calibration.csv  (training completion rate from NSC data)
+Load the three externally calibrated parameters held fixed during
+SMM estimation.
 
-These three are FIXED across all 4 estimation windows (base_fc, crisis_fc,
-base_covid, crisis_covid).  Only r is truly external; nu and phi are
-computed from data but held constant because they represent structural
-parameters that do not change with the business cycle.
+  r   = 0.05 / 12              monthly discount rate (5% annual)
+  ν   from nu_estimation.csv   demographic turnover (life-table)
+                                The FC pair (base_fc, crisis_fc) uses
+                                the base_fc row; the COVID pair
+                                (base_covid, crisis_covid) uses the
+                                base_covid row.
+  φ   from phi_calibration.csv training completion rate (NSC/IPEDS,
+                                pooled across Fall semesters)
 
-Requires the data pipeline to have been run first.  Errors if CSV files
-are missing — there are no hardcoded fallbacks for data-derived values.
+`window` controls which ν is returned. Crisis windows are mapped to
+their baseline (crisis_fc → base_fc, crisis_covid → base_covid)
+per data_and_moments.pdf §21.
 """
-function load_calibrated_params(; derived_dir::String)
-    # r: externally set at 5% annual.  The data is monthly, so the
-    # per-period discount rate is 0.05/12 ≈ 0.00417.
+function load_calibrated_params(; window::Symbol = :base_fc,
+                                  derived_dir::String)
     r_val = 0.05 / 12
 
-    # ── nu from CPS matched-panel exit hazard ─────────────────────────
-    nu_file = joinpath(derived_dir, "nu_estimate.csv")
-    isfile(nu_file) || error("nu_estimate.csv not found in $derived_dir — run the data pipeline first.")
-    df_nu = CSV.read(nu_file, DataFrame)
-    nu_val = Float64(df_nu.nu[1])
-    @printf("  Loaded nu = %.5f from %s\n", nu_val, nu_file)
+    # Which baseline supplies ν for this window
+    nu_pair = if window in (:base_fc, :crisis_fc)
+        :base_fc
+    elseif window in (:base_covid, :crisis_covid)
+        :base_covid
+    else
+        error("load_calibrated_params: unrecognised window :$window. " *
+              "Expected one of :base_fc, :crisis_fc, :base_covid, :crisis_covid.")
+    end
 
-    # ── phi from NSC completion-rate calibration ───────────────────────
+    nu_file = joinpath(derived_dir, "nu_estimation.csv")
+    isfile(nu_file) || error(
+        "nu_estimation.csv not found in $derived_dir — run data_pipeline_v7 first.")
+    df_nu = CSV.read(nu_file, DataFrame)
+    df_nu.window = Symbol.(df_nu.window)
+    rows = filter(:window => ==(nu_pair), df_nu)
+    isempty(rows) && error(
+        "nu_estimation.csv has no row for window=$nu_pair. " *
+        "Expected one row each for :base_fc and :base_covid.")
+    nu_val = Float64(rows.nu[1])
+    @printf("  Loaded nu = %.5f from %s  (window=%s → uses %s row)\n",
+            nu_val, nu_file, window, nu_pair)
+
     phi_file = joinpath(derived_dir, "phi_calibration.csv")
-    isfile(phi_file) || error("phi_calibration.csv not found in $derived_dir — run the data pipeline first.")
+    isfile(phi_file) || error(
+        "phi_calibration.csv not found in $derived_dir — run data_pipeline_v7 first.")
     df_phi = CSV.read(phi_file, DataFrame)
     phi_val = Float64(df_phi.phi[1])
     @printf("  Loaded phi = %.5f from %s\n", phi_val, phi_file)
@@ -363,33 +407,70 @@ end
 
 
 # ============================================================
-# Internal helpers for reading CSV files
+# Windows.json loader (single source of truth from data_pipeline_v7)
+# ============================================================
+
+"""
+    load_windows(; derived_dir::String) → NamedTuple
+
+Read `windows.json` (written by data_pipeline_v7) and return
+`(windows = Dict{Symbol,NamedTuple}, order = Vector{Symbol})`.
+"""
+function load_windows(; derived_dir::String)
+    win_path = joinpath(derived_dir, "windows.json")
+    isfile(win_path) || error(
+        "windows.json not found in $derived_dir — run data_pipeline_v7 first.")
+    raw = JSON3.read(read(win_path, String))
+    wins = Dict{Symbol, NamedTuple}()
+    for (k, v) in raw["windows"]
+        wins[Symbol(k)] = (
+            label      = String(v["label"]),
+            ym_start   = Int(v["ym_start"]),
+            ym_end     = Int(v["ym_end"]),
+            asec_years = Int(first(v["asec_years"])):Int(last(v["asec_years"])),
+        )
+    end
+    order = Symbol.(raw["windows_order"])
+    return (windows = wins, order = order)
+end
+
+
+# ============================================================
+# CSV helpers
 # ============================================================
 
 """
     _read_moments_csv(filepath) → NamedTuple
 
-Read moments_{window}.csv and return a NamedTuple mapping moment name → (value, weight).
+Read `moments_{window}.csv` and return a NamedTuple mapping
+moment name → (value, weight).  Only rows whose `moment` field
+appears in `MOMENT_NAMES` are kept; stale rows are silently
+filtered out with a one-line summary.
 
-Expected format (CSV with header):
-  moment, value
-  ur_U, 0.080
-  ur_S, 0.025
-  ...
-
-Weight is set to 1.0 for all moments; actual weights come from the W matrix.
+Weight is set to 1.0 here; effective weights come from the W matrix.
 """
 function _read_moments_csv(filepath::String)
     df = CSV.read(filepath, DataFrame)
 
-    # Build NamedTuple with (value, weight) pairs
-    # Weight = 1.0 here; actual weights come from the W matrix
     pairs = Pair{Symbol, NamedTuple{(:value, :weight), Tuple{Float64, Float64}}}[]
+    moment_name_set = Set(MOMENT_NAMES)
+    n_skipped = 0
+    skipped_names = Symbol[]
 
     for row in eachrow(df)
         name = Symbol(row.moment)
+        if !(name in moment_name_set)
+            n_skipped += 1
+            push!(skipped_names, name)
+            continue
+        end
         val = Float64(row.value)
         push!(pairs, name => (value = val, weight = 1.0))
+    end
+
+    if n_skipped > 0
+        @printf("  _read_moments_csv: skipped %d row(s) not in MOMENT_NAMES: %s\n",
+                n_skipped, join(string.(unique(skipped_names)), ", "))
     end
 
     return NamedTuple(pairs)
@@ -399,68 +480,55 @@ end
 """
     _read_sigma_csv(filepath) → Vector{Float64}
 
-Read sigma_{window}.csv and return the standard error vector.
-
-Expected format: CSV with K×K covariance matrix (moment names as column headers).
-Returns the square root of the diagonal elements (standard errors).
-Used by the cond_target == 0.0 and 1.0 branches; the full K×K matrix is
-read directly via CSV.read in the cond_target > 2.0 branch.
+Read a covariance-matrix CSV and return the vector of standard
+errors (square root of the diagonal).
 """
 function _read_sigma_csv(filepath::String)
     df = CSV.read(filepath, DataFrame)
     Sigma = Matrix{Float64}(df)
-    # Return standard errors (sqrt of diagonal)
     return sqrt.(max.(diag(Sigma), 0.0))
 end
 
 
+# ============================================================
+# Model-side moments
+# ============================================================
+
 """
-    model_moments(obj) -> NamedTuple
+    model_moments(obj) → NamedTuple
 
-Extract the 22 targeted moments from a solved model's equilibrium objects.
-`obj` is the NamedTuple returned by `compute_equilibrium_objects`.
+Extract the targeted moments from a solved model's equilibrium
+objects.  `obj` is the NamedTuple returned by
+`compute_equilibrium_objects`.
 
-Prerequisites -- the following fields must be present in obj:
-    f_S         :: Float64             # kappa_S = theta_S * q_S(theta_S)
-    sep_rate_U  :: Float64             # employment-weighted unskilled separation rate
-    sep_rate_S  :: Float64             # employment-weighted skilled separation rate
-    ee_rate_S   :: Float64             # skilled EE transition rate
+When aggregate employment is negligible for a segment, all
+wage-related moments for that segment collapse to 0 — this avoids
+spuriously "good" wage percentile values produced by interpolating
+a near-zero density and a misleading wage premium computed over a
+dummy grid.
+
+train_entry_rate_U (v7, new): the model counterpart of the data
+flow hazard is the τ-weighted share of unskilled unemployment
+(eqn ∫_{x̄}^1 u_U(x) dx / agg_uU). Equivalently, since τ(x) =
+1{x > x̄}, this is dot(τ, uU .* wx) / agg_uU.
 """
 function model_moments(obj)
-
-    # ── Corner-solution detection ────────────────────────────────────────
-    #   When aggregate employment is negligible for a segment, all
-    #   wage-related moments for that segment are set to 0.  This avoids
-    #   two pathologies:
-    #     (a) _percentile returning the dummy-grid endpoint (~1.0) when
-    #         the density is all-zeros, giving misleadingly "good" wage
-    #         percentile values that confuse the SMM optimizer;
-    #     (b) mean_log_wage computed over a dummy grid producing an
-    #         arbitrary wage premium.
-    #   The _emp_tol threshold matches the guard in equilibrium.jl.
     _emp_tol = 1e-12
     _has_eU  = obj.agg_eU > _emp_tol
     _has_eS  = obj.agg_eS > _emp_tol
 
-    # ── Labour market stocks ──────────────────────────────────────────────
-    #   ur_U is well-defined when unskilled mass > 0 (which it always is).
-    #   ur_S: when the skilled segment is empty (agg_mS ≈ 0), report
-    #   ur_S = 1.0 ("if anyone were there, they'd all be unemployed").
-    #   Reporting 0 would mislead the SMM into thinking skilled
-    #   unemployment is impressively low.
+    # Labour-market stocks.  When the skilled segment is empty,
+    # report ur_S = 1.0 so that the SMM does not interpret a
+    # nonexistent skilled labour force as having low unemployment.
     ur_U           = obj.ur_U
     ur_S           = obj.agg_mS > _emp_tol ? obj.ur_S : 1.0
-    ur_total      = obj.ur_total
-    exp_ur_total   = exp(ur_total)
-    exp_ur_U       = exp(ur_U)
-    exp_ur_S       = exp(ur_S)
-    _model_lf      = obj.agg_uU + obj.agg_eU + obj.agg_mS   # LF excl. training
+    ur_total       = obj.ur_total
+    _model_lf      = obj.agg_uU + obj.agg_eU + obj.agg_mS
     skilled_share  = obj.agg_mS  / max(_model_lf, 1e-14)
     training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
 
-    # emp_var / emp_cm3: variance and third central moment of the employed
-    # wage distribution, computed from the density grids.
-    # When employment is zero the density is all-zeros so these are 0.
+    # Variance and third central moment of the employed wage
+    # distribution.  Zero by construction when the density is zero.
     wmid_tmp   = obj.wmid
     dens_U_tmp = obj.dens_U
     dens_S_tmp = obj.dens_S
@@ -474,45 +542,44 @@ function model_moments(obj)
     emp_var_S  = sum((wmid_tmp .- _mean_S_tmp).^2 .* dens_S_tmp) * bw_tmp
     emp_cm3_S  = sum((wmid_tmp .- _mean_S_tmp).^3 .* dens_S_tmp) * bw_tmp
 
-    # ── Transition rates ──────────────────────────────────────────────────
-    jfr_U = _has_eU ? obj.f_U : 0.0
-    jfr_S = _has_eS ? obj.f_S : 0.0
-    sep_rate_U    = obj.sep_rate_U
-    sep_rate_S    = obj.sep_rate_S
-    ee_rate_S     = obj.ee_rate_S
+    # Transition rates
+    jfr_U      = _has_eU ? obj.f_U : 0.0
+    jfr_S      = _has_eS ? obj.f_S : 0.0
+    sep_rate_U = obj.sep_rate_U
+    sep_rate_S = obj.sep_rate_S
+    ee_rate_S  = obj.ee_rate_S
 
-    # ── Wages ─────────────────────────────────────────────────────────────
-    #   When a segment has no employment, all its wage moments are 0.
-    #   This includes mean, percentiles, and the log wage used in the
-    #   premium.  The key fix: _percentile must NOT fall through to
-    #   wmid[end] when the density integrates to < 1.
+    # train_entry_rate_U (v7) — model counterpart of the data flow hazard.
+    # Spec: ∫_{x̄}^1 u_U(x) dx / agg_uU.  τT carries the optimal training
+    # indicator on the x-grid, so the τ-weighted unemployment integral
+    # equals the numerator exactly.
+    _agg_uU_w = dot(obj.uU, obj.wx)
+    train_entry_rate_U = _agg_uU_w > _emp_tol ?
+        dot(obj.tauT .* obj.uU, obj.wx) / _agg_uU_w : 0.0
+
+    # Wages
     wmid   = obj.wmid
     dens_U = obj.dens_U
     dens_S = obj.dens_S
     bw     = length(wmid) >= 2 ? wmid[2] - wmid[1] : 1.0
 
-    # Percentile helper — returns 0 when the density has no mass
-    # (instead of the old fallback to wmid[end] which was ~1.0).
     function _percentile(wmid, dens, bw, target)
         cum = 0.0
         for j in eachindex(wmid)
             mass = dens[j] * bw
             if cum + mass >= target
                 frac = mass > 1e-14 ? (target - cum) / mass : 0.5
-                return wmid[j] - bw/2 + frac * bw   # interpolate within bin j
+                return wmid[j] - bw/2 + frac * bw
             end
             cum += mass
         end
-        # Cumulative density never reached the target → density has
-        # insufficient mass.  Return 0 (not wmid[end]) so that the
-        # SMM objective sees a clean corner value.
         return 0.0
     end
 
     if _has_eU
-        mean_wage_U    = sum(wmid .* dens_U) * bw
-        p25_wage_U     = _percentile(wmid, dens_U, bw, 0.25)
-        p50_wage_U     = _percentile(wmid, dens_U, bw, 0.50)
+        mean_wage_U     = sum(wmid .* dens_U) * bw
+        p25_wage_U      = _percentile(wmid, dens_U, bw, 0.25)
+        p50_wage_U      = _percentile(wmid, dens_U, bw, 0.50)
         mean_log_wage_U = sum(log.(max.(wmid, 1e-14)) .* dens_U) * bw
     else
         mean_wage_U     = 0.0
@@ -522,9 +589,9 @@ function model_moments(obj)
     end
 
     if _has_eS
-        mean_wage_S    = sum(wmid .* dens_S) * bw
-        p25_wage_S     = _percentile(wmid, dens_S, bw, 0.25)
-        p50_wage_S     = _percentile(wmid, dens_S, bw, 0.50)
+        mean_wage_S     = sum(wmid .* dens_S) * bw
+        p25_wage_S      = _percentile(wmid, dens_S, bw, 0.25)
+        p50_wage_S      = _percentile(wmid, dens_S, bw, 0.50)
         mean_log_wage_S = sum(log.(max.(wmid, 1e-14)) .* dens_S) * bw
     else
         mean_wage_S     = 0.0
@@ -533,37 +600,31 @@ function model_moments(obj)
         mean_log_wage_S = 0.0
     end
 
-    # Wage premium: E[log w_S] - E[log w_U]
-    #   Only meaningful when both segments have employment.
-    #   Otherwise 0 — which is far from the positive data target,
-    #   giving the SMM a strong signal to move away from this corner.
     wage_premium = (_has_eU && _has_eS) ?
                    (mean_log_wage_S - mean_log_wage_U) : 0.0
 
-    # ── Tightness ─────────────────────────────────────────────────────────
+    # Tightness
     _THETA_CAP = 1e14
     theta_U = _has_eU ? obj.thetaU : _THETA_CAP
     theta_S = _has_eS ? obj.thetaS : _THETA_CAP
 
     return (
-        ur_total      = ur_total,
-        ur_U          = ur_U,
-        ur_S          = ur_S,
-        exp_ur_total  = exp_ur_total,
-        exp_ur_U      = exp_ur_U,
-        exp_ur_S      = exp_ur_S,
-        skilled_share = skilled_share,
+        ur_total       = ur_total,
+        ur_U           = ur_U,
+        ur_S           = ur_S,
+        skilled_share  = skilled_share,
         training_share = training_share,
-        emp_var_U     = emp_var_U,
-        emp_cm3_U     = emp_cm3_U,
-        emp_var_S     = emp_var_S,
-        emp_cm3_S     = emp_cm3_S,
+        emp_var_U      = emp_var_U,
+        emp_cm3_U      = emp_cm3_U,
+        emp_var_S      = emp_var_S,
+        emp_cm3_S      = emp_cm3_S,
 
-        jfr_U         = jfr_U,
-        sep_rate_U    = sep_rate_U,
-        jfr_S         = jfr_S,
-        sep_rate_S    = sep_rate_S,
-        ee_rate_S     = ee_rate_S,
+        jfr_U              = jfr_U,
+        sep_rate_U         = sep_rate_U,
+        jfr_S              = jfr_S,
+        sep_rate_S         = sep_rate_S,
+        ee_rate_S          = ee_rate_S,
+        train_entry_rate_U = train_entry_rate_U,
 
         mean_wage_U   = mean_wage_U,
         mean_wage_S   = mean_wage_S,

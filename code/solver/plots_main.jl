@@ -1,18 +1,14 @@
 ############################################################
-# code/solver/plots_main.jl — Single-run plots from estimation
+# code/solver/plots_main.jl — Single-run plots from SMM estimation
 #
 # Usage (from project root):
 #   julia --threads auto code/solver/plots_main.jl
 #
-# Loads parameters from a saved SMM estimation bundle
-# (output/smm/smm_result_<WINDOW><W_SUFFIX>.jls),
+# Loads parameters from a saved SMM bundle
+#   output/smm/smm_result_<WINDOW><W_SUFFIX>.jls
 # solves the model once at those estimates, and writes the
 # full set of equilibrium figures defined in single_run_plots.jl
 # to output/plots/<WINDOW><W_SUFFIX>/.
-#
-# To pick which estimation to plot, set WINDOW and
-# W_COND_TARGET in section 1 below — same conventions as
-# code/smm/main.jl and code/solver/main.jl.
 ############################################################
 
 println("="^60)
@@ -20,7 +16,7 @@ println("  Segmented Search Model — Single-Run Plots from Estimation")
 println("="^60)
 flush(stdout)
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# Paths
 const SOLVER_DIR   = @__DIR__
 const SMM_DIR      = joinpath(SOLVER_DIR, "..", "smm")
 const PROJECT_ROOT = joinpath(SOLVER_DIR, "..", "..")
@@ -28,7 +24,12 @@ const OUTPUT_DIR   = joinpath(PROJECT_ROOT, "output")
 const SMM_OUT_DIR  = joinpath(OUTPUT_DIR, "smm")
 const PLOTS_ROOT   = joinpath(OUTPUT_DIR, "plots")
 
-# ── Packages ──────────────────────────────────────────────────────────────────
+isdir(SMM_DIR) || error(
+    "SMM module not found at:\n  $SMM_DIR\n" *
+    "Run code/solver/model_main.jl for a standalone solve, or wire up " *
+    "the SMM module before using this script.")
+
+# Packages
 print("Loading packages... "); flush(stdout)
 
 using LinearAlgebra
@@ -42,14 +43,11 @@ using Parameters
 using Printf
 using Base.Threads
 using Serialization
-using Optim          # required by smm.jl at load time
-using CSV            # required by moments.jl at load time
-using DataFrames     # required by moments.jl at load time
-using Clustering     # required by smm.jl at load time
+using Optim
+using CSV
+using DataFrames
+using Clustering
 
-# Plotting stack — must be loaded before including single_run_plots.jl
-# because the figure constructors use the L"..." string macro from
-# LaTeXStrings at function-definition (parse) time.
 using Plots
 using LaTeXStrings
 
@@ -57,7 +55,7 @@ println("done."); flush(stdout)
 
 Random.seed!(1234)
 
-# ── Load solver ───────────────────────────────────────────────────────────────
+# Solver modules
 print("Loading solver modules... "); flush(stdout)
 
 include(joinpath(SOLVER_DIR, "grids.jl"))
@@ -69,7 +67,7 @@ include(joinpath(SOLVER_DIR, "equilibrium.jl"))
 
 println("done."); flush(stdout)
 
-# ── Load SMM modules (needed to deserialize SMMResult / SMMSpec) ──────────────
+# SMM modules (needed to deserialize SMMResult / SMMSpec)
 print("Loading SMM modules... "); flush(stdout)
 
 include(joinpath(SMM_DIR, "moments.jl"))
@@ -78,7 +76,7 @@ include(joinpath(SMM_DIR, "smm.jl"))
 
 println("done."); flush(stdout)
 
-# ── Load plotting library ─────────────────────────────────────────────────────
+# Plotting library
 print("Loading plotting modules... "); flush(stdout)
 
 include(joinpath(SOLVER_DIR, "single_run_plots.jl"))
@@ -89,13 +87,6 @@ flush(stdout)
 
 # ============================================================
 # 1. Estimation to load
-#    Valid windows:  :base_fc, :crisis_fc, :base_covid, :crisis_covid
-#
-#    W_COND_TARGET — must match the value used during SMM:
-#      0.0   →  diagonal weights        (suffix "_diagonalW")
-#      1.0   →  compressed diagonal     (suffix "_compressedW")
-#      2.0   →  equal weights           (suffix "_equalW")
-#      >2.0  →  full optimal W          (suffix "_fullW")
 # ============================================================
 WINDOW        = :base_fc
 W_COND_TARGET = 2.0
@@ -110,9 +101,6 @@ const W_SUFFIX = _w_suffix(W_COND_TARGET)
 
 const SMM_JLS_PATH = joinpath(SMM_OUT_DIR,
     "smm_result_$(WINDOW)$(W_SUFFIX).jls")
-
-# Plots for this estimation go in their own subfolder so different
-# windows / weighting schemes don't overwrite each other.
 const PLOTS_DIR = joinpath(PLOTS_ROOT, string(WINDOW) * W_SUFFIX)
 
 @printf("Loading estimation bundle:\n  %s\n", SMM_JLS_PATH)
@@ -120,21 +108,20 @@ flush(stdout)
 
 isfile(SMM_JLS_PATH) || error(
     "Estimation bundle not found at:\n  $SMM_JLS_PATH\n" *
-    "Run code/smm/main.jl first with WINDOW = :$WINDOW and " *
+    "Run code/smm/smm_main.jl first with WINDOW = :$WINDOW and " *
     "W_COND_TARGET = $W_COND_TARGET.")
 
 bundle = _load_smm_bundle(SMM_JLS_PATH; delete_on_fail=false,
                           label="estimation bundle")
 isnothing(bundle) && error(
     "Could not deserialize estimation bundle at:\n  $SMM_JLS_PATH\n" *
-    "Likely a stale on-disk format. Re-run code/smm/main.jl " *
+    "Likely a stale on-disk format. Re-run code/smm/smm_main.jl " *
     "with the same WINDOW and W_COND_TARGET.")
 
-const result_smm = bundle.result   # SMMResult
-const spec_smm   = bundle.spec     # SMMSpec
-const sim_smm    = bundle.sim      # SimParams used during estimation
+const result_smm = bundle.result
+const spec_smm   = bundle.spec
+const sim_smm    = bundle.sim
 
-# Reconstruct the four parameter structs from the SMM optimum.
 common, regime, unsk_par, skl_par = unpack_θ(result_smm.theta_opt, spec_smm)
 
 @printf("Loaded estimation:\n")
@@ -151,9 +138,6 @@ flush(stdout)
 
 # ============================================================
 # 2. Solver settings for this single run
-#    Tighter tolerances than the SMM `sim`, since here we do
-#    one solve rather than thousands.  Set USE_SMM_SIM = true
-#    to instead reuse the bundle's `sim` exactly as estimated.
 # ============================================================
 USE_SMM_SIM = false
 
@@ -203,10 +187,8 @@ println("\nParameters loaded from estimation:")
         regime.α_U, regime.a_Γ, regime.b_Γ)
 @printf("  UnskilledParams: μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f\n",
         unsk_par.μ, unsk_par.η, unsk_par.k, unsk_par.β, unsk_par.λ)
-@printf("  SkilledParams:   μ=%.5f   η=%.5f   k=%.5f   β=%.5f\n",
-        skl_par.μ, skl_par.η, skl_par.k, skl_par.β)
-@printf("                   ξ=%.5f   λ=%.5f   σ=%.5f\n",
-        skl_par.ξ, skl_par.λ, skl_par.σ)
+@printf("  SkilledParams:   μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f   σ=%.5f\n",
+        skl_par.μ, skl_par.η, skl_par.k, skl_par.β, skl_par.λ, skl_par.σ)
 flush(stdout)
 
 # ============================================================
@@ -234,7 +216,6 @@ print_accounting(obj)
 
 # ============================================================
 # 6. Generate all single-run plots
-#    Pass γ_PS so fig03c_skilled_emp_by_PS is included.
 # ============================================================
 println("\nGenerating figures...")
 flush(stdout)

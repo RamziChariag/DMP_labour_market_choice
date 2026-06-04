@@ -1,33 +1,35 @@
 ############################################################
-# smm.jl — SMM objective and optimisation loops
+# smm.jl — SMM objective and optimisation loops (v7)
 #
 # Main entry points
-# ─────────────────
-#   run_smm(spec; method=:sa, ...)       single-run estimation
-#   multistart_smm(spec, n; ...)         repeated starts, keep best
+#   run_smm(spec; method, rng)         single-run estimation
+#   multistart_smm(spec, n; method)    repeated starts, keep best
 #
 # Methods
-# ───────
-#   :sa           our own simulated annealing loop (default)
-#   :neldermead   Optim.jl Nelder–Mead (good for polishing after SA)
+#   :de           differential evolution (default global search)
+#   :sa           simulated annealing
+#   :neldermead   Nelder–Mead from Optim.jl (local polish)
+#   :lbfgs, :bfgs gradient-based polish
 #
-# Design notes
-# ────────────
-# - SA is implemented here, not delegated to Optim.jl, because
-#   Optim's SA rejects Inf proposals silently and gets stuck when
-#   many parameter regions produce non-converging models.  Our loop
-#   handles Inf correctly (always reject, never update).
+# SA is implemented here rather than delegated to Optim.jl because
+# Optim's SA rejects Inf proposals silently and stalls in regions
+# where many parameter draws produce non-converging models.  This
+# loop handles Inf correctly (always reject, never update).
+#
+# v7 note: the SMM objective operates on the stationary-equilibrium
+# moment vector (24 moments). The discrete cross-market policy d(x)
+# is identically zero in stationary equilibrium and is therefore not
+# subject to any feasibility filter here; if the solver returns a
+# non-zero d for some parameter draw, the resulting moments still
+# enter the objective normally.
 ############################################################
 
 """
-    _load_smm_bundle(path; delete_on_fail=false, label="file")
+    _load_smm_bundle(path; delete_on_fail=false, label="file") → Union{Nothing, NamedTuple}
 
-Safely deserialize an SMM .jls bundle.
-Expected format:
-    (result = ::SMMResult, spec = ::SMMSpec, sim = ::SimParams)
-
+Safely deserialise an SMM .jls bundle of the form
+    (result = ::SMMResult, spec = ::SMMSpec, sim = ::SimParams).
 Returns the bundle on success, or `nothing` on failure / stale format.
-If `delete_on_fail=true`, removes the unreadable file so it can be overwritten.
 """
 function _load_smm_bundle(path::String; delete_on_fail::Bool=false, label::String="file")
     if !isfile(path)
@@ -44,7 +46,6 @@ function _load_smm_bundle(path::String; delete_on_fail::Bool=false, label::Strin
         return nothing
     end
 
-    # Accept named tuples / tuples with expected keys only
     ok = false
     if data isa NamedTuple
         ok = haskey(data, :result) && haskey(data, :spec)
@@ -70,27 +71,19 @@ function _load_smm_bundle(path::String; delete_on_fail::Bool=false, label::Strin
 end
 
 
-
-
 # ============================================================
 # Weighted loss
 # ============================================================
 
-
-
 """
-    compute_loss(m_model, spec) -> Float64
+    compute_loss(m_model, spec) → Float64
 
+    Q(θ) = Σ_k  w_k · [(m_k^model − m̂_k) / |m̂_k|]²
 
-
-    Q(θ) = Σ_k  w_k · [(m_k^model − m_k^data) / |m_k^data|]²
-
-
-
-Diagonal-weight loss with scale-normalised deviations.
-Each deviation is divided by |m̂_k| (floored at 1e-10) so that
-moments of different magnitudes contribute on a comparable scale.
-Only moments with weight > 0 are included.
+Diagonal-weight loss with scale-normalised deviations.  Each
+deviation is divided by max(|m̂_k|, 1e-10) so moments of different
+magnitudes contribute on comparable scales.  Only moments with
+positive weight in spec.moments are included.
 """
 function compute_loss(m_model::NamedTuple, spec::SMMSpec) :: Float64
     Q = 0.0
@@ -106,49 +99,14 @@ function compute_loss(m_model::NamedTuple, spec::SMMSpec) :: Float64
 end
 
 
-
-
 """
-    compute_loss_matrix(m_model, spec, W) -> Float64
-
-
+    compute_loss_matrix(m_model, spec, W) → Float64
 
     Q(θ) = g̃(θ)' W g̃(θ)     where g̃_k = (m_k^model − m̂_k) / |m̂_k|
 
-
-
-Compute the loss using the full K×K optimal weight matrix W = Σ̃⁻¹.
-
-
-
-Normalisation convention
-───────────────────────
-The data pipeline normalises each influence function ψ_k by
-|m̂_k| before forming the outer product:
-    ψ̃_k = ψ_k / |m̂_k|
-    Σ̃ = (1/N) Σ_i ψ̃(z_i) ψ̃(z_i)'
-    W = Σ̃⁻¹
-
-
-
-Because W lives in normalised space, the deviation vector must
-also be normalised:  g̃_k = (m_k − m̂_k) / |m̂_k|.
-This ensures that Q(θ) = g̃' Σ̃⁻¹ g̃ is scale-invariant
-and consistent with the diagonal-weight loss in compute_loss.
-
-
-
-Mathematically, if D = diag(|m̂_k|), then:
-    Σ̃ = D⁻¹ Σ_raw D⁻¹   ⟹   W = D Σ_raw⁻¹ D
-    g̃' W g̃ = (D⁻¹ g)' (D Σ_raw⁻¹ D) (D⁻¹ g)
-            = g' Σ_raw⁻¹ g
-So the normalisation cancels and is equivalent to using the
-raw optimal W with raw deviations — but numerically the
-normalised form is far better conditioned.
-
-
-
-Only moments with positive weight in spec.moments are included.
+Full-matrix loss using the optimal weight matrix W = Σ̃⁻¹.  The
+deviation vector is normalised by |m̂_k| because the influence
+functions in the data pipeline are normalised the same way.
 """
 function compute_loss_matrix(
     m_model::NamedTuple,
@@ -156,11 +114,6 @@ function compute_loss_matrix(
     W::Matrix{Float64}
 ) :: Float64
 
-
-
-    # Build deviation vector over active moments (weight > 0).
-    # W is already sized K_active x K_active (pre-subsetted by load_weight_matrix),
-    # so we iterate sequentially -- no index remapping into W needed.
     dev_vec = Float64[]
     for k in keys(spec.moments)
         target = spec.moments[k]
@@ -171,55 +124,39 @@ function compute_loss_matrix(
 
     isempty(dev_vec) && return 0.0
 
-    # Guard: catch W/dev_vec size mismatch with a clear error rather than
-    # a cryptic LinearAlgebra DimensionMismatch from inside a thread.
     if size(W, 1) != length(dev_vec) || size(W, 2) != length(dev_vec)
         error(
             "compute_loss_matrix: W is $(size(W,1))×$(size(W,2)) but deviation vector " *
-            "has length $(length(dev_vec)). The W matrix in spec.W is stale — it was built " *
-            "with a different SKIP_MOMENTS list. Rebuild spec via build_smm_spec with the " *
-            "correct W from load_weight_matrix(..., skip_moments=SKIP_MOMENTS)."
+            "has length $(length(dev_vec)). The W matrix in spec.W is stale — rebuild via " *
+            "build_smm_spec with the correct W from load_weight_matrix(..., skip_moments=SKIP_MOMENTS)."
         )
     end
 
-    # W is already the right size -- use directly
     Q = dot(dev_vec, W * dev_vec)
     return Q
 end
-
-
 
 
 # ============================================================
 # SMM objective
 # ============================================================
 
-
-
 """
-    smm_objective(θ_unc, spec) -> Float64
+    smm_objective(θ_unc, spec) → Float64
 
+Solve the model at parameters decoded from `θ_unc` and return Q(θ).
+Returns Inf (never throws) on any failure or non-convergence.  The
+solver runs silently regardless of spec.sim.verbose.
 
-
-Solve the model at parameters decoded from θ_unc and return Q(θ).
-Returns Inf (never throws) on any failure or non-convergence.
-The solver always runs silently regardless of spec.sim.verbose.
-
-
-
-If spec.W is not nothing, uses the full weight matrix via
-compute_loss_matrix; otherwise uses diagonal weights via compute_loss.
+Degenerate τ(x) profiles (all train, none train, non-monotone, or
+multiple jumps) are rejected as infeasible.
 """
 function smm_objective(
     θ_unc :: AbstractVector{Float64},
     spec  :: SMMSpec
 ) :: Float64
 
-
-
     cp, rp, up, sp = unpack_θ(θ_unc, spec)
-
-
 
     local model, solve_result
     try
@@ -231,10 +168,7 @@ function smm_objective(
         return Inf
     end
 
-
     solve_result.ok || return Inf
-
-
 
     local obj_eq, m_model
     try
@@ -245,33 +179,23 @@ function smm_objective(
     end
 
     emptol = 1e-12
-    # Check for empty equilibrium objects, which can arise from corner solutions
     if obj_eq.agg_eU < emptol || obj_eq.agg_eS < emptol
         return Inf
     end
 
-    # if everyone trains, or no one trains, the model is not identified and the loss is infinite
-    τ = obj_eq.tauT
-    τv = vec(τ)   # works for vectors and arrays
-
-    # reject degenerate cases: all train or none train
+    τ  = obj_eq.tauT
+    τv = vec(τ)
     if all(iszero, τv) || all(isone, τv)
         return Inf
     end
-
-    # optional: ensure tau is actually binary
     if !all(t -> t == 0 || t == 1, τv)
         return Inf
     end
-
     dτ = diff(τv)
-
-    # reject if tau ever decreases, or if it changes more than once
     if any(dτ .< 0) || count(!iszero, dτ) > 1
         return Inf
     end
 
-    # Use full weight matrix if available; otherwise diagonal weights
     if !isnothing(spec.W)
         return compute_loss_matrix(m_model, spec, spec.W)
     else
@@ -284,8 +208,6 @@ end
 # Result type
 # ============================================================
 
-
-
 struct SMMResult
     theta_opt  :: Vector{Float64}
     params_opt :: NamedTuple
@@ -296,49 +218,46 @@ struct SMMResult
 end
 
 
-
-
 # ============================================================
-# Simulated Annealing (own implementation)
+# Corner count (params within `tol` of either bound, in constrained space)
 # ============================================================
-
-
 
 """
-    _run_sa(spec; T0, step, max_iter, show_trace, trace_stride, rng)
-        -> (theta_best, Q_best, iters)
+    _count_corners(theta_unc, spec; tol=0.02) → Int
+
+Count free parameters whose constrained value lies within `tol`
+(fraction of bound width) of either `lb` or `ub`.
+"""
+function _count_corners(
+    theta_unc :: AbstractVector{Float64},
+    spec      :: SMMSpec;
+    tol       :: Float64 = 0.02,
+) :: Int
+    n = 0
+    for (i, ps) in enumerate(spec.free)
+        x     = _to_constrained(theta_unc[i], ps.lb, ps.ub)
+        width = ps.ub - ps.lb
+        width <= 0.0 && continue
+        if (x - ps.lb) / width < tol || (ps.ub - x) / width < tol
+            n += 1
+        end
+    end
+    return n
+end
 
 
+# ============================================================
+# Simulated annealing
+# ============================================================
+
+"""
+    _run_sa(spec; ...) → (theta_best, Q_best, iters)
 
 Simulated annealing in unconstrained (logit) space.
-
-
-
-Temperature schedule: T(t) = T0 / log(1 + rate * t)^exp  (per reheat segment)
-Acceptance rule:
-  - always accept downhill moves (Q_new < Q_current)
-  - accept uphill with prob exp(-ΔQ / T(t))    [no Q_scale normalisation]
-  - never accept Inf proposals
-
-
-
-T0 calibration:
-  Pass T0 <= 0 (default) to auto-calibrate from 50 probe steps so that
-  a typical uphill move is accepted with probability ~0.80 at t=1.
-  Set sa_T0 = 0.0 in RunParams to use auto-calibration (recommended).
-
-
-
-Adaptive step:
-  Tracks acceptance rate over the last adapt_window steps.
-  Targets acc ≈ 0.25 (theoretically optimal for continuous SA).
-  Also shrinks step when feasibility rate drops below target_fin.
-  The trace reports windowed rates (last adapt_window steps), not
-  cumulative, so you can see the current SA health at each checkpoint.
 """
 function _run_sa(
     spec             :: SMMSpec;
-    T0               :: Float64 = 0.0,   # ≤ 0 → auto-calibrate from probe steps
+    T0               :: Float64 = 0.0,
     step             :: Float64 = 0.15,
     max_iter         :: Int     = 5000,
     cooling_rate     :: Float64 = 1.0,
@@ -353,9 +272,6 @@ function _run_sa(
     trace_stride     :: Int     = 100,
     rng                         = Random.default_rng(),
 )
-    # ── Starting point ────────────────────────────────────────────────
-    # random_init=true:  draw uniform in constrained space, same as DE.
-    # random_init=false: use the init values baked into spec (warm start).
     theta = if random_init
         theta_j = Vector{Float64}(undef, length(spec.free))
         for (k, ps) in enumerate(spec.free)
@@ -378,12 +294,6 @@ function _run_sa(
 
     steps_since_improvement = 0
 
-    # ── FIX 3: Auto-calibrate T0 if not supplied ──────────────────────
-    # Run 50 small probe steps from the starting point and collect the
-    # uphill ΔQ values.  Set T0 so that a median uphill move is accepted
-    # with probability 0.80:  T0 = -median(ΔQ_pos) / log(0.80).
-    # This automatically matches T0 to the actual loss scale, regardless
-    # of whether the starting point is a corner or interior solution.
     if T0 <= 0.0
         dQ_pos = Float64[]
         for _ in 1:50
@@ -403,10 +313,6 @@ function _run_sa(
     T_reheat  = T0
     t_local   = 0
 
-    # ── FIX 2: Two tracking windows — feasibility AND acceptance ──────
-    # win_fin: was the proposal finite?     (feasibility, for step size)
-    # win_acc: was the proposal accepted?   (acceptance rate, for step size)
-    # Both are circular buffers of length adapt_window.
     win_fin = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
     win_acc = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
     win_idx = 0
@@ -414,31 +320,28 @@ function _run_sa(
     actual_iters = 0
 
     if show_trace
-        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f  random_init=%s\n",
+        n_corners_init = _count_corners(theta_best, spec)
+        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f  corners=%d/%d  random_init=%s\n",
                 isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (bad starting point)",
-                T0, step, random_init)
+                T0, step,
+                n_corners_init, length(spec.free),
+                random_init)
         flush(stdout)
     end
 
     for t in 1:max_iter
         actual_iters = t
 
-        # ── Cooling: each segment decays from its own T_reheat ─────────
         t_local  += 1
         T_current = T_reheat / (log(1.0 + cooling_rate * t_local))^cooling_exp
         T_current = max(T_current, 1e-8)
 
-        # ── Proposal ──────────────────────────────────────────────────
         theta_prop = theta .+ step .* randn(rng, length(theta))
         Q_prop     = smm_objective(theta_prop, spec)
 
         is_fin = isfinite(Q_prop)
         is_fin && (n_fin += 1)
 
-        # ── FIX 1: Accept / reject — no Q_scale divisor ───────────────
-        # Old code divided T_current by Q_scale (≈ initial loss ≈ 16 000),
-        # making exp(-ΔQ / T) ≈ 1 for all realistic ΔQ.  The temperature
-        # now operates directly on the raw loss difference.
         accept = false
         if is_fin
             accept = if !isfinite(Q)
@@ -467,11 +370,6 @@ function _run_sa(
             steps_since_improvement += 1
         end
 
-        # ── FIX 2: Adaptive step — AFTER accept/reject, targets acc ≈ 0.25
-        # Old code ran before accept/reject (couldn't see the accept outcome)
-        # and targeted feasibility rate, causing runaway step growth.
-        # New code targets the theoretically optimal acceptance rate of 0.25
-        # while also shrinking when too many proposals are Inf.
         if adapt_window > 0
             win_idx          = mod1(win_idx + 1, adapt_window)
             win_fin[win_idx] = is_fin
@@ -482,29 +380,29 @@ function _run_sa(
                 acc_rate = mean(win_acc)
 
                 if fin_rate < target_fin * 0.90
-                    step *= 0.85          # too many Inf proposals → shrink
+                    step *= 0.85
                 elseif acc_rate < 0.15
-                    step *= 0.85          # accepting too rarely   → shrink
+                    step *= 0.85
                 elseif acc_rate > 0.35
-                    step *= 1.10          # accepting too often    → grow
+                    step *= 1.10
                 end
                 step = clamp(step, 0.01, 2.0)
             end
         end
 
-        # ── Early stop: reheats exhausted and still stagnating ──────────
         if reheat_patience > 0 &&
            max_reheats > 0 && n_reheats >= max_reheats &&
            steps_since_improvement >= reheat_patience
             if show_trace
-                @printf("  [SA EARLY STOP  iter=%5d]  reheats exhausted, no improvement for %d steps, Q_best=%.6e\n",
-                        t, steps_since_improvement, Q_best)
+                n_corners_es = _count_corners(theta_best, spec)
+                @printf("  [SA EARLY STOP  iter=%5d]  reheats exhausted, no improvement for %d steps, Q_best=%.6e  corners=%d/%d\n",
+                        t, steps_since_improvement, Q_best,
+                        n_corners_es, length(spec.free))
                 flush(stdout)
             end
             break
         end
 
-        # ── Reheating on stagnation ────────────────────────────────────
         if reheat_patience > 0 &&
            steps_since_improvement >= reheat_patience &&
            (max_reheats == 0 || n_reheats < max_reheats)
@@ -512,38 +410,42 @@ function _run_sa(
             n_reheats += 1
             T_before   = T_current
             T_current  = T_current * reheat_factor
-            T_reheat   = T_current   # new segment starts here
-            t_local    = 0           # reset local clock so decay starts fresh
+            T_reheat   = T_current
+            t_local    = 0
             theta      = copy(theta_best)
             Q          = Q_best
             steps_since_improvement = 0
 
             if show_trace
-                @printf("  [SA REHEAT #%d  iter=%5d]  T %.4f→%.4f  restarting from Q_best=%.6e\n",
-                        n_reheats, t, T_before, T_current, Q_best)
+                n_corners_rh = _count_corners(theta_best, spec)
+                @printf("  [SA REHEAT #%d  iter=%5d]  T %.4f→%.4f  restarting from Q_best=%.6e  corners=%d/%d\n",
+                        n_reheats, t, T_before, T_current, Q_best,
+                        n_corners_rh, length(spec.free))
                 flush(stdout)
             end
         end
 
-        # ── Progress trace — windowed rates, not cumulative ───────────
-        # Windowed acc/fin show the *current* SA health rather than a
-        # decaying average dominated by the early corner-solution phase.
         if show_trace && t % trace_stride == 0
             w_acc = adapt_window > 0 && t >= adapt_window ? mean(win_acc) : n_acc / t
             w_fin = adapt_window > 0 && t >= adapt_window ? mean(win_fin) : n_fin / t
-            @printf("  [SA iter=%5d]  curr=%-14s  best=%.6e  T=%.4f  step=%.4f  acc=%.2f  fin=%.2f  reheats=%d\n",
+            n_corners = _count_corners(theta_best, spec)
+            @printf("  [SA iter=%5d]  curr=%-14s  best=%.6e  T=%.4f  step=%.4f  acc=%.2f  fin=%.2f  corners=%d/%d  reheats=%d\n",
                     t,
                     isfinite(Q) ? @sprintf("%.6e", Q) : "Inf",
                     Q_best, T_current, step,
                     w_acc, w_fin,
+                    n_corners, length(spec.free),
                     n_reheats)
             flush(stdout)
         end
     end
 
     if show_trace
-        @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  reheats=%d\n",
-                Q_best, n_acc, actual_iters, n_fin, actual_iters, n_reheats)
+        n_corners_done = _count_corners(theta_best, spec)
+        @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  corners=%d/%d  reheats=%d\n",
+                Q_best, n_acc, actual_iters, n_fin, actual_iters,
+                n_corners_done, length(spec.free),
+                n_reheats)
         flush(stdout)
     end
 
@@ -551,28 +453,14 @@ function _run_sa(
 end
 
 
-
-# Alias so pack_theta works (smm_params.jl defines pack_θ with Unicode)
+# Alias for the unicode pack_θ defined in smm_params.jl
 pack_theta(spec) = pack_θ(spec)
 
 
-
-
 # ============================================================
-# Differential Evolution — internal helper
+# Differential evolution
 # ============================================================
 
-
-
-"""
-    _pick3(rng, n, exclude) -> (a, b, c)
-
-
-
-Pick three distinct indices from 1:n, all different from `exclude`,
-using a rejection sampler.  Expected draws per call ≈ 3 + O(1/n),
-much cheaper than shuffling all n−1 candidates.
-"""
 @inline function _pick3(rng, n::Int, exclude::Int)
     a = exclude
     while a == exclude
@@ -590,36 +478,12 @@ much cheaper than shuffling all n−1 candidates.
 end
 
 
-
-
-# ============================================================
-# Differential Evolution
-# ============================================================
-
-
 """
-    _count_basins(pop, Q_pop, spec; min_size) -> Int
+    _count_basins(pop, Q_pop, spec; min_size) → Int
 
-
-Count distinct parameter-space basins among the feasible population
+Count distinct parameter-space basins among the feasible members
 using complete-linkage hierarchical clustering on pairwise Euclidean
-distances in normalised constrained space.
-
-
-Algorithm
-─────────
-1. Normalise each parameter to [0,1] via (x_k − lb_k)/(ub_k − lb_k).
-   This makes all parameters dimensionless and equally weighted.
-2. Compute the full n×n pairwise Euclidean distance matrix.
-3. Run complete-linkage agglomerative clustering.
-   Complete linkage: dist(A,B) = max pairwise distance between members.
-   This finds compact, globular clusters where every pair within a
-   cluster is closer than any pair crossing cluster boundaries.
-4. Cut the dendrogram at the largest gap in merge heights.
-   The largest gap separates the most distinct groupings — no scale
-   parameter needed, the cut is entirely data-driven.
-5. Return the number of clusters with ≥ min_size members.
-   Singletons and tiny groups are noise, not basins.
+distances in [0, 1]^d-normalised constrained space.
 """
 function _count_basins(
     pop      :: Vector{Vector{Float64}},
@@ -631,11 +495,8 @@ function _count_basins(
     n = length(feas_idx)
     n < 2 * min_size && return 0
 
-
     npar = length(spec.free)
 
-
-    # ── Normalise to [0,1] per parameter ──────────────────────────────
     X = Matrix{Float64}(undef, n, npar)
     for (row, i) in enumerate(feas_idx)
         θ = pop[i]
@@ -645,8 +506,6 @@ function _count_basins(
         end
     end
 
-
-    # ── Pairwise Euclidean distance matrix ────────────────────────────
     D = zeros(Float64, n, n)
     for i in 1:n
         for j in i+1:n
@@ -659,19 +518,13 @@ function _count_basins(
         end
     end
 
-
-    # ── Complete-linkage hierarchical clustering ──────────────────────
     hc = hclust(D; linkage = :complete)
 
-
-    # ── Automatic cut: midpoint of the largest gap in merge heights ───
     h       = hc.heights
     gaps    = diff(h)
     gap_idx = argmax(gaps)
     cut_h   = (h[gap_idx] + h[gap_idx + 1]) / 2.0
 
-
-    # ── Count clusters with enough members to be meaningful ──────────
     labels  = cutree(hc; h = cut_h)
     counts  = zeros(Int, maximum(labels))
     for l in labels
@@ -681,40 +534,10 @@ function _count_basins(
 end
 
 
-
 """
-    _run_de(spec; max_iter, pop_size, f, cr, show_trace, trace_stride, rng)
-        -> (theta_best, Q_best, iters)
+    _run_de(spec; ...) → (theta_best, Q_best, iters)
 
-
-
-Differential Evolution in unconstrained (logit) space.
-
-
-
-Algorithm: DE/rand/1/bin  (standard, robust variant)
-  For each member i of the population:
-    1. Pick three distinct members a, b, c ≠ i at random
-    2. Mutant:   v = a + F * (b - c)
-    3. Trial:    u = v where rand < CR, else keep x_i  (binomial crossover)
-    4. Select:   replace x_i with u if Q(u) < Q(x_i)
-
-
-
-Non-converging proposals (Q = Inf) are never accepted — the current
-population member survives unchanged, so the population always contains
-only feasible parameter vectors.
-
-
-
-Parameters
-──────────
-  pop_size   population size. Rule of thumb: 10 × n_params.
-             Larger = more exploration, slower per generation.
-  f          mutation scale ∈ (0, 2). Typical: 0.5–0.9.
-             Higher = larger steps, more exploration.
-  cr         crossover probability ∈ (0, 1). Typical: 0.7–0.9.
-             Higher = trial vector borrows more from mutant.
+DE/rand/1/bin in unconstrained (logit) space.
 """
 function _run_de(
     spec         :: SMMSpec;
@@ -733,13 +556,11 @@ function _run_de(
     pop_size = pop_size > 0 ? pop_size : 10 * npar
     theta0   = pack_theta(spec)
 
-    # Self-contained per-member RNGs
     member_rngs = begin
         seeds = rand(rng, UInt64, pop_size)
         [Random.Xoshiro(s) for s in seeds]
     end
 
-    # ── Initialise population — uniform in constrained space ──────────────
     pop = Vector{Vector{Float64}}(undef, pop_size)
     for j in 1:pop_size
         theta_j = Vector{Float64}(undef, npar)
@@ -798,11 +619,9 @@ function _run_de(
         actual_gens = gen
         n_improved  = Threads.Atomic{Int}(0)
 
-        # Freeze old generation
         pop_old = pop
         Q_old   = Q_pop
 
-        # Allocate next generation
         pop_new = Vector{Vector{Float64}}(undef, pop_size)
         Q_new   = Vector{Float64}(undef, pop_size)
 
@@ -862,11 +681,14 @@ function _run_de(
             Q_mean   = isempty(Q_finite) ? Inf : mean(Q_finite)
             n_feas   = length(Q_finite)
             n_bas    = n_feas == 0 ? 0 : _count_basins(pop, Q_pop, spec)
-            @printf("  [DE gen=%4d DONE]  Q_best=%.6e Q_mean=%-14s  feasible=%d/%d  improved=%d  clusters=%d  evals=%d\n",
+            n_corners = _count_corners(theta_best, spec)
+            @printf("  [DE gen=%4d DONE]  Q_best=%.6e Q_mean=%-14s  feasible=%d/%d  improved=%d  clusters=%d  corners=%d/%d  evals=%d\n",
                     gen,
                     Q_best,
                     isfinite(Q_mean) ? @sprintf("%.6e", Q_mean) : "Inf",
-                    n_feas, pop_size, n_imp, n_bas, n_eval)
+                    n_feas, pop_size, n_imp, n_bas,
+                    n_corners, length(spec.free),
+                    n_eval)
             flush(stdout)
         end
 
@@ -899,38 +721,14 @@ function _run_de(
 end
 
 
-
-
 # ============================================================
 # Main optimisation entry point
 # ============================================================
 
-
-
 """
-    run_smm(spec; method=:de, rng=default_rng()) -> SMMResult
+    run_smm(spec; method=:de, rng=default_rng()) → SMMResult
 
-
-
-Run SMM estimation. All settings (grid sizes, DE parameters,
-Nelder-Mead parameters, tracing) are read from `spec.run`.
-
-
-
-  :de          Differential evolution — global search (default).
-  :sa          Simulated annealing — alternative global search.
-  :neldermead  Nelder-Mead — local polish after :de or :sa.
-
-
-
-Typical workflow (both stages read their settings from spec.run):
-  res_de  = run_smm(spec; method=:de)
-  res_pol = run_smm(_spec_with_init(spec, res_de.theta_opt); method=:neldermead)
-
-
-
-SA note: set sa_T0 = 0.0 in RunParams to enable auto-calibration of T0
-(strongly recommended — it adapts T0 to the actual loss scale).
+Run SMM estimation.  All settings come from `spec.run`.
 """
 function run_smm(
     spec   :: SMMSpec;
@@ -938,17 +736,11 @@ function run_smm(
     rng             = Random.default_rng(),
 ) :: SMMResult
 
-
-
-    r    = spec.run     # shorthand
+    r    = spec.run
     npar = length(spec.free)
-
-
 
     @printf("\nStarting SMM  (%s,  %d free params)\n", method, npar)
     flush(stdout)
-
-
 
     if method == :de
         theta_opt, loss_opt, niters = _run_de(
@@ -966,13 +758,11 @@ function run_smm(
         )
         converged = isfinite(loss_opt)
 
-
-
     elseif method == :sa
         theta_opt, loss_opt, niters = _run_sa(
             spec;
             max_iter        = r.sa_max_iter,
-            T0              = r.sa_T0,        # set sa_T0 = 0.0 for auto-calibration
+            T0              = r.sa_T0,
             step            = r.sa_step,
             cooling_rate    = r.sa_cooling_rate,
             cooling_exp     = r.sa_cooling_exp,
@@ -988,14 +778,10 @@ function run_smm(
         )
         converged = isfinite(loss_opt)
 
-
-
     elseif method in (:neldermead, :lbfgs, :bfgs)
         theta0     = pack_theta(spec)
         iter_count = Ref(0)
         best_loss  = Ref(Inf)
-
-
 
         function obj_traced(theta)
             iter_count[] += 1
@@ -1011,12 +797,8 @@ function run_smm(
             return isfinite(Q) ? Q : 1e16
         end
 
-
-
         opt_method = (method == :neldermead) ? Optim.NelderMead() :
                      (method == :lbfgs)      ? Optim.LBFGS()      : Optim.BFGS()
-
-
 
         options   = Optim.Options(iterations = r.nm_max_iter,
                                   f_tol      = r.nm_f_tol,
@@ -1028,24 +810,16 @@ function run_smm(
         converged = Optim.converged(result) && isfinite(loss_opt)
         niters    = Optim.iterations(result)
 
-
-
     else
         error("Unknown method :$method. Choose :de, :sa, :neldermead, :lbfgs, or :bfgs.")
     end
-
-
 
     @printf("\nSMM complete:  Q=%.6e  converged=%s  iters=%d\n",
             isfinite(loss_opt) ? loss_opt : Inf, converged, niters)
     flush(stdout)
 
-
-
     cp_opt, rp_opt, up_opt, sp_opt = unpack_θ(theta_opt, spec)
     params_opt = _params_to_namedtuple(cp_opt, rp_opt, up_opt, sp_opt, spec)
-
-
 
     res = SMMResult(theta_opt, params_opt, loss_opt, converged, niters, spec)
     print_results(res)
@@ -1053,22 +827,12 @@ function run_smm(
 end
 
 
-
-
 # ============================================================
 # Multi-start wrapper
 # ============================================================
 
-
-
 """
-    multistart_smm(spec, n_starts; method=:de, seed=42) -> SMMResult
-
-
-
-Run `n_starts` searches from randomly perturbed starting points
-and return the best result.  All optimiser settings come from
-`spec.run` as usual — only the starting point differs across starts.
+    multistart_smm(spec, n_starts; method=:sa, seed=42) → SMMResult
 """
 function multistart_smm(
     spec     :: SMMSpec,
@@ -1077,28 +841,18 @@ function multistart_smm(
     seed     :: Int    = 42,
 ) :: SMMResult
 
-
-
     rng    = Random.MersenneTwister(seed)
     theta0 = pack_theta(spec)
     npar   = length(theta0)
 
-
-
     best_result = nothing
-
-
 
     for s in 1:n_starts
         @printf("\n══ Multi-start %d / %d ══\n", s, n_starts)
         flush(stdout)
 
-
-
         theta_start = theta0 .+ 0.5 .* randn(rng, npar)
         spec_s      = _spec_with_init(spec, theta_start)
-
-
 
         try
             res_s = run_smm(spec_s; method = method, rng = rng)
@@ -1112,21 +866,15 @@ function multistart_smm(
         end
     end
 
-
-
     @printf("\nMulti-start done.  Best Q = %.6e\n",
             isnothing(best_result) ? Inf : best_result.loss_opt)
     return best_result
 end
 
 
-
-
 # ============================================================
 # Result display and saving
 # ============================================================
-
-
 
 function print_results(res::SMMResult)
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
@@ -1152,8 +900,6 @@ function print_results(res::SMMResult)
 end
 
 
-
-
 function save_results(res::SMMResult, path::String)
     open(path, "w") do io
         println(io, "block,name,label,estimate,lb,ub,fixed")
@@ -1174,13 +920,9 @@ function save_results(res::SMMResult, path::String)
 end
 
 
-
-
 # ============================================================
 # Internal helpers
 # ============================================================
-
-
 
 function _params_to_namedtuple(cp, rp, up, sp, spec::SMMSpec)
     d = Dict{Symbol, Float64}()
@@ -1194,7 +936,6 @@ function _params_to_namedtuple(cp, rp, up, sp, spec::SMMSpec)
     end
     return NamedTuple(d)
 end
-
 
 
 function _spec_with_init(spec::SMMSpec, theta_unc::Vector{Float64})

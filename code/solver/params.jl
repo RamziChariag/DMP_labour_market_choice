@@ -2,7 +2,6 @@
 # params.jl — Structs and default parameter initialisation
 ############################################################
 
-# packages loaded by main.jl
 
 # ============================================================
 # Structs
@@ -66,7 +65,7 @@ end
 
 
 Base.@kwdef mutable struct UnskilledCache
-    # values
+    # Values
     Usearch   :: Vector{Float64}    # value of unskilled search
     U         :: Vector{Float64}    # value of untrained unemployment
     T         :: Vector{Float64}    # value of training
@@ -75,11 +74,17 @@ Base.@kwdef mutable struct UnskilledCache
     pstar     :: Vector{Float64}    # unskilled reservation quality cutoff
     τT        :: Vector{Float64}    # training policy indicator
 
-    # composition
+    # Composition
     u         :: Vector{Float64}    # density of untrained unemployed
     t         :: Vector{Float64}    # density of workers in training
 
-    # scalar
+    # Cross-market contribution carried from the skilled block:
+    # duS_carry(x) = d(x) · u_S(x).  Held constant within one unskilled
+    # block solve; refreshed by the global outer loop after each skilled
+    # solve, and used in the augmented free-entry condition.
+    duS_carry :: Vector{Float64}
+
+    # Scalar
     θ         :: Float64            # unskilled market tightness
 end
 
@@ -94,7 +99,6 @@ Base.@kwdef struct SkilledParams
     k   :: Float64    # vacancy posting cost
     β   :: Float64    # worker Nash bargaining weight
 
-    ξ   :: Float64    # exogenous separation rate
     λ   :: Float64    # skilled quality-shock arrival rate
     σ   :: Float64    # flow cost of on-the-job search
 end
@@ -114,15 +118,19 @@ end
 
 
 Base.@kwdef mutable struct SkilledCache
-    U     :: Vector{Float64}           # value of skilled unemployment
+    U     :: Vector{Float64}           # value of skilled unemployment (= max{U^(0), U^(1)})
 
     E0    :: Matrix{Float64}           # worker value, employed, no OJS
     E1    :: Matrix{Float64}           # worker value, employed, with OJS
     J0    :: Matrix{Float64}           # firm value, filled job, no OJS
     J1    :: Matrix{Float64}           # firm value, filled job, with OJS
 
-    pstar :: Vector{Float64}           # skilled separation cutoff
-    poj   :: Vector{Float64}           # skilled OJS cutoff
+    pstar :: Vector{Float64}           # endogenous separation cutoff
+    poj   :: Vector{Float64}           # OJS cutoff
+
+    # Cross-market policy on the type grid.
+    # d(x) = 1 ⇔ U^(1)_S(x) > U^(0)_S(x), stored as Float64.
+    d     :: Vector{Float64}
 
     u     :: Vector{Float64}           # density of skilled unemployed
     e     :: Matrix{Float64}           # density of skilled employed by (x, p)
@@ -206,12 +214,12 @@ function initialise_model(;
         b_Γ = 5.0,
     )
 )
-    # ── Grids ──────────────────────────────────────────────────────────────
+    # Grids
     xgrid,   wx   = build_gl_grid(Nx)
     pgrid_U, wp_U = build_gl_grid(Np_U)
     pgrid_S, wp_S = build_gl_grid(Np_S)
 
-    # ── Common parameters ─────────────────────────────────────────────────
+    # Common parameters
     cp = CommonParams(
         r   = 0.05,
         ν   = 0.05,
@@ -227,7 +235,7 @@ function initialise_model(;
     u_grids = UnskilledGrids(p = pgrid_U, wp = wp_U)
     s_grids = SkilledGrids(p = pgrid_S, wp = wp_S)
 
-    # ── Unskilled parameters ──────────────────────────────────────────────
+    # Unskilled parameters
     up = UnskilledParams(
         μ = 0.74,
         η = 0.60,
@@ -236,18 +244,17 @@ function initialise_model(;
         λ = 0.08,
     )
 
-    # ── Skilled parameters ────────────────────────────────────────────────
+    # Skilled parameters
     sp = SkilledParams(
         μ = 0.90,
         η = 0.50,
         k = 0.17,
         β = 0.32,
-        ξ = 0.03,
         λ = 0.07,
         σ = 0.01,
     )
 
-    # ── Simulation controls ───────────────────────────────────────────────
+    # Simulation controls
     sim = SimParams(
         tol_inner      = 1e-8,
         tol_outer_U    = 1e-6,
@@ -271,10 +278,10 @@ function initialise_model(;
         verbose_stride = 10,
     )
 
-    # ── Skilled precomputations ───────────────────────────────────────────
+    # Skilled precomputations
     s_pre = build_skilled_precomp(s_grids, regime)
 
-    # ── Initial conditions ────────────────────────────────────────────────
+    # Initial conditions
     r = cp.r;  ν = cp.ν;  φ = cp.φ
 
     US_guess     = regime.bS / (r + ν)
@@ -292,7 +299,8 @@ function initialise_model(;
         τT        = zeros(Nx),
         u         = 0.4 .* ℓvals,
         t         = t_seed,
-        θ         = 0.5,     # avoid 1.0 sentinel; will be overwritten on first outer iteration
+        duS_carry = zeros(Nx),
+        θ         = 0.5,
     )
 
     US_init = fill(regime.bS / (r + ν), Nx)
@@ -305,9 +313,10 @@ function initialise_model(;
         J1    = zeros(Nx, Np_S),
         pstar = fill(0.10, Nx),
         poj   = fill(0.60, Nx),
+        d     = zeros(Nx),
         u     = zeros(Nx),
         e     = zeros(Nx, Np_S),
-        θ     = 0.5,     # avoid 1.0 sentinel; will be overwritten on first outer iteration
+        θ     = 0.5,
     )
 
     return Model(

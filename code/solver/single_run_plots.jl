@@ -1,16 +1,14 @@
 ############################################################
-# single_run_plots.jl — All equilibrium plots (revised)
+# single_run_plots.jl — Equilibrium plots
 #
-# make_all_plots(obj; output_dir)
+# make_all_plots(obj; output_dir, gamma_PS)
 #   Generates and saves every figure to output_dir.
-#   obj — NamedTuple from compute_equilibrium_objects()
+#   obj — NamedTuple from compute_equilibrium_objects().
 #
-# NOTE: `using Plots`, `using LaTeXStrings`, and
-# `using Interpolations` are loaded in main.jl before
-# this file's functions are called.
+# `using Plots`, `using LaTeXStrings`, and `using Interpolations`
+# must be loaded before this file's functions are called.
 ############################################################
 
-# ── Shared theme ────────────────────────────────────────────
 function _set_theme!()
     gr()
     theme(:default)
@@ -34,8 +32,9 @@ const _C3 = :seagreen
 const _C4 = :darkorange
 const _C5 = :mediumpurple
 
+
 # ============================================================
-# Individual figure constructors (new style)
+# Figures
 # ============================================================
 
 function fig_densities(obj)
@@ -72,7 +71,6 @@ function fig_unskilled_values(obj)
         annotate!(p2, xg[end]*0.95, minimum(obj.Usearch)*1.02,
                   text(L"\bar{x} \approx %$(round(x_bar, digits=3))", :right, 8, :darkgray))
     end
-    #title!(p2, "Unskilled unemployment values")
     xlabel!(p2, L"x")
     ylabel!(p2, "Value")
     p2
@@ -83,7 +81,6 @@ function fig_employment_heatmaps(obj; percentile_print = 1.00)
     pgU = obj.pgU
     pg  = obj.pg
 
-    # zoom window
     x_lo,  x_hi  = 0.0, percentile_print
     pU_lo, pU_hi = 0.0, percentile_print
     pS_lo, pS_hi = 0.0, percentile_print
@@ -156,12 +153,33 @@ end
 function fig_training_policy(obj)
     p4 = plot(obj.xg, obj.tauT,
               label=L"\tau(x)", color=_C2, lw=2, legend=false)
-    #title!(p4, L"Training policy $\tau(x)$")
     xlabel!(p4, L"x")
     ylabel!(p4, L"\tau(x)")
     plot!(p4, yguidefontrotation=-90)
     ylims!(p4, -0.05, 1.15)
     p4
+end
+
+# Cross-market policy d(x) and the two unemployment-value branches.
+function fig_cross_market_policy(obj)
+    xg = obj.xg
+
+    pa = plot(xg, obj.d,
+              label = L"d(x)",
+              color = _C5, lw = 2.4, legend = false)
+    xlabel!(pa, L"x")
+    ylabel!(pa, L"d(x)")
+    plot!(pa, yguidefontrotation=-90)
+    ylims!(pa, -0.05, 1.15)
+    title!(pa, "Cross-market search policy")
+
+    pb = plot(xg, obj.US, label=L"U_S(x)=\max", color=_C3, lw=2)
+    plot!(pb, xg, obj.UU, label=L"U_U(x)",      color=_C1, lw=2)
+    xlabel!(pb, L"x")
+    ylabel!(pb, "Value")
+    title!(pb, "Unemployment values")
+
+    plot(pa, pb, layout=(1,2), size=(1000,380), margin=5Plots.mm)
 end
 
 function fig_unskilled_frontier(obj)
@@ -213,7 +231,6 @@ function fig_skilled_cutoffs(obj)
     xg = obj.xg
     p7 = plot(xg, obj.pstar_S, label=L"p_S^*(x)", color=_C1, legend=false)
     plot!(p7, xg, obj.poj, label=L"p^{\rm oj}(x)", color=_C2, legend=false)
-    #title!(p7, "Skilled cutoffs by type")
     xlabel!(p7, L"x")
     ylabel!(p7, L"p")
     plot!(p7, yguidefontrotation=-90, left_margin=5Plots.mm)
@@ -299,7 +316,6 @@ function fig_unemployment_values(obj)
     xg = obj.xg
     p11 = plot(xg, obj.US, label=L"U_S(x)", color=_C3, lw=2)
     plot!(p11, xg, obj.UU, label=L"U_U(x)", color=_C1, lw=2)
-    #title!(p11, "Unemployment values")
     xlabel!(p11, L"x")
     ylabel!(p11, "Value")
     p11
@@ -311,7 +327,6 @@ function fig_unskilled_wage(obj)
 
     pW1 = heatmap(xg, pgU, obj.wU_surface',
                   xlabel=L"x", ylabel=L"p",
-                  #title=L"Unskilled wage $w_U(x,p)$", color=:plasma,
                   legend=false, grid=false, yguidefontrotation=-90,
                   left_margin=12Plots.mm)
     contour!(pW1, xg, pgU, obj.wU_surface',
@@ -350,12 +365,12 @@ function fig_skilled_wages(obj)
     plot(pW2a, pW2b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
 end
 
-# New: wage premium by x (integrated over p)
+# Mean log wage gap by x, computed on the OJS-aware realised skilled wage
+# and the unskilled wage interpolated onto the skilled p-grid.
 function fig_skill_premium(obj)
     xg = obj.xg
     pg = obj.pg
 
-    # realised skilled wage
     wS_actual = fill(NaN, obj.Nx, obj.NpS)
     for ix in 1:obj.Nx
         poj_ix = clamp01(obj.poj[ix])
@@ -364,7 +379,6 @@ function fig_skill_premium(obj)
         end
     end
 
-    # interpolate unskilled wage onto skilled grid
     wU_on_pg = fill(NaN, obj.Nx, obj.NpS)
     for ix in 1:obj.Nx
         itp = linear_interpolation(obj.pgU, obj.wU_surface[ix, :],
@@ -372,7 +386,6 @@ function fig_skill_premium(obj)
         wU_on_pg[ix, :] = itp.(pg)
     end
 
-    # interpolate unskilled employment onto skilled grid
     eU_on_pg = zeros(obj.Nx, obj.NpS)
     for ix in 1:obj.Nx
         itp = linear_interpolation(obj.pgU, obj.eU_surface[ix, :],
@@ -460,7 +473,6 @@ function fig_wage_densities_pooled(obj)
     plot(pW4c, size=(720,480), margin=5Plots.mm)
 end
 
-# Optional: extra pooled wage-density figure from notebook (W5)
 function fig_wage_pooled_density(obj)
     dens_pooled = obj.dens_U .+ obj.dens_S
     dw          = obj.wmid[2] - obj.wmid[1]
@@ -474,7 +486,6 @@ function fig_wage_pooled_density(obj)
           color=_C1, lw=1.4, ls=:dash)
     plot!(pW5a, obj.wmid, obj.dens_S ./ Z_w, label="Skilled",
           color=_C2, lw=1.4, ls=:dash)
-    #title!(pW5a, "Pooled wage density")
     xlabel!(pW5a, "Wage")
     ylabel!(pW5a, "Density")
     plot(pW5a, size=(720,480), margin=5Plots.mm)
@@ -483,19 +494,10 @@ end
 """
     fig_skilled_employment_by_PS(obj, gamma_PS; percentile_print=1.00)
 
-Skilled employment density heatmap with P_S(x) = γ·x^{γ−1} on the
-horizontal axis and match quality p on the vertical axis.
-
-The GL quadrature x-grid is non-uniformly spaced, and the mapping
-x → P_S is a power law that further warps the spacing.  Passing a
-non-uniform vector directly to `heatmap` (GR backend) renders each
-node as an equal-width pixel column, producing an all-zero appearance
-because the mass is spread across hundreds of imperceptible columns.
-
-Fix: compute PSg = P_S(xg) on the GL grid (monotone for γ > 1),
-build a UNIFORM PS grid that spans [PSg[1], γ] with the same number
-of points, then interpolate each p-slice of eS_mat and the cutoff
-curves onto that uniform grid before calling heatmap.
+Skilled employment density with P_S(x) = γ x^{γ−1} on the horizontal
+axis.  Because the GL nodes are non-uniform and x → P_S is a power
+law, the GL grid is interpolated onto a uniform P_S grid before
+calling heatmap.
 """
 function fig_skilled_employment_by_PS(obj, gamma_PS::Float64;
                                        percentile_print::Float64 = 1.00)
@@ -503,37 +505,28 @@ function fig_skilled_employment_by_PS(obj, gamma_PS::Float64;
     pg  = obj.pg
     Nx  = obj.Nx
 
-    # ── P_S values at each GL node (monotone ↑ for γ > 1) ────────────────
-    PSg = [PS_of_x(x, gamma_PS) for x in xg]   # matches solver convention
+    PSg = [PS_of_x(x, gamma_PS) for x in xg]
 
-    # ── Uniform PS grid: same length as xg, spans [PSg[1], γ] ───────────
-    # PSg[1] ≈ γ·xg[1]^{γ-1} ≈ 0;  PSg[end] ≈ γ (PS at x≈1)
     PS_lo      = PSg[1]
-    PS_hi      = gamma_PS                        # theoretical max = PS(1) = γ
+    PS_hi      = gamma_PS
     PS_uniform = collect(range(PS_lo, PS_hi; length = Nx))
 
-    # ── Window on p (same convention as other heatmaps) ──────────────────
     iS    = 0.0 .≤ pg .≤ percentile_print
     pg_w  = pg[iS]
     NpW   = sum(iS)
-    eS_w  = obj.eS_mat[:, iS]                   # (Nx × NpW) on original PSg
+    eS_w  = obj.eS_mat[:, iS]
 
-    # ── Interpolate each p-slice from PSg → PS_uniform ───────────────────
-    # PSg is sorted ↑, so linear_interpolation is valid.
-    # Extrapolation at the left edge (PS < PSg[1] ≈ 0) returns 0 (no mass).
     eS_on_PS = zeros(Nx, NpW)
     for jp in 1:NpW
         itp = linear_interpolation(PSg, eS_w[:, jp]; extrapolation_bc = 0.0)
         eS_on_PS[:, jp] = max.(itp.(PS_uniform), 0.0)
     end
 
-    # ── Interpolate cutoff curves from PSg → PS_uniform ──────────────────
     itp_pstar = linear_interpolation(PSg, obj.pstar_S; extrapolation_bc = NaN)
     itp_poj   = linear_interpolation(PSg, obj.poj;     extrapolation_bc = NaN)
     pstar_PS  = itp_pstar.(PS_uniform)
     poj_PS    = itp_poj.(PS_uniform)
 
-    # ── Plot ──────────────────────────────────────────────────────────────
     fig = heatmap(PS_uniform, pg_w, eS_on_PS',
                   xlabel = L"P_S(x) = \gamma\, x^{\gamma-1}",
                   ylabel = L"p",
@@ -556,28 +549,30 @@ end
 # Master function — make and save all figures
 # ============================================================
 
-function make_all_plots(obj; output_dir::String = "output/plots", gamma_PS::Union{Float64,Nothing} = nothing)
+function make_all_plots(obj; output_dir::String = "output/plots",
+                              gamma_PS::Union{Float64,Nothing} = nothing)
     mkpath(output_dir)
     _set_theme!()
 
     figures = [
-        ("fig01_densities",           fig_densities(obj)),
-        ("fig02_unskilled_values",    fig_unskilled_values(obj)),
-        ("fig03_employment_heatmaps", fig_employment_heatmaps(obj)),
-        ("fig03b_total_employment",   fig_total_employment(obj)),
+        ("fig01_densities",            fig_densities(obj)),
+        ("fig02_unskilled_values",     fig_unskilled_values(obj)),
+        ("fig03_employment_heatmaps",  fig_employment_heatmaps(obj)),
+        ("fig03b_total_employment",    fig_total_employment(obj)),
         ("fig03c_skilled_emp_by_PS",   isnothing(gamma_PS) ? nothing : fig_skilled_employment_by_PS(obj, gamma_PS)),
-        ("fig04_training_policy",     fig_training_policy(obj)),
-        ("fig05_unskilled_frontier",  fig_unskilled_frontier(obj)),
-        ("fig06_unskilled_surfaces",  fig_unskilled_value_surfaces(obj)),
-        ("fig07_skilled_cutoffs",     fig_skilled_cutoffs(obj)),
-        ("fig08_skilled_worker_vals", fig_skilled_worker_values(obj)),
-        ("fig09_skilled_firm_vals",   fig_skilled_firm_values(obj)),
-        ("fig10_surplus_heatmaps",    fig_surplus_heatmaps(obj)),
-        ("fig11_unemployment_values", fig_unemployment_values(obj)),
-        ("figW1_unskilled_wage",      fig_unskilled_wage(obj)),
-        ("figW2_skilled_wages",       fig_skilled_wages(obj)),
-        ("figW3_skill_premium",       fig_skill_premium(obj)),
-        ("figW4_wage_densities",      fig_wage_densities(obj)),
+        ("fig04_training_policy",      fig_training_policy(obj)),
+        ("fig04b_cross_market_policy", fig_cross_market_policy(obj)),
+        ("fig05_unskilled_frontier",   fig_unskilled_frontier(obj)),
+        ("fig06_unskilled_surfaces",   fig_unskilled_value_surfaces(obj)),
+        ("fig07_skilled_cutoffs",      fig_skilled_cutoffs(obj)),
+        ("fig08_skilled_worker_vals",  fig_skilled_worker_values(obj)),
+        ("fig09_skilled_firm_vals",    fig_skilled_firm_values(obj)),
+        ("fig10_surplus_heatmaps",     fig_surplus_heatmaps(obj)),
+        ("fig11_unemployment_values",  fig_unemployment_values(obj)),
+        ("figW1_unskilled_wage",       fig_unskilled_wage(obj)),
+        ("figW2_skilled_wages",        fig_skilled_wages(obj)),
+        ("figW3_skill_premium",        fig_skill_premium(obj)),
+        ("figW4_wage_densities",       fig_wage_densities(obj)),
         ("figW4b_wage_densities_pool", fig_wage_densities_pooled(obj)),
         ("figW5_pooled_wage_density",  fig_wage_pooled_density(obj)),
     ]

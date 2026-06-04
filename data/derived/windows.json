@@ -1,0 +1,54 @@
+{
+    "windows_order": [
+        "base_fc",
+        "crisis_fc",
+        "base_covid",
+        "crisis_covid"
+    ],
+    "windows": {
+        "crisis_fc": {
+            "label": "Financial crisis",
+            "ym_start": 200801,
+            "asec_years": [
+                2009,
+                2010,
+                2011
+            ],
+            "ym_end": 201012
+        },
+        "crisis_covid": {
+            "label": "COVID crisis",
+            "ym_start": 202001,
+            "asec_years": [
+                2021,
+                2022,
+                2023
+            ],
+            "ym_end": 202212
+        },
+        "base_fc": {
+            "label": "Pre-FC baseline",
+            "ym_start": 200301,
+            "asec_years": [
+                2004,
+                2005,
+                2006,
+                2007,
+                2008
+            ],
+            "ym_end": 200712
+        },
+        "base_covid": {
+            "label": "Pre-COVID baseline",
+            "ym_start": 201501,
+            "asec_years": [
+                2016,
+                2017,
+                2018,
+                2019,
+                2020
+            ],
+            "ym_end": 201912
+        }
+    }
+}
