@@ -1,13 +1,15 @@
 ############################################################
-# cps_asec.jl — Stage 2: Clean CPS ASEC
+# data_processing/cps_asec.jl
 #
-# Reads raw IPUMS CPS ASEC extract.
-# Restricts to wage workers, constructs real hourly wages,
-# deflates to constant dollars, trims, normalises by
-# pooled weighted median within each window.
-# Saves cleaned Arrow file to derived/.
+# Stage 2 — load and clean the raw CPS ASEC extract: wage-worker sample,
+# hourly-wage construction, CPI deflation, per-window 1/99 trimming, and
+# normalisation by the pooled within-window median.
 #
-# Requires: helpers.jl included first.
+# Reads:  data/raw/cps_asec/
+# Writes: cps_asec_clean.arrow
+#
+# Plain include() file: definitions only, no top-level execution.
+# `using` packages and path consts come from data_processing_main.jl.
 ############################################################
 
 function clean_cps_asec()
@@ -30,7 +32,9 @@ function clean_cps_asec()
 
     # ── ASEC supplement filter ────────────────────────────────────
     if hasproperty(df, :ASECFLAG)
+        n_nonsup = count(row -> coalesce(row.ASECFLAG, 0) != 1, eachrow(df))
         filter!(row -> coalesce(row.ASECFLAG, 0) == 1, df)
+        #@info "  Non-supplement records dropped: $n_nonsup"
     end
 
     filter!(row -> 2003 <= row.YEAR <= 2022, df)
@@ -68,7 +72,7 @@ function clean_cps_asec()
 
     df.skilled = is_skilled.(df.EDUC)
 
-    # ── Window assignment (by ASEC survey year) ──────────────────
+    # ── Window assignment ────────────────────────────────────────
     df.window = assign_asec_window.(df.YEAR)
     @info "  In estimation windows: $(count(w -> w != :none, df.window)) / $(nrow(df))"
 
@@ -89,7 +93,7 @@ function clean_cps_asec()
     end
     filter!(row -> !row.trimmed, df)
 
-    # ── Normalisation: divide by pooled weighted median ──────────
+    # ── Normalisation: divide by pooled median ───────────────────
     df.wage_norm = fill(NaN, nrow(df))
     for wname in keys(WINDOWS)
         mask = df.window .== wname
@@ -99,7 +103,9 @@ function clean_cps_asec()
         med_w     = wmedian(wages_w, weights_w)
         if isfinite(med_w) && med_w > 0.0
             df.wage_norm[mask] .= df.real_wage[mask] ./ med_w
+            #@info "  Window $wname: median wage = \$(@sprintf("%.2f", med_w))"
         else
+            #@warn "  Median wage invalid for window $wname"
             df.wage_norm[mask] .= df.real_wage[mask]
         end
     end
@@ -114,6 +120,6 @@ function clean_cps_asec()
 
     outpath = joinpath(DERIVED_DIR, "cps_asec_clean.arrow")
     Arrow.write(outpath, df)
-    @info "  Saved: $outpath  ($(nrow(df)) rows)"
+    #@info "  Saved: $outpath  ($(nrow(df)) rows)"
     return df
 end

@@ -382,7 +382,7 @@ flush(stdout)
 #      2.0   equal weights (identity, no W matrix)
 #      >2.0  full optimal W (shrunk if κ > target)
 # ============================================================
-W_COND_TARGET = 1e7 
+W_COND_TARGET = 0.0 
 
 function _w_suffix(cond_target::Float64)
     cond_target == 0.0 && return "_diagonalW"

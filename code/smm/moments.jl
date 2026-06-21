@@ -35,6 +35,13 @@
 #     conceptually comparable.
 #   - If training_share_scale.csv is missing, κ_w defaults to 1.0
 #     with a warning (back-compat with older pipeline runs).
+#
+# v7.2 — the κ_w application now lives in data_pipeline_v7, not here:
+#     Stage 7 writes κ_w·training_share into moments_{window}.csv and
+#     Stage 8 writes the κ-scaled training_share row/col into
+#     sigma_{window}.csv. The loaders below therefore read pre-adjusted
+#     values and no longer rescale by κ_w. (load_training_share_scale is
+#     retained because smm_main.jl still reports κ_w in the run log.)
 ############################################################
 
 
@@ -97,11 +104,10 @@ Return the empirical moment targets used in SMM estimation.  Each
 field is a (value, weight) tuple.  Reads from
 `moments_{window}.csv` produced by data_pipeline_v7.
 
-The training_share row is rescaled by κ_w from
-`training_share_scale.csv` so the data target reflects the NSC
-IPEDS-Universe level (age-comparable across the FC and COVID
-windows). If the κ file is missing, κ = 1.0 and a warning is
-emitted.
+The training_share row already reflects the NSC IPEDS-Universe
+level: the κ_w adjustment is applied upstream in data_pipeline_v7
+(Stage 7), so this returns the moments exactly as written to
+`moments_{window}.csv` with no further rescaling.
 
 Moment list
   Labour-market stocks (5)
@@ -126,19 +132,8 @@ function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
     isfile(moments_file) || error("Moments file not found: $moments_file — run data_pipeline_v7 first.")
     raw = _read_moments_csv(moments_file)
 
-    # κ-rescale training_share to NSC level (see header note).
-    κ = load_training_share_scale(; window=window, derived_dir=derived_dir)
-    if haskey(raw, :training_share) && κ != 1.0
-        old_val = raw.training_share.value
-        new_val = κ * old_val
-        @printf("  Applied κ_w to training_share level: %.5f → %.5f  (κ_%s = %.4f)\n",
-                old_val, new_val, window, κ)
-        # Rebuild NamedTuple with the scaled training_share entry.
-        scaled_pairs = [k => (k === :training_share ?
-                              (value = new_val, weight = v.weight) : v)
-                        for (k, v) in Base.pairs(raw)]
-        return NamedTuple(scaled_pairs)
-    end
+    # training_share already carries the NSC κ_w level adjustment, applied
+    # upstream in data_pipeline_v7 (Stage 7). Return the moments as read.
     return raw
 end
 
@@ -150,8 +145,9 @@ from `sigma_{window}.csv`. Used only as the DISPLAY-ONLY `q_scale` divisor
 for the reported scalar Q under the matrix weighting schemes — constant in
 θ, so it does not move the argmin.
 
-The training_share diagonal is scaled by κ² (row/col × κ), matching the κ
-convention in load_weight_matrix. Note shrinkage there leaves the diagonal
+The training_share row/col of Σ̂ already carries the κ_w level adjustment
+(applied in data_pipeline_v7, Stage 8), so the κ²-scaled diagonal is read
+directly. Note shrinkage in load_weight_matrix leaves the diagonal
 unchanged, so tr(Σ̂_shrunk) = tr(Σ̂) and this is the correct scale either way.
 """
 function load_sigma_trace(;
@@ -174,15 +170,6 @@ function load_sigma_trace(;
         join(string.(missing_cols), ", ") * " — re-run data_pipeline_v7.")
 
     Σ_full = Matrix{Float64}(df_sig)
-
-    κ = load_training_share_scale(; window=window, derived_dir=derived_dir)
-    if κ != 1.0
-        ts_idx = findfirst(==(:training_share), csv_cols)
-        if !isnothing(ts_idx)
-            Σ_full[ts_idx, :] .*= κ
-            Σ_full[:, ts_idx] .*= κ
-        end
-    end
 
     return tr(Σ_full[active_col_idx, active_col_idx])
 end
@@ -243,26 +230,10 @@ function load_weight_matrix(;
         " — re-run data_pipeline_v7.")
 
     # Convert to Matrix once; all downstream operations work on Σ_full.
+    # The training_share row/col of Σ̂ already carries the κ_w level
+    # adjustment (applied in data_pipeline_v7, Stage 8), so no rescaling
+    # is done here.
     Σ_full = Matrix{Float64}(df_sig)
-
-    # Apply κ_w to the training_share row/column of Σ̂ so it stays
-    # consistent with the κ-scaled data target produced by
-    # load_data_moments. Off-diagonals × κ, diagonal × κ². Done on
-    # the FULL Σ̂ before subsetting so it works whether or not
-    # training_share is in `active_names`.
-    κ = load_training_share_scale(; window=window, derived_dir=derived_dir)
-    if κ != 1.0
-        ts_idx = findfirst(==(:training_share), csv_cols)
-        if isnothing(ts_idx)
-            @warn "Σ̂ has no training_share column — κ scaling on Σ̂ skipped."
-        else
-            Σ_full[ts_idx, :] .*= κ
-            Σ_full[:, ts_idx] .*= κ
-            # The (ts_idx, ts_idx) cell got multiplied twice → κ², which is
-            # the correct rescaling for the variance of a κ-scaled moment.
-            @printf("  Applied κ_w = %.4f to training_share row/col of Σ̂  (diagonal × κ² = %.4f).\n", κ, κ^2)
-        end
-    end
 
     if cond_target == 0.0
         d = diag(Σ_full[active_col_idx, active_col_idx])
@@ -369,22 +340,14 @@ end
     load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String) → Vector{Float64}
 
 Read `sigma_{window}.csv` and return the vector of standard errors
-(square root of the diagonal). The training_share entry is scaled
-by κ_w so the returned σ refers to the κ-rescaled data target.
+(square root of the diagonal). The training_share entry already
+carries the κ_w level adjustment (applied in data_pipeline_v7,
+Stage 8), so the returned σ refers to the κ-rescaled data target.
 """
 function load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String)
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
     isfile(sigma_file) || error("Sigma file not found: $sigma_file — run data_pipeline_v7 first.")
     σ_vec = _read_sigma_csv(sigma_file)
-
-    κ = load_training_share_scale(; window=window, derived_dir=derived_dir)
-    if κ != 1.0
-        df = CSV.read(sigma_file, DataFrame)
-        ts_idx = findfirst(==(:training_share), Symbol.(names(df)))
-        if !isnothing(ts_idx)
-            σ_vec[ts_idx] *= κ
-        end
-    end
     return σ_vec
 end
 

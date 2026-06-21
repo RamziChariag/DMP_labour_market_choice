@@ -1,12 +1,18 @@
 ############################################################
-# jolts.jl — Stage 3: Download and clean JOLTS
+# data_processing/jolts.jl
 #
-# Fetches JOLTS vacancy data from BLS API (or reads cached CSV).
-# Allocates vacancies to skilled/unskilled using CPS industry
-# skill shares from Stage 1.
-# Saves cleaned Arrow file to derived/.
+# Stage 3 — JOLTS job openings. download_jolts() pulls the supersector
+# series from the BLS API (cached to data/raw/jolts/); clean_jolts()
+# allocates openings to skilled/unskilled using the CPS industry skill
+# shares and aggregates V_S / V_U per (year, month, window).
 #
-# Requires: helpers.jl included first.
+# Reads:  data/raw/jolts/jolts_openings.csv (or BLS API), industry_skill_shares.arrow, economy_skill_shares.arrow
+# Writes: jolts_openings.csv, jolts_clean.arrow
+#
+# Set ENV["BLS_API_KEY"] for higher BLS rate limits (optional).
+#
+# Plain include() file: definitions only, no top-level execution.
+# `using` packages and path consts come from data_processing_main.jl.
 ############################################################
 
 # JOLTS series IDs — supersector-level job openings
@@ -86,7 +92,7 @@ function download_jolts()
     all_series = vcat(JOLTS_SERIES, JOLTS_CROSSCHECK_SERIES)
     records = @NamedTuple{series_id::String, year::Int, period::String, value::Float64}[]
 
-    for (start_yr, end_yr) in [(2000, 2019), (2020, 2022)]
+    for (start_yr, end_yr) in [(2000, 2019), (2020, 2025)]
         @info "  Requesting $(start_yr)–$(end_yr)..."
         result = _bls_fetch(all_series, start_yr, end_yr)
         result["status"] != "REQUEST_SUCCEEDED" &&
@@ -108,7 +114,7 @@ function download_jolts()
 
     df = DataFrame(records)
 
-    # Missing series check
+    # Missing series check — ERROR not warning
     missing_series = setdiff(JOLTS_SERIES, unique(df.series_id))
     if !isempty(missing_series)
         error("No data returned for JOLTS series: $missing_series — verify IDs at bls.gov/jlt")
@@ -142,6 +148,7 @@ function clean_jolts()
     df.industry_name = [get(JOLTS_INDUSTRY_MAP, ic, "Cross-check ($ic)")
                         for ic in df.industry_code]
 
+    # Verify: all JOL series should resolve
     @assert all(df.industry_code .!= "unknown") "Unresolved series IDs found"
 
     # ── 4. JOLTS units: multiply by 1000 (thousands → persons) ───
@@ -214,7 +221,7 @@ function clean_jolts()
         check = innerjoin(total_nf, alloc_total; on = [:YEAR, :MONTH])
         check.pct_diff = (check.alloc_total .- check.VALUE_PERSONS) ./ check.VALUE_PERSONS .* 100
         max_diff = maximum(abs.(filter(isfinite, check.pct_diff)))
-        println("  Cross-check: max |alloc_total − total_nonfarm| / total_nonfarm = $(round(max_diff; digits=2))%")
+        println("  Cross-check: max |alloc_total − total_nonfarm| / total_nonfarm = $(round(100*max_diff; digits=2))%")
         if max_diff > 5.0
             @warn "  Allocation total deviates >5% from total nonfarm — investigate"
         end
