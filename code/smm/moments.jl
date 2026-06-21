@@ -142,6 +142,51 @@ function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
     return raw
 end
 
+"""
+    load_sigma_trace(; window, derived_dir, skip_moments) → Float64
+
+tr(Σ̂) over the ACTIVE moments (MOMENT_NAMES minus `skip_moments`), read
+from `sigma_{window}.csv`. Used only as the DISPLAY-ONLY `q_scale` divisor
+for the reported scalar Q under the matrix weighting schemes — constant in
+θ, so it does not move the argmin.
+
+The training_share diagonal is scaled by κ² (row/col × κ), matching the κ
+convention in load_weight_matrix. Note shrinkage there leaves the diagonal
+unchanged, so tr(Σ̂_shrunk) = tr(Σ̂) and this is the correct scale either way.
+"""
+function load_sigma_trace(;
+    window::Symbol = :base_fc,
+    derived_dir::String,
+    skip_moments::Vector{Symbol} = Symbol[],
+) :: Float64
+    active_names = [nm for nm in MOMENT_NAMES if !(nm in skip_moments)]
+
+    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
+    isfile(sigma_file) || error(
+        "sigma_$(window).csv not found in $derived_dir — run data_pipeline_v7 first.")
+    df_sig   = CSV.read(sigma_file, DataFrame)
+    csv_cols = Symbol.(names(df_sig))
+
+    active_col_idx = [findfirst(==(nm), csv_cols) for nm in active_names]
+    missing_cols   = active_names[isnothing.(active_col_idx)]
+    isempty(missing_cols) || error(
+        "sigma_$(window).csv is missing columns for active moments: " *
+        join(string.(missing_cols), ", ") * " — re-run data_pipeline_v7.")
+
+    Σ_full = Matrix{Float64}(df_sig)
+
+    κ = load_training_share_scale(; window=window, derived_dir=derived_dir)
+    if κ != 1.0
+        ts_idx = findfirst(==(:training_share), csv_cols)
+        if !isnothing(ts_idx)
+            Σ_full[ts_idx, :] .*= κ
+            Σ_full[:, ts_idx] .*= κ
+        end
+    end
+
+    return tr(Σ_full[active_col_idx, active_col_idx])
+end
+
 
 """
     load_weight_matrix(; window, derived_dir, cond_target,

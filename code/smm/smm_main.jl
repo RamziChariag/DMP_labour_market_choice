@@ -382,7 +382,7 @@ flush(stdout)
 #      2.0   equal weights (identity, no W matrix)
 #      >2.0  full optimal W (shrunk if κ > target)
 # ============================================================
-W_COND_TARGET = 2.0 
+W_COND_TARGET = 1e7 
 
 function _w_suffix(cond_target::Float64)
     cond_target == 0.0 && return "_diagonalW"
@@ -660,8 +660,8 @@ run_params = SMMRunParams(
                                   # from uphill probes; here pinned to 20)
     sa_step            = 0.30,    # initial proposal sd in unconstrained space
     sa_cooling_rate    = 1.0,     # rate in T(t) = T_reheat / log(1+rate·t)^exp
-    sa_cooling_exp     = 0.2,     # exponent in same schedule (higher = faster cool)
-    sa_reheat_patience = 1_000,      # steps without improvement before a reheat
+    sa_cooling_exp     = 0.6,     # exponent in same schedule (higher = faster cool)
+    sa_reheat_patience = 1_000,   # steps without improvement before a reheat, 0 to disable reheats
     sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
     sa_max_reheats     = 3,      # cap on number of reheats per run
     sa_adapt_window    = 50,      # rolling window for adaptive step / acceptance
