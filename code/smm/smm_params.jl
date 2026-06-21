@@ -333,11 +333,11 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:skl,  :bS,  0.000, 2.00,  0.01,  "skilled outside flow b_S"),
 
         # Regime-specific — common block
-        ParamSpec(:common, :c,   0.01,  12.00,   1.70,  "training cost coeff c"),
+        ParamSpec(:common, :c,   3.00,  12.00,   7.70,  "training cost coeff c"),
 
         # Regime-specific — aggregate state / offer shape (stored by consuming block)
-        ParamSpec(:unsk, :PU,  0.05,  6.00,  0.70,  "unskilled productivity P_U"),
-        ParamSpec(:skl,  :gamma_PS, 0.10, 10.00, 1.85, "skilled productivity γ_PS"),
+        ParamSpec(:unsk, :PU,  0.70,  7.00,  0.70,  "unskilled productivity P_U"),
+        ParamSpec(:skl,  :gamma_PS, 1.00, 12.00, 1.85, "skilled productivity γ_PS"),
         ParamSpec(:unsk, :α_U, 0.01,  20.00, 1.00,  "unskilled damage shape α_U"),
         ParamSpec(:skl,  :a_Γ, 0.01,  10.00, 2.00,  "skilled offer shape a_Γ"),
         ParamSpec(:skl,  :b_Γ, 0.01,  10.00, 5.00,  "skilled offer shape b_Γ"),

@@ -16,8 +16,11 @@
 ############################################################
 
 # JOLTS series IDs — supersector-level job openings
+# NOTE: Mining and logging is BLS code 110099, NOT 100000.
+# 100000 = "Total private" (display_level 1) and would double-count the
+# entire private economy into the allocation (≈1.9x total nonfarm).
 const JOLTS_SERIES = [
-    "JTS100000000000000JOL", "JTS230000000000000JOL",
+    "JTS110099000000000JOL", "JTS230000000000000JOL",
     "JTS320000000000000JOL", "JTS340000000000000JOL",
     "JTS420000000000000JOL", "JTS440000000000000JOL",
     "JTS480099000000000JOL", "JTS510000000000000JOL",
@@ -55,7 +58,7 @@ const JOLTS_INDUSTRY_MAP = Dict(
     "720000" => "Accommodation and food services",
     "810000" => "Other services",
     "910000" => "Federal government",
-    "920000" => "State and local government",
+    "920000" => "Government (federal + state & local)",
 )
 
 function _bls_fetch(series_ids, start_year, end_year)
@@ -76,7 +79,12 @@ end
 function _parse_jolts_industry(sid::AbstractString)::String
     m = match(r"^JTS(\d{6})\d*JOL$", sid)
     isnothing(m) && return "unknown"
-    return m.captures[1]
+    code = m.captures[1]
+    # BLS codes Mining and logging as 110099; the rest of the pipeline
+    # (JOLTS_INDUSTRY_MAP and the CPS IND_JOLTS crosswalk) uses the internal
+    # key "100000" for this supersector. Normalise so the join matches.
+    code == "110099" && return "100000"
+    return code
 end
 
 function download_jolts()
@@ -158,9 +166,24 @@ function clean_jolts()
     # ── 5. Window assignment ──────────────────────────────────────
     df.window = assign_window.(df.YEAR, df.MONTH)
 
+    # Merge Federal (910000) into State-and-local (920000) → one Government
+    # cell. The CPS Census industry codes (setup.jl) route all public
+    # administration to "920000" and cannot separate federal from state/local,
+    # so JOLTS Federal openings have no distinct CPS skill share. Collapsing
+    # both JOLTS government series onto "920000" lets them share the single
+    # CPS government skill share; step 8's groupby then sums their V_S/V_U.
+    df.industry_code = [c == "910000" ? "920000" : c for c in df.industry_code]
+    df.industry_name = [get(JOLTS_INDUSTRY_MAP, ic, "Cross-check ($ic)")
+                        for ic in df.industry_code]
+
     # ── 6. Merge with CPS industry skill shares ──────────────────
+    # Restrict to in-window months. CPS industry skill shares are only
+    # produced for window != :none (Stage 1), so out-of-window JOLTS months
+    # (2001-02, 2011-14, the Dec-2000 lead-in, etc.) have no share to join
+    # to and would otherwise default spuriously. They enter no moment.
     CROSS_CHECK_CODES = Set(["000000","300000","400000","600000","700000","900000"])
-    allocation = filter(row -> row.industry_code ∉ CROSS_CHECK_CODES &&
+    allocation = filter(row -> row.window != :none &&
+                               row.industry_code ∉ CROSS_CHECK_CODES &&
                                row.industry_code != "unknown", df)
 
     shares_path = joinpath(DERIVED_DIR, "industry_skill_shares.arrow")
@@ -183,15 +206,25 @@ function clean_jolts()
         end
 
         n_defaulted = 0
+        defaulted_codes = Dict{String,Int}()
         for i in 1:nrow(allocation)
             if ismissing(allocation.skilled_share_ind[i])
                 default_share = get(econ_map, allocation.window[i], 0.35)
                 allocation.skilled_share_ind[i] = default_share
                 n_defaulted += 1
+                code = allocation.industry_code[i]
+                defaulted_codes[code] = get(defaulted_codes, code, 0) + 1
             end
         end
         if n_defaulted > 0
             @warn "  $n_defaulted industry-window cells used economy-wide default skill share"
+            # Breakdown by supersector: a code defaulting in (near) all 192
+            # in-window months means CPS never emits that IND_JOLTS string
+            # (structural gap in the crosswalk), not sampling sparsity.
+            for (code, n) in sort(collect(defaulted_codes); by = last, rev = true)
+                name = get(JOLTS_INDUSTRY_MAP, code, code)
+                @warn "    defaulted: $code ($name) — $n cells"
+            end
         end
     else
         @warn "  Industry skill shares not found — using 0.35 default"
@@ -221,7 +254,7 @@ function clean_jolts()
         check = innerjoin(total_nf, alloc_total; on = [:YEAR, :MONTH])
         check.pct_diff = (check.alloc_total .- check.VALUE_PERSONS) ./ check.VALUE_PERSONS .* 100
         max_diff = maximum(abs.(filter(isfinite, check.pct_diff)))
-        println("  Cross-check: max |alloc_total − total_nonfarm| / total_nonfarm = $(round(100*max_diff; digits=2))%")
+        println("  Cross-check: max |alloc_total − total_nonfarm| / total_nonfarm = $(round(max_diff; digits=2))%")
         if max_diff > 5.0
             @warn "  Allocation total deviates >5% from total nonfarm — investigate"
         end

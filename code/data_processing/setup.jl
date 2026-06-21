@@ -228,6 +228,7 @@ end
 # ============================================================
 
 function ind_to_jolts_supersector(ind::Int)::String
+    ind == 0                 && return "EXCLUDED" # N/A / not-applicable code
     ind == 270               && return "100000"  # Logging → Mining & Logging
     170 <= ind <= 290        && return "EXCLUDED" # Agriculture (excl. logging)
     370 <= ind <= 490        && return "100000"  # Mining
@@ -239,18 +240,19 @@ function ind_to_jolts_supersector(ind::Int)::String
     4070 <= ind <= 4590      && return "420000"  # Wholesale
     4670 <= ind <= 5791      && return "440000"  # Retail
     6070 <= ind <= 6390      && return "480099"  # Transport/Warehousing → TWU
-    6471 <= ind <= 6781      && return "510000"  # Information
-    6871 <= ind <= 6992      && return "510099"  # Finance & Insurance
-    7071 <= ind <= 7190      && return "510099"  # Real Estate
+    6470 <= ind <= 6781      && return "510000"  # Information (6470 = Newspaper publishers)
+    6870 <= ind <= 6992      && return "510099"  # Finance & Insurance (6870 = Banking)
+    7070 <= ind <= 7190      && return "510099"  # Real Estate (7070 in 2002/2012; 7071 in 2017)
     7270 <= ind <= 7790      && return "540099"  # Professional & Business Services
     7860 <= ind <= 7890      && return "610000"  # Educational Services
     7970 <= ind <= 8470      && return "620000"  # Health Care & Social Assistance
-    8561 <= ind <= 8590      && return "710000"  # Arts, Entertainment & Recreation
+    8560 <= ind <= 8590      && return "710000"  # Arts, Entertainment & Recreation (8560 in 2002/2012; 8561 in 2017)
     8660 <= ind <= 8690      && return "720000"  # Accommodation & Food Services
     8770 <= ind <= 9190      && return "810000"  # Other Services
     ind == 9290              && return "EXCLUDED" # Private households
     9370 <= ind <= 9590      && return "920000"  # Public Administration → Government
-    9670 <= ind <= 9870      && return "EXCLUDED" # Military
+    9670 <= ind <= 9870      && return "EXCLUDED" # Military (2002/2012 scheme)
+    ind == 9890              && return "EXCLUDED" # Armed Forces (2017 scheme; civilian-LF sample)
     return "UNKNOWN"
 end
 

@@ -150,7 +150,7 @@ sim_smm = SimParams(
 #    Valid windows are loaded from data/derived/windows.json
 #    written by data_pipeline_v7.
 # ============================================================
-WINDOW = :base_fc
+WINDOW = :base_covid
 
 # Crisis → baseline pair map. crisis_fc pairs with base_fc; the
 # crisis_covid pair with base_covid. Used to pick the right ν row
@@ -254,7 +254,7 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :default
+INIT_MODE            = :warmstart
 CLUSTERS_FORCE_REGEN = false
 INCLUDE_PREV_OPTIMUM = false
 
@@ -262,28 +262,28 @@ const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00416667,
     :nu       => 0.00323032,
     :phi      => 0.02222129,
-    :a_l      => 0.89590646,
-    :b_l      => 0.31592780,
-    :c        => 6.89855799,
-    :PU       => 2.43690010,
-    :gamma_PS => 3.81928381,
-    :bU       => 0.03157704,
-    :bT       => 1.58575095,
-    :bS       => 0.01349603,
-    :alpha_U  => 0.96441928,
-    :a_Gam    => 0.30113408,
-    :b_Gam    => 2.39486736,
-    :unsk_mu  => 0.06678201,
-    :unsk_eta => 0.66207985,
-    :unsk_k   => 0.05709632,
-    :unsk_bet => 0.89331634,
-    :unsk_lam => 0.35571936,
-    :skl_mu   => 0.48177239,
-    :skl_eta  => 0.89480583,
-    :skl_k    => 0.06976002,
-    :skl_bet  => 0.85611310,
-    :skl_lam  => 0.06309304,
-    :skl_sig  => 0.00978666,
+    :a_l      => 0.78291324,
+    :b_l      => 0.30091648,
+    :c        => 6.87715098,
+    :PU       => 2.75459741,
+    :gamma_PS => 4.48688904,
+    :bU       => 0.01904250,
+    :bT       => 1.90130367,
+    :bS       => 0.17804638,
+    :alpha_U  => 0.85837523,
+    :a_Gam    => 0.34535600,
+    :b_Gam    => 2.74637761,
+    :unsk_mu  => 0.13922352,
+    :unsk_eta => 0.45167087,
+    :unsk_k   => 0.03159131,
+    :unsk_bet => 0.90242216,
+    :unsk_lam => 0.39923509,
+    :skl_mu   => 0.28096675,
+    :skl_eta  => 0.88428503,
+    :skl_k    => 0.08008493,
+    :skl_bet  => 0.76249472,
+    :skl_lam  => 0.04610387,
+    :skl_sig  => 0.00746820,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
@@ -368,11 +368,6 @@ flush(stdout)
 
 moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 
-# Report κ_w for this window so it is visible in the run log.
-_κ_ts = load_training_share_scale(; window=WINDOW, derived_dir=derived_dir)
-@printf("  training_share κ_%s = %.4f  (from training_share_scale.csv)\n", WINDOW, _κ_ts)
-flush(stdout)
-
 
 # ============================================================
 # 4. Weight matrix
@@ -382,7 +377,7 @@ flush(stdout)
 #      2.0   equal weights (identity, no W matrix)
 #      >2.0  full optimal W (shrunk if κ > target)
 # ============================================================
-W_COND_TARGET = 0.0 
+W_COND_TARGET = 2.0  
 
 function _w_suffix(cond_target::Float64)
     cond_target == 0.0 && return "_diagonalW"
@@ -655,7 +650,7 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── Simulated annealing ──────────────────────────────────
-    sa_max_iter        = 5_000,   # max SA iterations
+    sa_max_iter        = 1_000,   # max SA iterations
     sa_T0              = 05.00,   # initial temperature (≤0 ⇒ auto-calibrate
                                   # from uphill probes; here pinned to 20)
     sa_step            = 0.30,    # initial proposal sd in unconstrained space
@@ -684,7 +679,7 @@ run_params = SMMRunParams(
                                   # 0 disables this early-stop
 
     # ── Nelder-Mead local polish ─────────────────────────────
-    nm_max_iter  = 3_000,         # max NM iterations
+    nm_max_iter  = 5_000,         # max NM iterations
     nm_f_tol     = 1e-6,          # function-value tolerance
     nm_x_tol     = 1e-4,          # parameter tolerance (unconstrained space)
 

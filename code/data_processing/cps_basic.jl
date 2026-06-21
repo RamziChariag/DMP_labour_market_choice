@@ -90,12 +90,19 @@ function clean_cps_basic()
     if hasproperty(df, :IND)
         df.IND_JOLTS = ind_to_jolts_supersector.(df.IND)
 
-        n_unknown  = count(df.IND_JOLTS .== "UNKNOWN")
-        n_excluded = count(df.IND_JOLTS .== "EXCLUDED")
-        @info "  IND mapping: $n_excluded EXCLUDED (agri/private HH/military), $n_unknown UNKNOWN"
+        # Only in-window rows can affect a moment. The 2000-2002 buffer is
+        # coded in the 1990 Census industry scheme (IPUMS codes IND by the
+        # contemporary scheme: 1990 for 1992-2002, 2002 for 2003-2008, ...),
+        # which this 2002+ crosswalk does not recognise. Those rows are all
+        # window == :none and never enter the JOLTS allocation, so we restrict
+        # the diagnostic to in-window rows to avoid a spurious warning.
+        in_window = df.window .!= :none
+        n_unknown  = count(df.IND_JOLTS[in_window] .== "UNKNOWN")
+        n_excluded = count(df.IND_JOLTS[in_window] .== "EXCLUDED")
+        @info "  IND mapping (in-window): $n_excluded EXCLUDED (agri/private HH/military), $n_unknown UNKNOWN"
         if n_unknown > 0
-            unknown_inds = unique(df.IND[df.IND_JOLTS .== "UNKNOWN"])
-            @warn "  Unknown IND codes: $unknown_inds"
+            unknown_inds = unique(df.IND[in_window .& (df.IND_JOLTS .== "UNKNOWN")])
+            @warn "  Unknown in-window IND codes: $unknown_inds"
         end
 
         # Employed AND not a working student, in a known JOLTS supersector
