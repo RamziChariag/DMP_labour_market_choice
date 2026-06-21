@@ -10,7 +10,7 @@
 #   build_smm_spec(...)    construct an SMMSpec
 #   default_free_params()  full list of estimable parameters
 #   pack_θ(spec)           initial values → unconstrained vector
-#   unpack_θ(θ, spec)      unconstrained vector → 4 model structs
+#   unpack_θ(θ, spec)      unconstrained vector → 3 model structs
 #   print_spec(spec)       display the estimation problem
 #
 # Parameter classification (Model Notes §2 / data_and_moments.pdf §18)
@@ -23,11 +23,13 @@
 #   Deep structural (estimated on base_fc, then HELD FIXED at the baseline
 #   estimates during crisis re-estimation):
 #     common:  a_ℓ, b_ℓ          worker-type Beta shapes
-#     regime:  bU, bT, bS         institutional flow values (UBI/UI/training stipend)
+#     unsk:    bU, bT             unskilled / training institutional flow values
+#     skl:     bS                 skilled outside flow value
 #
 #   Regime-specific (re-estimated within EACH window):
 #     common:  c                              training cost coefficient
-#     regime:  PU, gamma_PS, α_U, a_Γ, b_Γ    aggregate state / offer shape
+#     unsk:    PU, α_U                         unskilled productivity / damage shape
+#     skl:     gamma_PS, a_Γ, b_Γ              skilled productivity / offer shape
 #     unsk:    μ, η, k, β, λ                  matching, vacancy cost,
 #                                              bargaining, damage hazard
 #     skl:     μ, η, k, β, λ, σ               same + OJS flow cost
@@ -48,7 +50,7 @@
 Metadata for one free parameter.
 
 Fields
-  block   :: Symbol   which struct (:common, :regime, :unsk, :skl)
+  block   :: Symbol   which struct (:common, :unsk, :skl)
   name    :: Symbol   field name within that struct
   lb      :: Float64  lower bound (used for the logit transform)
   ub      :: Float64  upper bound
@@ -77,10 +79,18 @@ weighting and tracing options.  Construct with keyword arguments;
 all have defaults.
 """
 Base.@kwdef struct SMMRunParams
-    # Grids
+    # Grids (real SA / DE / NM runs)
     Nx      :: Int     = 80
     Np_U    :: Int     = 80
     Np_S    :: Int     = 80
+
+    # Candidate-generation layer (coarse grid, Sobol sample, hierarchical clustering)
+    cand_Nx          :: Int = 40
+    cand_Np_U        :: Int = 40
+    cand_Np_S        :: Int = 40
+    cand_n_sample    :: Int = 2000
+    cand_seed        :: Int = 20240601
+    cand_min_cluster :: Int = 5
 
     # Differential evolution
     de_max_iter  :: Int     = 200
@@ -102,6 +112,8 @@ Base.@kwdef struct SMMRunParams
     sa_adapt_window  :: Int     = 50
     sa_target_fin    :: Float64 = 0.90
     sa_random_init   :: Bool    = false
+    sa_parallel_steps :: Int    = 100         # parallel SA steps before pruning to the best chain
+    sa_seed           :: Int    = 20240601    # base seed for parallel SA chains (replicability)
 
     # Weight-matrix mode (see load_weight_matrix)
     w_cond_target :: Float64 = 1e8
@@ -115,6 +127,32 @@ Base.@kwdef struct SMMRunParams
     show_trace_members     :: Bool = false
     show_trace_generations :: Bool = true
     trace_stride           :: Int  = 10
+end
+
+
+# ============================================================
+# SeedBank — output of the candidate-generation layer
+# ============================================================
+
+"""
+    SeedBank
+
+The product of the candidate-generation layer (candidates.jl): a bank of
+feasible candidate parameter vectors (unconstrained space), their coarse-grid
+Q values, and hierarchical-clustering cluster labels (noise already dropped).  Passed as a
+single object into `run_smm` and forwarded to the SA / DE seeders.
+
+Fields
+  candidates :: Vector{Vector{Float64}}   feasible θ (unconstrained)
+  Q          :: Vector{Float64}           coarse-grid Q for each candidate
+  labels     :: Vector{Int}               cluster id (>= 1; noise removed)
+  meta       :: NamedTuple                staleness key (see candidates.jl)
+"""
+struct SeedBank
+    candidates :: Vector{Vector{Float64}}
+    Q          :: Vector{Float64}
+    labels     :: Vector{Int}
+    meta       :: NamedTuple
 end
 
 
@@ -133,7 +171,13 @@ Fields
   moments  NamedTuple from load_data_moments() — (value, weight) pairs
   sim      SimParams — solver settings
   run      SMMRunParams — grid sizes, optimiser settings, weighting
-  W        Union{Nothing, Matrix} — weight matrix (nothing = equal weights)
+  W        Matrix — weight matrix.  Never `nothing` after construction:
+           the equal-weight scheme is stored as the diagonal matrix
+           Diagonal(weight_k / m̂_k²), so every scheme shares one
+           weighted-loss path (see compute_loss_matrix).
+  q_scale  Float64 — DISPLAY-ONLY positive constant dividing the
+           reported scalar Q (e.g. tr(Σ̂) for matrix schemes, 1.0 for
+           equal weight).  Constant in θ, so it does not move the argmin.
 """
 struct SMMSpec
     free    :: Vector{ParamSpec}
@@ -141,7 +185,8 @@ struct SMMSpec
     moments :: NamedTuple
     sim     :: SimParams
     run     :: SMMRunParams
-    W       :: Union{Nothing, Matrix{Float64}}
+    W       :: Matrix{Float64}
+    q_scale :: Float64
 end
 
 
@@ -166,13 +211,23 @@ Build an `SMMSpec`.
   `fixed` is silently dropped from the free list.
 
 - `skip_moments` is a vector of moment Symbols to deactivate.  Their
-  weights are zeroed in the stored moments NamedTuple so that both
-  `compute_loss` and `compute_loss_matrix` skip them automatically.
-  Unknown names produce a warning.
+  weights are zeroed in the stored moments NamedTuple so that
+  `compute_loss_matrix` skips them automatically.  Unknown names
+  produce a warning.
 
-- `W`, if provided, must be square with size equal to the number of
-  active moments.  A mismatch raises an error — typically a sign
-  that `W` was built with a different `skip_moments` list.
+- `W` selects the weighting scheme.  If `W === nothing` (equal
+  weights), the constructor builds the diagonal matrix
+  Diagonal(weight_k / m̂_k²) over the active moments, so that
+  g' W g = Σ_k weight_k · (g_k / m̂_k)² reproduces the old relative-
+  deviation loss exactly.  If a matrix is passed (diagonal-σ or full
+  Σ̂⁻¹ from `load_weight_matrix`) it must be square with size equal to
+  the number of active moments; a mismatch raises an error — typically
+  a sign that `W` was built with a different `skip_moments` list.
+
+- `q_scale` is a DISPLAY-ONLY positive constant that divides the
+  reported scalar Q (pass `tr(Σ̂)` for the matrix schemes to bring the
+  number into a readable range; leave at 1.0 for equal weight).  It is
+  constant in θ and therefore does not move the argmin.
 """
 function build_smm_spec(
     moments      :: NamedTuple,
@@ -181,6 +236,7 @@ function build_smm_spec(
     free_specs   :: Vector{ParamSpec}             = default_free_params(),
     run          :: SMMRunParams                  = SMMRunParams(),
     W            :: Union{Nothing, Matrix{Float64}} = nothing,
+    q_scale      :: Float64                       = 1.0,
     skip_moments :: Vector{Symbol}                = Symbol[],
 )
     fixed_nt    = (fixed isa NamedTuple) ? fixed : NamedTuple()
@@ -216,8 +272,24 @@ function build_smm_spec(
         end
     end
 
-    if !isnothing(W)
-        K_active = count(v -> v.weight > 0.0, values(moments))
+    # Resolve the weight matrix.  Active moments are those with
+    # weight > 0, taken in `keys(moments)` order — the SAME order
+    # compute_loss_matrix uses to assemble the deviation vector, so the
+    # diagonal lines up element-for-element.
+    active_keys = [k for k in keys(moments) if moments[k].weight > 0.0]
+    K_active    = length(active_keys)
+
+    W_final::Matrix{Float64} = if isnothing(W)
+        # Equal-weight scheme as a diagonal matrix:
+        #   W_kk = weight_k / m̂_k²   ⟹   g' W g = Σ_k weight_k (g_k/m̂_k)²
+        d = Vector{Float64}(undef, K_active)
+        for (i, k) in enumerate(active_keys)
+            t      = moments[k]
+            scale2 = max(abs(t.value), 1e-10)^2
+            d[i]   = t.weight / scale2
+        end
+        Matrix(Diagonal(d))
+    else
         if size(W, 1) != K_active || size(W, 2) != K_active
             error(
                 "W matrix size $(size(W,1))×$(size(W,2)) does not match the number of " *
@@ -225,9 +297,12 @@ function build_smm_spec(
                 "correct W from load_weight_matrix(..., skip_moments=SKIP_MOMENTS)."
             )
         end
+        W
     end
 
-    return SMMSpec(active_free, fixed_nt, moments, sim, run, W)
+    q_scale > 0.0 || error("build_smm_spec: q_scale must be positive (got $q_scale).")
+
+    return SMMSpec(active_free, fixed_nt, moments, sim, run, W_final, q_scale)
 end
 
 
@@ -252,20 +327,20 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:common, :a_ℓ, 0.01,  07.00,  2.00,  "worker type shape a_ℓ"),
         ParamSpec(:common, :b_ℓ, 0.01,  07.00,  5.00,  "worker type shape b_ℓ"),
 
-        # Deep structural — regime block (institutional flow values)
-        ParamSpec(:regime, :bU,  0.000, 2.00,  0.00,  "unskilled outside flow b_U"),
-        ParamSpec(:regime, :bT,  0.000, 2.00,  0.28,  "training flow b_T"),
-        ParamSpec(:regime, :bS,  0.000, 2.00,  0.01,  "skilled outside flow b_S"),
+        # Deep structural — institutional flow values (stored by consuming block)
+        ParamSpec(:unsk, :bU,  0.000, 2.00,  0.00,  "unskilled outside flow b_U"),
+        ParamSpec(:unsk, :bT,  0.000, 2.00,  0.28,  "training flow b_T"),
+        ParamSpec(:skl,  :bS,  0.000, 2.00,  0.01,  "skilled outside flow b_S"),
 
         # Regime-specific — common block
         ParamSpec(:common, :c,   0.01,  12.00,   1.70,  "training cost coeff c"),
 
-        # Regime-specific — regime block (aggregate state / offer shape)
-        ParamSpec(:regime, :PU,  0.05,  6.00,  0.70,  "unskilled productivity P_U"),
-        ParamSpec(:regime, :gamma_PS, 0.10, 10.00, 1.85, "skilled productivity γ_PS"),
-        ParamSpec(:regime, :α_U, 0.01,  20.00, 1.00,  "unskilled damage shape α_U"),
-        ParamSpec(:regime, :a_Γ, 0.01,  10.00, 2.00,  "skilled offer shape a_Γ"),
-        ParamSpec(:regime, :b_Γ, 0.01,  10.00, 5.00,  "skilled offer shape b_Γ"),
+        # Regime-specific — aggregate state / offer shape (stored by consuming block)
+        ParamSpec(:unsk, :PU,  0.05,  6.00,  0.70,  "unskilled productivity P_U"),
+        ParamSpec(:skl,  :gamma_PS, 0.10, 10.00, 1.85, "skilled productivity γ_PS"),
+        ParamSpec(:unsk, :α_U, 0.01,  20.00, 1.00,  "unskilled damage shape α_U"),
+        ParamSpec(:skl,  :a_Γ, 0.01,  10.00, 2.00,  "skilled offer shape a_Γ"),
+        ParamSpec(:skl,  :b_Γ, 0.01,  10.00, 5.00,  "skilled offer shape b_Γ"),
 
         # Regime-specific — unskilled block
         ParamSpec(:unsk, :μ,    0.001,  1.50,  0.74,  "unskilled matching eff μ_U"),
@@ -290,8 +365,8 @@ end
 # get fixed at the baseline estimate; regime-specific ones stay free).
 const REGIME_SPECIFIC_PARAMS = Set([
     (:common, :c),
-    (:regime, :PU),  (:regime, :gamma_PS),
-    (:regime, :α_U), (:regime, :a_Γ),   (:regime, :b_Γ),
+    (:unsk,   :PU),  (:skl,  :gamma_PS),
+    (:unsk,   :α_U), (:skl,  :a_Γ),   (:skl,  :b_Γ),
     (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),
     (:skl,    :μ),   (:skl, :η),    (:skl, :k),   (:skl, :β),   (:skl, :λ),
     (:skl,    :σ),
@@ -302,7 +377,7 @@ const REGIME_SPECIFIC_PARAMS = Set([
 # pinning baseline-derived deep parameters in a crisis run.
 const DEEP_PARAMS = Set([
     (:common, :a_ℓ), (:common, :b_ℓ),
-    (:regime, :bU),  (:regime, :bT),  (:regime, :bS),
+    (:unsk,   :bU),  (:unsk,  :bT),  (:skl,  :bS),
 ])
 
 
@@ -337,16 +412,18 @@ end
 
 
 """
-    unpack_θ(θ_unc, spec) → (CommonParams, RegimeParams, UnskilledParams, SkilledParams)
+    unpack_θ(θ_unc, spec) → (CommonParams, UnskilledParams, SkilledParams)
 
-Convert an unconstrained free-parameter vector back to the four
-model structs, merging with any fixed values.
+Convert an unconstrained free-parameter vector back to the three
+model structs, merging with any fixed values.  The parameters formerly
+in `RegimeParams` now live in `UnskilledParams` (PU, bU, bT, α_U) and
+`SkilledParams` (gamma_PS, bS, a_Γ, b_Γ).
 """
 function unpack_θ(
     θ_unc :: AbstractVector{Float64},
     spec  :: SMMSpec
 )
-    # 1. Constrained free values
+    # 1. Constrained free values (keyed by bare name)
     free_vals = Dict{Symbol, Float64}()
     for (i, ps) in enumerate(spec.free)
         free_vals[ps.name] = _to_constrained(θ_unc[i], ps.lb, ps.ub)
@@ -371,42 +448,46 @@ function unpack_θ(
         c   = _get(:c,   :common, 1.70),
     )
 
-    rp = RegimeParams(
-        PU       = _get(:PU,       :regime, 0.70),
-        gamma_PS = _get(:gamma_PS, :regime, 1.85),
-        bU  = _get(:bU,  :regime, 0.00),
-        bT  = _get(:bT,  :regime, 0.28),
-        bS  = _get(:bS,  :regime, 0.01),
-        α_U = _get(:α_U, :regime, 1.00),
-        a_Γ = _get(:a_Γ, :regime, 2.00),
-        b_Γ = _get(:b_Γ, :regime, 5.00),
-    )
-
+    # First-pass build.  Unique moved names (PU, bU, bT, α_U / gamma_PS, bS,
+    # a_Γ, b_Γ) are resolved correctly here because free_vals is keyed by bare
+    # name and these names are unique across blocks.
     up = UnskilledParams(
-        μ = _get(:μ,  :unsk, 0.74),
-        η = _get(:η,  :unsk, 0.60),
-        k = _get(:k,  :unsk, 0.25),
-        β = _get(:β,  :unsk, 0.40),
-        λ = _get(:λ,  :unsk, 0.08),
+        μ   = _get(:μ,   :unsk, 0.74),
+        η   = _get(:η,   :unsk, 0.60),
+        k   = _get(:k,   :unsk, 0.25),
+        β   = _get(:β,   :unsk, 0.40),
+        λ   = _get(:λ,   :unsk, 0.08),
+        PU  = _get(:PU,  :unsk, 0.70),
+        bU  = _get(:bU,  :unsk, 0.00),
+        bT  = _get(:bT,  :unsk, 0.28),
+        α_U = _get(:α_U, :unsk, 1.00),
     )
 
     sp = SkilledParams(
-        μ = _get(:μ,  :skl, 0.90),
-        η = _get(:η,  :skl, 0.50),
-        k = _get(:k,  :skl, 0.17),
-        β = _get(:β,  :skl, 0.32),
-        λ = _get(:λ,  :skl, 0.07),
-        σ = _get(:σ,  :skl, 0.01),
+        μ        = _get(:μ,        :skl, 0.90),
+        η        = _get(:η,        :skl, 0.50),
+        k        = _get(:k,        :skl, 0.17),
+        β        = _get(:β,        :skl, 0.32),
+        λ        = _get(:λ,        :skl, 0.07),
+        σ        = _get(:σ,        :skl, 0.01),
+        gamma_PS = _get(:gamma_PS, :skl, 1.85),
+        bS       = _get(:bS,       :skl, 0.01),
+        a_Γ      = _get(:a_Γ,      :skl, 2.00),
+        b_Γ      = _get(:b_Γ,      :skl, 5.00),
     )
 
-    # 3. Disambiguate shared field names (μ, η, k, β, λ) across the
-    #    unskilled and skilled blocks.
+    # 3. Disambiguate the SHARED field names (μ, η, k, β, λ, and σ) across the
+    #    unskilled and skilled blocks: free_vals is keyed by bare name, so the
+    #    first pass cannot tell :unsk_μ from :skl_μ.  The eight unique moved
+    #    names are already correct above and are carried through unchanged by
+    #    seeding the dicts with the full first-pass structs.
     up_fields = Dict{Symbol,Float64}(
-        :μ => up.μ, :η => up.η, :k => up.k, :β => up.β, :λ => up.λ
+        :μ => up.μ, :η => up.η, :k => up.k, :β => up.β, :λ => up.λ,
+        :PU => up.PU, :bU => up.bU, :bT => up.bT, :α_U => up.α_U,
     )
     sp_fields = Dict{Symbol,Float64}(
-        :μ => sp.μ, :η => sp.η, :k => sp.k, :β => sp.β,
-        :λ => sp.λ, :σ => sp.σ
+        :μ => sp.μ, :η => sp.η, :k => sp.k, :β => sp.β, :λ => sp.λ, :σ => sp.σ,
+        :gamma_PS => sp.gamma_PS, :bS => sp.bS, :a_Γ => sp.a_Γ, :b_Γ => sp.b_Γ,
     )
 
     for (i, ps) in enumerate(spec.free)
@@ -433,14 +514,18 @@ function unpack_θ(
         μ = up_fields[:μ], η = up_fields[:η],
         k = up_fields[:k], β = up_fields[:β],
         λ = up_fields[:λ],
+        PU = up_fields[:PU], bU = up_fields[:bU],
+        bT = up_fields[:bT], α_U = up_fields[:α_U],
     )
     sp = SkilledParams(
         μ = sp_fields[:μ], η = sp_fields[:η],
         k = sp_fields[:k], β = sp_fields[:β],
         λ = sp_fields[:λ], σ = sp_fields[:σ],
+        gamma_PS = sp_fields[:gamma_PS], bS = sp_fields[:bS],
+        a_Γ = sp_fields[:a_Γ], b_Γ = sp_fields[:b_Γ],
     )
 
-    return cp, rp, up, sp
+    return cp, up, sp
 end
 
 
@@ -485,19 +570,23 @@ function print_spec(spec::SMMSpec)
     @printf("\n╠══════════════════════════════════════════════════════╣\n")
     @printf("║  Active moments (%2d)                                 ║\n", length(active_moments))
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    if !isnothing(spec.W)
-        @printf("  (Weighting: full optimal W matrix)\n\n")
+    is_equal_weight = (spec.run.w_cond_target == 2.0)
+    if is_equal_weight
+        @printf("  (Weighting: equal weights — W = Diagonal(weight/m̂²), relative-deviation loss)\n")
+        @printf("  (Q divided by q_scale = %.6e for display)\n\n", spec.q_scale)
+        @printf("  %-22s  %10s  %10s\n", "moment", "target", "weight")
+        @printf("  %s\n", "─"^46)
+        for (k, v) in active_moments
+            @printf("  %-22s  %10.4f  %10.2f\n", k, v.value, v.weight)
+        end
+    else
+        @printf("  (Weighting: matrix W — raw deviations g'Wg)\n")
+        @printf("  (Q divided by q_scale = %.6e for display)\n\n", spec.q_scale)
         @printf("  %-22s  %10s  %12s\n", "moment", "target", "W diag wt")
         @printf("  %s\n", "─"^48)
         for (idx, (k, v)) in enumerate(active_moments)
             w_diag = (idx <= size(spec.W, 1)) ? spec.W[idx, idx] : NaN
             @printf("  %-22s  %10.4f  %12.4e\n", k, v.value, w_diag)
-        end
-    else
-        @printf("  %-22s  %10s  %10s\n", "moment", "target", "weight")
-        @printf("  %s\n", "─"^46)
-        for (k, v) in active_moments
-            @printf("  %-22s  %10.4f  %10.2f\n", k, v.value, v.weight)
         end
     end
 
@@ -526,8 +615,8 @@ function print_spec(spec::SMMSpec)
     @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e\n",
             spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol)
     if spec.run.w_cond_target == 2.0
-        @printf("  W:    equal weights (identity, no W matrix)\n")
-    elseif !isnothing(spec.W)
+        @printf("  W:    equal weights — Diagonal(weight/m̂²) (cond(W)=%.2e)\n", cond(spec.W))
+    else
         cond_W = cond(spec.W)
         if spec.run.w_cond_target == 0.0
             @printf("  W:    diagonal from moment Σ (cond(W)=%.2e)\n", cond_W)
@@ -537,9 +626,7 @@ function print_spec(spec::SMMSpec)
             @printf("  W:    optimal weight matrix (cond(W)=%.2e, target κ=%.1e)\n",
                     cond_W, spec.run.w_cond_target)
         end
-    else
-        @printf("  W:    using diagonal weights from moment variances (target κ=%.1e)\n",
-                spec.run.w_cond_target)
     end
+    @printf("  Q scale (display-only divisor): %.6e\n", spec.q_scale)
     @printf("╚══════════════════════════════════════════════════════╝\n\n")
 end

@@ -37,9 +37,9 @@
 # ---------------------------------------------------------------------------
 # Precompute Γ CDF/PDF and tail weights on the p-grid
 # ---------------------------------------------------------------------------
-function build_skilled_precomp(sg::SkilledGrids, rp::RegimeParams)
+function build_skilled_precomp(sg::SkilledGrids, sp::SkilledParams)
     Np   = length(sg.p)
-    dist = Beta(rp.a_Γ, rp.b_Γ)
+    dist = Beta(sp.a_Γ, sp.b_Γ)
 
     Γvals = Vector{Float64}(undef, Np)
     γvals = Vector{Float64}(undef, Np)
@@ -200,7 +200,6 @@ function skilled_inner_loop!(
     EU1   :: AbstractVector{Float64},
 )
     cp  = model.common
-    rp  = model.regime
     gp  = model.grids
     sp  = model.skl_par
     sg  = model.skl_grids
@@ -212,7 +211,7 @@ function skilled_inner_loop!(
     Np = length(sg.p)
 
     r  = cp.r;   ν  = cp.ν
-    γPS = rp.gamma_PS;  bS = rp.bS
+    γPS = sp.gamma_PS;  bS = sp.bS
 
     β  = sp.β;   λ  = sp.λ;   σ  = sp.σ
     μ  = sp.μ;   η  = sp.η
@@ -562,7 +561,6 @@ function solve_skilled_block!(
     EU1   :: AbstractVector{Float64},
 )
     cp  = model.common
-    rp  = model.regime
     gp  = model.grids
     sg  = model.skl_grids
     sc  = model.skl_cache
@@ -575,7 +573,7 @@ function solve_skilled_block!(
     denom_nb = max(1.0 - sp.β, 1e-14)
 
     r  = cp.r;   ν  = cp.ν
-    γPS = rp.gamma_PS
+    γPS = sp.gamma_PS
     β  = sp.β;   λ  = sp.λ;   σ  = sp.σ
 
     wΓ = pre.γvals .* sg.wp

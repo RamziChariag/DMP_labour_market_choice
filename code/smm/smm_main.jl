@@ -85,7 +85,8 @@ using Optim
 using CSV
 using DataFrames
 using Serialization
-using Clustering
+using Clustering          # hclust / cutree for the candidate-clustering layer
+using QuasiMonteCarlo
 using JSON3
 
 println("done."); flush(stdout)
@@ -110,6 +111,7 @@ print("Loading SMM modules... "); flush(stdout)
 include(joinpath(SMM_DIR, "moments.jl"))
 include(joinpath(SMM_DIR, "smm_params.jl"))
 include(joinpath(SMM_DIR, "smm.jl"))
+include(joinpath(SMM_DIR, "candidates.jl"))
 
 println("done."); flush(stdout)
 @printf("Threads available: %d\n\n", Threads.nthreads())
@@ -148,7 +150,7 @@ sim_smm = SimParams(
 #    Valid windows are loaded from data/derived/windows.json
 #    written by data_pipeline_v7.
 # ============================================================
-WINDOW = :base_covid
+WINDOW = :base_fc
 
 # Crisis → baseline pair map. crisis_fc pairs with base_fc; the
 # crisis_covid pair with base_covid. Used to pick the right ν row
@@ -242,45 +244,54 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 )
 
 # ============================================================
-# USE_DEFAULT_PARAMS — when true, seed the optimiser from the
-#   hard-coded values below and ignore any prior run.
+# INIT_MODE — how the optimiser is seeded.
+#   :default    seed from DEFAULT_PARAMS (below), all windows; skip the
+#               candidate layer.
+#   :warmstart  seed from a saved optimum (single warm start); if the
+#               relevant optimum is missing/invalid, falls back to DEFAULT_PARAMS.
+#   :clusters   generate (or load) the Sobol→hclust candidate bank and seed
+#               SA (one chain per cluster) and DE (round-robin) from it.
+# CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
+# INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-USE_DEFAULT_PARAMS = true
+INIT_MODE            = :default
+CLUSTERS_FORCE_REGEN = false
+INCLUDE_PREV_OPTIMUM = false
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00416667,
     :nu       => 0.00323032,
     :phi      => 0.02222129,
-    :a_l      => 0.88876000,
-    :b_l      => 0.30088000,
-    :c        => 7.05302000,
-    :PU       => 2.40573000,
-    :gamma_PS => 3.81189000,
-    :bU       => 0.03062000,
-    :bT       => 1.59653000,
-    :bS       => 0.01848000,
-    :alpha_U  => 1.00174000,
-    :a_Gam    => 0.30219000,
-    :b_Gam    => 2.36812000,
-    :unsk_mu  => 0.06382000,
-    :unsk_eta => 0.62036000,
-    :unsk_k   => 0.07349000,
-    :unsk_bet => 0.86951000,
-    :unsk_lam => 0.31930000,
-    :skl_mu   => 0.47164000,
-    :skl_eta  => 0.89611000,
-    :skl_k    => 0.06919000,
-    :skl_bet  => 0.85555000,
-    :skl_lam  => 0.06319000,
-    :skl_sig  => 0.00736000,
+    :a_l      => 0.89590646,
+    :b_l      => 0.31592780,
+    :c        => 6.89855799,
+    :PU       => 2.43690010,
+    :gamma_PS => 3.81928381,
+    :bU       => 0.03157704,
+    :bT       => 1.58575095,
+    :bS       => 0.01349603,
+    :alpha_U  => 0.96441928,
+    :a_Gam    => 0.30113408,
+    :b_Gam    => 2.39486736,
+    :unsk_mu  => 0.06678201,
+    :unsk_eta => 0.66207985,
+    :unsk_k   => 0.05709632,
+    :unsk_bet => 0.89331634,
+    :unsk_lam => 0.35571936,
+    :skl_mu   => 0.48177239,
+    :skl_eta  => 0.89480583,
+    :skl_k    => 0.06976002,
+    :skl_bet  => 0.85611310,
+    :skl_lam  => 0.06309304,
+    :skl_sig  => 0.00978666,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
 const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:common, :a_ℓ) => :a_l,     (:common, :b_ℓ)  => :b_l,     (:common, :c)   => :c,
-    (:regime, :PU)  => :PU,      (:regime, :gamma_PS) => :gamma_PS,
-    (:regime, :bU)  => :bU,      (:regime, :bT)   => :bT,      (:regime, :bS)  => :bS,
-    (:regime, :α_U) => :alpha_U, (:regime, :a_Γ)  => :a_Gam,  (:regime, :b_Γ) => :b_Gam,
+    (:unsk,   :PU)  => :PU,      (:skl,    :gamma_PS) => :gamma_PS,
+    (:unsk,   :bU)  => :bU,      (:unsk,   :bT)   => :bT,      (:skl,    :bS)  => :bS,
+    (:unsk,   :α_U) => :alpha_U, (:skl,    :a_Γ)  => :a_Gam,  (:skl,    :b_Γ) => :b_Gam,
     (:unsk,   :μ)   => :unsk_mu, (:unsk,   :η)    => :unsk_eta, (:unsk,  :k)   => :unsk_k,
     (:unsk,   :β)   => :unsk_bet, (:unsk,  :λ)   => :unsk_lam,
     (:skl,    :μ)   => :skl_mu,  (:skl,    :η)    => :skl_eta,  (:skl,   :k)   => :skl_k,
@@ -386,6 +397,18 @@ W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
                              cond_target=W_COND_TARGET,
                              skip_moments=SKIP_MOMENTS)
 
+# Display-only divisor for the reported scalar Q.  Equal weights keep
+# the readable relative-deviation magnitude (q_scale = 1.0); the matrix
+# schemes divide by tr(Σ̂) so the number is human-sized.  This constant
+# does not affect the argmin (see compute_loss_matrix).
+Q_SCALE = if W_COND_TARGET == 2.0
+    1.0
+else
+    load_sigma_trace(; window=WINDOW, derived_dir=derived_dir,
+                       skip_moments=SKIP_MOMENTS)
+end
+@printf("  q_scale (display-only Q divisor) = %.6e\n", Q_SCALE)
+
 
 # ============================================================
 # 5. Externally calibrated parameters (r, ν, φ)
@@ -412,21 +435,20 @@ flush(stdout)
 #    Deep structural (estimated on the baseline of each pair,
 #    then fixed in the crisis re-estimation):
 #      common:  a_ℓ, b_ℓ
-#      regime:  bU, bT, bS
+#      unsk:    bU, bT        skl:  bS
 #
 #    Regime-specific (re-estimated within each window):
 #      common:  c
-#      regime:  PU, gamma_PS, α_U, a_Γ, b_Γ
+#      unsk:    PU, α_U       skl:  gamma_PS, a_Γ, b_Γ
 #      unsk:    μ, η, k, β, λ
 #      skl:     μ, η, k, β, λ, σ
 # ============================================================
 
 """
-    _baseline_param_value(ps::ParamSpec, cp, rp, up, sp) → Float64
+    _baseline_param_value(ps::ParamSpec, cp, up, sp) → Float64
 """
-function _baseline_param_value(ps::ParamSpec, cp, rp, up, sp) :: Float64
+function _baseline_param_value(ps::ParamSpec, cp, up, sp) :: Float64
     if     ps.block == :common; return Float64(getfield(cp, ps.name))
-    elseif ps.block == :regime; return Float64(getfield(rp, ps.name))
     elseif ps.block == :unsk;   return Float64(getfield(up, ps.name))
     else                        return Float64(getfield(sp, ps.name))
     end
@@ -456,7 +478,7 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     baseline_result = baseline_data.result
     baseline_spec   = baseline_data.spec
 
-    cp_base, rp_base, up_base, sp_base =
+    cp_base, up_base, sp_base =
         unpack_θ(baseline_result.theta_opt, baseline_spec)
 
     @printf("  Baseline Q = %.6e  (converged = %s)\n",
@@ -464,6 +486,7 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     flush(stdout)
 
     # Fixed: external calibration + deep structural from baseline.
+    # bU, bT now live in the unskilled block; bS in the skilled block.
     # FIX_PARAMS can additionally pin regime-specific parameters;
     # baseline-derived deep values take priority over FIX_PARAMS.
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
@@ -475,16 +498,22 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         φ   = calib.phi,
         a_ℓ = cp_base.a_ℓ,
         b_ℓ = cp_base.b_ℓ,
-        bU  = rp_base.bU,
-        bT  = rp_base.bT,
-        bS  = rp_base.bS,
+        bU  = up_base.bU,
+        bT  = up_base.bT,
+        bS  = sp_base.bS,
     ))
 
-    # Free parameters: regime-specific only, initialised from baseline.
+    # Free parameters: regime-specific only.  Init values follow INIT_MODE:
+    #   :warmstart → the matched baseline optimum;  otherwise → DEFAULT_PARAMS.
     free_params = ParamSpec[]
     for ps in default_free_params()
         (ps.block, ps.name) in REGIME_SPECIFIC_PARAMS || continue
-        init_val = _baseline_param_value(ps, cp_base, rp_base, up_base, sp_base)
+        init_val = if INIT_MODE == :warmstart
+            _baseline_param_value(ps, cp_base, up_base, sp_base)
+        else
+            ascii_key = get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing)
+            isnothing(ascii_key) ? ps.init : get(DEFAULT_PARAMS, ascii_key, ps.init)
+        end
         init_val = clamp(init_val, ps.lb + 1e-10, ps.ub - 1e-10)
         push!(free_params,
               ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label))
@@ -493,9 +522,11 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     println("\n  Deep structural parameters FIXED from baseline:")
     @printf("    common:  a_ℓ=%.4f  b_ℓ=%.4f\n",
             cp_base.a_ℓ, cp_base.b_ℓ)
-    @printf("    regime:  bU=%.4f  bT=%.4f  bS=%.4f\n",
-            rp_base.bU, rp_base.bT, rp_base.bS)
-    @printf("  Regime-specific parameters FREE (%d params)\n", length(free_params))
+    @printf("    unsk:    bU=%.4f  bT=%.4f      skl:  bS=%.4f\n",
+            up_base.bU, up_base.bT, sp_base.bS)
+    @printf("  Regime-specific parameters FREE (%d params); init from %s\n",
+            length(free_params),
+            INIT_MODE == :warmstart ? "baseline optimum" : "DEFAULT_PARAMS")
     flush(stdout)
 
 else
@@ -509,32 +540,10 @@ else
 
     free_params = default_free_params()
 
-    # Warm start: load only parameter values from a prior run.
     _warmstart_jls = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
-    if USE_DEFAULT_PARAMS
-        println("\n  USE_DEFAULT_PARAMS = true — seeding free parameters from DEFAULT_PARAMS.")
-        flush(stdout)
 
-        free_params = [
-            let ascii_key = get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing),
-                raw_val   = isnothing(ascii_key) ? ps.init :
-                                get(DEFAULT_PARAMS, ascii_key, ps.init),
-                init_val  = clamp(raw_val, ps.lb + 1e-10, ps.ub - 1e-10)
-                ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
-            end
-            for ps in free_params
-        ]
-
-        n_matched = count(ps -> !isnothing(get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing)) &&
-                                 haskey(DEFAULT_PARAMS,
-                                        get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), :__missing__)),
-                          free_params)
-        @printf("    Matched %d / %d free parameters from DEFAULT_PARAMS.\n",
-                n_matched, length(free_params))
-        flush(stdout)
-
-    elseif isfile(_warmstart_jls)
-        println("\n  Warm-start: loading prior parameter values from:")
+    if INIT_MODE == :warmstart && isfile(_warmstart_jls)
+        println("\n  INIT_MODE = :warmstart — loading prior parameter values from:")
         @printf("    %s\n", _warmstart_jls)
         flush(stdout)
 
@@ -545,16 +554,16 @@ else
             try
                 _ws_result = _ws_data.result
                 _ws_spec   = _ws_data.spec
-                _ws_cp, _ws_rp, _ws_up, _ws_sp = unpack_θ(_ws_result.theta_opt, _ws_spec)
+                _ws_cp, _ws_up, _ws_sp = unpack_θ(_ws_result.theta_opt, _ws_spec)
                 for ps in _ws_spec.free
                     has_field = try
-                        _baseline_param_value(ps, _ws_cp, _ws_rp, _ws_up, _ws_sp)
+                        _baseline_param_value(ps, _ws_cp, _ws_up, _ws_sp)
                         true
                     catch
                         false
                     end
                     has_field && (_ws_vals[(ps.block, ps.name)] =
-                                  _baseline_param_value(ps, _ws_cp, _ws_rp, _ws_up, _ws_sp))
+                                  _baseline_param_value(ps, _ws_cp, _ws_up, _ws_sp))
                 end
                 @printf("    Prior Q = %.6e  (converged = %s)\n",
                         _ws_result.loss_opt, _ws_result.converged)
@@ -578,9 +587,33 @@ else
             println("    Warm-start skipped — could not read file.")
         end
     else
-        println("\n  No prior result found — using default initial values.")
+        # :default and :clusters seed the spec's init from DEFAULT_PARAMS.
+        # (:warmstart with no prior file also lands here.)
+        if INIT_MODE == :warmstart
+            println("\n  INIT_MODE = :warmstart but no prior file — seeding from DEFAULT_PARAMS.")
+        else
+            println("\n  INIT_MODE = :$(INIT_MODE) — seeding free-parameter init from DEFAULT_PARAMS.")
+        end
+        flush(stdout)
+
+        free_params = [
+            let ascii_key = get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing),
+                raw_val   = isnothing(ascii_key) ? ps.init :
+                                get(DEFAULT_PARAMS, ascii_key, ps.init),
+                init_val  = clamp(raw_val, ps.lb + 1e-10, ps.ub - 1e-10)
+                ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
+            end
+            for ps in free_params
+        ]
+
+        n_matched = count(ps -> !isnothing(get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing)) &&
+                                 haskey(DEFAULT_PARAMS,
+                                        get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), :__missing__)),
+                          free_params)
+        @printf("    Matched %d / %d free parameters from DEFAULT_PARAMS.\n",
+                n_matched, length(free_params))
+        flush(stdout)
     end
-    flush(stdout)
 
     @printf("\n  Baseline mode: all structural + regime params are FREE (%d total)\n",
             length(free_params))
@@ -608,6 +641,14 @@ run_params = SMMRunParams(
     Np_U    = 120,
     Np_S    = 120,
 
+    # ── Candidate-generation layer (used when INIT_MODE = :clusters) ──
+    cand_Nx          = 40,
+    cand_Np_U        = 40,
+    cand_Np_S        = 40,
+    cand_n_sample    = 2048,
+    cand_seed        = 42,
+    cand_min_cluster = 5,      # min number of candidates per cluster (hclust leaf)
+
     # ── Weight-matrix mode (passed to print_spec for the header) ──
     # See load_weight_matrix for the cond_target semantics
     # (0=diag, 1=compressed diag, 2=identity, >2=full optimal W).
@@ -615,22 +656,25 @@ run_params = SMMRunParams(
 
     # ── Simulated annealing ──────────────────────────────────
     sa_max_iter        = 5_000,   # max SA iterations
-    sa_T0              = 20.00,   # initial temperature (≤0 ⇒ auto-calibrate
+    sa_T0              = 05.00,   # initial temperature (≤0 ⇒ auto-calibrate
                                   # from uphill probes; here pinned to 20)
     sa_step            = 0.30,    # initial proposal sd in unconstrained space
     sa_cooling_rate    = 1.0,     # rate in T(t) = T_reheat / log(1+rate·t)^exp
-    sa_cooling_exp     = 1.0,     # exponent in same schedule (higher = faster cool)
-    sa_reheat_patience = 50,      # steps without improvement before a reheat
-    sa_reheat_factor   = 2.00,    # multiplicative reheat: T ← T · factor
-    sa_max_reheats     = 30,      # cap on number of reheats per run
+    sa_cooling_exp     = 0.2,     # exponent in same schedule (higher = faster cool)
+    sa_reheat_patience = 1_000,      # steps without improvement before a reheat
+    sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
+    sa_max_reheats     = 3,      # cap on number of reheats per run
     sa_adapt_window    = 50,      # rolling window for adaptive step / acceptance
     sa_target_fin      = 0.90,    # target feasibility (finite-Q) fraction;
                                   # below this, step shrinks
     sa_random_init     = false,   # false ⇒ start from pack_θ(spec); true ⇒
                                   # uniform draw inside [lb, ub]
+    sa_parallel_steps  = 100,     # :clusters — parallel SA steps per cluster 
+                                  # before pruning to the best basin
+    sa_seed            = 42,# base seed for the parallel SA chains
 
     # ── Differential evolution ───────────────────────────────
-    de_max_iter  = 3_000,         # max generations
+    de_max_iter  = 2_000,         # max generations
     de_pop_size  = 120,           # population size (0 ⇒ 10·n_free_params)
     de_f         = 0.70,          # DE differential weight (mutation strength)
     de_cr        = 0.85,          # DE crossover probability
@@ -640,7 +684,7 @@ run_params = SMMRunParams(
                                   # 0 disables this early-stop
 
     # ── Nelder-Mead local polish ─────────────────────────────
-    nm_max_iter  = 2_000,         # max NM iterations
+    nm_max_iter  = 3_000,         # max NM iterations
     nm_f_tol     = 1e-6,          # function-value tolerance
     nm_x_tol     = 1e-4,          # parameter tolerance (unconstrained space)
 
@@ -659,18 +703,58 @@ spec = build_smm_spec(
     free_specs   = free_params,
     run          = run_params,
     W            = W_opt,
+    q_scale      = Q_SCALE,
     skip_moments = SKIP_MOMENTS,
 )
 
 print_spec(spec)
 
 # ============================================================
+# 8b. Candidate seed bank (used when INIT_MODE = :clusters)
+# ============================================================
+seed_bank    = nothing
+prev_optimum = nothing
+
+if INIT_MODE == :clusters
+    cand_path = joinpath(SMM_OUT_DIR, "candidates_$(WINDOW)$(W_SUFFIX).jls")
+    seed_bank = load_or_generate_candidates(spec, cand_path;
+                                            window      = WINDOW,
+                                            force_regen = CLUSTERS_FORCE_REGEN,
+                                            show_trace  = true)
+    if isempty(seed_bank.candidates)
+        @warn "Candidate bank is empty — SA/DE will fall back to the spec's init point."
+        seed_bank = nothing
+    end
+
+    # Optional guaranteed previous optimum.  Valid only if its free-parameter
+    # (block, name) sequence AND fixed-parameter values match the current spec.
+    if INCLUDE_PREV_OPTIMUM
+        _opt_jls = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
+        _opt = _load_smm_bundle(_opt_jls; delete_on_fail=false, label="previous optimum")
+        if !isnothing(_opt)
+            _o_free = [(ps.block, ps.name) for ps in _opt.spec.free]
+            _c_free = [(ps.block, ps.name) for ps in spec.free]
+            if _o_free == _c_free && _opt.spec.fixed == spec.fixed
+                prev_optimum = copy(_opt.result.theta_opt)
+                @printf("  [init] INCLUDE_PREV_OPTIMUM: added valid prior optimum (Q=%.6e).\n",
+                        _opt.result.loss_opt)
+            else
+                @printf("  [init] INCLUDE_PREV_OPTIMUM: prior optimum invalid (free-set / fixed mismatch) — ignored.\n")
+            end
+        else
+            @printf("  [init] INCLUDE_PREV_OPTIMUM: no readable prior optimum — ignored.\n")
+        end
+        flush(stdout)
+    end
+end
+
+# ============================================================
 # 9. Run estimation
 # ============================================================
 println("Starting SMM optimisation..."); flush(stdout)
 
-# Stage 1: global search
-res = run_smm(spec; method = :sa)
+# Stage 1: global search (seeded per INIT_MODE; seed_bank/prev_optimum set in §8b)
+res = run_smm(spec; method = :sa, seed_bank = seed_bank, prev_optimum = prev_optimum)
 
 # Stage 2: local polish from the global optimum
 res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead)

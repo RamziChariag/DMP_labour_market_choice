@@ -118,7 +118,6 @@ function unskilled_inner_loop!(
     US_in :: AbstractVector{Float64}
 )
     cp  = model.common
-    rp  = model.regime
     gp  = model.grids
     up  = model.unsk_par
     ug  = model.unsk_grids
@@ -130,7 +129,7 @@ function unskilled_inner_loop!(
 
     r  = cp.r;   ν  = cp.ν;   φ  = cp.φ;   c  = cp.c
     μ  = up.μ;   η  = up.η;   β  = up.β;   λ  = up.λ
-    PU = rp.PU;  bU = rp.bU;  bT = rp.bT;  α  = rp.α_U
+    PU = up.PU;  bU = up.bU;  bT = up.bT;  α  = up.α_U
 
     θ  = uc.θ
     f  = jobfinding_rate(θ, μ, η)
@@ -238,7 +237,7 @@ function solve_stationary_unskilled_pointwise!(
     ν = model.common.ν
     φ = model.common.φ
     λ = model.unsk_par.λ
-    α = model.regime.α_U
+    α = model.unsk_par.α_U
 
     @inbounds for ix in 1:length(model.grids.x)
         ℓx    = ℓvals[ix]
@@ -276,13 +275,12 @@ function update_pstar_from_surplus!(
     T_in      :: AbstractVector{Float64}
 )
     cp = model.common
-    rp = model.regime
     up = model.unsk_par
     gp = model.grids
 
     r  = cp.r;   ν  = cp.ν;   c  = cp.c
     λ  = up.λ;   μ  = up.μ;   η  = up.η
-    PU = rp.PU;  bU = rp.bU
+    PU = up.PU;  bU = up.bU
 
     f_new        = jobfinding_rate(θ_new, μ, η)
     denom_search = r + ν + f_new

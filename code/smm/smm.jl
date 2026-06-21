@@ -2,8 +2,9 @@
 # smm.jl — SMM objective and optimisation loops (v7)
 #
 # Main entry points
-#   run_smm(spec; method, rng)         single-run estimation
-#   multistart_smm(spec, n; method)    repeated starts, keep best
+#   run_smm(spec; method, rng,
+#           seed_bank, prev_optimum)   single-run estimation; seed_bank seeds
+#                                      SA/DE from candidate clusters
 #
 # Methods
 #   :de           differential evolution (default global search)
@@ -76,37 +77,31 @@ end
 # ============================================================
 
 """
-    compute_loss(m_model, spec) → Float64
-
-    Q(θ) = Σ_k  w_k · [(m_k^model − m̂_k) / |m̂_k|]²
-
-Diagonal-weight loss with scale-normalised deviations.  Each
-deviation is divided by max(|m̂_k|, 1e-10) so moments of different
-magnitudes contribute on comparable scales.  Only moments with
-positive weight in spec.moments are included.
-"""
-function compute_loss(m_model::NamedTuple, spec::SMMSpec) :: Float64
-    Q = 0.0
-    for k in keys(spec.moments)
-        target = spec.moments[k]
-        target.weight <= 0.0  && continue
-        !hasproperty(m_model, k) && continue
-        scale = max(abs(target.value), 1e-10)
-        dev   = (getproperty(m_model, k) - target.value) / scale
-        Q    += target.weight * dev^2
-    end
-    return Q
-end
-
-
-"""
     compute_loss_matrix(m_model, spec, W) → Float64
 
-    Q(θ) = g̃(θ)' W g̃(θ)     where g̃_k = (m_k^model − m̂_k) / |m̂_k|
+    Q(θ) = g(θ)' W g(θ) / q_scale,   where g_k = m_k^model − m̂_k   (RAW deviations)
 
-Full-matrix loss using the optimal weight matrix W = Σ̃⁻¹.  The
-deviation vector is normalised by |m̂_k| because the influence
-functions in the data pipeline are normalised the same way.
+Single weighted-loss path for every weighting scheme.  The deviation
+vector is in RAW moment units (no |m̂_k| division); all per-moment
+scaling and cross-moment weighting live entirely in `W`:
+
+  • Equal weight (relative):  W = Diagonal(weight_k / m̂_k²)
+        ⟹ g' W g = Σ_k weight_k · (g_k / m̂_k)²
+        i.e. the scale-normalised relative-deviation loss, identical
+        to the former `compute_loss`.
+  • Diagonal-σ:                W = Diagonal(1 / σ̂_k²)
+  • Full optimal:              W = Σ̂⁻¹  (regularised)
+
+`W` is built once, outside the hot loop, by `build_smm_spec`
+(equal-weight case) or `load_weight_matrix` (diagonal / full).
+
+`spec.q_scale` is a DISPLAY-ONLY positive constant (e.g. tr(Σ̂) for
+the matrix schemes, 1.0 for equal weight).  Because it is constant
+across all θ, dividing Q by it does NOT move the argmin — it only
+rescales the reported number to a human-readable magnitude.  The
+optimiser, gradients, and acceptance ratios all see the same
+rescaled-by-a-constant surface, so optimisation is mathematically
+identical to the un-normalised objective.
 """
 function compute_loss_matrix(
     m_model::NamedTuple,
@@ -133,7 +128,7 @@ function compute_loss_matrix(
     end
 
     Q = dot(dev_vec, W * dev_vec)
-    return Q
+    return Q / spec.q_scale
 end
 
 
@@ -153,17 +148,20 @@ multiple jumps) are rejected as infeasible.
 """
 function smm_objective(
     θ_unc :: AbstractVector{Float64},
-    spec  :: SMMSpec
+    spec  :: SMMSpec;
+    Nx    :: Int = spec.run.Nx,
+    Np_U  :: Int = spec.run.Np_U,
+    Np_S  :: Int = spec.run.Np_S,
 ) :: Float64
 
-    cp, rp, up, sp = unpack_θ(θ_unc, spec)
+    cp, up, sp = unpack_θ(θ_unc, spec)
 
     local model, solve_result
     try
-        model, solve_result = solve_model(cp, rp, up, sp, spec.sim;
-                                          Nx   = spec.run.Nx,
-                                          Np_U = spec.run.Np_U,
-                                          Np_S = spec.run.Np_S)
+        model, solve_result = solve_model(cp, up, sp, spec.sim;
+                                          Nx   = Nx,
+                                          Np_U = Np_U,
+                                          Np_S = Np_S)
     catch
         return Inf
     end
@@ -196,11 +194,9 @@ function smm_objective(
         return Inf
     end
 
-    if !isnothing(spec.W)
-        return compute_loss_matrix(m_model, spec, spec.W)
-    else
-        return compute_loss(m_model, spec)
-    end
+    # spec.W is always present (equal-weight is a diagonal W built in
+    # build_smm_spec), so there is a single weighted-loss path.
+    return compute_loss_matrix(m_model, spec, spec.W)
 end
 
 
@@ -251,12 +247,33 @@ end
 # ============================================================
 
 """
-    _run_sa(spec; ...) → (theta_best, Q_best, iters)
+    _random_theta(spec, rng) → Vector{Float64}
 
-Simulated annealing in unconstrained (logit) space.
+A single random start in unconstrained space: draw each free parameter
+uniformly within its bounds, then map to the logit scale.
 """
-function _run_sa(
-    spec             :: SMMSpec;
+function _random_theta(spec::SMMSpec, rng)
+    theta_j = Vector{Float64}(undef, length(spec.free))
+    for (k, ps) in enumerate(spec.free)
+        x_k = ps.lb + (ps.ub - ps.lb) * rand(rng)
+        x_k = clamp(x_k, ps.lb + 1e-8 * (ps.ub - ps.lb),
+                         ps.ub - 1e-8 * (ps.ub - ps.lb))
+        theta_j[k] = _to_unconstrained(x_k, ps.lb, ps.ub)
+    end
+    return theta_j
+end
+
+
+"""
+    _sa_loop(spec, theta_start; ...) → (theta_best, Q_best, iters)
+
+One simulated-annealing chain in unconstrained (logit) space, started
+from `theta_start`.  This is the single-chain engine used both for a lone
+start and for each parallel start in `_run_sa`.
+"""
+function _sa_loop(
+    spec             :: SMMSpec,
+    theta_start      :: AbstractVector{Float64};
     T0               :: Float64 = 0.0,
     step             :: Float64 = 0.15,
     max_iter         :: Int     = 5000,
@@ -267,24 +284,11 @@ function _run_sa(
     max_reheats      :: Int     = 5,
     adapt_window     :: Int     = 50,
     target_fin       :: Float64 = 0.90,
-    random_init      :: Bool    = false,
     show_trace       :: Bool    = true,
     trace_stride     :: Int     = 100,
     rng                         = Random.default_rng(),
 )
-    theta = if random_init
-        theta_j = Vector{Float64}(undef, length(spec.free))
-        for (k, ps) in enumerate(spec.free)
-            x_k = ps.lb + (ps.ub - ps.lb) * rand(rng)
-            x_k = clamp(x_k, ps.lb + 1e-8 * (ps.ub - ps.lb),
-                             ps.ub - 1e-8 * (ps.ub - ps.lb))
-            theta_j[k] = _to_unconstrained(x_k, ps.lb, ps.ub)
-        end
-        theta_j
-    else
-        pack_theta(spec)
-    end
-
+    theta      = copy(theta_start)
     Q          = smm_objective(theta, spec)
     theta_best = copy(theta)
     Q_best     = isfinite(Q) ? Q : Inf
@@ -321,11 +325,10 @@ function _run_sa(
 
     if show_trace
         n_corners_init = _count_corners(theta_best, spec)
-        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f  corners=%d/%d  random_init=%s\n",
+        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f  corners=%d/%d\n",
                 isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (bad starting point)",
                 T0, step,
-                n_corners_init, length(spec.free),
-                random_init)
+                n_corners_init, length(spec.free))
         flush(stdout)
     end
 
@@ -453,6 +456,132 @@ function _run_sa(
 end
 
 
+"""
+    _run_sa(spec; starts, parallel_steps, seed, ...) → (theta_best, Q_best, iters)
+
+Multi-start simulated annealing.  When `starts` holds more than one point
+(one per cluster), every start runs for the first `parallel_steps`
+iterations; the best chain (lowest Q_best) is then continued to completion.
+Because each start sits in a distinct cluster, pruning to the best chain
+selects the best basin, not merely the best individual candidate.
+
+The warm-up chains run sequentially (not threaded over) — each model solve
+already uses the solver's internal multithreading, and nesting thread pools
+oversubscribes the workers and can stall the run.
+
+With zero or one start the routine reduces to a single chain identical to
+the original behaviour: seeded from `starts[1]`, or — if `starts` is empty
+— from a random draw (`random_init=true`) or `pack_theta(spec)`.
+
+Per-chain RNGs are seeded deterministically as `Xoshiro(seed + j)`, and the
+continuation chain uses `Xoshiro(seed)`, so a run is replicable.  Note the
+continuation restarts the temperature schedule from the best basin's
+incumbent rather than resuming the pruned chain's internal SA state — a
+fresh anneal from the selected basin.
+"""
+function _run_sa(
+    spec             :: SMMSpec;
+    starts           :: Vector{Vector{Float64}} = Vector{Vector{Float64}}(),
+    T0               :: Float64 = 0.0,
+    step             :: Float64 = 0.15,
+    max_iter         :: Int     = 5000,
+    cooling_rate     :: Float64 = 1.0,
+    cooling_exp      :: Float64 = 0.5,
+    reheat_patience  :: Int     = 200,
+    reheat_factor    :: Float64 = 2.0,
+    max_reheats      :: Int     = 5,
+    adapt_window     :: Int     = 50,
+    target_fin       :: Float64 = 0.90,
+    parallel_steps   :: Int     = 100,
+    seed             :: Int     = 20240601,
+    random_init      :: Bool    = false,
+    show_trace       :: Bool    = true,
+    trace_stride     :: Int     = 100,
+    rng                         = Random.default_rng(),
+)
+    # Assemble the start set.
+    start_set = if !isempty(starts)
+        starts
+    else
+        [random_init ? _random_theta(spec, rng) : pack_theta(spec)]
+    end
+
+    # Single start → original single-chain behaviour.
+    if length(start_set) <= 1
+        return _sa_loop(spec, start_set[1];
+                        T0 = T0, step = step, max_iter = max_iter,
+                        cooling_rate = cooling_rate, cooling_exp = cooling_exp,
+                        reheat_patience = reheat_patience, reheat_factor = reheat_factor,
+                        max_reheats = max_reheats, adapt_window = adapt_window,
+                        target_fin = target_fin, show_trace = show_trace,
+                        trace_stride = trace_stride, rng = rng)
+    end
+
+    # Multi-start warm-up, then prune to the best basin.  Chains run
+    # SEQUENTIALLY, not threaded over: each smm_objective already uses the
+    # solver's internal multithreading, so wrapping the chains in another
+    # Threads.@threads nests thread pools — with few chains that starves the
+    # inner solver and can stall the run.  Sequential chains keep every model
+    # solve fully parallel internally (where the speed actually comes from).
+    nch     = length(start_set)
+    p_steps = min(parallel_steps, max_iter)
+
+    chain_theta = Vector{Vector{Float64}}(undef, nch)
+    chain_Q     = fill(Inf, nch)
+
+    if show_trace
+        @printf("  [SA multistart]  %d chains x %d warm-up steps (sequential; then prune to best basin)\n",
+                nch, p_steps)
+        flush(stdout)
+    end
+
+    for j in 1:nch
+        rng_j = Random.Xoshiro(UInt64(seed) + UInt64(j))
+        tb, qb, _ = _sa_loop(spec, start_set[j];
+                             T0 = T0, step = step, max_iter = p_steps,
+                             cooling_rate = cooling_rate, cooling_exp = cooling_exp,
+                             reheat_patience = reheat_patience, reheat_factor = reheat_factor,
+                             max_reheats = max_reheats, adapt_window = adapt_window,
+                             target_fin = target_fin, show_trace = false,
+                             trace_stride = trace_stride, rng = rng_j)
+        chain_theta[j] = tb
+        chain_Q[j]     = qb
+        if show_trace
+            @printf("  [SA multistart]  chain %d/%d done  Q_best=%s\n",
+                    j, nch, isfinite(qb) ? @sprintf("%.6e", qb) : "Inf")
+            flush(stdout)
+        end
+    end
+
+    jbest = argmin(chain_Q)
+    if show_trace
+        @printf("  [SA multistart]  best basin = chain %d  Q_best=%.6e  (feasible chains: %d/%d)\n",
+                jbest, chain_Q[jbest], count(isfinite, chain_Q), nch)
+        flush(stdout)
+    end
+
+    remaining = max(max_iter - p_steps, 0)
+    if remaining == 0
+        return chain_theta[jbest], chain_Q[jbest], p_steps
+    end
+
+    # Continue the best basin to completion.
+    tb, qb, iters = _sa_loop(spec, chain_theta[jbest];
+                             T0 = T0, step = step, max_iter = remaining,
+                             cooling_rate = cooling_rate, cooling_exp = cooling_exp,
+                             reheat_patience = reheat_patience, reheat_factor = reheat_factor,
+                             max_reheats = max_reheats, adapt_window = adapt_window,
+                             target_fin = target_fin, show_trace = show_trace,
+                             trace_stride = trace_stride, rng = Random.Xoshiro(UInt64(seed)))
+
+    if chain_Q[jbest] <= qb
+        return chain_theta[jbest], chain_Q[jbest], p_steps + iters
+    else
+        return tb, qb, p_steps + iters
+    end
+end
+
+
 # Alias for the unicode pack_θ defined in smm_params.jl
 pack_theta(spec) = pack_θ(spec)
 
@@ -547,6 +676,8 @@ function _run_de(
     cr           :: Float64 = 0.85,
     patience     :: Int     = 20,
     avg_tol      :: Float64 = 0.01,
+    seed_bank    :: Union{Nothing,SeedBank}        = nothing,
+    prev_optimum :: Union{Nothing,Vector{Float64}} = nothing,
     show_members :: Bool    = false,
     show_gens    :: Bool    = true,
     trace_stride :: Int     = 10,
@@ -561,6 +692,7 @@ function _run_de(
         [Random.Xoshiro(s) for s in seeds]
     end
 
+    # Base population: uniform random draws (also used to top up a short bank).
     pop = Vector{Vector{Float64}}(undef, pop_size)
     for j in 1:pop_size
         theta_j = Vector{Float64}(undef, npar)
@@ -573,7 +705,28 @@ function _run_de(
         end
         pop[j] = theta_j
     end
-    pop[1] = copy(theta0)
+
+    if seed_bank === nothing
+        # No bank: warm the first member with the spec's initial point.
+        pop[1] = copy(theta0)
+    else
+        # Seed from clusters (round-robin, best-Q first); the random draws above
+        # remain as the top-up for any slots the bank cannot fill.
+        seeded = _seed_pop_from_bank(seed_bank, pop_size)
+        for (j, θ) in enumerate(seeded)
+            pop[j] = θ
+        end
+        if show_gens
+            @printf("  [DE init]  seeded %d/%d members from candidate clusters\n",
+                    length(seeded), pop_size)
+            flush(stdout)
+        end
+    end
+
+    # Guaranteed previous-optimum member (when supplied and valid).
+    if prev_optimum !== nothing
+        pop[1] = copy(prev_optimum)
+    end
 
     Q_pop = fill(Inf, pop_size)
 
@@ -722,6 +875,71 @@ end
 
 
 # ============================================================
+# Seed-bank helpers (candidate-cluster seeding for SA / DE)
+# ============================================================
+
+"""
+    _bank_clusters(bank) → Vector{Vector{Int}}
+
+Group candidate indices by cluster label, each group sorted by ascending Q.
+"""
+function _bank_clusters(bank::SeedBank)
+    groups = Vector{Vector{Int}}()
+    for lab in unique(bank.labels)
+        idx = findall(==(lab), bank.labels)
+        sort!(idx; by = i -> bank.Q[i])
+        push!(groups, idx)
+    end
+    return groups
+end
+
+"""
+    _sa_starts_from_bank(bank, prev_optimum) → Vector{Vector{Float64}}
+
+One SA start per cluster (the best-Q member), optionally with `prev_optimum`
+appended.  Returns an empty vector when there is no bank and no previous
+optimum (the caller then falls back to a single start).
+"""
+function _sa_starts_from_bank(bank::Union{Nothing,SeedBank},
+                              prev_optimum::Union{Nothing,Vector{Float64}})
+    starts = Vector{Vector{Float64}}()
+    if bank !== nothing
+        for grp in _bank_clusters(bank)
+            isempty(grp) && continue
+            push!(starts, copy(bank.candidates[grp[1]]))   # best-Q member
+        end
+    end
+    prev_optimum !== nothing && push!(starts, copy(prev_optimum))
+    return starts
+end
+
+"""
+    _seed_pop_from_bank(bank, pop_size) → Vector{Vector{Float64}}
+
+Round-robin fill across clusters (best-Q first within each), skipping dry
+clusters, up to `pop_size` members.  May return fewer than `pop_size`; the
+caller tops up the remainder with random draws.
+"""
+function _seed_pop_from_bank(bank::SeedBank, pop_size::Int)
+    groups  = _bank_clusters(bank)
+    pop     = Vector{Vector{Float64}}()
+    cursors = ones(Int, length(groups))
+    while length(pop) < pop_size
+        advanced = false
+        for (g, grp) in enumerate(groups)
+            cursors[g] <= length(grp) || continue
+            push!(pop, copy(bank.candidates[grp[cursors[g]]]))
+            cursors[g] += 1
+            advanced = true
+            length(pop) >= pop_size && break
+        end
+        advanced || break   # all clusters exhausted
+    end
+    return pop
+end
+
+
+# ============================================================
 # Main optimisation entry point
 # ============================================================
 
@@ -731,9 +949,11 @@ end
 Run SMM estimation.  All settings come from `spec.run`.
 """
 function run_smm(
-    spec   :: SMMSpec;
-    method :: Symbol = :de,
-    rng             = Random.default_rng(),
+    spec         :: SMMSpec;
+    method       :: Symbol = :de,
+    seed_bank    :: Union{Nothing,SeedBank}        = nothing,
+    prev_optimum :: Union{Nothing,Vector{Float64}} = nothing,
+    rng                  = Random.default_rng(),
 ) :: SMMResult
 
     r    = spec.run
@@ -751,6 +971,8 @@ function run_smm(
             cr           = r.de_cr,
             patience     = r.de_patience,
             avg_tol      = r.de_avg_tol,
+            seed_bank    = seed_bank,
+            prev_optimum = prev_optimum,
             show_members = r.show_trace_members,
             show_gens    = r.show_trace_generations,
             trace_stride = r.trace_stride,
@@ -759,8 +981,10 @@ function run_smm(
         converged = isfinite(loss_opt)
 
     elseif method == :sa
+        sa_starts = _sa_starts_from_bank(seed_bank, prev_optimum)
         theta_opt, loss_opt, niters = _run_sa(
             spec;
+            starts          = sa_starts,
             max_iter        = r.sa_max_iter,
             T0              = r.sa_T0,
             step            = r.sa_step,
@@ -771,6 +995,8 @@ function run_smm(
             max_reheats     = r.sa_max_reheats,
             adapt_window    = r.sa_adapt_window,
             target_fin      = r.sa_target_fin,
+            parallel_steps  = r.sa_parallel_steps,
+            seed            = r.sa_seed,
             random_init     = r.sa_random_init,
             show_trace      = r.show_trace_generations,
             trace_stride    = r.trace_stride,
@@ -801,8 +1027,8 @@ function run_smm(
                      (method == :lbfgs)      ? Optim.LBFGS()      : Optim.BFGS()
 
         options   = Optim.Options(iterations = r.nm_max_iter,
-                                  f_tol      = r.nm_f_tol,
-                                  x_tol      = r.nm_x_tol,
+                                  f_reltol      = r.nm_f_tol,
+                                  x_abstol      = r.nm_x_tol,
                                   show_trace = false)
         result    = Optim.optimize(obj_traced, theta0, opt_method, options)
         theta_opt = Optim.minimizer(result)
@@ -818,8 +1044,8 @@ function run_smm(
             isfinite(loss_opt) ? loss_opt : Inf, converged, niters)
     flush(stdout)
 
-    cp_opt, rp_opt, up_opt, sp_opt = unpack_θ(theta_opt, spec)
-    params_opt = _params_to_namedtuple(cp_opt, rp_opt, up_opt, sp_opt, spec)
+    cp_opt, up_opt, sp_opt = unpack_θ(theta_opt, spec)
+    params_opt = _params_to_namedtuple(cp_opt, up_opt, sp_opt, spec)
 
     res = SMMResult(theta_opt, params_opt, loss_opt, converged, niters, spec)
     print_results(res)
@@ -831,45 +1057,9 @@ end
 # Multi-start wrapper
 # ============================================================
 
-"""
-    multistart_smm(spec, n_starts; method=:sa, seed=42) → SMMResult
-"""
-function multistart_smm(
-    spec     :: SMMSpec,
-    n_starts :: Int;
-    method   :: Symbol = :sa,
-    seed     :: Int    = 42,
-) :: SMMResult
-
-    rng    = Random.MersenneTwister(seed)
-    theta0 = pack_theta(spec)
-    npar   = length(theta0)
-
-    best_result = nothing
-
-    for s in 1:n_starts
-        @printf("\n══ Multi-start %d / %d ══\n", s, n_starts)
-        flush(stdout)
-
-        theta_start = theta0 .+ 0.5 .* randn(rng, npar)
-        spec_s      = _spec_with_init(spec, theta_start)
-
-        try
-            res_s = run_smm(spec_s; method = method, rng = rng)
-            if isnothing(best_result) || res_s.loss_opt < best_result.loss_opt
-                best_result = res_s
-                @printf("  -> new best  Q = %.6e\n", best_result.loss_opt)
-                flush(stdout)
-            end
-        catch e
-            @printf("  start %d failed: %s\n", s, e)
-        end
-    end
-
-    @printf("\nMulti-start done.  Best Q = %.6e\n",
-            isnothing(best_result) ? Inf : best_result.loss_opt)
-    return best_result
-end
+# multistart_smm was removed — its repeated-restart role is now served by the
+# multi-start simulated annealing built into _run_sa (one chain per candidate
+# cluster, pruned to the best basin).
 
 
 # ============================================================
@@ -924,13 +1114,12 @@ end
 # Internal helpers
 # ============================================================
 
-function _params_to_namedtuple(cp, rp, up, sp, spec::SMMSpec)
+function _params_to_namedtuple(cp, up, sp, spec::SMMSpec)
     d = Dict{Symbol, Float64}()
     for ps in spec.free
-        val = if ps.block == :common;   getfield(cp, ps.name)
-              elseif ps.block == :regime; getfield(rp, ps.name)
-              elseif ps.block == :unsk;   getfield(up, ps.name)
-              else;                       getfield(sp, ps.name)
+        val = if ps.block == :common; getfield(cp, ps.name)
+              elseif ps.block == :unsk; getfield(up, ps.name)
+              else;                     getfield(sp, ps.name)
               end
         d[Symbol(string(ps.block) * "_" * string(ps.name))] = val
     end
@@ -944,5 +1133,5 @@ function _spec_with_init(spec::SMMSpec, theta_unc::Vector{Float64})
                   _to_constrained(theta_unc[i], ps.lb, ps.ub), ps.label)
         for (i, ps) in enumerate(spec.free)
     ]
-    return SMMSpec(new_free, spec.fixed, spec.moments, spec.sim, spec.run, spec.W)
+    return SMMSpec(new_free, spec.fixed, spec.moments, spec.sim, spec.run, spec.W, spec.q_scale)
 end

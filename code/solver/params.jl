@@ -1,5 +1,13 @@
 ############################################################
 # params.jl — Structs and default parameter initialisation
+#
+# NOTE (refactor): the former `RegimeParams` container has been
+# dissolved.  Each of its parameters now lives in the block whose
+# solver code actually reads it:
+#   :unsk  ← PU, bU, bT, α_U
+#   :skl   ← gamma_PS, bS, a_Γ, b_Γ
+# Storage now reflects only which solver block consumes a parameter;
+# "regime-specific" denotes the estimation category alone.
 ############################################################
 
 
@@ -23,21 +31,6 @@ Base.@kwdef struct CommonParams
 end
 
 
-Base.@kwdef struct RegimeParams
-    PU       :: Float64    # unskilled sector productivity shifter
-    gamma_PS :: Float64    # skilled productivity shape: PS(x) = γ·x^{γ−1} (Beta(γ,1) PDF)
-
-    bU  :: Float64    # flow payoff in unskilled unemployment
-    bT  :: Float64    # flow payoff while in training
-    bS  :: Float64    # flow payoff in skilled unemployment
-
-    α_U :: Float64    # unskilled damage-shock Beta shape (Beta(α_U, 1))
-
-    a_Γ :: Float64    # skilled match-quality Beta shape 1
-    b_Γ :: Float64    # skilled match-quality Beta shape 2
-end
-
-
 Base.@kwdef struct CommonGrids
     x   :: Vector{Float64}    # worker-type grid
     wx  :: Vector{Float64}    # quadrature weights on x-grid
@@ -55,6 +48,12 @@ Base.@kwdef struct UnskilledParams
     k   :: Float64    # vacancy posting cost
     β   :: Float64    # worker Nash bargaining weight
     λ   :: Float64    # damage-shock arrival rate
+
+    # Absorbed from the former RegimeParams (read by the unskilled block):
+    PU  :: Float64    # unskilled sector productivity shifter
+    bU  :: Float64    # flow payoff in unskilled unemployment
+    bT  :: Float64    # flow payoff while in training
+    α_U :: Float64    # unskilled damage-shock Beta shape (Beta(α_U, 1))
 end
 
 
@@ -101,6 +100,12 @@ Base.@kwdef struct SkilledParams
 
     λ   :: Float64    # skilled quality-shock arrival rate
     σ   :: Float64    # flow cost of on-the-job search
+
+    # Absorbed from the former RegimeParams (read by the skilled block):
+    gamma_PS :: Float64    # skilled productivity shape: PS(x) = γ·x^{γ−1} (Beta(γ,1) PDF)
+    bS       :: Float64    # flow payoff in skilled unemployment
+    a_Γ      :: Float64    # skilled match-quality Beta shape 1
+    b_Γ      :: Float64    # skilled match-quality Beta shape 2
 end
 
 
@@ -173,7 +178,6 @@ end
 
 Base.@kwdef mutable struct Model
     common      :: CommonParams
-    regime      :: RegimeParams
     grids       :: CommonGrids
 
     unsk_par    :: UnskilledParams
@@ -194,25 +198,17 @@ end
 # ============================================================
 
 """
-    initialise_model(; Nx, Np_U, Np_S, regime)
+    initialise_model(; Nx, Np_U, Np_S)
 
-Construct a `Model` with default parameters and a given regime.
+Construct a `Model` with default parameters.  The parameters formerly
+held in `RegimeParams` are now folded into the default `UnskilledParams`
+(`PU, bU, bT, α_U`) and `SkilledParams` (`gamma_PS, bS, a_Γ, b_Γ`).
 Returns an unsolved `Model` ready to be passed to `solve_model!`.
 """
 function initialise_model(;
     Nx   :: Int = 200,
     Np_U :: Int = 200,
     Np_S :: Int = 200,
-    regime :: RegimeParams = RegimeParams(
-        PU       = 0.70,
-        gamma_PS = 1.85,
-        bU  = 0.00,
-        bT  = 0.28,
-        bS  = 0.01,
-        α_U = 1.00,
-        a_Γ = 2.0,
-        b_Γ = 5.0,
-    )
 )
     # Grids
     xgrid,   wx   = build_gl_grid(Nx)
@@ -235,23 +231,31 @@ function initialise_model(;
     u_grids = UnskilledGrids(p = pgrid_U, wp = wp_U)
     s_grids = SkilledGrids(p = pgrid_S, wp = wp_S)
 
-    # Unskilled parameters
+    # Unskilled parameters (now includes PU, bU, bT, α_U)
     up = UnskilledParams(
-        μ = 0.74,
-        η = 0.60,
-        k = 0.25,
-        β = 0.40,
-        λ = 0.08,
+        μ   = 0.74,
+        η   = 0.60,
+        k   = 0.25,
+        β   = 0.40,
+        λ   = 0.08,
+        PU  = 0.70,
+        bU  = 0.00,
+        bT  = 0.28,
+        α_U = 1.00,
     )
 
-    # Skilled parameters
+    # Skilled parameters (now includes gamma_PS, bS, a_Γ, b_Γ)
     sp = SkilledParams(
-        μ = 0.90,
-        η = 0.50,
-        k = 0.17,
-        β = 0.32,
-        λ = 0.07,
-        σ = 0.01,
+        μ        = 0.90,
+        η        = 0.50,
+        k        = 0.17,
+        β        = 0.32,
+        λ        = 0.07,
+        σ        = 0.01,
+        gamma_PS = 1.85,
+        bS       = 0.01,
+        a_Γ      = 2.0,
+        b_Γ      = 5.0,
     )
 
     # Simulation controls
@@ -278,15 +282,15 @@ function initialise_model(;
         verbose_stride = 10,
     )
 
-    # Skilled precomputations
-    s_pre = build_skilled_precomp(s_grids, regime)
+    # Skilled precomputations (reads a_Γ, b_Γ from sp)
+    s_pre = build_skilled_precomp(s_grids, sp)
 
     # Initial conditions
     r = cp.r;  ν = cp.ν;  φ = cp.φ
 
-    US_guess     = regime.bS / (r + ν)
-    T_init       = fill((regime.bT + φ * US_guess) / (r + φ + ν), Nx)
-    Usearch_init = fill(regime.bU / (r + ν), Nx)
+    US_guess     = sp.bS / (r + ν)
+    T_init       = fill((up.bT + φ * US_guess) / (r + φ + ν), Nx)
+    Usearch_init = fill(up.bU / (r + ν), Nx)
     U_init       = max.(Usearch_init, T_init)
     t_seed       = [(ν / (2ν + φ)) * ℓvals[ix] for ix in 1:Nx]
 
@@ -303,7 +307,7 @@ function initialise_model(;
         θ         = 0.5,
     )
 
-    US_init = fill(regime.bS / (r + ν), Nx)
+    US_init = fill(sp.bS / (r + ν), Nx)
 
     sc = SkilledCache(
         U     = US_init,
@@ -321,7 +325,6 @@ function initialise_model(;
 
     return Model(
         common     = cp,
-        regime     = regime,
         grids      = grids,
         unsk_par   = up,
         unsk_grids = u_grids,

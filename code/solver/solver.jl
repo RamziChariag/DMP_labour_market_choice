@@ -2,7 +2,7 @@
 # solver.jl — Global equilibrium solver
 #
 # Public entry points
-#   solve_model(common, regime, unsk_par, skl_par, sim; Nx, Np_U, Np_S)
+#   solve_model(common, unsk_par, skl_par, sim; Nx, Np_U, Np_S)
 #       → build grids and caches, run the global loop, return (Model, SolveResult).
 #   solve_model!(model)
 #       → run the global loop in place on an existing Model.
@@ -52,7 +52,6 @@ SolveResult(cU::Bool, cS::Bool, cG::Bool) = SolveResult(cU, cS, cG, cU && cS && 
 # ---------------------------------------------------------------------------
 function _initialise_caches(
     common   :: CommonParams,
-    regime   :: RegimeParams,
     unsk_par :: UnskilledParams,
     skl_par  :: SkilledParams,
     grids    :: CommonGrids,
@@ -64,20 +63,20 @@ function _initialise_caches(
 
     r = common.r;   ν = common.ν;   φ = common.φ
 
-    US_guess     = regime.bS / (r + ν)
-    Usearch_init = fill(regime.bU / (r + ν), Nx)
-    T_init       = [(regime.bT + φ * US_guess) / (r + φ + ν) for _ in 1:Nx]
+    US_guess     = skl_par.bS / (r + ν)
+    Usearch_init = fill(unsk_par.bU / (r + ν), Nx)
+    T_init       = [(unsk_par.bT + φ * US_guess) / (r + φ + ν) for _ in 1:Nx]
     U_init       = max.(Usearch_init, T_init)
     t_seed       = [(ν / (ν + φ + ν)) * grids.ℓ[ix] for ix in 1:Nx]
 
-    PU_init = max(regime.PU, 1e-6)
-    pstar_U_init = [clamp(regime.bU / (PU_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
+    PU_init = max(unsk_par.PU, 1e-6)
+    pstar_U_init = [clamp(unsk_par.bU / (PU_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
                     for ix in 1:Nx]
 
     pstar_S_init = [begin
                         xi = max(grids.x[ix], 1e-3)
-                        PS_xi = max(PS_of_x(xi, regime.gamma_PS), 1e-6)
-                        clamp(regime.bS / (PS_xi * xi), 0.05, 0.90)
+                        PS_xi = max(PS_of_x(xi, skl_par.gamma_PS), 1e-6)
+                        clamp(skl_par.bS / (PS_xi * xi), 0.05, 0.90)
                     end
                     for ix in 1:Nx]
     poj_init = clamp.(pstar_S_init .+ 0.30, pstar_S_init, 0.95)
@@ -95,7 +94,7 @@ function _initialise_caches(
         θ         = 0.5,
     )
 
-    US_init = fill(regime.bS / (r + ν), Nx)
+    US_init = fill(skl_par.bS / (r + ν), Nx)
 
     sc = SkilledCache(
         U     = US_init,
@@ -119,12 +118,11 @@ end
 # solve_model — allocate grids and caches, then solve
 # ---------------------------------------------------------------------------
 """
-    solve_model(common, regime, unsk_par, skl_par, sim; Nx, Np_U, Np_S)
+    solve_model(common, unsk_par, skl_par, sim; Nx, Np_U, Np_S)
         → (Model, SolveResult)
 """
 function solve_model(
     common   :: CommonParams,
-    regime   :: RegimeParams,
     unsk_par :: UnskilledParams,
     skl_par  :: SkilledParams,
     sim      :: SimParams;
@@ -142,14 +140,13 @@ function solve_model(
     u_grids = UnskilledGrids(p = pgrid_U, wp = wp_U)
     s_grids = SkilledGrids(p = pgrid_S, wp = wp_S)
 
-    s_pre = build_skilled_precomp(s_grids, regime)
+    s_pre = build_skilled_precomp(s_grids, skl_par)
 
-    uc, sc = _initialise_caches(common, regime, unsk_par, skl_par,
+    uc, sc = _initialise_caches(common, unsk_par, skl_par,
                                  grids, u_grids, s_grids)
 
     model = Model(
         common     = common,
-        regime     = regime,
         grids      = grids,
         unsk_par   = unsk_par,
         unsk_grids = u_grids,

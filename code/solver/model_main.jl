@@ -75,32 +75,29 @@ common = CommonParams(
     c   = 1.70,
 )
 
-regime = RegimeParams(
-    PU       = 0.70,
-    gamma_PS = 1.85,
+unsk_par = UnskilledParams(
+    μ   = 0.74,
+    η   = 0.60,
+    k   = 0.25,
+    β   = 0.40,
+    λ   = 0.08,
+    PU  = 0.70,
     bU  = 0.00,
     bT  = 0.28,
-    bS  = 0.01,
     α_U = 1.00,
-    a_Γ = 2.0,
-    b_Γ = 5.0,
-)
-
-unsk_par = UnskilledParams(
-    μ = 0.74,
-    η = 0.60,
-    k = 0.25,
-    β = 0.40,
-    λ = 0.08,
 )
 
 skl_par = SkilledParams(
-    μ = 0.90,
-    η = 0.50,
-    k = 0.17,
-    β = 0.32,
-    λ = 0.07,
-    σ = 0.01,
+    μ        = 0.90,
+    η        = 0.50,
+    k        = 0.17,
+    β        = 0.32,
+    λ        = 0.07,
+    σ        = 0.01,
+    gamma_PS = 1.85,
+    bS       = 0.01,
+    a_Γ      = 2.0,
+    b_Γ      = 5.0,
 )
 
 sim = SimParams(
@@ -133,12 +130,10 @@ println("Parameters:")
         common.r, common.ν, common.φ)
 @printf("                   a_ℓ=%.5f  b_ℓ=%.5f  c=%.5f\n",
         common.a_ℓ, common.b_ℓ, common.c)
-@printf("  RegimeParams:    PU=%.5f   γ_PS=%.5f\n",
-        regime.PU, regime.gamma_PS)
-@printf("                   bU=%.5f   bT=%.5f   bS=%.5f\n",
-        regime.bU, regime.bT, regime.bS)
-@printf("                   α_U=%.5f  a_Γ=%.5f  b_Γ=%.5f\n",
-        regime.α_U, regime.a_Γ, regime.b_Γ)
+@printf("  Unsk (regime):   PU=%.5f   bU=%.5f   bT=%.5f   α_U=%.5f\n",
+        unsk_par.PU, unsk_par.bU, unsk_par.bT, unsk_par.α_U)
+@printf("  Skl  (regime):   γ_PS=%.5f  bS=%.5f  a_Γ=%.5f  b_Γ=%.5f\n",
+        skl_par.gamma_PS, skl_par.bS, skl_par.a_Γ, skl_par.b_Γ)
 @printf("  UnskilledParams: μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f\n",
         unsk_par.μ, unsk_par.η, unsk_par.k, unsk_par.β, unsk_par.λ)
 @printf("  SkilledParams:   μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f   σ=%.5f\n",
@@ -149,7 +144,7 @@ flush(stdout)
 # 2. Solve
 # ============================================================
 println("\nSolving model...")
-@time model, result = solve_model(common, regime, unsk_par, skl_par, sim;
+@time model, result = solve_model(common, unsk_par, skl_par, sim;
                                    Nx=200, Np_U=200, Np_S=200)
 
 if result.ok
@@ -175,7 +170,7 @@ println("\nGenerating figures...")
 flush(stdout)
 
 @time make_all_plots(obj; output_dir = PLOTS_DIR,
-                          gamma_PS    = regime.gamma_PS)
+                          gamma_PS    = skl_par.gamma_PS)
 
 println("\nDone.")
 flush(stdout)

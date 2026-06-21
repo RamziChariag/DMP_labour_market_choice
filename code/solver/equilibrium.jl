@@ -15,7 +15,6 @@
 function compute_equilibrium_objects(model::Model)
 
     cp  = model.common
-    rp  = model.regime
     uc  = model.unsk_cache
     sc  = model.skl_cache
     up  = model.unsk_par
@@ -38,7 +37,7 @@ function compute_equilibrium_objects(model::Model)
     βU = up.β;  λU = up.λ
     βS = sp.β;  λS = sp.λ;  σS = sp.σ
 
-    PU = rp.PU;  γPS = rp.gamma_PS;  bS = rp.bS;  αU = rp.α_U
+    PU = up.PU;  γPS = sp.gamma_PS;  bS = sp.bS;  αU = up.α_U
 
     c_of_x = x -> training_cost(x, cp.c)
 
