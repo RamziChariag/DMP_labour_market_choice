@@ -254,36 +254,36 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :warmstart
+INIT_MODE            = :default
 CLUSTERS_FORCE_REGEN = false
 INCLUDE_PREV_OPTIMUM = false
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00416667,
-    :nu       => 0.00323032,
+    :nu       => 0.00335677,
     :phi      => 0.02222129,
-    :a_l      => 0.78291324,
-    :b_l      => 0.30091648,
-    :c        => 6.87715098,
-    :PU       => 2.75459741,
-    :gamma_PS => 4.48688904,
-    :bU       => 0.01904250,
-    :bT       => 1.90130367,
-    :bS       => 0.17804638,
-    :alpha_U  => 0.85837523,
-    :a_Gam    => 0.34535600,
-    :b_Gam    => 2.74637761,
-    :unsk_mu  => 0.13922352,
-    :unsk_eta => 0.45167087,
-    :unsk_k   => 0.03159131,
-    :unsk_bet => 0.90242216,
-    :unsk_lam => 0.39923509,
-    :skl_mu   => 0.28096675,
-    :skl_eta  => 0.88428503,
-    :skl_k    => 0.08008493,
-    :skl_bet  => 0.76249472,
-    :skl_lam  => 0.04610387,
-    :skl_sig  => 0.00746820,
+    :a_l      => 1.70085276,
+    :b_l      => 0.22005125,
+    :c        => 7.30116505,
+    :PU       => 3.13818913,
+    :gamma_PS => 6.39599442,
+    :bU       => 0.10223153,
+    :bT       => 0.83650743,
+    :bS       => 0.00371526,
+    :alpha_U  => 0.51498294,
+    :a_Gam    => 1.90443324,
+    :b_Gam    => 8.23941892,
+    :unsk_mu  => 0.24286479,
+    :unsk_eta => 0.83268020,
+    :unsk_k   => 0.09364803,
+    :unsk_bet => 0.70137202,
+    :unsk_lam => 0.66362118,
+    :skl_mu   => 0.23764609,
+    :skl_eta  => 0.89610432,
+    :skl_k    => 0.01356406,
+    :skl_bet  => 0.94446085,
+    :skl_lam  => 0.59273932,
+    :skl_sig  => 0.00185023,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
@@ -650,15 +650,15 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── Simulated annealing ──────────────────────────────────
-    sa_max_iter        = 1_000,   # max SA iterations
-    sa_T0              = 05.00,   # initial temperature (≤0 ⇒ auto-calibrate
-                                  # from uphill probes; here pinned to 20)
-    sa_step            = 0.30,    # initial proposal sd in unconstrained space
-    sa_cooling_rate    = 1.0,     # rate in T(t) = T_reheat / log(1+rate·t)^exp
-    sa_cooling_exp     = 0.6,     # exponent in same schedule (higher = faster cool)
+    sa_max_iter        = 5_000,   # max SA iterations
+    sa_T0              = 0.0,     # initial temperature (≤0 ⇒ auto-calibrate
+                                  # from uphill probes)
+    sa_step            = 0.20,    # initial proposal sd in unconstrained space
+    sa_cooling_rate    = 0.5,     # rate in T(t) = T_reheat / log(1+rate·t)^exp
+    sa_cooling_exp     = 1.0,     # exponent in same schedule (higher = faster cool)
     sa_reheat_patience = 1_000,   # steps without improvement before a reheat, 0 to disable reheats
     sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
-    sa_max_reheats     = 3,      # cap on number of reheats per run
+    sa_max_reheats     = 2,       # cap on number of reheats per run
     sa_adapt_window    = 50,      # rolling window for adaptive step / acceptance
     sa_target_fin      = 0.90,    # target feasibility (finite-Q) fraction;
                                   # below this, step shrinks
@@ -679,9 +679,10 @@ run_params = SMMRunParams(
                                   # 0 disables this early-stop
 
     # ── Nelder-Mead local polish ─────────────────────────────
-    nm_max_iter  = 5_000,         # max NM iterations
+    nm_max_iter  = 3_000,         # max NM iterations
     nm_f_tol     = 1e-6,          # function-value tolerance
     nm_x_tol     = 1e-4,          # parameter tolerance (unconstrained space)
+    nm_g_tol     = 1e-5,          # gradient tolerance (unconstrained space)
 
     # ── Tracing ──────────────────────────────────────────────
     show_trace_members     = false,   # per-member trace inside one DE/SA gen

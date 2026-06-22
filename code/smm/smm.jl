@@ -1029,6 +1029,7 @@ function run_smm(
         options   = Optim.Options(iterations = r.nm_max_iter,
                                   f_reltol      = r.nm_f_tol,
                                   x_abstol      = r.nm_x_tol,
+                                  g_abstol      = r.nm_g_tol,
                                   show_trace = false)
         result    = Optim.optimize(obj_traced, theta0, opt_method, options)
         theta_opt = Optim.minimizer(result)

@@ -122,6 +122,7 @@ Base.@kwdef struct SMMRunParams
     nm_max_iter  :: Int     = 5_000
     nm_f_tol     :: Float64 = 1e-6
     nm_x_tol     :: Float64 = 1e-5
+    nm_g_tol     :: Float64 = 1e-5   # gradient tolerance (unconstrained space)
 
     # Tracing
     show_trace_members     :: Bool = false
@@ -612,8 +613,8 @@ function print_spec(spec::SMMSpec)
             spec.run.de_pop_size == 0 ? "auto" : string(spec.run.de_pop_size),
             spec.run.de_f, spec.run.de_cr, spec.run.de_patience,
             spec.run.de_avg_tol > 0.0 ? @sprintf("%.1e", spec.run.de_avg_tol) : "off")
-    @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e\n",
-            spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol)
+    @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e  g_tol=%.0e\n",
+            spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol, spec.run.nm_g_tol)
     if spec.run.w_cond_target == 2.0
         @printf("  W:    equal weights — Diagonal(weight/m̂²) (cond(W)=%.2e)\n", cond(spec.W))
     else
