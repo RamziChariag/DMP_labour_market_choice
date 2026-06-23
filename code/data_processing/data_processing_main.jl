@@ -1,13 +1,13 @@
 ############################################################
 # code/data_processing/data_processing_main.jl
-#   Data-processing pipeline — entry point (v7)
+#   Data-processing pipeline — entry point
 #
 # Usage (from the project root):
 #   julia --threads auto code/data_processing/data_processing_main.jl
 #
-# Replaces the former data_pipeline_v7.ipynb notebook. Loads every raw
-# dataset, cleans it, and writes all artefacts the SMM step later reads
-# from data/derived/. Run this once before any SMM estimation.
+# Loads every raw dataset, cleans it, and writes all artefacts the SMM
+# step later reads from data/derived/. Run this once before any SMM
+# estimation.
 #
 # Project layout:
 #   code/
@@ -18,7 +18,7 @@
 #       jolts.jl       j2j.jl      — JOLTS openings / J2J EE rates
 #       nsc.jl                     — NSC enrolment: κ_w level adj. + φ calibration
 #       transitions.jl             — worker-flow hazards + ν life-table turnover
-#       moments.jl     sigma.jl    — 24 moment targets + Σ̂, per window
+#       moments.jl     sigma.jl    — 23 moment targets + Σ̂, per window
 #       validation.jl              — end-of-run diagnostics
 #     smm/                         — separate step; consumes data/derived/
 #   data/
@@ -45,8 +45,8 @@
 #
 # NSC κ_w convention. The per-window NSC level adjustment for
 # training_share is applied HERE, when moments_{w}.csv and sigma_{w}.csv
-# are written (Stages 9–10). code/smm/moments.jl therefore reads the
-# pre-adjusted values and no longer rescales by κ_w.
+# are written (Stages 9–10). code/smm/moments.jl reads the pre-adjusted
+# values directly.
 ############################################################
 
 println("="^60)
@@ -130,7 +130,7 @@ compute_cps_nsc_scale()
 _stage_banner("Stage 4 — JOLTS job openings")
 clean_jolts()
 
-_stage_banner("Stage 5 — CPS transition hazards (job-finding / separation / train-entry)")
+_stage_banner("Stage 5 — CPS transition hazards (job-finding / separation)")
 make_transitions()
 
 _stage_banner("Stage 6 — J2J employer-to-employer (EE) rates")
@@ -142,10 +142,10 @@ compute_nu()
 _stage_banner("Stage 8 — training-completion rate φ (NSC/IPEDS)")
 calibrate_phi()
 
-_stage_banner("Stage 9 — moment targets (24 moments × 4 windows; training_share × κ_w)")
+_stage_banner("Stage 9 — moment targets (23 moments × 4 windows; training_share × κ_w)")
 all_moments = make_moments()
 
-_stage_banner("Stage 10 — influence functions and Σ̂ (24×24 per window; ts row/col × κ_w)")
+_stage_banner("Stage 10 — influence functions and Σ̂ (23×23 per window; ts row/col × κ_w)")
 all_sigma = compute_influence_functions_and_sigma_full()
 
 _stage_banner("Stage 11 — validation and diagnostics")
@@ -163,8 +163,8 @@ end
 
 println("\nKey outputs:")
 println("  • windows.json                 — single source of truth for WINDOWS (4 entries)")
-println("  • moments_{window}.csv         — 24 moments per window")
-println("  • sigma_{window}.csv           — 24×24 variance-covariance matrix (full)")
+println("  • moments_{window}.csv         — 23 moments per window")
+println("  • sigma_{window}.csv           — 23×23 variance-covariance matrix (full)")
 println("  • moment_scales_{window}.csv   — scale factors used for IF normalisation")
 println("  • j2j_ee_rates.csv             — J2J E4-only EE rates by window")
 println("  • nu_estimation.csv            — ν on base_fc AND base_covid (life-table)")

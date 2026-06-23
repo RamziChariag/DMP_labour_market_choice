@@ -35,7 +35,7 @@ const _C4 = :darkorange
 const _C5 = :mediumpurple
 
 # ============================================================
-# Individual figure constructors (new style)
+# Individual figure constructors
 # ============================================================
 
 function fig_densities(obj)

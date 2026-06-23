@@ -1,5 +1,5 @@
 ############################################################
-# code/smm/smm_main.jl — SMM estimation entry point (v7)
+# code/smm/smm_main.jl — SMM estimation entry point
 #
 # Usage (from project root):
 #   julia --threads auto code/smm/smm_main.jl
@@ -16,7 +16,7 @@
 #     derived/  — windows.json, moments_{w}.csv, sigma_{w}.csv,
 #                 nu_estimation.csv, phi_calibration.csv,
 #                 training_share_scale.csv (κ_w; optional but
-#                                            recommended — see v7.1)
+#                                            recommended)
 #   output/
 #     plots/
 #     tables/
@@ -37,22 +37,11 @@
 #       Re-estimate only the 17 regime-specific parameters.
 #       ν comes from the baseline row (NOT a crisis-specific value).
 #
-# v7 changes vs. previous SMM:
-#   - 24 moments (train_entry_rate_U added; exp_ur_* dropped).
-#   - nu_estimate.csv → nu_estimation.csv (two rows; this script
-#     picks the correct row per window).
-#   - Crisis windows now consume the pair-matched baseline bundle
-#     (crisis_covid uses base_covid, not base_fc).
-#   - WINDOWS are read from data/derived/windows.json — single source
-#     of truth shared with data_pipeline_v7.
-#
-# v7.1 changes:
-#   - training_share is now NSC-level-rescaled by κ_w (read from
-#     derived/training_share_scale.csv) at SMM load time. Applied
-#     inside load_data_moments (target value), load_weight_matrix
-#     (Σ̂ row/col), and load_sigma_matrix (std-err vector). See the
-#     moments.jl header for the full convention. If the κ file is
-#     missing, κ defaults to 1.0 with a warning (back-compat).
+# WINDOWS are read from data/derived/windows.json — the single source
+# of truth shared with the data pipeline. training_share carries the
+# NSC κ_w level adjustment, applied upstream when the data pipeline
+# writes moments_{w}.csv / sigma_{w}.csv; the loaders here read the
+# pre-adjusted values (see the moments.jl header for the convention).
 ############################################################
 
 println("="^60)
@@ -148,7 +137,7 @@ sim_smm = SimParams(
 # ============================================================
 # 2. Estimation window
 #    Valid windows are loaded from data/derived/windows.json
-#    written by data_pipeline_v7.
+#    written by the data pipeline.
 # ============================================================
 WINDOW = :base_fc
 
@@ -167,11 +156,11 @@ const _PAIR_BASELINE = Dict(
 # Use the SAME list for both load_weight_matrix and build_smm_spec
 # so sigma / W is subsetted consistently with the loss function.
 #
-# Valid names (24 moments in MOMENT_NAMES order):
+# Valid names (23 moments in MOMENT_NAMES order):
 #   :ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
 #   :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
 #   :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S,
-#   :ee_rate_S, :train_entry_rate_U,
+#   :ee_rate_S,
 #   :mean_wage_U, :mean_wage_S,
 #   :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
 #   :wage_premium, :theta_U, :theta_S
@@ -191,7 +180,6 @@ SKIP_MOMENTS = Symbol[
     # :jfr_S,
     # :sep_rate_S,
     # :ee_rate_S,
-    # :train_entry_rate_U,
     # :mean_wage_U,
     # :mean_wage_S,
     # :p25_wage_U,
@@ -254,9 +242,9 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :warmstart
+INIT_MODE            = :clusters
 CLUSTERS_FORCE_REGEN = false
-INCLUDE_PREV_OPTIMUM = true
+INCLUDE_PREV_OPTIMUM = false
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00416667,
@@ -491,6 +479,9 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         r   = calib.r,
         ν   = calib.nu,
         φ   = calib.phi,
+        # Matching elasticities fixed at 0.5 (It is unidentifiable).
+        unsk_η = 0.5,
+        skl_η  = 0.5,
         a_ℓ = cp_base.a_ℓ,
         b_ℓ = cp_base.b_ℓ,
         bU  = up_base.bU,
@@ -531,6 +522,11 @@ else
         r = calib.r,
         ν = calib.nu,
         φ = calib.phi,
+        # Matching elasticities fixed at 0.5 (Cobb–Douglas curvature).
+        # Not identified without aggregate U/V fluctuations — LMR (2016) fix
+        # the elasticity at 0.5 for the same reason. Levels μ_U, μ_S stay free.
+        unsk_η = 0.5,
+        skl_η  = 0.5,
     ))
 
     free_params = default_free_params()
@@ -650,7 +646,7 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── Simulated annealing ──────────────────────────────────
-    sa_max_iter        = 100,   # max SA iterations
+    sa_max_iter        = 5_000,   # max SA iterations
     sa_T0              = 10.0,     # initial temperature (≤0 ⇒ auto-calibrate
                                   # from uphill probes)
     sa_step            = 0.20,    # initial proposal sd in unconstrained space

@@ -3,7 +3,7 @@
 #
 # Stage 4 & 6 — labour-market worker flows from the matched CPS Basic
 # month-pairs. make_transitions() builds monthly job-finding, separation,
-# LF-exit and train-entry hazards; compute_nu() turns the demographic
+# and LF-exit hazards; compute_nu() turns the demographic
 # side into the life-table turnover rate ν for each baseline window.
 #
 # Reads:  cps_basic_clean.arrow, transitions_monthly.arrow
@@ -28,8 +28,7 @@ function make_transitions()
     matchable = filter(row -> row.valid_match && row.CPSIDP > 0, df)
     next_ym(y, m) = m == 12 ? (y + 1, 1) : (y, m + 1)
 
-    # Build lookup of all observations — now includes in_training so that
-    # we can identify trainee status at t+1 for the train_entry_rate_U moment.
+    # Build lookup of all observations.
     lookup = Dict{Tuple{Int64, Int, Int}, NamedTuple}()
     for row in eachrow(df)
         key = (Int64(row.CPSIDP), row.YEAR, row.MONTH)
@@ -38,7 +37,6 @@ function make_transitions()
                        employed=is_employed(empstat),
                        unemployed=is_unemployed(empstat),
                        nilf=is_nilf(empstat),
-                       in_training=row.in_training,
                        weight=Float64(coalesce(getproperty(row, wt_col), 0.0)),
                        window=row.window)
     end
@@ -56,9 +54,7 @@ function make_transitions()
             year_t=row.YEAR, month_t=row.MONTH, skilled=row.skilled,
             emp_t=is_employed(empstat_t), unemp_t=is_unemployed(empstat_t),
             lf_t=is_employed(empstat_t) || is_unemployed(empstat_t),
-            in_training_t=row.in_training,
             emp_t1=next.employed, unemp_t1=next.unemployed, nilf_t1=next.nilf,
-            in_training_t1=next.in_training,
             weight=Float64(coalesce(getproperty(row, wt_col), 0.0)),
             window=row.window,
         ))
@@ -93,21 +89,9 @@ function make_transitions()
         numer_nu  = sum(g.weight[nilf_mask])
         nu = denom_nu > 0 ? numer_nu / denom_nu : NaN
 
-        # train_entry hazard (NEW, v7): unskilled, unemployed, not in training
-        # at t → in training at t+1. Computed on every (year, month, skilled)
-        # cell for symmetry, but only the unskilled (skilled=false) rows are
-        # consumed downstream as train_entry_rate_U.
-        te_base_mask  = g.unemp_t .& .!g.in_training_t
-        te_event_mask = te_base_mask .& g.in_training_t1
-        denom_te = sum(g.weight[te_base_mask])
-        numer_te = sum(g.weight[te_event_mask])
-        train_entry = denom_te > 0 ? numer_te / denom_te : NaN
-        n_pairs_te  = count(te_base_mask)
-
         push!(results, (year=g.year_t[1], month=g.month_t[1], skilled=sk,
                          window=win,
                          jfr=jfr, sep=sep, nu=nu,
-                         train_entry=train_entry, n_pairs_te=n_pairs_te,
                          n_pairs=nrow(g)))
     end
     rates = DataFrame(results)
@@ -119,13 +103,11 @@ function make_transitions()
         valid_jfr = filter(isfinite, g.jfr)
         valid_sep = filter(isfinite, g.sep)
         valid_nu  = filter(isfinite, g.nu)
-        valid_te  = filter(isfinite, g.train_entry)
         push!(window_rates, (
             window=g.window[1], skilled=g.skilled[1],
             mean_jfr=isempty(valid_jfr) ? NaN : mean(valid_jfr),
             mean_sep=isempty(valid_sep) ? NaN : mean(valid_sep),
             mean_nu=isempty(valid_nu)   ? NaN : mean(valid_nu),
-            mean_train_entry = isempty(valid_te) ? NaN : mean(valid_te),
             n_months=nrow(g),
         ))
     end

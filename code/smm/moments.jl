@@ -1,52 +1,41 @@
 ############################################################
-# moments.jl — Empirical moment targets (v7)
+# moments.jl — Empirical moment targets
 #
-# Loads moments from CSV files produced by data_pipeline_v7 and
+# Loads moments from the CSV files produced by the data pipeline and
 # computes the matching model moments from a solved equilibrium.
 #
 # Wage premium convention
 #   wage_premium  ≡  E[log w_S] − E[log w_U]
 #
-# Changes vs. previous version (data_and_moments.pdf Part VII):
-#   - 24 moments (dropped exp_ur_total / exp_ur_U / exp_ur_S).
-#   - Added train_entry_rate_U: monthly hazard of an
-#     unskilled-unemployed worker becoming enrolled in training.
-#     Model counterpart: ∫_{x̄}^1 u_U(x) dx / agg_uU, equivalently
-#     the τ-weighted share of unskilled unemployment.
-#   - load_calibrated_params now reads nu_estimation.csv (two rows)
-#     and accepts a `window` so each crisis pair gets the ν of its
-#     own baseline (FC pair → ν_base_fc; COVID pair → ν_base_covid).
+# load_calibrated_params reads nu_estimation.csv (two rows) and accepts
+# a `window` so each crisis pair gets the ν of its own baseline
+# (FC pair → ν_base_fc; COVID pair → ν_base_covid).
 #
-# v7.1 — NSC-based training_share level adjustment (κ_w):
-#   - The CPS SCHLCOLL universe expanded in Jan 2013 (16–24 → 16–54),
-#     so the raw CPS training_share level is not directly comparable
-#     across the FC and COVID windows. The new pipeline cell
-#     "CPS vs NSC enrolment — per-window level adjustment (κ)" writes
-#     derived/training_share_scale.csv with one κ_w per window,
-#     κ_w = NSC_IPEDS_enr_w / CPS_enr_w.
-#   - Strategy (Option B from the design discussion):
+# NSC-based training_share level adjustment (κ_w):
+#   The CPS SCHLCOLL universe expanded in Jan 2013 (16–24 → 16–54), so
+#   the raw CPS training_share level is not directly comparable across
+#   the FC and COVID windows. derived/training_share_scale.csv holds one
+#   κ_w per window, κ_w = NSC_IPEDS_enr_w / CPS_enr_w, applied as:
 #       data_target          ←  κ_w · CPS_training_share
 #       Σ̂[ts, ts]            ←  κ_w² · Σ̂[ts, ts]
 #       Σ̂[ts,  ·] (off-diag) ←  κ_w  · Σ̂[ts,  ·]
-#     The full CPS off-diagonal covariance structure is preserved up
-#     to the linear κ scaling on the training_share row/column.
-#   - The model-side training_share is already age-uncapped
-#     (agg_t / total_pop), so κ-scaling the data target makes the two
-#     conceptually comparable.
-#   - If training_share_scale.csv is missing, κ_w defaults to 1.0
-#     with a warning (back-compat with older pipeline runs).
+#   The full CPS off-diagonal covariance structure is preserved up to
+#   the linear κ scaling on the training_share row/column. The model-side
+#   training_share is age-uncapped (agg_t / total_pop), so κ-scaling the
+#   data target makes the two conceptually comparable. If
+#   training_share_scale.csv is missing, κ_w defaults to 1.0 with a
+#   warning.
 #
-# v7.2 — the κ_w application now lives in data_pipeline_v7, not here:
-#     Stage 7 writes κ_w·training_share into moments_{window}.csv and
-#     Stage 8 writes the κ-scaled training_share row/col into
-#     sigma_{window}.csv. The loaders below therefore read pre-adjusted
-#     values and no longer rescale by κ_w. (load_training_share_scale is
-#     retained because smm_main.jl still reports κ_w in the run log.)
+#   The κ_w application lives in the data pipeline: Stage 7 writes
+#   κ_w·training_share into moments_{window}.csv and Stage 8 writes the
+#   κ-scaled training_share row/col into sigma_{window}.csv. The loaders
+#   below read these pre-adjusted values directly. load_training_share_scale
+#   is retained because smm_main.jl reports κ_w in the run log.
 ############################################################
 
 
 # ============================================================
-# Moment names (canonical order — 24 moments)
+# Moment names (canonical order — 23 moments)
 # ============================================================
 
 const MOMENT_NAMES = [
@@ -54,13 +43,13 @@ const MOMENT_NAMES = [
     :skilled_share, :training_share,
     :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
     :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S,
-    :ee_rate_S, :train_entry_rate_U,
+    :ee_rate_S,
     :mean_wage_U, :mean_wage_S,
     :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
     :wage_premium, :theta_U, :theta_S,
 ]
 
-@assert length(MOMENT_NAMES) == 24 "Expected 24 moments, got $(length(MOMENT_NAMES))"
+@assert length(MOMENT_NAMES) == 23 "Expected 23 moments, got $(length(MOMENT_NAMES))"
 
 
 """
@@ -68,16 +57,15 @@ const MOMENT_NAMES = [
 
 Return κ_w for the given window, read from
 `derived/training_share_scale.csv` produced by the "CPS vs NSC
-enrolment" cell in data_pipeline_v7. Returns 1.0 with a warning if
-the file is missing or the window has no row (back-compat with
-older pipeline runs that did not write the file).
+enrolment" cell in the data pipeline. Returns 1.0 with a warning if
+the file is missing or the window has no row.
 """
 function load_training_share_scale(; window::Symbol, derived_dir::String) :: Float64
     path = joinpath(derived_dir, "training_share_scale.csv")
     if !isfile(path)
         @warn "training_share_scale.csv not found in $derived_dir — using κ = 1.0 " *
               "(no NSC-based level adjustment applied). Re-run the CPS-vs-NSC " *
-              "cell in data_pipeline_v7 to enable κ."
+              "cell in the data pipeline to enable κ."
         return 1.0
     end
     df = CSV.read(path, DataFrame)
@@ -102,10 +90,10 @@ end
 
 Return the empirical moment targets used in SMM estimation.  Each
 field is a (value, weight) tuple.  Reads from
-`moments_{window}.csv` produced by data_pipeline_v7.
+`moments_{window}.csv` produced by the data pipeline.
 
 The training_share row already reflects the NSC IPEDS-Universe
-level: the κ_w adjustment is applied upstream in data_pipeline_v7
+level: the κ_w adjustment is applied upstream in the data pipeline
 (Stage 7), so this returns the moments exactly as written to
 `moments_{window}.csv` with no further rescaling.
 
@@ -116,8 +104,8 @@ Moment list
   Wage shape (4)
     emp_var_U, emp_cm3_U, emp_var_S, emp_cm3_S
 
-  Transition rates (6)
-    jfr_U, sep_rate_U, jfr_S, sep_rate_S, ee_rate_S, train_entry_rate_U
+  Transition rates (5)
+    jfr_U, sep_rate_U, jfr_S, sep_rate_S, ee_rate_S
 
   Wages (7)
     mean_wage_U, mean_wage_S,
@@ -129,11 +117,11 @@ Moment list
 """
 function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
     moments_file = joinpath(derived_dir, "moments_$(window).csv")
-    isfile(moments_file) || error("Moments file not found: $moments_file — run data_pipeline_v7 first.")
+    isfile(moments_file) || error("Moments file not found: $moments_file — run the data pipeline first.")
     raw = _read_moments_csv(moments_file)
 
     # training_share already carries the NSC κ_w level adjustment, applied
-    # upstream in data_pipeline_v7 (Stage 7). Return the moments as read.
+    # upstream in the data pipeline (Stage 7). Return the moments as read.
     return raw
 end
 
@@ -146,7 +134,7 @@ for the reported scalar Q under the matrix weighting schemes — constant in
 θ, so it does not move the argmin.
 
 The training_share row/col of Σ̂ already carries the κ_w level adjustment
-(applied in data_pipeline_v7, Stage 8), so the κ²-scaled diagonal is read
+(applied in the data pipeline, Stage 8), so the κ²-scaled diagonal is read
 directly. Note shrinkage in load_weight_matrix leaves the diagonal
 unchanged, so tr(Σ̂_shrunk) = tr(Σ̂) and this is the correct scale either way.
 """
@@ -159,7 +147,7 @@ function load_sigma_trace(;
 
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
     isfile(sigma_file) || error(
-        "sigma_$(window).csv not found in $derived_dir — run data_pipeline_v7 first.")
+        "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
     df_sig   = CSV.read(sigma_file, DataFrame)
     csv_cols = Symbol.(names(df_sig))
 
@@ -167,7 +155,7 @@ function load_sigma_trace(;
     missing_cols   = active_names[isnothing.(active_col_idx)]
     isempty(missing_cols) || error(
         "sigma_$(window).csv is missing columns for active moments: " *
-        join(string.(missing_cols), ", ") * " — re-run data_pipeline_v7.")
+        join(string.(missing_cols), ", ") * " — re-run the data pipeline.")
 
     Σ_full = Matrix{Float64}(df_sig)
 
@@ -219,7 +207,7 @@ function load_weight_matrix(;
 
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
     isfile(sigma_file) || error(
-        "sigma_$(window).csv not found in $derived_dir — run data_pipeline_v7 first.")
+        "sigma_$(window).csv not found in $derived_dir — run the data pipeline first.")
     df_sig   = CSV.read(sigma_file, DataFrame)
     csv_cols = Symbol.(names(df_sig))
     active_col_idx = [findfirst(==(nm), csv_cols) for nm in active_names]
@@ -227,11 +215,11 @@ function load_weight_matrix(;
     isempty(missing_cols) || error(
         "sigma_$(window).csv is missing columns for active moments: " *
         join(string.(missing_cols), ", ") *
-        " — re-run data_pipeline_v7.")
+        " — re-run the data pipeline.")
 
     # Convert to Matrix once; all downstream operations work on Σ_full.
     # The training_share row/col of Σ̂ already carries the κ_w level
-    # adjustment (applied in data_pipeline_v7, Stage 8), so no rescaling
+    # adjustment (applied in the data pipeline, Stage 8), so no rescaling
     # is done here.
     Σ_full = Matrix{Float64}(df_sig)
 
@@ -341,12 +329,12 @@ end
 
 Read `sigma_{window}.csv` and return the vector of standard errors
 (square root of the diagonal). The training_share entry already
-carries the κ_w level adjustment (applied in data_pipeline_v7,
+carries the κ_w level adjustment (applied in the data pipeline,
 Stage 8), so the returned σ refers to the κ-rescaled data target.
 """
 function load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String)
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-    isfile(sigma_file) || error("Sigma file not found: $sigma_file — run data_pipeline_v7 first.")
+    isfile(sigma_file) || error("Sigma file not found: $sigma_file — run the data pipeline first.")
     σ_vec = _read_sigma_csv(sigma_file)
     return σ_vec
 end
@@ -392,7 +380,7 @@ function load_calibrated_params(; window::Symbol = :base_fc,
 
     nu_file = joinpath(derived_dir, "nu_estimation.csv")
     isfile(nu_file) || error(
-        "nu_estimation.csv not found in $derived_dir — run data_pipeline_v7 first.")
+        "nu_estimation.csv not found in $derived_dir — run the data pipeline first.")
     df_nu = CSV.read(nu_file, DataFrame)
     df_nu.window = Symbol.(df_nu.window)
     rows = filter(:window => ==(nu_pair), df_nu)
@@ -405,7 +393,7 @@ function load_calibrated_params(; window::Symbol = :base_fc,
 
     phi_file = joinpath(derived_dir, "phi_calibration.csv")
     isfile(phi_file) || error(
-        "phi_calibration.csv not found in $derived_dir — run data_pipeline_v7 first.")
+        "phi_calibration.csv not found in $derived_dir — run the data pipeline first.")
     df_phi = CSV.read(phi_file, DataFrame)
     phi_val = Float64(df_phi.phi[1])
     @printf("  Loaded phi = %.5f from %s\n", phi_val, phi_file)
@@ -415,19 +403,19 @@ end
 
 
 # ============================================================
-# Windows.json loader (single source of truth from data_pipeline_v7)
+# Windows.json loader (single source of truth from the data pipeline)
 # ============================================================
 
 """
     load_windows(; derived_dir::String) → NamedTuple
 
-Read `windows.json` (written by data_pipeline_v7) and return
+Read `windows.json` (written by the data pipeline) and return
 `(windows = Dict{Symbol,NamedTuple}, order = Vector{Symbol})`.
 """
 function load_windows(; derived_dir::String)
     win_path = joinpath(derived_dir, "windows.json")
     isfile(win_path) || error(
-        "windows.json not found in $derived_dir — run data_pipeline_v7 first.")
+        "windows.json not found in $derived_dir — run the data pipeline first.")
     raw = JSON3.read(read(win_path, String))
     wins = Dict{Symbol, NamedTuple}()
     for (k, v) in raw["windows"]
@@ -514,11 +502,6 @@ wage-related moments for that segment collapse to 0 — this avoids
 spuriously "good" wage percentile values produced by interpolating
 a near-zero density and a misleading wage premium computed over a
 dummy grid.
-
-train_entry_rate_U (v7, new): the model counterpart of the data
-flow hazard is the τ-weighted share of unskilled unemployment
-(eqn ∫_{x̄}^1 u_U(x) dx / agg_uU). Equivalently, since τ(x) =
-1{x > x̄}, this is dot(τ, uU .* wx) / agg_uU.
 """
 function model_moments(obj)
     _emp_tol = 1e-12
@@ -556,14 +539,6 @@ function model_moments(obj)
     sep_rate_U = obj.sep_rate_U
     sep_rate_S = obj.sep_rate_S
     ee_rate_S  = obj.ee_rate_S
-
-    # train_entry_rate_U (v7) — model counterpart of the data flow hazard.
-    # Spec: ∫_{x̄}^1 u_U(x) dx / agg_uU.  τT carries the optimal training
-    # indicator on the x-grid, so the τ-weighted unemployment integral
-    # equals the numerator exactly.
-    _agg_uU_w = dot(obj.uU, obj.wx)
-    train_entry_rate_U = _agg_uU_w > _emp_tol ?
-        dot(obj.tauT .* obj.uU, obj.wx) / _agg_uU_w : 0.0
 
     # Wages
     wmid   = obj.wmid
@@ -632,7 +607,6 @@ function model_moments(obj)
         jfr_S              = jfr_S,
         sep_rate_S         = sep_rate_S,
         ee_rate_S          = ee_rate_S,
-        train_entry_rate_U = train_entry_rate_U,
 
         mean_wage_U   = mean_wage_U,
         mean_wage_S   = mean_wage_S,

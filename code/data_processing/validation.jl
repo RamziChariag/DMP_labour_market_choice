@@ -3,10 +3,9 @@
 #
 # Stage 9 — validation and diagnostics, run at the very end of the
 # pipeline. Prints the moment table, published-benchmark range checks,
-# cross-window direction checks, the train-entry comparison, the
-# stationary-identity gap, and Σ̂ condition numbers. Reads the in-memory
-# results (raw training_share), so it is independent of the κ adjustment
-# baked into the saved CSVs.
+# cross-window direction checks, the stationary-identity gap, and Σ̂
+# condition numbers. Reads the in-memory results (raw training_share),
+# so it is independent of the κ adjustment baked into the saved CSVs.
 #
 # Reads:  phi_calibration.csv, nu_estimation.csv (+ in-memory moments/Σ̂)
 # Writes: — (prints only)
@@ -45,7 +44,6 @@ function run_validation(all_moments, all_sigma)
         :wage_premium => (name="Log skill premium", lo=0.20, hi=0.80),
         :p25_wage_U => (name="p25 wage unskilled (norm.)", lo=0.40, hi=0.90),
         :p25_wage_S => (name="p25 wage skilled (norm.)", lo=0.70, hi=1.20),
-        :train_entry_rate_U => (name="Train-entry rate (unskilled-unemp)", lo=0.0005, hi=0.05),
     )
 
     n_flags = 0
@@ -86,28 +84,7 @@ function run_validation(all_moments, all_sigma)
         @printf("  %s  %s: %.4f → %.4f (Δ=%.4f)\n", flag, desc, v1, v2, v2-v1)
     end
 
-    # ── 4. train_entry_rate_U cross-window comparison ─────────────
-    # Primary cross-check for whether a COVID-era training decline
-    # is a structural shift in the decision rule (c) or a
-    # compositional change in the unskilled-unemployed pool.
-    println("\n── 4. train_entry_rate_U across windows ──")
-    te = Dict{Symbol, Float64}()
-    for wname in WINDOWS_ORDER
-        haskey(all_moments, wname) || continue
-        mdf = all_moments[wname]
-        row = filter(r -> r.moment == "train_entry_rate_U", mdf)
-        isempty(row) && continue
-        te[wname] = row.value[1]
-        @printf("  %-14s  train_entry_rate_U = %.6f\n", wname, te[wname])
-    end
-    for (base, crisis) in ((:base_fc, :crisis_fc), (:base_covid, :crisis_covid))
-        if haskey(te, base) && haskey(te, crisis) && te[base] > 0
-            pct = 100 * (te[crisis] / te[base] - 1)
-            @printf("    Δ%% %s → %s: %+.2f%%\n", base, crisis, pct)
-        end
-    end
-
-    # ── 5. Stationary-identity gap by window ──────────────────────
+    # ── 4. Stationary-identity gap by window ──────────────────────
     # Model identity (d ≡ 0 in stationary equilibrium, strict
     # training_share convention):
     #     skilled_share * (1 - training_share)
@@ -152,8 +129,8 @@ function run_validation(all_moments, all_sigma)
         end
     end
 
-    # ── 6. Σ̂ diagnostics ─────────────────────────────────────────
-    println("\n── 6. Σ̂ condition numbers ──")
+    # ── 5. Σ̂ diagnostics ─────────────────────────────────────────
+    println("\n── 5. Σ̂ condition numbers ──")
     for wname in WINDOWS_ORDER
         haskey(all_sigma, wname) || continue
         Sig = all_sigma[wname]

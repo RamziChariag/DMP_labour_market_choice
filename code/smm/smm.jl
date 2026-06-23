@@ -1,5 +1,5 @@
 ############################################################
-# smm.jl — SMM objective and optimisation loops (v7)
+# smm.jl — SMM objective and optimisation loops
 #
 # Main entry points
 #   run_smm(spec; method, rng,
@@ -17,12 +17,12 @@
 # where many parameter draws produce non-converging models.  This
 # loop handles Inf correctly (always reject, never update).
 #
-# v7 note: the SMM objective operates on the stationary-equilibrium
-# moment vector (24 moments). The discrete cross-market policy d(x)
-# is identically zero in stationary equilibrium and is therefore not
-# subject to any feasibility filter here; if the solver returns a
-# non-zero d for some parameter draw, the resulting moments still
-# enter the objective normally.
+# The SMM objective operates on the stationary-equilibrium moment
+# vector. The discrete cross-market policy d(x) is identically zero
+# in stationary equilibrium and is therefore not subject to any
+# feasibility filter here; if the solver returns a non-zero d for some
+# parameter draw, the resulting moments still enter the objective
+# normally.
 ############################################################
 
 """
@@ -87,8 +87,7 @@ scaling and cross-moment weighting live entirely in `W`:
 
   • Equal weight (relative):  W = Diagonal(weight_k / m̂_k²)
         ⟹ g' W g = Σ_k weight_k · (g_k / m̂_k)²
-        i.e. the scale-normalised relative-deviation loss, identical
-        to the former `compute_loss`.
+        i.e. the scale-normalised relative-deviation loss.
   • Diagonal-σ:                W = Diagonal(1 / σ̂_k²)
   • Full optimal:              W = Σ̂⁻¹  (regularised)
 
@@ -1052,15 +1051,6 @@ function run_smm(
     print_results(res)
     return res
 end
-
-
-# ============================================================
-# Multi-start wrapper
-# ============================================================
-
-# multistart_smm was removed — its repeated-restart role is now served by the
-# multi-start simulated annealing built into _run_sa (one chain per candidate
-# cluster, pruned to the best basin).
 
 
 # ============================================================

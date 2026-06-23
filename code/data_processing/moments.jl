@@ -1,7 +1,7 @@
 ############################################################
 # data_processing/moments.jl
 #
-# Combine step (Stage 7) — assemble all 24 empirical moments × 4 windows
+# Combine step (Stage 7) — assemble all 23 empirical moments × 4 windows
 # from every cleaned dataset and write one moments_{window}.csv per window.
 # The training_share level carries the NSC κ_w adjustment (written here so
 # the SMM loaders read it pre-adjusted). The in-memory return keeps the raw
@@ -17,10 +17,9 @@
 # ──────────────────────────────────────────────────────────────────────────
 # Stage 7 helpers — per-period-then-average approach
 #
-# Stock denominators now apply the LF ∩ ¬train filter for ur_total, ur_U,
+# Stock denominators apply the LF ∩ ¬train filter for ur_total, ur_U,
 # and skilled_share. training_share is the strict variant (NILF trainees
-# in numerator, working-age population in denominator). exp_ur_* moments
-# are no longer computed.
+# in numerator, working-age population in denominator).
 # ──────────────────────────────────────────────────────────────────────────
 
 function _compute_stock_moments(cps_w::DataFrame)::Dict{Symbol, Float64}
@@ -120,19 +119,6 @@ function _fill_transition_moments!(moments::Dict{Symbol, Float64},
         valid_sep = filter(isfinite, Float64.(rows.sep))
         moments[jfr_name] = isempty(valid_jfr) ? NaN : mean(valid_jfr)
         moments[sep_name] = isempty(valid_sep) ? NaN : mean(valid_sep)
-    end
-
-    # train_entry_rate_U (NEW, v7): n_pairs_te-weighted mean of train_entry
-    # on the unskilled rows only.
-    unskilled_rows = filter(r -> !Bool(r.skilled) && isfinite(r.train_entry),
-                            trans_w)
-    if !isempty(unskilled_rows)
-        npe = Float64.(coalesce.(unskilled_rows.n_pairs_te, 0.0))
-        te  = Float64.(unskilled_rows.train_entry)
-        denom = sum(npe)
-        moments[:train_entry_rate_U] = denom > 0 ? sum(te .* npe) / denom : mean(te)
-    else
-        moments[:train_entry_rate_U] = NaN
     end
 end
 
@@ -235,7 +221,7 @@ function _compute_tightness_per_month(jolts_w::DataFrame, cps_w::DataFrame)::Dic
 end
 
 # ──────────────────────────────────────────────────────────────────────────
-# Stage 7 main: assemble all 24 moments × 4 windows
+# Stage 7 main: assemble all 23 moments × 4 windows
 # ──────────────────────────────────────────────────────────────────────────
 
 function make_moments()
@@ -272,12 +258,12 @@ function make_moments()
             end
         end
 
-        # B. Transition moments (jfr_j, sep_rate_j, train_entry_rate_U)
+        # B. Transition moments (jfr_j, sep_rate_j)
         trans_w = filter(r -> r.window == wname, trans_monthly)
         if nrow(trans_w) > 0
             _fill_transition_moments!(moments, trans_w)
         else
-            for k in (:jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S, :train_entry_rate_U)
+            for k in (:jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S)
                 moments[k] = NaN
             end
         end
@@ -317,11 +303,10 @@ function make_moments()
             push!(moment_df, (string(mname), get(moments, mname, NaN)))
         end
 
-        # NSC level adjustment (moved here from the SMM loaders in moments.jl):
-        # write the κ_w-scaled training_share into moments_{window}.csv so the
-        # saved target already reflects the NSC IPEDS-Universe level. The
-        # in-memory `all_moments` keeps the raw values, so the Stage 9
-        # diagnostics below are unchanged.
+        # NSC level adjustment: write the κ_w-scaled training_share into
+        # moments_{window}.csv so the saved target already reflects the NSC
+        # IPEDS-Universe level. The in-memory `all_moments` keeps the raw
+        # values, so the Stage 9 diagnostics below are unchanged.
         moment_df_out = copy(moment_df)
         κ_ts = _load_training_share_scale(wname)
         if κ_ts != 1.0

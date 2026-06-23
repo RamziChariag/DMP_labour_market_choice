@@ -97,7 +97,8 @@ is_unemployed(empstat::Integer)::Bool = empstat in (20, 21, 22)
 is_nilf(empstat::Integer)::Bool = empstat in (30, 31, 32, 33, 34, 36)
 is_wage_worker(classwkr::Integer)::Bool = classwkr in (22, 25, 27, 28)
 
-# FIX (v6): was (4, 5) — code 5 = "does not attend school", code 3 = "college full-time"
+# Enrolled in college without a BA: SCHLCOLL code 3 = college full-time,
+# code 4 = college part-time; EDUC < 111 excludes those who already hold a BA.
 is_enrolled_no_ba(schlcoll::Integer, educ::Integer)::Bool = schlcoll in (3, 4) && educ < 111
 
 valid_match_mish(mish::Integer)::Bool = mish in (1, 2, 3, 5, 6, 7)
@@ -128,7 +129,7 @@ deflate_wage(nominal_wage::Float64, cpi_t::Float64, cpi_base::Float64)::Float64 
     nominal_wage * (cpi_base / cpi_t)
 
 # ============================================================
-# Trimming (renamed from winsorize_bounds)
+# Trimming
 # ============================================================
 
 function trim_bounds(wages::AbstractVector{Float64}, weights::AbstractVector{Float64};
@@ -257,25 +258,20 @@ function ind_to_jolts_supersector(ind::Int)::String
 end
 
 # ============================================================
-# Moment name list — 24 moments (v7)
-# ----------------------------------------------------------
-# Dropped from v6: exp_ur_total, exp_ur_U, exp_ur_S (collinear
-# with the underlying rates, contributed no identification).
-# Added in v7: train_entry_rate_U (monthly hazard of an
-# unskilled-unemployed not-enrolled worker becoming enrolled).
+# Moment name list — 23 moments
 # ============================================================
 const MOMENT_NAMES = [
     :ur_total, :ur_U, :ur_S,
     :skilled_share, :training_share,
     :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
     :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S,
-    :ee_rate_S, :train_entry_rate_U,
+    :ee_rate_S,
     :mean_wage_U, :mean_wage_S,
     :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
     :wage_premium, :theta_U, :theta_S,
 ]
 
-@assert length(MOMENT_NAMES) == 24 "Expected 24 moments, got $(length(MOMENT_NAMES))"
+@assert length(MOMENT_NAMES) == 23 "Expected 23 moments, got $(length(MOMENT_NAMES))"
 
 # ============================================================
 # Regularization parameter for Σ̂

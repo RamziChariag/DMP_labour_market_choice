@@ -1,5 +1,5 @@
 ############################################################
-# smm_params.jl — SMM parameter specification (v7)
+# smm_params.jl — SMM parameter specification
 #
 # Types
 #   ParamSpec      metadata for a single free parameter
@@ -219,8 +219,8 @@ Build an `SMMSpec`.
 - `W` selects the weighting scheme.  If `W === nothing` (equal
   weights), the constructor builds the diagonal matrix
   Diagonal(weight_k / m̂_k²) over the active moments, so that
-  g' W g = Σ_k weight_k · (g_k / m̂_k)² reproduces the old relative-
-  deviation loss exactly.  If a matrix is passed (diagonal-σ or full
+  g' W g = Σ_k weight_k · (g_k / m̂_k)² is the scale-normalised
+  relative-deviation loss.  If a matrix is passed (diagonal-σ or full
   Σ̂⁻¹ from `load_weight_matrix`) it must be square with size equal to
   the number of active moments; a mismatch raises an error — typically
   a sign that `W` was built with a different `skip_moments` list.
@@ -325,38 +325,38 @@ Excluded from this list because they are always fixed:
 function default_free_params() :: Vector{ParamSpec}
     return [
         # Deep structural — common block
-        ParamSpec(:common, :a_ℓ, 0.01,  07.00,  2.00,  "worker type shape a_ℓ"),
-        ParamSpec(:common, :b_ℓ, 0.01,  07.00,  5.00,  "worker type shape b_ℓ"),
+        ParamSpec(:common, :a_ℓ,        0.0100,   8.0000,   2.0000, "worker type shape a_ℓ"),
+        ParamSpec(:common, :b_ℓ,        0.0100,   7.0000,   5.0000, "worker type shape b_ℓ"),
 
         # Deep structural — institutional flow values (stored by consuming block)
-        ParamSpec(:unsk, :bU,  0.000, 2.00,  0.00,  "unskilled outside flow b_U"),
-        ParamSpec(:unsk, :bT,  0.000, 2.00,  0.28,  "training flow b_T"),
-        ParamSpec(:skl,  :bS,  0.000, 2.00,  0.01,  "skilled outside flow b_S"),
+        ParamSpec(:unsk,   :bU,         0.0000,   2.0000,   0.0000, "unskilled outside flow b_U"),
+        ParamSpec(:unsk,   :bT,         0.0000,   2.0000,   0.2800, "training flow b_T"),
+        ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.0100, "skilled outside flow b_S"),
 
         # Regime-specific — common block
-        ParamSpec(:common, :c,   0.10,  12.00,   7.70,  "training cost coeff c"),
+        ParamSpec(:common, :c,          0.1000,  12.0000,   7.7000, "training cost coeff c"),
 
         # Regime-specific — aggregate state / offer shape (stored by consuming block)
-        ParamSpec(:unsk, :PU,  0.50,  7.00,  0.70,  "unskilled productivity P_U"),
-        ParamSpec(:skl,  :gamma_PS, 1.00, 12.00, 1.85, "skilled productivity γ_PS"),
-        ParamSpec(:unsk, :α_U, 0.01,  20.00, 1.00,  "unskilled damage shape α_U"),
-        ParamSpec(:skl,  :a_Γ, 0.01,  10.00, 2.00,  "skilled offer shape a_Γ"),
-        ParamSpec(:skl,  :b_Γ, 0.01,  11.00, 5.00,  "skilled offer shape b_Γ"),
+        ParamSpec(:unsk,   :PU,         0.5000,   7.0000,   0.7000, "unskilled productivity P_U"),
+        ParamSpec(:skl,    :gamma_PS,   1.0000,  12.0000,   1.8500, "skilled productivity γ_PS"),
+        ParamSpec(:unsk,   :α_U,        0.0100,  20.0000,   1.0000, "unskilled damage shape α_U"),
+        ParamSpec(:skl,    :a_Γ,        0.0100,  10.0000,   2.0000, "skilled offer shape a_Γ"),
+        ParamSpec(:skl,    :b_Γ,        0.0100,  12.0000,   5.0000, "skilled offer shape b_Γ"),
 
         # Regime-specific — unskilled block
-        ParamSpec(:unsk, :μ,    0.001,  1.50,  0.74,  "unskilled matching eff μ_U"),
-        ParamSpec(:unsk, :η,    0.10,  0.90,  0.60,  "unskilled matching elas η_U"),
-        ParamSpec(:unsk, :k,    0.001, 1.50,  0.25,  "unskilled vacancy cost k_U"),
-        ParamSpec(:unsk, :β,    0.05,  0.95,  0.40,  "unskilled bargaining β_U"),
-        ParamSpec(:unsk, :λ,    0.001, 0.70, 0.08,  "unskilled damage rate λ_U"),
+        ParamSpec(:unsk,   :μ,          0.0010,   1.5000,   0.7400, "unskilled matching eff μ_U"),
+        ParamSpec(:unsk,   :η,          0.1000,   0.9800,   0.6000, "unskilled matching elas η_U"),
+        ParamSpec(:unsk,   :k,          0.0010,   1.5000,   0.2500, "unskilled vacancy cost k_U"),
+        ParamSpec(:unsk,   :β,          0.0500,   0.9800,   0.4000, "unskilled bargaining β_U"),
+        ParamSpec(:unsk,   :λ,          0.0010,   0.8000,   0.0800, "unskilled damage rate λ_U"),
 
         # Regime-specific — skilled block
-        ParamSpec(:skl, :μ,    0.01,  1.50,  0.90,  "skilled matching eff μ_S"),
-        ParamSpec(:skl, :η,    0.10,  0.90,  0.50,  "skilled matching elas η_S"),
-        ParamSpec(:skl, :k,    0.001, 1.50,  0.17,  "skilled vacancy cost k_S"),
-        ParamSpec(:skl, :β,    0.05,  0.95,  0.32,  "skilled bargaining β_S"),
-        ParamSpec(:skl, :λ,    0.001, 0.70, 0.07,  "skilled quality shock λ_S"),
-        ParamSpec(:skl, :σ,    0.0, 0.150, 0.01,  "OJS flow cost σ_S"),
+        ParamSpec(:skl,    :μ,          0.0100,   1.5000,   0.9000, "skilled matching eff μ_S"),
+        ParamSpec(:skl,    :η,          0.1000,   0.9800,   0.5000, "skilled matching elas η_S"),
+        ParamSpec(:skl,    :k,          0.0010,   1.5000,   0.1700, "skilled vacancy cost k_S"),
+        ParamSpec(:skl,    :β,          0.0500,   0.98000,   0.3200, "skilled bargaining β_S"),
+        ParamSpec(:skl,    :λ,          0.0010,   0.8000,   0.0700, "skilled quality shock λ_S"),
+        ParamSpec(:skl,    :σ,          0.0000,   0.1500,   0.0100, "OJS flow cost σ_S"),
     ]
 end
 
@@ -416,9 +416,8 @@ end
     unpack_θ(θ_unc, spec) → (CommonParams, UnskilledParams, SkilledParams)
 
 Convert an unconstrained free-parameter vector back to the three
-model structs, merging with any fixed values.  The parameters formerly
-in `RegimeParams` now live in `UnskilledParams` (PU, bU, bT, α_U) and
-`SkilledParams` (gamma_PS, bS, a_Γ, b_Γ).
+model structs, merging with any fixed values.  PU, bU, bT and α_U live
+in `UnskilledParams`; gamma_PS, bS, a_Γ and b_Γ live in `SkilledParams`.
 """
 function unpack_θ(
     θ_unc :: AbstractVector{Float64},
@@ -449,9 +448,9 @@ function unpack_θ(
         c   = _get(:c,   :common, 1.70),
     )
 
-    # First-pass build.  Unique moved names (PU, bU, bT, α_U / gamma_PS, bS,
-    # a_Γ, b_Γ) are resolved correctly here because free_vals is keyed by bare
-    # name and these names are unique across blocks.
+    # First-pass build.  The names unique to one block (PU, bU, bT, α_U /
+    # gamma_PS, bS, a_Γ, b_Γ) are resolved correctly here because free_vals is
+    # keyed by bare name and these names are unique across blocks.
     up = UnskilledParams(
         μ   = _get(:μ,   :unsk, 0.74),
         η   = _get(:η,   :unsk, 0.60),
@@ -479,7 +478,7 @@ function unpack_θ(
 
     # 3. Disambiguate the SHARED field names (μ, η, k, β, λ, and σ) across the
     #    unskilled and skilled blocks: free_vals is keyed by bare name, so the
-    #    first pass cannot tell :unsk_μ from :skl_μ.  The eight unique moved
+    #    first pass cannot tell :unsk_μ from :skl_μ.  The eight block-unique
     #    names are already correct above and are carried through unchanged by
     #    seeding the dicts with the full first-pass structs.
     up_fields = Dict{Symbol,Float64}(

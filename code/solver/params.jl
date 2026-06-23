@@ -1,12 +1,10 @@
 ############################################################
 # params.jl — Structs and default parameter initialisation
 #
-# NOTE (refactor): the former `RegimeParams` container has been
-# dissolved.  Each of its parameters now lives in the block whose
-# solver code actually reads it:
+# Each parameter is stored in the block whose solver code reads it:
 #   :unsk  ← PU, bU, bT, α_U
 #   :skl   ← gamma_PS, bS, a_Γ, b_Γ
-# Storage now reflects only which solver block consumes a parameter;
+# Storage reflects only which solver block consumes a parameter;
 # "regime-specific" denotes the estimation category alone.
 ############################################################
 
@@ -200,9 +198,9 @@ end
 """
     initialise_model(; Nx, Np_U, Np_S)
 
-Construct a `Model` with default parameters.  The parameters formerly
-held in `RegimeParams` are now folded into the default `UnskilledParams`
-(`PU, bU, bT, α_U`) and `SkilledParams` (`gamma_PS, bS, a_Γ, b_Γ`).
+Construct a `Model` with default parameters.  `PU, bU, bT, α_U` are
+held in the default `UnskilledParams` and `gamma_PS, bS, a_Γ, b_Γ` in
+`SkilledParams`.
 Returns an unsolved `Model` ready to be passed to `solve_model!`.
 """
 function initialise_model(;

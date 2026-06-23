@@ -1,7 +1,7 @@
 ############################################################
 # data_processing/sigma.jl
 #
-# Combine step (Stage 8) — the full 24×24 influence-function variance–
+# Combine step (Stage 8) — the full 23×23 influence-function variance–
 # covariance matrix Σ̂ for every window, used to build the SMM weight
 # matrix. The training_share row/col of the SAVED Σ̂ carries the NSC κ_w
 # adjustment (off-diagonals × κ, diagonal × κ²); the in-memory return
@@ -31,10 +31,6 @@ end
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 8: full K×K influence-function matrix Σ̂ for every window.
-#
-# v7 update: K = 24. exp_ur_* moments dropped. train_entry_rate_U added
-# (its influence-function contribution comes from the unskilled rows of
-# transitions_monthly, with the same ratio formula as jfr_U/sep_rate_U).
 # ─────────────────────────────────────────────────────────────────────────────
 function compute_influence_functions_and_sigma_full()
     @info "Stage 8: influence functions and Σ̂ (full $(length(MOMENT_NAMES))×$(length(MOMENT_NAMES)))..."
@@ -195,7 +191,7 @@ function compute_influence_functions_and_sigma_full()
             _add_to_stack!(monthly_stack, (yr, mo), psi, K)
         end
 
-        # ── B. CPS transition moments (jfr, sep, train_entry_rate_U) ──────────
+        # ── B. CPS transition moments (jfr, sep) ──────────────────────────────
         trans_w = filter(r -> r.window == wname, trans_monthly)
         @assert nrow(trans_w) > 0 "Transitions empty for window $wname"
 
@@ -217,15 +213,6 @@ function compute_influence_functions_and_sigma_full()
                 val  = Float64(row[1, :sep])
                 mbar = get(moment_vals, sep_name, NaN)
                 isfinite(val) && isfinite(mbar) && (psi[idx[sep_name]] = val - mbar)
-            end
-
-            # train_entry_rate_U: only from the unskilled row of the month.
-            te_row = filter(r -> !Bool(r.skilled), g)
-            if nrow(te_row) > 0
-                val  = Float64(te_row[1, :train_entry])
-                mbar = get(moment_vals, :train_entry_rate_U, NaN)
-                isfinite(val) && isfinite(mbar) &&
-                    (psi[idx[:train_entry_rate_U]] = val - mbar)
             end
 
             _add_to_stack!(monthly_stack, (yr, mo), psi, K)
@@ -372,12 +359,11 @@ function compute_influence_functions_and_sigma_full()
         all_sigma[wname] = Sigma
 
         # ── I. Save ───────────────────────────────────────────────────────────
-        # NSC level adjustment (moved here from the SMM loaders in moments.jl):
-        # scale the training_share row/col of the SAVED Σ̂ by κ_w (off-diagonals
-        # × κ, the (ts,ts) diagonal × κ²) so sigma_{window}.csv is consistent
-        # with the κ-adjusted training_share moment from Stage 7. The in-memory
-        # `all_sigma` (above) keeps the raw matrix, so Stage 9 diagnostics are
-        # unchanged.
+        # NSC level adjustment: scale the training_share row/col of the SAVED Σ̂
+        # by κ_w (off-diagonals × κ, the (ts,ts) diagonal × κ²) so
+        # sigma_{window}.csv is consistent with the κ-adjusted training_share
+        # moment from Stage 7. The in-memory `all_sigma` (above) keeps the raw
+        # matrix, so Stage 9 diagnostics are unchanged.
         Sigma_out = copy(Sigma)
         κ_ts = _load_training_share_scale(wname)
         if κ_ts != 1.0

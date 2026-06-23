@@ -30,7 +30,7 @@
 Staleness / validity key for a candidate cache.  Two caches are
 interchangeable iff their structural fields match (see `_meta_matches`).
 Free-parameter identity is stored as `(block, name)` pairs so the key
-stays correct after the parameter-container refactor.
+is unambiguous across blocks.
 """
 function _candidate_meta(spec::SMMSpec, window::Symbol,
                          n_sample::Int, seed::Int, min_cluster::Int)
