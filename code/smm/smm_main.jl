@@ -150,7 +150,7 @@ sim_smm = SimParams(
 #    Valid windows are loaded from data/derived/windows.json
 #    written by data_pipeline_v7.
 # ============================================================
-WINDOW = :base_covid
+WINDOW = :base_fc
 
 # Crisis → baseline pair map. crisis_fc pairs with base_fc; the
 # crisis_covid pair with base_covid. Used to pick the right ν row
@@ -254,36 +254,36 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :default
+INIT_MODE            = :warmstart
 CLUSTERS_FORCE_REGEN = false
-INCLUDE_PREV_OPTIMUM = false
+INCLUDE_PREV_OPTIMUM = true
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00416667,
-    :nu       => 0.00335677,
+    :nu       => 0.00323032,
     :phi      => 0.02222129,
-    :a_l      => 1.70085276,
-    :b_l      => 0.22005125,
-    :c        => 7.30116505,
-    :PU       => 3.13818913,
-    :gamma_PS => 6.39599442,
-    :bU       => 0.10223153,
-    :bT       => 0.83650743,
-    :bS       => 0.00371526,
-    :alpha_U  => 0.51498294,
-    :a_Gam    => 1.90443324,
-    :b_Gam    => 8.23941892,
-    :unsk_mu  => 0.24286479,
-    :unsk_eta => 0.83268020,
-    :unsk_k   => 0.09364803,
-    :unsk_bet => 0.70137202,
-    :unsk_lam => 0.66362118,
-    :skl_mu   => 0.23764609,
-    :skl_eta  => 0.89610432,
-    :skl_k    => 0.01356406,
-    :skl_bet  => 0.94446085,
-    :skl_lam  => 0.59273932,
-    :skl_sig  => 0.00185023,
+    :a_l      => 0.89590646,
+    :b_l      => 0.31592780,
+    :c        => 6.89855799,
+    :PU       => 2.43690010,
+    :gamma_PS => 3.81928381,
+    :bU       => 0.03157704,
+    :bT       => 1.58575095,
+    :bS       => 0.01349603,
+    :alpha_U  => 0.96441928,
+    :a_Gam    => 0.30113408,
+    :b_Gam    => 2.39486736,
+    :unsk_mu  => 0.06678201,
+    :unsk_eta => 0.66207985,
+    :unsk_k   => 0.05709632,
+    :unsk_bet => 0.89331634,
+    :unsk_lam => 0.35571936,
+    :skl_mu   => 0.48177239,
+    :skl_eta  => 0.89480583,
+    :skl_k    => 0.06976002,
+    :skl_bet  => 0.85611310,
+    :skl_lam  => 0.06309304,
+    :skl_sig  => 0.00978666,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
@@ -650,8 +650,8 @@ run_params = SMMRunParams(
     w_cond_target = W_COND_TARGET,
 
     # ── Simulated annealing ──────────────────────────────────
-    sa_max_iter        = 5_000,   # max SA iterations
-    sa_T0              = 0.0,     # initial temperature (≤0 ⇒ auto-calibrate
+    sa_max_iter        = 100,   # max SA iterations
+    sa_T0              = 10.0,     # initial temperature (≤0 ⇒ auto-calibrate
                                   # from uphill probes)
     sa_step            = 0.20,    # initial proposal sd in unconstrained space
     sa_cooling_rate    = 0.5,     # rate in T(t) = T_reheat / log(1+rate·t)^exp
@@ -673,13 +673,13 @@ run_params = SMMRunParams(
     de_pop_size  = 120,           # population size (0 ⇒ 10·n_free_params)
     de_f         = 0.70,          # DE differential weight (mutation strength)
     de_cr        = 0.85,          # DE crossover probability
-    de_patience  = 2,             # stop after this many generations with no
+    de_patience  = 4,             # stop after this many generations with no
                                   # improvement
-    de_avg_tol   = 0.0,           # stop when (Q_mean - Q_best)/|Q_best| < tol;
+    de_avg_tol   = 1e-6,           # stop when (Q_mean - Q_best)/|Q_best| < tol;
                                   # 0 disables this early-stop
 
     # ── Nelder-Mead local polish ─────────────────────────────
-    nm_max_iter  = 3_000,         # max NM iterations
+    nm_max_iter  = 5_000,         # max NM iterations
     nm_f_tol     = 1e-6,          # function-value tolerance
     nm_x_tol     = 1e-4,          # parameter tolerance (unconstrained space)
     nm_g_tol     = 1e-5,          # gradient tolerance (unconstrained space)
