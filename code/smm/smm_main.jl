@@ -221,7 +221,7 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :unsk_mu  => 0.25585,
     # :unsk_eta => 0.50000,
     # :unsk_k   => 0.10061,
-    # :unsk_bet => 0.50000,
+     :unsk_bet => 0.50000,
     # :unsk_lam => 0.20263,
     # :skl_mu   => 0.22462,
     # :skl_eta  => 0.50000,
@@ -242,9 +242,9 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :clusters
+INIT_MODE            = :warmstart
 CLUSTERS_FORCE_REGEN = false
-INCLUDE_PREV_OPTIMUM = false
+INCLUDE_PREV_OPTIMUM = true
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00416667,

@@ -297,6 +297,21 @@ function make_moments()
             moments[:theta_S] = NaN
         end
 
+        # F. Frequency consistency — convert transition PROBABILITIES to
+        # continuous-time monthly HAZARDS so they match the model objects.
+        # The model reports rates as Poisson hazards (f = μθ^{1−η},
+        # sep = λ·G(p*), ee = κ·(1−Γ)); the data moments above are monthly
+        # transition probabilities. For a monthly probability p the hazard is
+        # h = −log(1 − p). Negligible for small rates (separations / EE);
+        # ~10–25% for job finding, where p is large. Stocks (ur_*, shares),
+        # ratios (theta_*) and wage moments are NOT rates and are left as-is.
+        for k in (:jfr_U, :jfr_S, :sep_rate_U, :sep_rate_S, :ee_rate_S)
+            p = get(moments, k, NaN)
+            if isfinite(p) && 0.0 <= p < 1.0
+                moments[k] = -log(1.0 - p)
+            end
+        end
+
         # Build moment DataFrame in canonical MOMENT_NAMES order
         moment_df = DataFrame(moment=String[], value=Float64[])
         for mname in MOMENT_NAMES
