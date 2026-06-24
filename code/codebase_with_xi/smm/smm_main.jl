@@ -204,7 +204,7 @@ flush(stdout)
 #   regime:  :PU  :gamma_PS  :bU  :bT  :bS  :alpha_U  :a_Gam  :b_Gam
 #   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam
 #   skl:     :skl_mu   :skl_eta   :skl_k   :skl_bet
-#            :skl_lam  :skl_sig
+#            :skl_lam  :skl_sig  :skl_xi
 # ============================================================
 FIX_PARAMS = Dict{Symbol,Float64}(
     # :a_l      => 1.01131,
@@ -229,6 +229,7 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :skl_bet  => 0.50000,
     # :skl_lam  => 0.17788,
     # :skl_sig  => 1.10000,
+    # :skl_xi   => 0.0,      # ← uncomment to pin ξ_S = 0 (recovers the pre-ξ model)
 )
 
 # ============================================================
@@ -242,9 +243,9 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :clusters
+INIT_MODE            = :warmstart
 CLUSTERS_FORCE_REGEN = false
-INCLUDE_PREV_OPTIMUM = false
+INCLUDE_PREV_OPTIMUM = true
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00416667,
@@ -272,6 +273,7 @@ const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :skl_bet  => 0.85611310,
     :skl_lam  => 0.06309304,
     :skl_sig  => 0.00978666,
+    :skl_xi   => 0.00500000,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
@@ -285,6 +287,7 @@ const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:skl,    :μ)   => :skl_mu,  (:skl,    :η)    => :skl_eta,  (:skl,   :k)   => :skl_k,
     (:skl,    :β)   => :skl_bet, (:skl,    :λ)   => :skl_lam,
     (:skl,    :σ)   => :skl_sig,
+    (:skl,    :ξ)   => :skl_xi,
 )
 
 # ASCII key (FIX_PARAMS convention) → unicode fixed-NamedTuple key.
@@ -314,6 +317,7 @@ const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :skl_bet  => :skl_β,
     :skl_lam  => :skl_λ,
     :skl_sig  => :skl_σ,
+    :skl_xi   => :skl_ξ,
 )
 
 """
