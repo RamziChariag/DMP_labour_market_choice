@@ -692,7 +692,7 @@ end
 # Parameter classification
 # Externally calibrated: r, ν, φ
 # Deep structural (13): a_ℓ, b_ℓ, c, bU, bT, bS, μ_U, η_U, β_U, μ_S, η_S, β_S, σ_S
-# Regime-specific (10): PU, gamma_PS, α_U, a_Γ, b_Γ, k_U, λ_U, k_S, ξ_S, λ_S
+# Regime-specific (12): PU, gamma_PS, α_U, a_Γ, b_Γ, k_U, λ_U, σ_wU, k_S, ξ_S, λ_S, σ_wS
 
 EXTERNALLY_CALIBRATED = [
     (:r,   "r",            raw"$r$",              "Discount rate"),
@@ -724,9 +724,11 @@ REGIME_SPECIFIC = [
     (:b_Γ,  :regime, raw"$b_\Gamma$",       "Skilled offer shape"),
     (:k,    :unsk,   raw"$k_U$",            "Unskilled vacancy cost"),
     (:λ,    :unsk,   raw"$\lambda_U$",      "Unskilled damage rate"),
+    (:σ_w,  :unsk,   raw"$\sigma_{w,U}$",   "Unskilled wage meas. error"),
     (:k,    :skl,    raw"$k_S$",            "Skilled vacancy cost"),
     (:ξ,    :skl,    raw"$\xi_S$",          "Skilled exog. sep. rate"),
     (:λ,    :skl,    raw"$\lambda_S$",      "Skilled quality shock"),
+    (:σ_w,  :skl,    raw"$\sigma_{w,S}$",   "Skilled wage meas. error"),
 ]
 
 

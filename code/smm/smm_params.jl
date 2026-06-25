@@ -352,6 +352,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:unsk,   :k,          0.0010,   1.5000,   0.2500, "unskilled vacancy cost k_U"),
         ParamSpec(:unsk,   :β,          0.0500,   0.9800,   0.4000, "unskilled bargaining β_U"),
         ParamSpec(:unsk,   :λ,          0.0010,   0.8000,   0.0800, "unskilled damage rate λ_U"),
+        ParamSpec(:unsk,   :σ_w,        0.0000,   0.5000,   0.1000, "unskilled wage meas. error σ_wU"),
 
         # Regime-specific — skilled block
         ParamSpec(:skl,    :μ,          0.0100,   1.5000,   0.9000, "skilled matching eff μ_S"),
@@ -361,6 +362,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:skl,    :λ,          0.0010,   0.8000,   0.0700, "skilled quality shock λ_S"),
         ParamSpec(:skl,    :σ,          0.0000,   0.1500,   0.0100, "OJS flow cost σ_S"),
         ParamSpec(:skl,    :ξ,          0.0000,   0.1000,   0.0050, "skilled exogenous separation ξ_S"),
+        ParamSpec(:skl,    :σ_w,        0.0000,   0.5000,   0.1000, "skilled wage meas. error σ_wS"),
     ]
 end
 
@@ -372,9 +374,9 @@ const REGIME_SPECIFIC_PARAMS = Set([
     (:common, :c),
     (:unsk,   :PU),  (:skl,  :gamma_PS),
     (:unsk,   :α_U), (:skl,  :a_Γ),   (:skl,  :b_Γ),
-    (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),
+    (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),  (:unsk, :σ_w),
     (:skl,    :μ),   (:skl, :η),    (:skl, :k),   (:skl, :β),   (:skl, :λ),
-    (:skl,    :σ),   (:skl, :ξ),
+    (:skl,    :σ),   (:skl, :ξ),    (:skl, :σ_w),
 ])
 
 # Convenience: the complement is the deep set (everything in
@@ -465,6 +467,7 @@ function unpack_θ(
         bU  = _get(:bU,  :unsk, 0.00),
         bT  = _get(:bT,  :unsk, 0.28),
         α_U = _get(:α_U, :unsk, 1.00),
+        σ_w = _get(:σ_w, :unsk, 0.0),
     )
 
     sp = SkilledParams(
@@ -479,6 +482,7 @@ function unpack_θ(
         a_Γ      = _get(:a_Γ,      :skl, 2.00),
         b_Γ      = _get(:b_Γ,      :skl, 5.00),
         ξ        = _get(:ξ,        :skl, 0.0),
+        σ_w      = _get(:σ_w,      :skl, 0.0),
     )
 
     # 3. Disambiguate the SHARED field names (μ, η, k, β, λ, and σ) across the
@@ -489,11 +493,12 @@ function unpack_θ(
     up_fields = Dict{Symbol,Float64}(
         :μ => up.μ, :η => up.η, :k => up.k, :β => up.β, :λ => up.λ,
         :PU => up.PU, :bU => up.bU, :bT => up.bT, :α_U => up.α_U,
+        :σ_w => up.σ_w,
     )
     sp_fields = Dict{Symbol,Float64}(
         :μ => sp.μ, :η => sp.η, :k => sp.k, :β => sp.β, :λ => sp.λ, :σ => sp.σ,
         :gamma_PS => sp.gamma_PS, :bS => sp.bS, :a_Γ => sp.a_Γ, :b_Γ => sp.b_Γ,
-        :ξ => sp.ξ,
+        :ξ => sp.ξ, :σ_w => sp.σ_w,
     )
 
     for (i, ps) in enumerate(spec.free)
@@ -522,6 +527,7 @@ function unpack_θ(
         λ = up_fields[:λ],
         PU = up_fields[:PU], bU = up_fields[:bU],
         bT = up_fields[:bT], α_U = up_fields[:α_U],
+        σ_w = up_fields[:σ_w],
     )
     sp = SkilledParams(
         μ = sp_fields[:μ], η = sp_fields[:η],
@@ -529,7 +535,7 @@ function unpack_θ(
         λ = sp_fields[:λ], σ = sp_fields[:σ],
         gamma_PS = sp_fields[:gamma_PS], bS = sp_fields[:bS],
         a_Γ = sp_fields[:a_Γ], b_Γ = sp_fields[:b_Γ],
-        ξ = sp_fields[:ξ],
+        ξ = sp_fields[:ξ], σ_w = sp_fields[:σ_w],
     )
 
     return cp, up, sp

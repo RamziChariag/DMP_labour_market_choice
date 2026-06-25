@@ -142,7 +142,9 @@ function _compute_wage_moments_per_year(asec_w::DataFrame)::Dict{Symbol, Float64
         skilled   = filter(r ->  r.skilled, g)
 
         if nrow(unskilled) > 0
-            wu = Float64.(unskilled.wage_norm)
+            # LOG wages — model-side wage moments are computed in logs, so the
+            # data targets (mean/var/cm3/median/p25) must match.
+            wu = log.(max.(Float64.(unskilled.wage_norm), 1e-14))
             wt = Float64.(unskilled.ASECWT)
             push!(yr_mean_U, wmean(wu, wt))
             push!(yr_var_U,  wvar(wu, wt))
@@ -152,7 +154,7 @@ function _compute_wage_moments_per_year(asec_w::DataFrame)::Dict{Symbol, Float64
         end
 
         if nrow(skilled) > 0
-            ws = Float64.(skilled.wage_norm)
+            ws = log.(max.(Float64.(skilled.wage_norm), 1e-14))
             wt = Float64.(skilled.ASECWT)
             push!(yr_mean_S, wmean(ws, wt))
             push!(yr_var_S,  wvar(ws, wt))

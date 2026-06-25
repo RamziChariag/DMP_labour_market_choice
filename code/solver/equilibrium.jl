@@ -415,6 +415,10 @@ function compute_equilibrium_objects(model::Model)
         sep_rate_U = sep_rate_U,
         sep_rate_S = sep_rate_S,
         ee_rate_S  = ee_rate_S,
+
+        # Log-wage measurement-error SDs, carried through for model_moments.
+        σ_wU       = up.σ_w,
+        σ_wS       = sp.σ_w,
     )
 end
 

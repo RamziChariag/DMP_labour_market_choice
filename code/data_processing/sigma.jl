@@ -262,7 +262,8 @@ function compute_influence_functions_and_sigma_full()
             psi = zeros(K)
 
             if nrow(unskilled) > 0
-                wu = Float64.(unskilled.wage_norm)
+                # LOG wages — match the model-side log-wage moments (and moments.jl).
+                wu = log.(max.(Float64.(unskilled.wage_norm), 1e-14))
                 wt = Float64.(unskilled.ASECWT)
                 for (sym, fn) in ((:mean_wage_U, wmean), (:emp_var_U, wvar),
                                    (:emp_cm3_U, wcm3), (:p50_wage_U, wmedian),
@@ -274,7 +275,7 @@ function compute_influence_functions_and_sigma_full()
             end
 
             if nrow(skilled) > 0
-                ws = Float64.(skilled.wage_norm)
+                ws = log.(max.(Float64.(skilled.wage_norm), 1e-14))
                 wt = Float64.(skilled.ASECWT)
                 for (sym, fn) in ((:mean_wage_S, wmean), (:emp_var_S, wvar),
                                    (:emp_cm3_S, wcm3), (:p50_wage_S, wmedian),

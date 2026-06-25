@@ -503,6 +503,67 @@ spuriously "good" wage percentile values produced by interpolating
 a near-zero density and a misleading wage premium computed over a
 dummy grid.
 """
+# ── Log-wage moments with lognormal measurement error ──────────────────────
+# Observed log wage = structural log wage + N(0, σ_w²).  Effects on moments:
+#   mean : unchanged          variance : structural + σ_w²
+#   third central moment : unchanged (symmetric error)
+#   p25 / p50 : quantiles of the σ_w-convolved log-wage distribution.
+# Input (wmid, dens, bw) is the LEVEL-wage density from the equilibrium;
+# returns (mean_log, var_log, cm3_log, p25_log, p50_log).
+function _logwage_moments(wmid::AbstractVector, dens::AbstractVector,
+                          bw::Real, σ_w::Real)
+    logw = log.(max.(wmid, 1e-14))
+    mass = dens .* bw
+    M    = sum(mass)
+    M < 1e-12 && return (0.0, 0.0, 0.0, 0.0, 0.0)
+    mass = mass ./ M
+    μ    = sum(logw .* mass)
+    dev  = logw .- μ
+    v0   = sum((dev .^ 2) .* mass)
+    cm3  = sum((dev .^ 3) .* mass)
+    var  = v0 + σ_w^2
+    if σ_w > 1e-10
+        nd   = Normal(0.0, float(σ_w))
+        Fcdf = y -> begin
+            s = 0.0
+            @inbounds for j in eachindex(logw)
+                s += mass[j] * cdf(nd, y - logw[j])
+            end
+            s
+        end
+        lo  = minimum(logw) - 8.0 * σ_w
+        hi  = maximum(logw) + 8.0 * σ_w
+        p25 = _invert_cdf(Fcdf, 0.25, lo, hi)
+        p50 = _invert_cdf(Fcdf, 0.50, lo, hi)
+    else
+        p25 = _disc_pctile(logw, mass, 0.25)
+        p50 = _disc_pctile(logw, mass, 0.50)
+    end
+    return (μ, var, cm3, p25, p50)
+end
+
+# Bisection inverse of a monotone-increasing CDF F on [lo, hi].
+function _invert_cdf(F, target::Real, lo::Real, hi::Real)
+    a = float(lo); b = float(hi)
+    F(a) >= target && return a
+    F(b) <= target && return b
+    @inbounds for _ in 1:60
+        m = 0.5 * (a + b)
+        (F(m) < target) ? (a = m) : (b = m)
+    end
+    return 0.5 * (a + b)
+end
+
+# Discrete quantile of a normalised log-wage mass vector (σ_w → 0 fallback).
+function _disc_pctile(logw::AbstractVector, mass::AbstractVector, target::Real)
+    cum = 0.0
+    @inbounds for j in eachindex(logw)
+        cum += mass[j]
+        cum >= target && return logw[j]
+    end
+    return logw[end]
+end
+
 function model_moments(obj)
     _emp_tol = 1e-12
     _has_eU  = obj.agg_eU > _emp_tol
@@ -518,20 +579,11 @@ function model_moments(obj)
     skilled_share  = obj.agg_mS  / max(_model_lf, 1e-14)
     training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
 
-    # Variance and third central moment of the employed wage
-    # distribution.  Zero by construction when the density is zero.
-    wmid_tmp   = obj.wmid
-    dens_U_tmp = obj.dens_U
-    dens_S_tmp = obj.dens_S
-    bw_tmp     = length(wmid_tmp) >= 2 ? wmid_tmp[2] - wmid_tmp[1] : 1.0
-
-    _mean_U_tmp = sum(wmid_tmp .* dens_U_tmp) * bw_tmp
-    _mean_S_tmp = sum(wmid_tmp .* dens_S_tmp) * bw_tmp
-
-    emp_var_U  = sum((wmid_tmp .- _mean_U_tmp).^2 .* dens_U_tmp) * bw_tmp
-    emp_cm3_U  = sum((wmid_tmp .- _mean_U_tmp).^3 .* dens_U_tmp) * bw_tmp
-    emp_var_S  = sum((wmid_tmp .- _mean_S_tmp).^2 .* dens_S_tmp) * bw_tmp
-    emp_cm3_S  = sum((wmid_tmp .- _mean_S_tmp).^3 .* dens_S_tmp) * bw_tmp
+    # Log-wage measurement-error SDs, carried from the equilibrium params.
+    # Wage moments (mean / variance / third moment / percentiles) are computed
+    # in LOG wages below, with lognormal measurement error of SD σ_w.
+    σ_wU = hasproperty(obj, :σ_wU) ? obj.σ_wU : 0.0
+    σ_wS = hasproperty(obj, :σ_wS) ? obj.σ_wS : 0.0
 
     # Transition rates
     jfr_U      = _has_eU ? obj.f_U : 0.0
@@ -540,47 +592,31 @@ function model_moments(obj)
     sep_rate_S = obj.sep_rate_S
     ee_rate_S  = obj.ee_rate_S
 
-    # Wages
+    # Wages — all moments on LOG wages, with lognormal measurement error σ_w.
+    # "mean_wage_*", "emp_var_*", "emp_cm3_*", "p25/p50_wage_*" now hold the
+    # corresponding LOG-wage objects (mean/var/3rd-moment/quantiles of log w);
+    # the DATA side must compute these on log(wage_norm) to match.
     wmid   = obj.wmid
     dens_U = obj.dens_U
     dens_S = obj.dens_S
     bw     = length(wmid) >= 2 ? wmid[2] - wmid[1] : 1.0
 
-    function _percentile(wmid, dens, bw, target)
-        cum = 0.0
-        for j in eachindex(wmid)
-            mass = dens[j] * bw
-            if cum + mass >= target
-                frac = mass > 1e-14 ? (target - cum) / mass : 0.5
-                return wmid[j] - bw/2 + frac * bw
-            end
-            cum += mass
-        end
-        return 0.0
-    end
-
     if _has_eU
-        mean_wage_U     = sum(wmid .* dens_U) * bw
-        p25_wage_U      = _percentile(wmid, dens_U, bw, 0.25)
-        p50_wage_U      = _percentile(wmid, dens_U, bw, 0.50)
-        mean_log_wage_U = sum(log.(max.(wmid, 1e-14)) .* dens_U) * bw
+        (mean_log_wage_U, emp_var_U, emp_cm3_U, p25_wage_U, p50_wage_U) =
+            _logwage_moments(wmid, dens_U, bw, σ_wU)
+        mean_wage_U = mean_log_wage_U
     else
-        mean_wage_U     = 0.0
-        p25_wage_U      = 0.0
-        p50_wage_U      = 0.0
-        mean_log_wage_U = 0.0
+        mean_wage_U = 0.0; mean_log_wage_U = 0.0
+        emp_var_U = 0.0; emp_cm3_U = 0.0; p25_wage_U = 0.0; p50_wage_U = 0.0
     end
 
     if _has_eS
-        mean_wage_S     = sum(wmid .* dens_S) * bw
-        p25_wage_S      = _percentile(wmid, dens_S, bw, 0.25)
-        p50_wage_S      = _percentile(wmid, dens_S, bw, 0.50)
-        mean_log_wage_S = sum(log.(max.(wmid, 1e-14)) .* dens_S) * bw
+        (mean_log_wage_S, emp_var_S, emp_cm3_S, p25_wage_S, p50_wage_S) =
+            _logwage_moments(wmid, dens_S, bw, σ_wS)
+        mean_wage_S = mean_log_wage_S
     else
-        mean_wage_S     = 0.0
-        p25_wage_S      = 0.0
-        p50_wage_S      = 0.0
-        mean_log_wage_S = 0.0
+        mean_wage_S = 0.0; mean_log_wage_S = 0.0
+        emp_var_S = 0.0; emp_cm3_S = 0.0; p25_wage_S = 0.0; p50_wage_S = 0.0
     end
 
     wage_premium = (_has_eU && _has_eS) ?

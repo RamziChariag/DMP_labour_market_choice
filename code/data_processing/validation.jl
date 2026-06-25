@@ -42,8 +42,9 @@ function run_validation(all_moments, all_sigma)
         :sep_rate_U => (name="Unskilled EU sep rate (monthly)", lo=0.005, hi=0.05),
         :ee_rate_S => (name="Skilled EE rate (monthly)", lo=0.005, hi=0.05),
         :wage_premium => (name="Log skill premium", lo=0.20, hi=0.80),
-        :p25_wage_U => (name="p25 wage unskilled (norm.)", lo=0.40, hi=0.90),
-        :p25_wage_S => (name="p25 wage skilled (norm.)", lo=0.70, hi=1.20),
+        # p25 moments are now LOG wages (= log of the old level bounds).
+        :p25_wage_U => (name="p25 log wage unskilled (norm.)", lo=-0.92, hi=-0.10),
+        :p25_wage_S => (name="p25 log wage skilled (norm.)", lo=-0.36, hi=0.18),
     )
 
     n_flags = 0

@@ -202,9 +202,10 @@ flush(stdout)
 # Valid keys (ASCII):
 #   common:  :a_l  :b_l  :c
 #   regime:  :PU  :gamma_PS  :bU  :bT  :bS  :alpha_U  :a_Gam  :b_Gam
-#   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam
+#   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam  :unsk_sigw
 #   skl:     :skl_mu   :skl_eta   :skl_k   :skl_bet
-#            :skl_lam  :skl_sig
+#            :skl_lam  :skl_sig   :skl_sigw
+#   (:unsk_sigw / :skl_sigw = wage measurement-error SD σ_wU / σ_wS)
 # ============================================================
 FIX_PARAMS = Dict{Symbol,Float64}(
     # :a_l      => 1.01131,
@@ -219,16 +220,18 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :a_Gam    => 4.77377,
     # :b_Gam    => 2.28169,
     # :unsk_mu  => 0.25585,
-     :unsk_eta => 0.50000,
+    # :unsk_eta => 0.50000,
     # :unsk_k   => 0.10061,
-     :unsk_bet => 0.50000,
+    # :unsk_bet => 0.50000,
     # :unsk_lam => 0.20263,
+    # :unsk_sigw => 0.10000,   # σ_wU 
     # :skl_mu   => 0.22462,
-     :skl_eta  => 0.50000,
+    # :skl_eta  => 0.50000,
     # :skl_k    => 0.03317,
     # :skl_bet  => 0.50000,
     # :skl_lam  => 0.17788,
     # :skl_sig  => 1.10000,
+    # :skl_sigw  => 0.10000,   # σ_wS 
 )
 
 # ============================================================
@@ -266,12 +269,14 @@ const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :unsk_k   => 0.05709632,
     :unsk_bet => 0.89331634,
     :unsk_lam => 0.35571936,
+    :unsk_sigw => 0.10000000,
     :skl_mu   => 0.48177239,
     :skl_eta  => 0.89480583,
     :skl_k    => 0.06976002,
     :skl_bet  => 0.85611310,
     :skl_lam  => 0.06309304,
     :skl_sig  => 0.00978666,
+    :skl_sigw  => 0.10000000,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
@@ -281,10 +286,10 @@ const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:unsk,   :bU)  => :bU,      (:unsk,   :bT)   => :bT,      (:skl,    :bS)  => :bS,
     (:unsk,   :α_U) => :alpha_U, (:skl,    :a_Γ)  => :a_Gam,  (:skl,    :b_Γ) => :b_Gam,
     (:unsk,   :μ)   => :unsk_mu, (:unsk,   :η)    => :unsk_eta, (:unsk,  :k)   => :unsk_k,
-    (:unsk,   :β)   => :unsk_bet, (:unsk,  :λ)   => :unsk_lam,
+    (:unsk,   :β)   => :unsk_bet, (:unsk,  :λ)   => :unsk_lam,  (:unsk, :σ_w)  => :unsk_sigw,
     (:skl,    :μ)   => :skl_mu,  (:skl,    :η)    => :skl_eta,  (:skl,   :k)   => :skl_k,
     (:skl,    :β)   => :skl_bet, (:skl,    :λ)   => :skl_lam,
-    (:skl,    :σ)   => :skl_sig,
+    (:skl,    :σ)   => :skl_sig, (:skl,    :σ_w)  => :skl_sigw,
 )
 
 # ASCII key (FIX_PARAMS convention) → unicode fixed-NamedTuple key.
@@ -308,12 +313,14 @@ const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :unsk_k   => :unsk_k,
     :unsk_bet => :unsk_β,
     :unsk_lam => :unsk_λ,
+    :unsk_sigw => :unsk_σ_w,
     :skl_mu   => :skl_μ,
     :skl_eta  => :skl_η,
     :skl_k    => :skl_k,
     :skl_bet  => :skl_β,
     :skl_lam  => :skl_λ,
     :skl_sig  => :skl_σ,
+    :skl_sigw  => :skl_σ_w,
 )
 
 """

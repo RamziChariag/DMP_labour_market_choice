@@ -52,6 +52,8 @@ Base.@kwdef struct UnskilledParams
     bU  :: Float64    # flow payoff in unskilled unemployment
     bT  :: Float64    # flow payoff while in training
     α_U :: Float64    # unskilled damage-shock Beta shape (Beta(α_U, 1))
+
+    σ_w :: Float64 = 0.0   # log-wage measurement-error SD (σ_wU); 0 ⇒ no measurement error
 end
 
 
@@ -106,6 +108,7 @@ Base.@kwdef struct SkilledParams
     b_Γ      :: Float64    # skilled match-quality Beta shape 2
 
     ξ        :: Float64 = 0.0   # exogenous skilled separation hazard ξ_S (0 ⇒ recovers the no-ξ model)
+    σ_w      :: Float64 = 0.0   # log-wage measurement-error SD (σ_wS); 0 ⇒ no measurement error
 end
 
 
