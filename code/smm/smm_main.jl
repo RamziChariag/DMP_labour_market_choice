@@ -139,7 +139,7 @@ sim_smm = SimParams(
 #    Valid windows are loaded from data/derived/windows.json
 #    written by the data pipeline.
 # ============================================================
-WINDOW = :base_fc
+WINDOW = :base_covid
 
 # Crisis → baseline pair map. crisis_fc pairs with base_fc; the
 # crisis_covid pair with base_covid. Used to pick the right ν row
@@ -219,12 +219,12 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :a_Gam    => 4.77377,
     # :b_Gam    => 2.28169,
     # :unsk_mu  => 0.25585,
-    # :unsk_eta => 0.50000,
+     :unsk_eta => 0.50000,
     # :unsk_k   => 0.10061,
      :unsk_bet => 0.50000,
     # :unsk_lam => 0.20263,
     # :skl_mu   => 0.22462,
-    # :skl_eta  => 0.50000,
+     :skl_eta  => 0.50000,
     # :skl_k    => 0.03317,
     # :skl_bet  => 0.50000,
     # :skl_lam  => 0.17788,
@@ -479,9 +479,7 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         r   = calib.r,
         ν   = calib.nu,
         φ   = calib.phi,
-        # Matching elasticities fixed at 0.5 (It is unidentifiable).
-        unsk_η = 0.5,
-        skl_η  = 0.5,
+
         a_ℓ = cp_base.a_ℓ,
         b_ℓ = cp_base.b_ℓ,
         bU  = up_base.bU,
@@ -522,11 +520,6 @@ else
         r = calib.r,
         ν = calib.nu,
         φ = calib.phi,
-        # Matching elasticities fixed at 0.5 (Cobb–Douglas curvature).
-        # Not identified without aggregate U/V fluctuations — LMR (2016) fix
-        # the elasticity at 0.5 for the same reason. Levels μ_U, μ_S stay free.
-        unsk_η = 0.5,
-        skl_η  = 0.5,
     ))
 
     free_params = default_free_params()

@@ -98,7 +98,7 @@ skl_par = SkilledParams(
     bS       = 0.01,
     a_Γ      = 2.0,
     b_Γ      = 5.0,
-    ξ        = 0.0,    # exogenous skilled separation hazard (set > 0 to activate)
+    ξ        = 0.0,    
 )
 
 sim = SimParams(
