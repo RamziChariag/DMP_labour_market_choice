@@ -132,9 +132,12 @@ function clean_cps_basic()
     end
 
     # ── 6. Select columns and save ────────────────────────────────
+    # DURUNEMP (weeks unemployed, current spell) feeds the skilled
+    # long-term-unemployment share ltu_share_S (DURUNEMP ≥ 27 → LTU).
     cols_to_keep = intersect(
         [:YEAR, :MONTH, :CPSID, :CPSIDP, :MISH, :WTFINL,
          :EMPSTAT, :EMPSTAT_CORRECTED, :EDUC, :AGE, :SEX, :IND,
+         :DURUNEMP,
          :skilled, :employed, :unemployed, :in_training,
          :valid_match, :window, :IND_JOLTS, :in_lf, :in_age],
         Symbol.(names(df))

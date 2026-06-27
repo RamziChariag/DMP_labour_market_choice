@@ -156,40 +156,32 @@ const _PAIR_BASELINE = Dict(
 # Use the SAME list for both load_weight_matrix and build_smm_spec
 # so sigma / W is subsetted consistently with the loss function.
 #
-# Valid names (23 moments in MOMENT_NAMES order):
+# wage_premium and ur_total are exact linear redundancies of the active
+# set (wage_premium ≡ mean_wage_S − mean_wage_U; ur_total is the
+# skilled-share-weighted average of ur_U and ur_S), so they are skipped —
+# but kept in MOMENT_NAMES and the data pipeline so a robustness rerun is a
+# one-line edit here.
+#
+# Valid names (26 moments in MOMENT_NAMES order):
 #   :ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
 #   :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
 #   :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S,
 #   :ee_rate_S,
 #   :mean_wage_U, :mean_wage_S,
 #   :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
-#   :wage_premium, :theta_U, :theta_S
+#   :wage_premium, :theta_U, :theta_S,
+#   :overlap_UgtS, :overlap_SltU, :ltu_share_S
 # ============================================================
 SKIP_MOMENTS = Symbol[
-    # :ur_total,
-    # :ur_U,
-    # :ur_S,
-    # :skilled_share,
-    # :training_share,
-    # :emp_var_U,
-    # :emp_var_S,
-    # :emp_cm3_U,
-    # :emp_cm3_S,
-    # :jfr_U,
-    # :sep_rate_U,
-    # :jfr_S,
-    # :sep_rate_S,
-    # :ee_rate_S,
-    # :mean_wage_U,
-    # :mean_wage_S,
-    # :p25_wage_U,
-    # :p25_wage_S,
-    # :p50_wage_U,
-    # :p50_wage_S,
-    # :wage_premium,
-    # :theta_U,
-    # :theta_S,
+    :wage_premium,
+    :ur_total,
 ]
+
+# Wage-reliability calibration knob (single source of truth for both the run
+# header and calibrate_sigma_w). σ_w is calibrated externally from λ_w rather
+# than estimated, which removes the β–σ_w degeneracy and frees β_U, β_S.
+# Bound–Krueger (1991): λ_w ≈ 0.82 for log annual earnings.
+const LAMBDA_W = 0.78
 
 @printf("Estimation window: %s\n", WINDOW)
 flush(stdout)
@@ -198,6 +190,12 @@ flush(stdout)
 # Parameters to pin at a fixed value during estimation.
 # r / ν / φ are always fixed from external calibration and do
 # not need to appear here.
+#
+# η_U / η_S are pinned at 0.5 (Hosios): the matching elasticity is not
+# identified without aggregate U–V variation (LMR). The bargaining weights
+# β_U / β_S are FREE — the β–σ_w degeneracy is removed by calibrating σ_w
+# externally (calibrate_sigma_w from λ_w), so σ_wU / σ_wS are injected into
+# the pinned block below from the data rather than pinned here.
 #
 # Valid keys (ASCII):
 #   common:  :a_l  :b_l  :c
@@ -222,16 +220,12 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :unsk_mu  => 0.25585,
      :unsk_eta => 0.50000,
     # :unsk_k   => 0.10061,
-     :unsk_bet => 0.50000,
     # :unsk_lam => 0.20263,
-    # :unsk_sigw => 0.10000,   # σ_wU 
     # :skl_mu   => 0.22462,
      :skl_eta  => 0.50000,
     # :skl_k    => 0.03317,
-     :skl_bet  => 0.50000,
     # :skl_lam  => 0.17788,
     # :skl_sig  => 1.10000,
-    # :skl_sigw  => 0.10000,   # σ_wS 
 )
 
 # ============================================================
@@ -366,6 +360,43 @@ flush(stdout)
 
 moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 
+# ── σ_w calibration (class (ii): calibrated model parameters) ─────────────
+# σ_{w,j}² = (1−λ_w)·Var̂[log w_j]. Calibrated from the data here, then pinned
+# in the fixed block alongside r, ν, φ (§6). This is what frees β_U, β_S.
+σ_wU_cal, σ_wS_cal = calibrate_sigma_w(LAMBDA_W, moments)
+@printf("  Calibrated σ_w (λ_w = %.4f):  σ_wU = %.5f,  σ_wS = %.5f\n",
+        LAMBDA_W, σ_wU_cal, σ_wS_cal)
+flush(stdout)
+
+# ── ρ_NILF: gross skilled U→NILF competing-risk hazard for ltu_share_S ────
+# Empirical alignment input (not a moment, not estimated). Read the skilled
+# row for this window from rho_nilf.csv (data pipeline); crisis windows share
+# their baseline value. Pinned into the SkilledParams via :skl_ρ_NILF below.
+# Falls back to the SkilledParams default with a warning if unavailable.
+function _load_rho_nilf(window::Symbol, derived_dir::String) :: Union{Float64,Nothing}
+    rho_pair = _PAIR_BASELINE[window]
+    path = joinpath(derived_dir, "rho_nilf.csv")
+    if !isfile(path)
+        @warn "rho_nilf.csv not found in $derived_dir — ltu_share_S will use the " *
+              "SkilledParams ρ_NILF default. Re-run data_processing/transitions.jl."
+        return nothing
+    end
+    df = CSV.read(path, DataFrame)
+    df.window = Symbol.(df.window)
+    rows = filter(:window => ==(rho_pair), df)
+    (isempty(rows) || !isfinite(rows.rho_NILF[1])) && return nothing
+    return Float64(rows.rho_NILF[1])
+end
+
+ρ_NILF_cal = _load_rho_nilf(WINDOW, derived_dir)
+if isnothing(ρ_NILF_cal)
+    @warn "ρ_NILF unavailable for $WINDOW — using the SkilledParams default."
+else
+    @printf("  Loaded ρ_NILF = %.5f for %s (skilled net U→NILF hazard)\n",
+            ρ_NILF_cal, WINDOW)
+end
+flush(stdout)
+
 
 # ============================================================
 # 4. Weight matrix
@@ -478,11 +509,13 @@ if WINDOW in (:crisis_fc, :crisis_covid)
             baseline_result.loss_opt, baseline_result.converged)
     flush(stdout)
 
-    # Fixed: external calibration + deep structural from baseline.
-    # bU, bT now live in the unskilled block; bS in the skilled block.
+    # Fixed: external calibration + calibrated σ_w + deep structural from
+    # baseline. bU, bT now live in the unskilled block; bS in the skilled block.
     # FIX_PARAMS can additionally pin regime-specific parameters;
     # baseline-derived deep values take priority over FIX_PARAMS.
+    # ρ_NILF is pinned only when the data pipeline supplied it.
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
+    _rho_fixed   = isnothing(ρ_NILF_cal) ? (;) : (skl_ρ_NILF = ρ_NILF_cal,)
     fixed_params = merge(
         _extra_fixed,
         (
@@ -490,12 +523,15 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         ν   = calib.nu,
         φ   = calib.phi,
 
+        unsk_σ_w = σ_wU_cal,
+        skl_σ_w  = σ_wS_cal,
+
         a_ℓ = cp_base.a_ℓ,
         b_ℓ = cp_base.b_ℓ,
         bU  = up_base.bU,
         bT  = up_base.bT,
         bS  = sp_base.bS,
-    ))
+    ), _rho_fixed)
 
     # Free parameters: regime-specific only.  Init values follow INIT_MODE:
     #   :warmstart → the matched baseline optimum;  otherwise → DEFAULT_PARAMS.
@@ -524,13 +560,19 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     flush(stdout)
 
 else
-    # Baseline estimation.  Fix r / ν / φ plus anything in FIX_PARAMS.
+    # Baseline estimation.  Fix r / ν / φ and the calibrated σ_w, plus anything
+    # in FIX_PARAMS.  ρ_NILF is pinned only when the data pipeline supplied it;
+    # otherwise the SkilledParams default applies.
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
+    _rho_fixed   = isnothing(ρ_NILF_cal) ? (;) : (skl_ρ_NILF = ρ_NILF_cal,)
     fixed_params = merge(_extra_fixed, (
         r = calib.r,
         ν = calib.nu,
         φ = calib.phi,
-    ))
+
+        unsk_σ_w = σ_wU_cal,
+        skl_σ_w  = σ_wS_cal,
+    ), _rho_fixed)
 
     free_params = default_free_params()
 
@@ -647,6 +689,9 @@ run_params = SMMRunParams(
     # See load_weight_matrix for the cond_target semantics
     # (0=diag, 1=compressed diag, 2=identity, >2=full optimal W).
     w_cond_target = W_COND_TARGET,
+
+    # ── Wage-reliability calibration knob (header-only; σ_w is calibrated) ──
+    λ_w = LAMBDA_W,
 
     # ── Simulated annealing ──────────────────────────────────
     sa_max_iter        = 5_000,   # max SA iterations

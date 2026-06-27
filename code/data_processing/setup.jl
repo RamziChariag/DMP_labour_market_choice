@@ -258,7 +258,11 @@ function ind_to_jolts_supersector(ind::Int)::String
 end
 
 # ============================================================
-# Moment name list — 23 moments
+# Moment name list — 26 moments
+#
+# overlap_UgtS, overlap_SltU and ltu_share_S are the cross-market
+# wage-overlap pair and the skilled long-term-unemployment share; they
+# are appended at the END so the legacy moment indices are unchanged.
 # ============================================================
 const MOMENT_NAMES = [
     :ur_total, :ur_U, :ur_S,
@@ -269,9 +273,10 @@ const MOMENT_NAMES = [
     :mean_wage_U, :mean_wage_S,
     :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
     :wage_premium, :theta_U, :theta_S,
+    :overlap_UgtS, :overlap_SltU, :ltu_share_S,
 ]
 
-@assert length(MOMENT_NAMES) == 23 "Expected 23 moments, got $(length(MOMENT_NAMES))"
+@assert length(MOMENT_NAMES) == 26 "Expected 26 moments, got $(length(MOMENT_NAMES))"
 
 # ============================================================
 # Regularization parameter for Σ̂

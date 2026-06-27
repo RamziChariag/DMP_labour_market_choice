@@ -1,7 +1,7 @@
 ############################################################
 # data_processing/moments.jl
 #
-# Combine step (Stage 7) — assemble all 23 empirical moments × 4 windows
+# Combine step (Stage 7) — assemble all 26 empirical moments × 4 windows
 # from every cleaned dataset and write one moments_{window}.csv per window.
 # The training_share level carries the NSC κ_w adjustment (written here so
 # the SMM loaders read it pre-adjusted). The in-memory return keeps the raw
@@ -107,6 +107,34 @@ function _compute_stock_moments(cps_w::DataFrame)::Dict{Symbol, Float64}
     return moments
 end
 
+function _compute_ltu_share(cps_w::DataFrame)::Dict{Symbol, Float64}
+    moments = Dict{Symbol, Float64}()
+    # ltu_share_S: WTFINL-weighted share of skilled unemployed whose current
+    # spell is long-term (DURUNEMP ≥ 27 weeks), computed per month then
+    # averaged across the window. Matches the model survivor ltu_share_S at
+    # a* ≈ 6.23 months. Requires DURUNEMP (added to cps_basic.jl cols_to_keep).
+    if !hasproperty(cps_w, :DURUNEMP)
+        @warn "  DURUNEMP not in cleaned CPS Basic — ltu_share_S left as NaN. " *
+              "Add DURUNEMP to the CPS Basic extract and cps_basic.jl::cols_to_keep."
+        moments[:ltu_share_S] = NaN
+        return moments
+    end
+
+    monthly = Float64[]
+    for gk in groupby(cps_w, [:YEAR, :MONTH])
+        g  = DataFrame(gk)
+        skl_u = g.unemployed .& g.skilled
+        any(skl_u) || continue
+        w   = Float64.(coalesce.(g.WTFINL, 0.0))[skl_u]
+        dur = Float64.(coalesce.(g.DURUNEMP[skl_u], 0.0))
+        sw  = sum(w)
+        sw <= 0 && continue
+        push!(monthly, sum(w[dur .>= 27.0]) / sw)
+    end
+    moments[:ltu_share_S] = isempty(monthly) ? NaN : mean(filter(isfinite, monthly))
+    return moments
+end
+
 function _fill_transition_moments!(moments::Dict{Symbol, Float64},
                                     trans_w::DataFrame)
     # jfr_j, sep_rate_j: n_pairs-weighted mean across month-pairs in window.
@@ -135,6 +163,7 @@ function _compute_wage_moments_per_year(asec_w::DataFrame)::Dict{Symbol, Float64
     yr_med_U  = Float64[]; yr_med_S  = Float64[]
     yr_p25_U  = Float64[]; yr_p25_S  = Float64[]
     yr_prem   = Float64[]
+    yr_ov_UgtS = Float64[]; yr_ov_SltU = Float64[]
 
     for gk in groupby(asec_w, :YEAR)
         g = DataFrame(gk)
@@ -166,9 +195,21 @@ function _compute_wage_moments_per_year(asec_w::DataFrame)::Dict{Symbol, Float64
         if nrow(unskilled) > 0 && nrow(skilled) > 0
             log_wu = log.(max.(Float64.(unskilled.wage_norm), 1e-14))
             log_ws = log.(max.(Float64.(skilled.wage_norm),   1e-14))
-            prem_yr = wmean(log_ws, Float64.(skilled.ASECWT)) -
-                      wmean(log_wu, Float64.(unskilled.ASECWT))
-            push!(yr_prem, prem_yr)
+            wt_u   = Float64.(unskilled.ASECWT)
+            wt_s   = Float64.(skilled.ASECWT)
+            push!(yr_prem, wmean(log_ws, wt_s) - wmean(log_wu, wt_u))
+
+            # Cross-market wage overlap, computed within the year against that
+            # year's medians (one moment per bargaining weight):
+            #   overlap_UgtS = weighted share of unskilled with logw > median(skilled logw)
+            #   overlap_SltU = weighted share of skilled   with logw < median(unskilled logw)
+            med_S = wmedian(log_ws, wt_s)
+            med_U = wmedian(log_wu, wt_u)
+            sw_u  = sum(wt_u); sw_s = sum(wt_s)
+            if sw_u > 0 && sw_s > 0
+                push!(yr_ov_UgtS, sum(wt_u[log_wu .> med_S]) / sw_u)
+                push!(yr_ov_SltU, sum(wt_s[log_ws .< med_U]) / sw_s)
+            end
         end
     end
 
@@ -185,6 +226,8 @@ function _compute_wage_moments_per_year(asec_w::DataFrame)::Dict{Symbol, Float64
     moments[:p25_wage_U]   = finite_mean(yr_p25_U)
     moments[:p25_wage_S]   = finite_mean(yr_p25_S)
     moments[:wage_premium] = finite_mean(yr_prem)
+    moments[:overlap_UgtS] = finite_mean(yr_ov_UgtS)
+    moments[:overlap_SltU] = finite_mean(yr_ov_SltU)
 
     return moments
 end
@@ -223,7 +266,7 @@ function _compute_tightness_per_month(jolts_w::DataFrame, cps_w::DataFrame)::Dic
 end
 
 # ──────────────────────────────────────────────────────────────────────────
-# Stage 7 main: assemble all 23 moments × 4 windows
+# Stage 7 main: assemble all 26 moments × 4 windows
 # ──────────────────────────────────────────────────────────────────────────
 
 function make_moments()
@@ -250,12 +293,15 @@ function make_moments()
         @info "  Window: $(wdef.label) ($wname)"
         moments = Dict{Symbol, Float64}()
 
-        # A. Stock moments — ur_total, ur_U, ur_S, skilled_share, training_share
+        # A. Stock moments — ur_total, ur_U, ur_S, skilled_share, training_share,
+        #    and the skilled long-term-unemployment share ltu_share_S.
         cps_w = filter(row -> row.window == wname, cps_basic_m)
         if nrow(cps_w) > 0
             merge!(moments, _compute_stock_moments(cps_w))
+            merge!(moments, _compute_ltu_share(cps_w))
         else
-            for k in (:ur_total, :ur_U, :ur_S, :skilled_share, :training_share)
+            for k in (:ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
+                      :ltu_share_S)
                 moments[k] = NaN
             end
         end
@@ -278,14 +324,16 @@ function make_moments()
             moments[:ee_rate_S] = NaN
         end
 
-        # D. Wage moments (ASEC, per-survey-year then average)
+        # D. Wage moments (ASEC, per-survey-year then average), including the
+        #    cross-market overlap pair overlap_UgtS / overlap_SltU.
         asec_w = filter(r -> r.window == wname, cps_asec_m)
         if nrow(asec_w) > 0
             merge!(moments, _compute_wage_moments_per_year(asec_w))
         else
             for k in (:mean_wage_U, :mean_wage_S, :emp_var_U, :emp_cm3_U,
                       :emp_var_S, :emp_cm3_S, :p25_wage_U, :p25_wage_S,
-                      :p50_wage_U, :p50_wage_S, :wage_premium)
+                      :p50_wage_U, :p50_wage_S, :wage_premium,
+                      :overlap_UgtS, :overlap_SltU)
                 moments[k] = NaN
             end
         end

@@ -269,6 +269,9 @@ MOMENT_CATEGORY = Dict{Symbol,String}(
     :wage_premium  => "Wages",
     :theta_U       => "Tightness",
     :theta_S       => "Tightness",
+    :overlap_UgtS  => "Wages",
+    :overlap_SltU  => "Wages",
+    :ltu_share_S   => "Labour-market stocks",
 )
 
 # Short display names for moments
@@ -299,6 +302,9 @@ MOMENT_DISPLAY = Dict{Symbol,String}(
     :wage_premium  => "Skill premium",
     :theta_U       => raw"$\theta_U$",
     :theta_S       => raw"$\theta_S$",
+    :overlap_UgtS  => "Overlap U>med(S)",
+    :overlap_SltU  => "Overlap S<med(U)",
+    :ltu_share_S   => "LTU share skilled",
 )
 
 # Short tags for scatter plot labels
@@ -329,6 +335,9 @@ MOMENT_TAG = Dict{Symbol,String}(
     :wage_premium  => "prem",
     :theta_U       => "θU",
     :theta_S       => "θS",
+    :overlap_UgtS  => "ovUS",
+    :overlap_SltU  => "ovSU",
+    :ltu_share_S   => "ltuS",
 )
 
 # Shape/colour by category for scatter plot
@@ -689,10 +698,15 @@ end
 # 2. PARAMETER ESTIMATES TABLES A & B (LaTeX)
 # ============================================================
 
-# Parameter classification
-# Externally calibrated: r, ν, φ
-# Deep structural (13): a_ℓ, b_ℓ, c, bU, bT, bS, μ_U, η_U, β_U, μ_S, η_S, β_S, σ_S
-# Regime-specific (12): PU, gamma_PS, α_U, a_Γ, b_Γ, k_U, λ_U, σ_wU, k_S, ξ_S, λ_S, σ_wS
+# Parameter classification (these lists drive only the post-processing
+# parameter tables; they do not configure the SMM).
+# Externally calibrated: r, ν, φ, and σ_wU, σ_wS (calibrated from λ_w).
+# Deep structural: a_ℓ, b_ℓ, c, bU, bT, bS, μ_U, η_U, μ_S, η_S, σ_S.
+# Regime-specific: PU, gamma_PS, α_U, a_Γ, b_Γ, k_U, β_U, λ_U, k_S, β_S, ξ_S, λ_S.
+# TODO(ramzi): regenerate these display lists against the new spec — β_U/β_S
+# are now free regime-specific and σ_wU/σ_wS are calibrated (moved out of the
+# free regime set). Aligned with the smm_params.jl classification and the
+# sensitivity-notebook GIVEN_PARAMS box.
 
 EXTERNALLY_CALIBRATED = [
     (:r,   "r",            raw"$r$",              "Discount rate"),

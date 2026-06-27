@@ -31,7 +31,12 @@ function run_validation(all_moments, all_sigma)
     end
     display(wide)
 
-    # ── 2. Sanity checks with published benchmarks ────────────────
+    # ── 2. Sanity checks with published / data-implied benchmarks ──
+    # Wage moments are RAW log real weekly earnings (no within-window
+    # normalisation; the model's aggregate scale A absorbs the dollar level).
+    # base_covid targets, for reference: mean_wage_U≈6.67, mean_wage_S≈7.06,
+    # p25≈6.31/6.74, p50≈6.68/7.06, emp_var≈0.31/0.27. The level bands below
+    # bracket plausible US log weekly earnings (~e^6 = $400 to ~e^7.6 = $2000).
     println("\n── 2. Benchmark comparisons ──")
     benchmarks = Dict(
         :skilled_share => (name="Skilled share (BA+)", lo=0.20, hi=0.50),
@@ -39,12 +44,27 @@ function run_validation(all_moments, all_sigma)
         :theta_U => (name="Unskilled tightness V/U", lo=0.1, hi=5.0),
         :theta_S => (name="Skilled tightness V/U", lo=0.1, hi=10.0),
         :jfr_U => (name="Unskilled JF rate (monthly)", lo=0.10, hi=0.50),
+        :jfr_S => (name="Skilled JF rate (monthly)", lo=0.10, hi=0.50),
         :sep_rate_U => (name="Unskilled EU sep rate (monthly)", lo=0.005, hi=0.05),
+        :sep_rate_S => (name="Skilled EU sep rate (monthly)", lo=0.002, hi=0.03),
         :ee_rate_S => (name="Skilled EE rate (monthly)", lo=0.005, hi=0.05),
+        # Wage levels — RAW log real weekly earnings (not normalised).
+        :mean_wage_U => (name="Mean log wage unskilled", lo=6.0, hi=7.2),
+        :mean_wage_S => (name="Mean log wage skilled", lo=6.4, hi=7.6),
+        :p25_wage_U => (name="p25 log wage unskilled", lo=5.8, hi=7.0),
+        :p25_wage_S => (name="p25 log wage skilled", lo=6.2, hi=7.3),
+        :p50_wage_U => (name="p50 log wage unskilled", lo=6.0, hi=7.2),
+        :p50_wage_S => (name="p50 log wage skilled", lo=6.4, hi=7.6),
+        # Wage dispersion (includes σ_w measurement component on the data side).
+        :emp_var_U => (name="Var log wage unskilled", lo=0.10, hi=0.50),
+        :emp_var_S => (name="Var log wage skilled", lo=0.10, hi=0.50),
         :wage_premium => (name="Log skill premium", lo=0.20, hi=0.80),
-        # p25 moments are now LOG wages (= log of the old level bounds).
-        :p25_wage_U => (name="p25 log wage unskilled (norm.)", lo=-0.92, hi=-0.10),
-        :p25_wage_S => (name="p25 log wage skilled (norm.)", lo=-0.36, hi=0.18),
+        # New cross-market / duration moments — data-implied bands (base_covid
+        # targets ≈ 0.239 / 0.206 / 0.256). LTU rises in crisis windows, so the
+        # upper band is wider than the baseline value. Provisional ranges.
+        :overlap_UgtS => (name="P(w_U > med w_S) overlap", lo=0.05, hi=0.45),
+        :overlap_SltU => (name="P(w_S < med w_U) overlap", lo=0.05, hi=0.45),
+        :ltu_share_S => (name="Skilled long-term-unemp share (≥27wk)", lo=0.05, hi=0.50),
     )
 
     n_flags = 0

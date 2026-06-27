@@ -111,6 +111,14 @@ Base.@kwdef struct SkilledParams
 
     ξ        :: Float64 = 0.0   # exogenous skilled separation hazard ξ_S (0 ⇒ recovers the no-ξ model)
     σ_w      :: Float64 = 0.0   # log-wage measurement-error SD (σ_wS); 0 ⇒ no measurement error
+
+    # Gross skilled U→NILF monthly hazard, used as a competing-risk term in the
+    # skilled long-term-unemployment survival object (ltu_share_S). It is an
+    # empirical alignment input, like σ_w: it enters only that moment, not the
+    # equilibrium solve, so u_S(x) is still solved with ν (first-order-correct).
+    # TODO(ramzi): set ρ_NILF per window from the measured gross skilled U→NILF
+    # hazard written by data_processing/transitions.jl, not this placeholder.
+    ρ_NILF   :: Float64 = 0.03
 end
 
 

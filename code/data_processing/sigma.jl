@@ -1,7 +1,7 @@
 ############################################################
 # data_processing/sigma.jl
 #
-# Combine step (Stage 8) — the full 23×23 influence-function variance–
+# Combine step (Stage 8) — the full 26×26 influence-function variance–
 # covariance matrix Σ̂ for every window, used to build the SMM weight
 # matrix. The training_share row/col of the SAVED Σ̂ carries the NSC κ_w
 # adjustment (off-diagonals × κ, diagonal × κ²); the in-memory return
@@ -191,6 +191,33 @@ function compute_influence_functions_and_sigma_full()
             _add_to_stack!(monthly_stack, (yr, mo), psi, K)
         end
 
+        # ltu_share_S — WTFINL-weighted share of skilled unemployed with a
+        # long-term spell (DURUNEMP ≥ 27 weeks). Per-month cell deviation
+        # (val_month − m̄), the same across-period ψ convention as the stock
+        # moments above; the monthly cells carry its covariance with the rest.
+        # TODO(ramzi): the analytic ratio/rate IF (action plan Part C) is in the
+        # data appendix; Σ̂ here keeps the file's uniform per-period deviation
+        # form so all moments share one variance construction.
+        if hasproperty(cps_w, :DURUNEMP)
+            for gk in groupby(cps_w, [:YEAR, :MONTH])
+                g  = DataFrame(gk)
+                yr = Int(g.YEAR[1]); mo = Int(g.MONTH[1])
+                skl_u = g.unemployed .& g.skilled
+                any(skl_u) || continue
+                w   = Float64.(coalesce.(g.WTFINL, 0.0))[skl_u]
+                dur = Float64.(coalesce.(g.DURUNEMP[skl_u], 0.0))
+                sw  = sum(w)
+                sw <= 0 && continue
+                psi = zeros(K)
+                val  = sum(w[dur .>= 27.0]) / sw
+                mbar = get(moment_vals, :ltu_share_S, NaN)
+                isfinite(val) && isfinite(mbar) && (psi[idx[:ltu_share_S]] = val - mbar)
+                _add_to_stack!(monthly_stack, (yr, mo), psi, K)
+            end
+        else
+            @warn "    DURUNEMP not in cleaned CPS Basic — ltu_share_S column of Σ̂ left at 0 for $wname."
+        end
+
         # ── B. CPS transition moments (jfr, sep) ──────────────────────────────
         trans_w = filter(r -> r.window == wname, trans_monthly)
         @assert nrow(trans_w) > 0 "Transitions empty for window $wname"
@@ -289,10 +316,33 @@ function compute_influence_functions_and_sigma_full()
             if nrow(unskilled) > 0 && nrow(skilled) > 0
                 log_wu  = log.(max.(Float64.(unskilled.wage_norm), 1e-14))
                 log_ws  = log.(max.(Float64.(skilled.wage_norm),   1e-14))
-                prem_yr = wmean(log_ws, Float64.(skilled.ASECWT)) -
-                          wmean(log_wu, Float64.(unskilled.ASECWT))
+                wt_u    = Float64.(unskilled.ASECWT)
+                wt_s    = Float64.(skilled.ASECWT)
+                prem_yr = wmean(log_ws, wt_s) - wmean(log_wu, wt_u)
                 mbar = get(moment_vals, :wage_premium, NaN)
                 isfinite(prem_yr) && isfinite(mbar) && (psi[idx[:wage_premium]] = prem_yr - mbar)
+
+                # Cross-market overlap — per-year cell deviation, the same
+                # across-period ψ convention used for every ASEC wage moment
+                # above (val_yr − m̄). Each year contributes one (overlap_UgtS,
+                # overlap_SltU) pair to the ASEC stack; U and S are disjoint
+                # subsamples of the same ASEC, so their covariance with the
+                # other ASEC moments is preserved by the shared cell.
+                # TODO(ramzi): the analytic two-sample IF with the estimated-
+                # median correction (action plan Part C) is documented in the
+                # data appendix; Σ̂ here keeps the file's uniform per-period
+                # deviation form so all moments share one variance construction.
+                med_S = wmedian(log_ws, wt_s)
+                med_U = wmedian(log_wu, wt_u)
+                sw_u  = sum(wt_u); sw_s = sum(wt_s)
+                if sw_u > 0 && sw_s > 0
+                    ov_UgtS = sum(wt_u[log_wu .> med_S]) / sw_u
+                    ov_SltU = sum(wt_s[log_ws .< med_U]) / sw_s
+                    mbar = get(moment_vals, :overlap_UgtS, NaN)
+                    isfinite(ov_UgtS) && isfinite(mbar) && (psi[idx[:overlap_UgtS]] = ov_UgtS - mbar)
+                    mbar = get(moment_vals, :overlap_SltU, NaN)
+                    isfinite(ov_SltU) && isfinite(mbar) && (psi[idx[:overlap_SltU]] = ov_SltU - mbar)
+                end
             end
 
             _add_to_stack!(asec_stack, (yr + 1, 1), psi, K)

@@ -121,6 +121,13 @@ Base.@kwdef struct SMMRunParams
     # Weight-matrix mode (see load_weight_matrix)
     w_cond_target :: Float64 = 1e8
 
+    # Wage-reliability calibration knob. σ_w is NOT a free parameter: it is
+    # calibrated externally from λ_w via σ_{w,j}² = (1−λ_w)·Var̂[log w_j]
+    # (calibrate_sigma_w), so λ_w configures the run and is reported in the
+    # header only — it never appears in the parameter tables. Bound–Krueger
+    # (1991) give λ_w ≈ 0.82 for log annual earnings.
+    λ_w :: Float64 = 0.82
+
     # Nelder-Mead polish
     nm_max_iter  :: Int     = 5_000
     nm_f_tol     :: Float64 = 1e-6
@@ -311,6 +318,27 @@ end
 
 
 # ============================================================
+# σ_w calibration from the wage-reliability knob λ_w
+# ============================================================
+
+"""
+    calibrate_sigma_w(λ_w, moments) → (σ_wU, σ_wS)
+
+Calibrate the log-wage measurement-error SDs from the reliability ratio
+λ_w via the classical-error decomposition σ_{w,j}² = (1−λ_w)·Var̂[log w_j],
+mirroring the external calibration of ν and φ. `moments` is the data
+NamedTuple from `load_data_moments`; the empirical log-wage variances are
+its `emp_var_U` / `emp_var_S` targets. The returned pair is injected into
+the pinned (calibrated) block exactly like r, ν, φ.
+"""
+function calibrate_sigma_w(λ_w::Real, moments::NamedTuple)
+    σ_wU = sqrt(max((1.0 - λ_w) * moments[:emp_var_U].value, 0.0))
+    σ_wS = sqrt(max((1.0 - λ_w) * moments[:emp_var_S].value, 0.0))
+    return (σ_wU, σ_wS)
+end
+
+
+# ============================================================
 # Default free parameter list
 # ============================================================
 
@@ -331,11 +359,14 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:common, :a_ℓ,        0.0100,   8.0000,   2.0000, "worker type shape a_ℓ"),
         ParamSpec(:common, :b_ℓ,        0.0100,   7.0000,   5.0000, "worker type shape b_ℓ"),
 
-        # Deep structural — institutional flow values (stored by consuming block)
-        # Flow values relative to the aggregate scale: effective b_j = b̃_j · A.
-        ParamSpec(:unsk,   :bU,         0.0000,   2.0000,   0.0500, "unskilled outside flow b_U / A"),
-        ParamSpec(:unsk,   :bT,         0.0000,   5.0000,   0.3000, "training flow b_T / A"),
-        ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.1000, "skilled outside flow b_S / A"),
+        # Deep structural — institutional flow values (stored by consuming block).
+        # All flow/cost/vacancy parameters are estimated relative to the aggregate
+        # scale A: the model functions multiply them by A internally, so b_U, b_T,
+        # b_S, k_U, k_S, σ_S are dimensionless coefficients on A (LMR convention).
+        # The labels carry plain names; the A-normalization is stated once here.
+        ParamSpec(:unsk,   :bU,         0.0000,   2.0000,   0.0500, "unskilled outside flow b_U"),
+        ParamSpec(:unsk,   :bT,         0.0000,   5.0000,   0.3000, "training flow b_T"),
+        ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.1000, "skilled outside flow b_S"),
 
         # Regime-specific — common block
         ParamSpec(:common, :c,          0.1000,  12.0000,   7.7000, "training cost coeff c"),
@@ -352,7 +383,7 @@ function default_free_params() :: Vector{ParamSpec}
         # Regime-specific — unskilled block
         ParamSpec(:unsk,   :μ,          0.0010,   3.5000,   0.7400, "unskilled matching eff μ_U"),
         ParamSpec(:unsk,   :η,          0.1000,   0.9800,   0.6000, "unskilled matching elas η_U"),
-        ParamSpec(:unsk,   :k,          0.0010,   5.0000,   0.5000, "unskilled vacancy cost k_U / A"),
+        ParamSpec(:unsk,   :k,          0.0010,   5.0000,   0.5000, "unskilled vacancy cost k_U"),
         ParamSpec(:unsk,   :β,          0.0500,   0.9800,   0.4000, "unskilled bargaining β_U"),
         ParamSpec(:unsk,   :λ,          0.0010,   0.8000,   0.0800, "unskilled damage rate λ_U"),
         ParamSpec(:unsk,   :σ_w,        0.0000,   0.5000,   0.1000, "unskilled wage meas. error σ_wU"),
@@ -360,10 +391,10 @@ function default_free_params() :: Vector{ParamSpec}
         # Regime-specific — skilled block
         ParamSpec(:skl,    :μ,          0.0100,   4.5000,   0.9000, "skilled matching eff μ_S"),
         ParamSpec(:skl,    :η,          0.1000,   0.9800,   0.5000, "skilled matching elas η_S"),
-        ParamSpec(:skl,    :k,          0.0010,   5.0000,   0.5000, "skilled vacancy cost k_S / A"),
+        ParamSpec(:skl,    :k,          0.0010,   5.0000,   0.5000, "skilled vacancy cost k_S"),
         ParamSpec(:skl,    :β,          0.0500,   0.98000,   0.3200, "skilled bargaining β_S"),
         ParamSpec(:skl,    :λ,          0.0010,   0.8000,   0.0700, "skilled quality shock λ_S"),
-        ParamSpec(:skl,    :σ,          0.0000,   1.0000,   0.0500, "OJS flow cost σ_S / A"),
+        ParamSpec(:skl,    :σ,          0.0000,   1.0000,   0.0500, "OJS flow cost σ_S"),
         ParamSpec(:skl,    :ξ,          0.0000,   0.1000,   0.0050, "skilled exogenous separation ξ_S"),
         ParamSpec(:skl,    :σ_w,        0.0000,   0.5000,   0.1000, "skilled wage meas. error σ_wS"),
     ]
@@ -487,6 +518,7 @@ function unpack_θ(
         b_Γ      = _get(:b_Γ,      :skl, 5.00),
         ξ        = _get(:ξ,        :skl, 0.0),
         σ_w      = _get(:σ_w,      :skl, 0.0),
+        ρ_NILF   = _get(:ρ_NILF,   :skl, 0.03),
     )
 
     # 3. Disambiguate the SHARED field names (μ, η, k, β, λ, and σ) across the
@@ -502,7 +534,7 @@ function unpack_θ(
     sp_fields = Dict{Symbol,Float64}(
         :μ => sp.μ, :η => sp.η, :k => sp.k, :β => sp.β, :λ => sp.λ, :σ => sp.σ,
         :gamma_PS => sp.gamma_PS, :bS => sp.bS, :a_Γ => sp.a_Γ, :b_Γ => sp.b_Γ,
-        :ξ => sp.ξ, :σ_w => sp.σ_w,
+        :ξ => sp.ξ, :σ_w => sp.σ_w, :ρ_NILF => sp.ρ_NILF,
     )
 
     for (i, ps) in enumerate(spec.free)
@@ -540,6 +572,7 @@ function unpack_θ(
         gamma_PS = sp_fields[:gamma_PS], bS = sp_fields[:bS],
         a_Γ = sp_fields[:a_Γ], b_Γ = sp_fields[:b_Γ],
         ξ = sp_fields[:ξ], σ_w = sp_fields[:σ_w],
+        ρ_NILF = sp_fields[:ρ_NILF],
     )
 
     return cp, up, sp
@@ -619,6 +652,8 @@ function print_spec(spec::SMMSpec)
     end
     @printf("\n  Grid: Nx=%d  Np_U=%d  Np_S=%d\n",
             spec.run.Nx, spec.run.Np_U, spec.run.Np_S)
+    @printf("  λ_w (wage-reliability calibration knob, σ_w = √((1−λ_w)·Var̂[log w])): %.4f\n",
+            spec.run.λ_w)
     @printf("  SA:  max_iter=%d  T0=%.2f  step=%.2f  cooling_rate=%.2f  cooling_exp=%.2f  reheat_patience=%d  reheat_factor=%.2f  adapt_window=%d  target_fin=%.2f\n",
             spec.run.sa_max_iter, spec.run.sa_T0, spec.run.sa_step,
             spec.run.sa_cooling_rate, spec.run.sa_cooling_exp,

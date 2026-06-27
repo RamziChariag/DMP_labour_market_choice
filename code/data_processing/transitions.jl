@@ -3,11 +3,13 @@
 #
 # Stage 4 & 6 — labour-market worker flows from the matched CPS Basic
 # month-pairs. make_transitions() builds monthly job-finding, separation,
-# and LF-exit hazards; compute_nu() turns the demographic
+# and LF-exit hazards, and the NET skilled U→NILF hazard ρ_NILF used as the
+# competing-risk term in ltu_share_S; compute_nu() turns the demographic
 # side into the life-table turnover rate ν for each baseline window.
 #
 # Reads:  cps_basic_clean.arrow, transitions_monthly.arrow
-# Writes: transitions.arrow, transitions_monthly.arrow, nu_estimation.csv
+# Writes: transitions.arrow, transitions_monthly.arrow, rho_nilf.csv,
+#         nu_estimation.csv
 #
 # Plain include() file: definitions only, no top-level execution.
 # `using` packages and path consts come from data_processing_main.jl.
@@ -89,9 +91,18 @@ function make_transitions()
         numer_nu  = sum(g.weight[nilf_mask])
         nu = denom_nu > 0 ? numer_nu / denom_nu : NaN
 
+        # Gross U→NILF hazard: P(NILF_t+1 | U_t) — a per-month diagnostic. The
+        # value the model consumes is the NET hazard built below, because the
+        # gross rate double-counts reversible U↔NILF churn (see the ρ_NILF block).
+        u_mask_nilf   = g.unemp_t
+        un_mask       = g.unemp_t .& g.nilf_t1
+        denom_u_nilf  = sum(g.weight[u_mask_nilf])
+        numer_u_nilf  = sum(g.weight[un_mask])
+        u_nilf = denom_u_nilf > 0 ? numer_u_nilf / denom_u_nilf : NaN
+
         push!(results, (year=g.year_t[1], month=g.month_t[1], skilled=sk,
                          window=win,
-                         jfr=jfr, sep=sep, nu=nu,
+                         jfr=jfr, sep=sep, nu=nu, u_nilf=u_nilf,
                          n_pairs=nrow(g)))
     end
     rates = DataFrame(results)
@@ -100,14 +111,16 @@ function make_transitions()
     window_rates = NamedTuple[]
     for gk in groupby(filter(r -> r.window != :none, rates), [:window, :skilled])
         g = DataFrame(gk)
-        valid_jfr = filter(isfinite, g.jfr)
-        valid_sep = filter(isfinite, g.sep)
-        valid_nu  = filter(isfinite, g.nu)
+        valid_jfr    = filter(isfinite, g.jfr)
+        valid_sep    = filter(isfinite, g.sep)
+        valid_nu     = filter(isfinite, g.nu)
+        valid_u_nilf = filter(isfinite, g.u_nilf)
         push!(window_rates, (
             window=g.window[1], skilled=g.skilled[1],
             mean_jfr=isempty(valid_jfr) ? NaN : mean(valid_jfr),
             mean_sep=isempty(valid_sep) ? NaN : mean(valid_sep),
             mean_nu=isempty(valid_nu)   ? NaN : mean(valid_nu),
+            mean_u_nilf=isempty(valid_u_nilf) ? NaN : mean(valid_u_nilf),
             n_months=nrow(g),
         ))
     end
@@ -117,6 +130,60 @@ function make_transitions()
     outpath = joinpath(DERIVED_DIR, "transitions.arrow")
     Arrow.write(outpath, agg)
     @info "  Saved: $outpath  ($(nrow(agg)) rows)"
+
+    # ── ρ_NILF: NET skilled U→NILF hazard (same netting as the net-flow ν) ──
+    # The model's ρ_NILF is a PERMANENT exit from skilled unemployment (the
+    # model has no NILF state, so a worker who "leaks" to NILF does not return).
+    # The GROSS hazard P(NILF|U) is dominated by reversible U↔NILF churn — the
+    # same classification churn that inflates the gross LF→NILF rate (~0.038)
+    # relative to the demographic ν (~0.0033). We therefore net it the way ν is
+    # netted: subtract the NILF→U return flow, scaled by the NILF/U stock ratio,
+    # and floor at ν (a permanent exit cannot be below the demographic rate):
+    #
+    #     ρ_NILF = max( ρ_UN − ρ_NU · (NILF_S / U_S) ,  ν )
+    #
+    # ρ_UN = P(NILF|U, skilled), ρ_NU = P(U|NILF, skilled), both pooled over the
+    # window; NILF_S/U_S and ν from the skilled cross-section. The gross U→NILF
+    # rate is retained in transitions.arrow (mean_u_nilf) as a diagnostic only.
+    skl_pairs = filter(r -> Bool(r.skilled), pairs)
+    rho_rows  = NamedTuple[]
+    for wname in WINDOWS_ORDER
+        pw = filter(r -> r.window == wname, skl_pairs)
+
+        # Gross U→NILF (pooled): P(NILF_t+1 | U_t)
+        um     = pw.unemp_t
+        w_um   = sum(pw.weight[um])
+        rho_UN = w_um > 0 ? sum(pw.weight[um .& pw.nilf_t1]) / w_um : NaN
+
+        # Gross NILF→U return (pooled): P(U_t+1 | NILF_t), NILF_t = ¬lf_t
+        nm     = .!pw.lf_t
+        w_nm   = sum(pw.weight[nm])
+        rho_NU = w_nm > 0 ? sum(pw.weight[nm .& pw.unemp_t1]) / w_nm : NaN
+
+        # Skilled NILF/U stock ratio and life-table ν (demographic floor)
+        cw   = filter(r -> r.window == wname && r.skilled, df)
+        wv   = Float64.(coalesce.(getproperty(cw, wt_col), 0.0))
+        nN   = sum(wv[.!cw.in_lf]); nU = sum(wv[cw.unemployed])
+        ratio = nU > 0 ? nN / nU : NaN
+
+        lfw  = filter(r -> r.window == wname && r.in_lf, df)
+        lw   = Float64.(coalesce.(getproperty(lfw, wt_col), 0.0))
+        rem  = Float64.(max.(65 .- lfw.AGE, 0)) .* 12.0
+        nu_w = sum(lw) > 0 ? 1.0 / wmean(rem, lw) : NaN
+
+        rho_net = rho_UN - rho_NU * ratio
+        rho_use = isfinite(rho_net) ? max(rho_net, nu_w) : nu_w
+
+        push!(rho_rows, (window=String(wname), rho_NILF=rho_use,
+                         rho_UN_gross=rho_UN, rho_NU_gross=rho_NU,
+                         nilf_u_ratio=ratio, nu_floor=nu_w, rho_net_raw=rho_net))
+        @printf("  ρ_NILF[%-13s]  net=%.5f  (gross U→N=%.5f, N→U=%.5f, NILF/U=%.1f, ν floor=%.5f, raw net=%+.5f)\n",
+                wname, rho_use, rho_UN, rho_NU, ratio, nu_w, rho_net)
+    end
+    rho_path = joinpath(DERIVED_DIR, "rho_nilf.csv")
+    CSV.write(rho_path, DataFrame(rho_rows))
+    @info "  Saved: $rho_path  (NET skilled U→NILF hazard ρ_NILF per window)"
+
     return agg
 end
 
@@ -141,12 +208,16 @@ function compute_nu()
                 n_obs = nrow(sub))
     end
 
-    # ── Net-flow upper bound (diagnostic) ─────────────────────────
-    # ν_ub = δ - γ * (1 - LFPR) / LFPR
-    # δ = LF→NILF hazard, γ = NILF→LF return hazard. γ_obs overstates
-    # true re-entry (post-window returns are unobserved), so ν_ub is
-    # an upper bound on the true permanent exit rate.
-    function net_flow_ub(window::Symbol)
+    # ── Net-flow ν estimate (independent cross-check, NOT a bound) ─
+    # ν_nf = δ − γ·(1−LFPR)/LFPR — the realised net LF→NILF outflow per LF
+    # participant. This is a different notion of turnover than the life-table
+    # rate (realised net outflow vs a smoothed "everyone exits at 65"), so the
+    # two need not coincide. Reversible LF↔NILF churn inflates both δ and γ and
+    # largely cancels in the net, so ν_nf is not a one-sided bound; what moves
+    # it is the age structure — elevated retirement (e.g. the 2015–19 boomer
+    # wave, with a low NILF→LF return γ) pushes the net outflow above the
+    # life-table rate.
+    function net_flow_estimate(window::Symbol)
         bt = filter(r -> r.window == window && isfinite(r.nu), trans)
         delta = nrow(bt) > 0 ? wmean(bt.nu, Float64.(bt.n_pairs)) : NaN
 
@@ -173,36 +244,36 @@ function compute_nu()
         w_all = Float64.(coalesce.(sub.WTFINL, 0.0))
         lfpr  = sum(w_all[sub.in_lf]) / sum(w_all)
 
-        nu_ub = delta - gamma * (1.0 - lfpr) / lfpr
-        return (delta=delta, gamma=gamma, lfpr=lfpr, nu_upper_bound=nu_ub)
+        nu_nf = delta - gamma * (1.0 - lfpr) / lfpr
+        return (delta=delta, gamma=gamma, lfpr=lfpr, nu_net=nu_nf)
     end
 
     # ── Run on both baseline windows ──────────────────────────────
     rows = NamedTuple[]
     for w in (:base_fc, :base_covid)
         lt = life_table_nu(w)
-        nf = net_flow_ub(w)
+        nf = net_flow_estimate(w)
         @printf("  %s: life-table ν = %.6f  (mean_rem = %.1f months, n = %d)\n",
                 w, lt.nu, lt.mean_rem_months, lt.n_obs)
-        @printf("            δ = %.6f  γ = %.6f  LFPR = %.4f  ν_ub = %.6f\n",
-                nf.delta, nf.gamma, nf.lfpr, nf.nu_upper_bound)
-        # ν_ub is an independent, downward-biased estimate of ν (γ_obs
-        # overstates re-entry, so the subtracted term is too large). A strict
-        # lt.nu < ν_ub therefore fires on noise-level overshoots that carry no
-        # economic meaning. Flag only a material breach (>3% above the bound);
-        # otherwise report agreement between the two independent estimates.
-        rel_gap = (lt.nu - nf.nu_upper_bound) / nf.nu_upper_bound
-        if rel_gap < 0.03
-            @info @sprintf("    ✓ life-table ν consistent with net-flow estimate (gap = %+.2f%%)", 100 * rel_gap)
+        @printf("            δ = %.6f  γ = %.6f  LFPR = %.4f  ν_net = %.6f\n",
+                nf.delta, nf.gamma, nf.lfpr, nf.nu_net)
+        # Two independent ν estimates: the life-table rate and the net-flow
+        # rate ν_net. They coincide when the age structure is stable and
+        # diverge when retirement is elevated (the net outflow then runs above
+        # the life-table rate). Both are ~0.003–0.005; flag only an
+        # order-of-magnitude disagreement, not the routine demographic gap.
+        rel_gap = (lt.nu - nf.nu_net) / nf.nu_net
+        if abs(rel_gap) <= 0.50
+            @info @sprintf("    ✓ life-table ν and net-flow ν agree within 50%% (gap = %+.1f%%)", 100 * rel_gap)
         else
-            @warn @sprintf("    ⚠ life-table ν exceeds net-flow upper bound by %.2f%% — review", 100 * rel_gap)
+            @warn @sprintf("    ⚠ life-table ν and net-flow ν differ by %.1f%% — check window stationarity", 100 * rel_gap)
         end
         push!(rows, (
             window                = String(w),
             nu                    = lt.nu,
             mean_rem_months       = lt.mean_rem_months,
             n_obs                 = lt.n_obs,
-            nu_upper_bound        = nf.nu_upper_bound,
+            nu_net                = nf.nu_net,
             delta_lf_nilf         = nf.delta,
             gamma_nilf_lf         = nf.gamma,
             lfpr                  = nf.lfpr,

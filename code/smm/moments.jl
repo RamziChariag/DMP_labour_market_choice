@@ -35,7 +35,12 @@
 
 
 # ============================================================
-# Moment names (canonical order — 23 moments)
+# Moment names (canonical order — 26 moments)
+#
+# Identical ordering to data_processing/setup.jl. The cross-market
+# overlap pair (overlap_UgtS, overlap_SltU) and the skilled long-term-
+# unemployment share (ltu_share_S) are appended at the END so the
+# legacy moment indices line up with the data-side Σ̂ columns.
 # ============================================================
 
 const MOMENT_NAMES = [
@@ -47,9 +52,10 @@ const MOMENT_NAMES = [
     :mean_wage_U, :mean_wage_S,
     :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
     :wage_premium, :theta_U, :theta_S,
+    :overlap_UgtS, :overlap_SltU, :ltu_share_S,
 ]
 
-@assert length(MOMENT_NAMES) == 23 "Expected 23 moments, got $(length(MOMENT_NAMES))"
+@assert length(MOMENT_NAMES) == 26 "Expected 26 moments, got $(length(MOMENT_NAMES))"
 
 
 """
@@ -114,6 +120,9 @@ Moment list
 
   Tightness (2)
     theta_U, theta_S
+
+  Cross-market overlap and duration (3)
+    overlap_UgtS, overlap_SltU, ltu_share_S
 """
 function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
     moments_file = joinpath(derived_dir, "moments_$(window).csv")
@@ -564,6 +573,39 @@ function _disc_pctile(logw::AbstractVector, mass::AbstractVector, target::Real)
     return logw[end]
 end
 
+# CDF of the σ_w-convolved log-wage distribution as a callable F(y).  Same
+# lognormal-measurement-error layer as _logwage_moments: each structural
+# log-wage atom logw[j] (mass[j]) is smeared by N(0, σ_w²), so
+# F(y) = Σ_j mass[j] · Φ((y − logw[j]) / σ_w).  With σ_w → 0 this is the
+# step CDF of the discrete structural mass.  Returns nothing if the segment
+# has negligible employment, signalling the caller to skip the overlap.
+function _logwage_conv_cdf(wmid::AbstractVector, dens::AbstractVector,
+                           bw::Real, σ_w::Real)
+    logw = log.(max.(wmid, 1e-14))
+    mass = dens .* bw
+    M    = sum(mass)
+    M < 1e-12 && return nothing
+    mass = mass ./ M
+    if σ_w > 1e-10
+        nd = Normal(0.0, float(σ_w))
+        return y -> begin
+            s = 0.0
+            @inbounds for j in eachindex(logw)
+                s += mass[j] * cdf(nd, y - logw[j])
+            end
+            s
+        end
+    else
+        return y -> begin
+            s = 0.0
+            @inbounds for j in eachindex(logw)
+                logw[j] <= y && (s += mass[j])
+            end
+            s
+        end
+    end
+end
+
 function model_moments(obj)
     _emp_tol = 1e-12
     _has_eU  = obj.agg_eU > _emp_tol
@@ -622,6 +664,29 @@ function model_moments(obj)
     wage_premium = (_has_eU && _has_eS) ?
                    (mean_log_wage_S - mean_log_wage_U) : 0.0
 
+    # Cross-market wage overlap (one moment per bargaining weight).  Each is
+    # a tail probability of one segment's σ_w-convolved log-wage distribution
+    # evaluated at the OTHER segment's convolved median:
+    #   overlap_UgtS = P(log w_U > med log w_S) = 1 − F_U^conv(p50_wage_S)
+    #   overlap_SltU = P(log w_S < med log w_U) =     F_S^conv(p50_wage_U)
+    # Both require non-empty employment on both sides; otherwise the overlap
+    # is undefined and reported as 0 (matched by the skip on an empty segment).
+    if _has_eU && _has_eS
+        F_U_conv = _logwage_conv_cdf(wmid, dens_U, bw, σ_wU)
+        F_S_conv = _logwage_conv_cdf(wmid, dens_S, bw, σ_wS)
+        overlap_UgtS = isnothing(F_U_conv) ? 0.0 : 1.0 - F_U_conv(p50_wage_S)
+        overlap_SltU = isnothing(F_S_conv) ? 0.0 : F_S_conv(p50_wage_U)
+    else
+        overlap_UgtS = 0.0
+        overlap_SltU = 0.0
+    end
+
+    # Skilled long-term-unemployment share: survival of a skilled spell past
+    # a* ≈ 6.23 months under the type-mixture of exponential exit hazards.
+    # Computed in compute_equilibrium_objects (it needs uS, Γ(p*_S), κ_S, wx);
+    # read it through here. Absent or empty skilled segment ⇒ 0.
+    ltu_share_S = (hasproperty(obj, :ltu_share_S) && _has_eS) ? obj.ltu_share_S : 0.0
+
     # Tightness
     _THETA_CAP = 1e14
     theta_U = _has_eU ? obj.thetaU : _THETA_CAP
@@ -654,5 +719,9 @@ function model_moments(obj)
 
         theta_U       = theta_U,
         theta_S       = theta_S,
+
+        overlap_UgtS  = overlap_UgtS,
+        overlap_SltU  = overlap_SltU,
+        ltu_share_S   = ltu_share_S,
     )
 end

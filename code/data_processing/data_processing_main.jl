@@ -18,7 +18,8 @@
 #       jolts.jl       j2j.jl      — JOLTS openings / J2J EE rates
 #       nsc.jl                     — NSC enrolment: κ_w level adj. + φ calibration
 #       transitions.jl             — worker-flow hazards + ν life-table turnover
-#       moments.jl     sigma.jl    — 23 moment targets + Σ̂, per window
+#                                     + ρ_NILF skilled U→NILF hazard
+#       moments.jl     sigma.jl    — 26 moment targets + Σ̂, per window
 #       validation.jl              — end-of-run diagnostics
 #     smm/                         — separate step; consumes data/derived/
 #   data/
@@ -142,10 +143,10 @@ compute_nu()
 _stage_banner("Stage 8 — training-completion rate φ (NSC/IPEDS)")
 calibrate_phi()
 
-_stage_banner("Stage 9 — moment targets (23 moments × 4 windows; training_share × κ_w)")
+_stage_banner("Stage 9 — moment targets (26 moments × 4 windows; training_share × κ_w)")
 all_moments = make_moments()
 
-_stage_banner("Stage 10 — influence functions and Σ̂ (23×23 per window; ts row/col × κ_w)")
+_stage_banner("Stage 10 — influence functions and Σ̂ (26×26 per window; ts row/col × κ_w)")
 all_sigma = compute_influence_functions_and_sigma_full()
 
 _stage_banner("Stage 11 — validation and diagnostics")
@@ -163,11 +164,12 @@ end
 
 println("\nKey outputs:")
 println("  • windows.json                 — single source of truth for WINDOWS (4 entries)")
-println("  • moments_{window}.csv         — 23 moments per window")
-println("  • sigma_{window}.csv           — 23×23 variance-covariance matrix (full)")
+println("  • moments_{window}.csv         — 26 moments per window")
+println("  • sigma_{window}.csv           — 26×26 variance-covariance matrix (full)")
 println("  • moment_scales_{window}.csv   — scale factors used for IF normalisation")
 println("  • j2j_ee_rates.csv             — J2J E4-only EE rates by window")
 println("  • nu_estimation.csv            — ν on base_fc AND base_covid (life-table)")
+println("  • rho_nilf.csv                 — skilled gross U→NILF hazard ρ_NILF per window")
 println("  • phi_calibration.csv          — training completion rate φ (pooled)")
 println("  • training_share_scale.csv     — per-window κ_w NSC level adjustment")
 
