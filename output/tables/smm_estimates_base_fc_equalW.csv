@@ -1,31 +1,34 @@
 block,name,label,estimate,lb,ub,fixed
-common,a_ℓ,worker type shape a_ℓ,7.99462517,0.01000000,8.00000000,false
-common,b_ℓ,worker type shape b_ℓ,0.23652217,0.01000000,7.00000000,false
-unsk,bU,unskilled outside flow b_U,0.03447963,0.00000000,2.00000000,false
-unsk,bT,training flow b_T,0.84365065,0.00000000,2.00000000,false
-skl,bS,skilled outside flow b_S,0.20892945,0.00000000,2.00000000,false
-common,c,training cost coeff c,10.71565955,0.10000000,12.00000000,false
-unsk,PU,unskilled productivity P_U,2.22503117,0.50000000,7.00000000,false
-skl,gamma_PS,skilled productivity γ_PS,9.23313882,1.00000000,12.00000000,false
-unsk,α_U,unskilled damage shape α_U,0.61467445,0.01000000,20.00000000,false
-skl,a_Γ,skilled offer shape a_Γ,1.33893406,0.01000000,10.00000000,false
-skl,b_Γ,skilled offer shape b_Γ,8.19980737,0.01000000,12.00000000,false
-unsk,μ,unskilled matching eff μ_U,0.35927164,0.00100000,1.50000000,false
-unsk,k,unskilled vacancy cost k_U,1.33822529,0.00100000,1.50000000,false
-unsk,λ,unskilled damage rate λ_U,0.36590938,0.00100000,0.80000000,false
-skl,μ,skilled matching eff μ_S,0.31065411,0.01000000,1.50000000,false
-skl,k,skilled vacancy cost k_S,0.72104178,0.00100000,1.50000000,false
-skl,β,skilled bargaining β_S,0.61223361,0.05000000,0.98000000,false
-skl,λ,skilled quality shock λ_S,0.50266679,0.00100000,0.80000000,false
-skl,σ,OJS flow cost σ_S,0.03226970,0.00000000,0.15000000,false
-skl,ξ,skilled exogenous separation ξ_S,0.00561424,0.00000000,0.10000000,false
+common,a_ℓ,worker type shape a_ℓ,1.98775931,0.01000000,8.00000000,false
+common,b_ℓ,worker type shape b_ℓ,1.12095262,0.01000000,7.00000000,false
+unsk,bU,unskilled outside flow b_U,3.90161099,0.00000000,4.00000000,false
+unsk,bT,training flow b_T,0.97398141,0.00000000,6.00000000,false
+skl,bS,skilled outside flow b_S,3.98403817,0.00000000,4.00000000,false
+common,c,training cost coeff c,1.17136756,0.10000000,20.00000000,false
+common,A,aggregate production scale A,5.96272513,1.00000000,6.00000000,false
+unsk,PU,unskilled productivity P_U,6.98053300,0.50000000,7.00000000,false
+skl,gamma_PS,skilled productivity γ_PS,3.72003516,1.00000000,17.00000000,false
+unsk,α_U,unskilled damage shape α_U,0.01056443,0.01000000,20.00000000,false
+skl,a_Γ,skilled offer shape a_Γ,6.71544980,0.01000000,10.00000000,false
+skl,b_Γ,skilled offer shape b_Γ,1.25182447,0.01000000,12.00000000,false
+unsk,μ,unskilled matching eff μ_U,1.49999719,0.00100000,1.50000000,false
+unsk,k,unskilled vacancy cost k_U,3.98702658,0.00100000,4.50000000,false
+unsk,λ,unskilled damage rate λ_U,0.01474448,0.00100000,0.80000000,false
+unsk,σ_w,unskilled wage meas. error σ_wU,0.49984684,0.00000000,0.50000000,false
+skl,μ,skilled matching eff μ_S,0.26787547,0.01000000,2.00000000,false
+skl,k,skilled vacancy cost k_S,4.49999340,0.00100000,4.50000000,false
+skl,λ,skilled quality shock λ_S,0.11932831,0.00100000,0.80000000,false
+skl,σ,OJS flow cost σ_S,0.15647457,0.00000000,4.00000000,false
+skl,ξ,skilled exogenous separation ξ_S,0.00601620,0.00000000,0.30000000,false
+skl,σ_w,skilled wage meas. error σ_wS,0.00031038,0.00000000,0.50000000,false
+fixed,unsk_η,unsk_η,0.50000000,,,true
+fixed,skl_η,skl_η,0.50000000,,,true
 fixed,unsk_β,unsk_β,0.50000000,,,true
+fixed,skl_β,skl_β,0.50000000,,,true
 fixed,r,r,0.00416667,,,true
 fixed,ν,ν,0.00323032,,,true
 fixed,φ,φ,0.02222129,,,true
-fixed,unsk_η,unsk_η,0.50000000,,,true
-fixed,skl_η,skl_η,0.50000000,,,true
 
-# Q = 1.4382390576e+00
+# Q = 5.0979884349e+00
 # converged = true
-# iterations = 2758
+# iterations = 3421

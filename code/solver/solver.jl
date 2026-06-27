@@ -63,20 +63,20 @@ function _initialise_caches(
 
     r = common.r;   ν = common.ν;   φ = common.φ
 
-    US_guess     = skl_par.bS / (r + ν)
-    Usearch_init = fill(unsk_par.bU / (r + ν), Nx)
-    T_init       = [(unsk_par.bT + φ * US_guess) / (r + φ + ν) for _ in 1:Nx]
+    US_guess     = skl_par.bS * common.A / (r + ν)
+    Usearch_init = fill(unsk_par.bU * common.A / (r + ν), Nx)
+    T_init       = [(unsk_par.bT * common.A + φ * US_guess) / (r + φ + ν) for _ in 1:Nx]
     U_init       = max.(Usearch_init, T_init)
     t_seed       = [(ν / (ν + φ + ν)) * grids.ℓ[ix] for ix in 1:Nx]
 
-    PU_init = max(unsk_par.PU, 1e-6)
-    pstar_U_init = [clamp(unsk_par.bU / (PU_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
+    PU_init = max(common.A * unsk_par.PU, 1e-6)
+    pstar_U_init = [clamp(unsk_par.bU * common.A / (PU_init * max(grids.x[ix], 1e-3)), 0.05, 0.90)
                     for ix in 1:Nx]
 
     pstar_S_init = [begin
                         xi = max(grids.x[ix], 1e-3)
-                        PS_xi = max(PS_of_x(xi, skl_par.gamma_PS), 1e-6)
-                        clamp(skl_par.bS / (PS_xi * xi), 0.05, 0.90)
+                        PS_xi = max(PS_of_x(xi, skl_par.gamma_PS, common.A), 1e-6)
+                        clamp(skl_par.bS * common.A / (PS_xi * xi), 0.05, 0.90)
                     end
                     for ix in 1:Nx]
     poj_init = clamp.(pstar_S_init .+ 0.30, pstar_S_init, 0.95)
@@ -94,7 +94,7 @@ function _initialise_caches(
         θ         = 0.5,
     )
 
-    US_init = fill(skl_par.bS / (r + ν), Nx)
+    US_init = fill(skl_par.bS * common.A / (r + ν), Nx)
 
     sc = SkilledCache(
         U     = US_init,

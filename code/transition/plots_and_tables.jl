@@ -177,8 +177,8 @@ function _get_model_moments(bundle)
     spec = bundle.spec
     sim  = bundle.sim
 
-    cp, rp, up, sp = unpack_θ(res.theta_opt, spec)
-    model, sol = solve_model(cp, rp, up, sp, sim;
+    cp, up, sp = unpack_θ(res.theta_opt, spec)
+    model, sol = solve_model(cp, up, sp, sim;
                              Nx=spec.run.Nx, Np_U=spec.run.Np_U, Np_S=spec.run.Np_S)
 
     if !sol.ok
@@ -384,8 +384,8 @@ function compute_smm_standard_errors(bundle; derived_dir::String, cond_target::F
 
     # ── Helper: compute model moment vector at a given θ ────────────────
     function _model_mom_vec(θ)
-        cp, rp, up, sp = unpack_θ(θ, spec)
-        model_sol, sol = solve_model(cp, rp, up, sp, sim;
+        cp, up, sp = unpack_θ(θ, spec)
+        model_sol, sol = solve_model(cp, up, sp, sim;
                                      Nx=spec.run.Nx, Np_U=spec.run.Np_U, Np_S=spec.run.Np_S)
         obj = compute_equilibrium_objects(model_sol)
         mm  = model_moments(obj)
@@ -740,11 +740,13 @@ Extract a parameter value from an SMM bundle's optimum.
 function _extract_param(bundle, field::Symbol, block::Symbol)
     res  = bundle.result
     spec = bundle.spec
-    cp, rp, up, sp = unpack_θ(res.theta_opt, spec)
+    cp, up, sp = unpack_θ(res.theta_opt, spec)
     if     block == :common; return Float64(getfield(cp, field))
-    elseif block == :regime; return Float64(getfield(rp, field))
     elseif block == :unsk;   return Float64(getfield(up, field))
     elseif block == :skl;    return Float64(getfield(sp, field))
+    elseif block == :regime  # absorbed into up/sp; these names are block-unique
+        return hasfield(typeof(up), field) ? Float64(getfield(up, field)) :
+                                             Float64(getfield(sp, field))
     else error("Unknown block: $block")
     end
 end
@@ -913,9 +915,9 @@ function _get_x_bar(bundle; Nx_fine::Int = 400)
     spec = bundle.spec
     sim  = bundle.sim
 
-    cp, rp, up, sp = unpack_θ(res.theta_opt, spec)
+    cp, up, sp = unpack_θ(res.theta_opt, spec)
     # Solve on a finer grid so the interpolated cutoff is precise
-    model, sol = solve_model(cp, rp, up, sp, sim;
+    model, sol = solve_model(cp, up, sp, sim;
                              Nx=Nx_fine, Np_U=spec.run.Np_U, Np_S=spec.run.Np_S)
 
     if !sol.ok

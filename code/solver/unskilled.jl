@@ -129,7 +129,7 @@ function unskilled_inner_loop!(
 
     r  = cp.r;   ν  = cp.ν;   φ  = cp.φ;   c  = cp.c
     μ  = up.μ;   η  = up.η;   β  = up.β;   λ  = up.λ
-    PU = up.PU;  bU = up.bU;  bT = up.bT;  α  = up.α_U
+    PU = up.PU;  bU = up.bU * cp.A;  bT = up.bT * cp.A;  α  = up.α_U
 
     θ  = uc.θ
     f  = jobfinding_rate(θ, μ, η)
@@ -280,7 +280,7 @@ function update_pstar_from_surplus!(
 
     r  = cp.r;   ν  = cp.ν;   c  = cp.c
     λ  = up.λ;   μ  = up.μ;   η  = up.η
-    PU = up.PU;  bU = up.bU
+    PU = up.PU;  bU = up.bU * cp.A
 
     f_new        = jobfinding_rate(θ_new, μ, η)
     denom_search = r + ν + f_new
@@ -296,7 +296,7 @@ function update_pstar_from_surplus!(
         if x <= 1e-14 || PU <= 1e-14
             pstar_new[ix] = 1.0
         else
-            pstar_new[ix] = clamp01(((r + ν) * U_new - λ * I) / (PU * x))
+            pstar_new[ix] = clamp01(((r + ν) * U_new - λ * I) / (cp.A * PU * x))
         end
     end
     return nothing
@@ -324,7 +324,7 @@ function update_theta_unskilled(model::Model)
         return 1e-14
     end
 
-    q     = up.k * U_total / Jbar
+    q     = (up.k * model.common.A) * U_total / Jbar
     θ_raw = theta_from_q(q, up.μ, up.η)
     return clamp(θ_raw, 1e-14, 100.0)
 end

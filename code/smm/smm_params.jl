@@ -332,12 +332,15 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:common, :b_ℓ,        0.0100,   7.0000,   5.0000, "worker type shape b_ℓ"),
 
         # Deep structural — institutional flow values (stored by consuming block)
-        ParamSpec(:unsk,   :bU,         0.0000,   2.0000,   0.0000, "unskilled outside flow b_U"),
-        ParamSpec(:unsk,   :bT,         0.0000,   2.0000,   0.2800, "training flow b_T"),
-        ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.0100, "skilled outside flow b_S"),
+        # Flow values relative to the aggregate scale: effective b_j = b̃_j · A.
+        ParamSpec(:unsk,   :bU,         0.0000,   2.0000,   0.0500, "unskilled outside flow b_U / A"),
+        ParamSpec(:unsk,   :bT,         0.0000,   5.0000,   0.3000, "training flow b_T / A"),
+        ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.1000, "skilled outside flow b_S / A"),
 
         # Regime-specific — common block
         ParamSpec(:common, :c,          0.1000,  12.0000,   7.7000, "training cost coeff c"),
+        # Aggregate production scale; carries the dollar level of wages.
+        ParamSpec(:common, :A,          3.0000, 9.0000, 7.0000, "aggregate production scale A"),
 
         # Regime-specific — aggregate state / offer shape (stored by consuming block)
         ParamSpec(:unsk,   :PU,         0.5000,   7.0000,   0.7000, "unskilled productivity P_U"),
@@ -347,20 +350,20 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:skl,    :b_Γ,        0.0100,  12.0000,   5.0000, "skilled offer shape b_Γ"),
 
         # Regime-specific — unskilled block
-        ParamSpec(:unsk,   :μ,          0.0010,   1.5000,   0.7400, "unskilled matching eff μ_U"),
+        ParamSpec(:unsk,   :μ,          0.0010,   3.5000,   0.7400, "unskilled matching eff μ_U"),
         ParamSpec(:unsk,   :η,          0.1000,   0.9800,   0.6000, "unskilled matching elas η_U"),
-        ParamSpec(:unsk,   :k,          0.0010,   1.5000,   0.2500, "unskilled vacancy cost k_U"),
+        ParamSpec(:unsk,   :k,          0.0010,   5.0000,   0.5000, "unskilled vacancy cost k_U / A"),
         ParamSpec(:unsk,   :β,          0.0500,   0.9800,   0.4000, "unskilled bargaining β_U"),
         ParamSpec(:unsk,   :λ,          0.0010,   0.8000,   0.0800, "unskilled damage rate λ_U"),
         ParamSpec(:unsk,   :σ_w,        0.0000,   0.5000,   0.1000, "unskilled wage meas. error σ_wU"),
 
         # Regime-specific — skilled block
-        ParamSpec(:skl,    :μ,          0.0100,   1.5000,   0.9000, "skilled matching eff μ_S"),
+        ParamSpec(:skl,    :μ,          0.0100,   4.5000,   0.9000, "skilled matching eff μ_S"),
         ParamSpec(:skl,    :η,          0.1000,   0.9800,   0.5000, "skilled matching elas η_S"),
-        ParamSpec(:skl,    :k,          0.0010,   1.5000,   0.1700, "skilled vacancy cost k_S"),
+        ParamSpec(:skl,    :k,          0.0010,   5.0000,   0.5000, "skilled vacancy cost k_S / A"),
         ParamSpec(:skl,    :β,          0.0500,   0.98000,   0.3200, "skilled bargaining β_S"),
         ParamSpec(:skl,    :λ,          0.0010,   0.8000,   0.0700, "skilled quality shock λ_S"),
-        ParamSpec(:skl,    :σ,          0.0000,   0.1500,   0.0100, "OJS flow cost σ_S"),
+        ParamSpec(:skl,    :σ,          0.0000,   1.0000,   0.0500, "OJS flow cost σ_S / A"),
         ParamSpec(:skl,    :ξ,          0.0000,   0.1000,   0.0050, "skilled exogenous separation ξ_S"),
         ParamSpec(:skl,    :σ_w,        0.0000,   0.5000,   0.1000, "skilled wage meas. error σ_wS"),
     ]
@@ -371,7 +374,7 @@ end
 # which parameters to free in a crisis re-estimation (deep parameters
 # get fixed at the baseline estimate; regime-specific ones stay free).
 const REGIME_SPECIFIC_PARAMS = Set([
-    (:common, :c),
+    (:common, :c),   (:common, :A),
     (:unsk,   :PU),  (:skl,  :gamma_PS),
     (:unsk,   :α_U), (:skl,  :a_Γ),   (:skl,  :b_Γ),
     (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),  (:unsk, :σ_w),
@@ -452,6 +455,7 @@ function unpack_θ(
         a_ℓ = _get(:a_ℓ, :common, 2.00),
         b_ℓ = _get(:b_ℓ, :common, 5.00),
         c   = _get(:c,   :common, 1.70),
+        A   = _get(:A,   :common, 1.00),
     )
 
     # First-pass build.  The names unique to one block (PU, bU, bT, α_U /

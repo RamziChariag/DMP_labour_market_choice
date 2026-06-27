@@ -26,6 +26,8 @@ Base.@kwdef struct CommonParams
     b_ℓ :: Float64    # Beta shape 2 for worker-type density ℓ(x)
 
     c   :: Float64    # training cost coefficient in c(x) = exp(c)·(1−x)·e^{−x}
+
+    A   :: Float64 = 1.0   # aggregate production scale (TFP / demand level); multiplies π_U and π_S
 end
 
 
@@ -226,6 +228,7 @@ function initialise_model(;
         a_ℓ = 2.0,
         b_ℓ = 5.0,
         c   = 1.70,
+        A   = 1.0,
     )
 
     ℓvals = pdf.(Beta(cp.a_ℓ, cp.b_ℓ), xgrid)
@@ -292,9 +295,9 @@ function initialise_model(;
     # Initial conditions
     r = cp.r;  ν = cp.ν;  φ = cp.φ
 
-    US_guess     = sp.bS / (r + ν)
-    T_init       = fill((up.bT + φ * US_guess) / (r + φ + ν), Nx)
-    Usearch_init = fill(up.bU / (r + ν), Nx)
+    US_guess     = sp.bS * cp.A / (r + ν)
+    T_init       = fill((up.bT * cp.A + φ * US_guess) / (r + φ + ν), Nx)
+    Usearch_init = fill(up.bU * cp.A / (r + ν), Nx)
     U_init       = max.(Usearch_init, T_init)
     t_seed       = [(ν / (2ν + φ)) * ℓvals[ix] for ix in 1:Nx]
 
@@ -311,7 +314,7 @@ function initialise_model(;
         θ         = 0.5,
     )
 
-    US_init = fill(sp.bS / (r + ν), Nx)
+    US_init = fill(sp.bS * cp.A / (r + ν), Nx)
 
     sc = SkilledCache(
         U     = US_init,

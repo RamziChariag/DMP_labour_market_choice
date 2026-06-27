@@ -73,6 +73,7 @@ common = CommonParams(
     a_ℓ = 2.0,
     b_ℓ = 5.0,
     c   = 1.70,
+    A   = 1.0,   # aggregate production scale; set to ≈ data median weekly wage for un-normalised runs
 )
 
 unsk_par = UnskilledParams(

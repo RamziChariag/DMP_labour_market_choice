@@ -35,9 +35,9 @@ function compute_equilibrium_objects(model::Model)
 
     r  = cp.r;  ν  = cp.ν;  φ  = cp.φ
     βU = up.β;  λU = up.λ
-    βS = sp.β;  λS = sp.λ;  σS = sp.σ;  ξS = sp.ξ
+    βS = sp.β;  λS = sp.λ;  σS = sp.σ * cp.A;  ξS = sp.ξ
 
-    PU = up.PU;  γPS = sp.gamma_PS;  bS = sp.bS;  αU = up.α_U
+    PU = up.PU;  γPS = sp.gamma_PS;  bS = sp.bS * cp.A;  αU = up.α_U
 
     c_of_x = x -> training_cost(x, cp.c)
 
@@ -117,7 +117,7 @@ function compute_equilibrium_objects(model::Model)
     for ix in 1:Nx
         Svec = zeros(NpU)
         solve_unskilled_surplus_on_grid!(
-            Svec, pgU, wGU, PU, xg[ix], r, ν, λU, UU[ix], uc.pstar[ix]
+            Svec, pgU, wGU, cp.A * PU, xg[ix], r, ν, λU, UU[ix], uc.pstar[ix]
         )
         SU_surface[ix, :] = Svec
     end
@@ -178,7 +178,7 @@ function compute_equilibrium_objects(model::Model)
         for jp in 1:NpU
             ω_j = _soft_weight(pgU[jp], pst, pgU, jp, NpU)
             if ω_j > 0.0
-                wU_surface[ix, jp] = βU * PU * xg[ix] * pgU[jp] + outside
+                wU_surface[ix, jp] = βU * cp.A * PU * xg[ix] * pgU[jp] + outside
             end
         end
     end
@@ -187,7 +187,7 @@ function compute_equilibrium_objects(model::Model)
     wS0_surface = fill(NaN, Nx, NpS)
     for ix in 1:Nx
         pst         = clamp01(pstar_S[ix])
-        PS_x        = PS_of_x(xg[ix], γPS)
+        PS_x        = PS_of_x(xg[ix], γPS, cp.A)
         flow_out    = (1.0 - βS) * bS
         ladder_term = βS * (1.0 - βS) * κS * I_full[ix]
         for jp in 1:NpS
@@ -202,7 +202,7 @@ function compute_equilibrium_objects(model::Model)
     wS1_surface = fill(NaN, Nx, NpS)
     for ix in 1:Nx
         pst      = clamp01(pstar_S[ix])
-        PS_x     = PS_of_x(xg[ix], γPS)
+        PS_x     = PS_of_x(xg[ix], γPS, cp.A)
         flow_out = (1.0 - βS) * (bS + σS)
         for jp in 1:NpS
             ω_j = _soft_weight(pg[jp], pst, pg, jp, NpS)
@@ -401,12 +401,12 @@ function compute_equilibrium_objects(model::Model)
             _Utot = dot(ueff, wx)
             _Jbar = dot(uc.Jfrontier .* ueff, wx)
             (_Jbar > 1e-14 && _Utot > 1e-14) ?
-                max(theta_from_q(up.k * _Utot / _Jbar, up.μ, up.η), 1e-14) : 1e-14
+                max(theta_from_q(up.k * cp.A * _Utot / _Jbar, up.μ, up.η), 1e-14) : 1e-14
         end,
         thetaS  = begin
             _JS = compute_Jbar_skilled(model)
             _JS > 1e-12 ?
-                max(theta_from_q(sp.k / _JS, sp.μ, sp.η), 1e-14) : 1e-14
+                max(theta_from_q(sp.k * cp.A / _JS, sp.μ, sp.η), 1e-14) : 1e-14
         end,
 
         # Job-finding and separation rates

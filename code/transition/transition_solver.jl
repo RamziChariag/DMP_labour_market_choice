@@ -37,11 +37,9 @@
 #
 # Productivity function
 # ─────────────────────
-# The old model used a constant rp.PS.  This variant uses
-#   PS(x) = γ · x^{γ−1},   γ = rp.gamma_PS,
-# via the PS_of_x(x, γ) helper defined in params.jl / skilled.jl.
-# Every place that previously wrote  rp.PS * x * p  now reads
-#   PS_of_x(x, rp.gamma_PS) * x * p.
+# Skilled flow output is  A · PS(x) · x · p  with
+#   PS(x) = γ · x^{γ−1},   γ = sp.gamma_PS,   A = cp.A,
+# via the PS_of_x(x, γ, A) helper defined in grids.jl.
 #
 # Public API
 #   solve_transition(model_z0, model_z1, tp; scenario)
@@ -268,8 +266,7 @@ Bellman given that θ).  This is correct because, with θ given,
 the value functions are uniquely pinned down by the parameters;
 the backward structure enters only through the θ path.
 
-PS(x) is evaluated via PS_of_x(x, rp.gamma_PS) everywhere the old
-solver used the constant rp.PS.
+PS(x) is evaluated via PS_of_x(x, sp.gamma_PS, cp.A).
 """
 function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
     Nt  = tp.N_steps + 1
@@ -280,7 +277,6 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
     sc = model.skl_cache
 
     cp = model.common
-    rp = model.regime
     up = model.unsk_par
     sp = model.skl_par
     gp = model.grids
@@ -288,7 +284,7 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
     sg = model.skl_grids
     pre = model.skl_pre
 
-    αU = rp.α_U
+    αU = up.α_U
     wG = build_unskilled_G_weights(ug.p, ug.wp, αU)
 
     denom_nb = max(1.0 - sp.β, 1e-14)
@@ -339,7 +335,7 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
             j0_soft   = max(j0_prev - 1, 1)
 
             # PS(x) for this worker type — fct_ps variant
-            PS_x = PS_of_x(x_val, rp.gamma_PS)
+            PS_x = PS_of_x(x_val, sp.gamma_PS, cp.A)
 
             # Recompute tail integral I
             tailE = zeros(Float64, NpS)
@@ -358,12 +354,12 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
 
             @inbounds for j in 1:NpS
                 pj = sg.p[j]
-                # Match flow output:  PS(x) · x · p  (fct_ps vs old constant rp.PS)
+                # Match flow output:  A · PS(x) · x · p
                 flow = PS_x * x_val * pj
                 raw_S0 = (flow - (cp.r + cp.ν) * U_x + sp.λ * I_val) / base
                 tail_mass_j = pre.tail_weights[j]
                 tail_Emax_j = tailE[max(j, j0_soft)]
-                raw_S1 = (flow - (cp.r + cp.ν) * U_x - sp.σ + sp.λ * I_val +
+                raw_S1 = (flow - (cp.r + cp.ν) * U_x - sp.σ * cp.A + sp.λ * I_val +
                            fS * sp.β * tail_Emax_j) / (base + fS * tail_mass_j)
                 Smax_raw[j] = max(raw_S0, raw_S1)
                 diff_raw[j] = raw_S1 - raw_S0
@@ -495,7 +491,6 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
     dt  = tp.dt
 
     cp  = model.common
-    rp  = model.regime
     up  = model.unsk_par
     sp  = model.skl_par
     pre = model.skl_pre
@@ -503,7 +498,7 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
     sg  = model.skl_grids
 
     φ  = cp.φ;   ν  = cp.ν
-    λU = up.λ;   αU = rp.α_U
+    λU = up.λ;   αU = up.α_U
     ξS = sp.ξ;   λS = sp.λ
 
     for n in 1:(Nt - 1)
@@ -695,7 +690,7 @@ function _update_tightness!(path::TransitionPath, model::Model, tp::TransitionPa
         end
 
         if J_u_sum > 1e-12 && u_U_sum > 1e-12
-            q_U     = up.k * u_U_sum / J_u_sum
+            q_U     = up.k * model.common.A * u_U_sum / J_u_sum
             θU_prop = clamp(theta_from_q(q_U, up.μ, up.η), 1e-14, 100.0)
         else
             θU_prop = path.θU[n]
@@ -734,7 +729,7 @@ function _update_tightness!(path::TransitionPath, model::Model, tp::TransitionPa
 
         if num_S > 1e-12 && den_S > 1e-12
             Jbar_S  = num_S / den_S
-            q_S     = sp.k / Jbar_S
+            q_S     = sp.k * model.common.A / Jbar_S
             θS_prop = clamp(theta_from_q(q_S, sp.μ, sp.η), 1e-14, 100.0)
         else
             θS_prop = path.θS[n]
@@ -766,7 +761,6 @@ function _build_result(
     sg  = model_z1.skl_grids
     up  = model_z1.unsk_par
     sp  = model_z1.skl_par
-    rp  = model_z1.regime
     cp  = model_z1.common
 
     wx  = gp.wx
@@ -816,18 +810,18 @@ function _build_result(
             # Unskilled wages: w_U(x,p) = PU·x·p·β + (1-β)·(r+ν)·U(x)
             # Average over employed — approximate using frontier (p=1)
             if eU_ix > 1e-14
-                w_U_avg = rp.PU * gp.x[ix] * up.β + (1.0 - up.β) * (cp.r + cp.ν) * path.U[ix, n]
+                w_U_avg = cp.A * up.PU * gp.x[ix] * up.β + (1.0 - up.β) * (cp.r + cp.ν) * path.U[ix, n]
                 wage_num_U += w * eU_ix * w_U_avg
                 wage_den_U += w * eU_ix
             end
 
             # Skilled wages: PS(x)·x·p·β + (1-β)·(r+ν)·US(x)
-            # Uses PS_of_x(x, gamma_PS) — fct_ps variant
+            # Uses PS_of_x(x, gamma_PS, A)
             for jp in 1:NpS
                 e_ij = path.eS[ix, jp, n]
                 if e_ij > 1e-14
                     pj    = sg.p[jp]
-                    PS_xi = PS_of_x(gp.x[ix], rp.gamma_PS)   # ← fct_ps
+                    PS_xi = PS_of_x(gp.x[ix], sp.gamma_PS, cp.A)
                     w_S_ij = PS_xi * gp.x[ix] * pj * sp.β +
                              (1.0 - sp.β) * (cp.r + cp.ν) * path.US[ix, n]
                     wage_num_S += w * e_ij * wpS[jp] * w_S_ij

@@ -51,9 +51,9 @@ end
 #   equals γ at x = 1.  Single parameter γ controls shape & level.
 # ============================================================
 
-@inline function PS_of_x(x::Float64, γ::Float64)
+@inline function PS_of_x(x::Float64, γ::Float64, A::Float64=1.0)
     x <= 0.0 && return 0.0
-    return γ * x^(γ - 1.0)
+    return A * γ * x^(γ - 1.0)
 end
 
 

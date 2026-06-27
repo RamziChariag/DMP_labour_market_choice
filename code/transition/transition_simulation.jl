@@ -123,9 +123,9 @@ function run_transition_simulation(
     base_bundle   = _ts_load_bundle_or_error(base_jls,   "Baseline SMM result")
     crisis_bundle = _ts_load_bundle_or_error(crisis_jls, "Crisis SMM result")
 
-    cp_base,  rp_base,  up_base,  sp_base  = unpack_θ(
+    cp_base,  up_base,  sp_base  = unpack_θ(
         base_bundle.result.theta_opt,   base_bundle.spec)
-    cp_crisis, rp_crisis, up_crisis, sp_crisis = unpack_θ(
+    cp_crisis, up_crisis, sp_crisis = unpack_θ(
         crisis_bundle.result.theta_opt, crisis_bundle.spec)
 
     # ── SimParams: inherit tolerances, raise verbosity ────
@@ -161,7 +161,7 @@ function run_transition_simulation(
 
     # ── Solve both stationary equilibria ─────────────────
     println("Solving baseline (z₀) stationary equilibrium..."); flush(stdout)
-    model_z0, sr_z0 = solve_model(cp_base, rp_base, up_base, sp_base, sim_solve;
+    model_z0, sr_z0 = solve_model(cp_base, up_base, sp_base, sim_solve;
                                    Nx = Nx, Np_U = Np_U, Np_S = Np_S)
     sr_z0.ok || @warn "Baseline model did not converge — " *
                        "transition results may be unreliable."
@@ -171,7 +171,7 @@ function run_transition_simulation(
     flush(stdout)
 
     println("Solving crisis (z₁) stationary equilibrium..."); flush(stdout)
-    model_z1, sr_z1 = solve_model(cp_crisis, rp_crisis, up_crisis, sp_crisis,
+    model_z1, sr_z1 = solve_model(cp_crisis, up_crisis, sp_crisis,
                                    sim_solve;
                                    Nx = Nx, Np_U = Np_U, Np_S = Np_S)
     sr_z1.ok || @warn "Crisis model did not converge — " *

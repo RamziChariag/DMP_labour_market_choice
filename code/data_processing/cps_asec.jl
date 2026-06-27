@@ -52,9 +52,15 @@ function clean_cps_asec()
     filter!(row -> row.INCWAGE > 0 && row.WKSWORK1 > 0 && row.UHRSWORKLY > 0, df)
     @info "  After sample restrictions: $(nrow(df))"
 
-    # ── Construct hourly wages ───────────────────────────────────
+    # ── Construct hourly wage, then full-time-equivalent weekly earnings ──
     df.hourly_wage = compute_hourly_wage.(df.INCWAGE, df.WKSWORK1, df.UHRSWORKLY)
     filter!(row -> isfinite(row.hourly_wage) && row.hourly_wage > 0.0, df)
+    # Full-time-equivalent weekly earnings: hourly rate times a standard
+    # full-time week, applied to every worker so part-time hours variation does
+    # not enter the wage distribution.
+    ft_hours = 40.0
+    df.weekly_wage = df.hourly_wage .* ft_hours
+    filter!(row -> isfinite(row.weekly_wage) && row.weekly_wage > 0.0, df)
 
     # ── Deflate to constant (2012) dollars ───────────────────────
     if hasproperty(df, :CPI99)
@@ -64,10 +70,10 @@ function clean_cps_asec()
             cpi_2012 = 1.0
             @warn "  Could not identify CPI99 base — wages not deflated"
         end
-        df.real_wage = deflate_wage.(df.hourly_wage, Float64.(df.CPI99), Float64(cpi_2012))
+        df.real_wage = deflate_wage.(df.weekly_wage, Float64.(df.CPI99), Float64(cpi_2012))
     else
         @warn "  CPI99 not in data — wages remain nominal"
-        df.real_wage = df.hourly_wage
+        df.real_wage = df.weekly_wage
     end
 
     df.skilled = is_skilled.(df.EDUC)
@@ -93,21 +99,15 @@ function clean_cps_asec()
     end
     filter!(row -> !row.trimmed, df)
 
-    # ── Normalisation: divide by pooled median ───────────────────
-    df.wage_norm = fill(NaN, nrow(df))
+    # ── No normalisation: wage_norm holds real weekly-earnings LEVELS ──
+    #    (LMR-style; the model's aggregate scale A absorbs the dollar level.
+    #     A per-window median is printed as a diagnostic only — NOT divided out.)
+    df.wage_norm = copy(df.real_wage)
     for wname in keys(WINDOWS)
         mask = df.window .== wname
         !any(mask) && continue
-        wages_w   = df.real_wage[mask]
-        weights_w = Float64.(df.ASECWT[mask])
-        med_w     = wmedian(wages_w, weights_w)
-        if isfinite(med_w) && med_w > 0.0
-            df.wage_norm[mask] .= df.real_wage[mask] ./ med_w
-            #@info "  Window $wname: median wage = \$(@sprintf("%.2f", med_w))"
-        else
-            #@warn "  Median wage invalid for window $wname"
-            df.wage_norm[mask] .= df.real_wage[mask]
-        end
+        med_w = wmedian(df.real_wage[mask], Float64.(df.ASECWT[mask]))
+        isfinite(med_w) && println("  Window $wname: median real weekly wage = \$$(round(med_w; digits=2)) (level kept, not normalised)")
     end
 
     # ── Select and save ──────────────────────────────────────────
