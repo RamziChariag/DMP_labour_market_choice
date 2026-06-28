@@ -18,7 +18,6 @@
 #       jolts.jl       j2j.jl      — JOLTS openings / J2J EE rates
 #       nsc.jl                     — NSC enrolment: κ_w level adj. + φ calibration
 #       transitions.jl             — worker-flow hazards + ν life-table turnover
-#                                     + ρ_NILF skilled U→NILF hazard
 #       moments.jl     sigma.jl    — 26 moment targets + Σ̂, per window
 #       validation.jl              — end-of-run diagnostics
 #     smm/                         — separate step; consumes data/derived/
@@ -169,7 +168,6 @@ println("  • sigma_{window}.csv           — 26×26 variance-covariance matri
 println("  • moment_scales_{window}.csv   — scale factors used for IF normalisation")
 println("  • j2j_ee_rates.csv             — J2J E4-only EE rates by window")
 println("  • nu_estimation.csv            — ν on base_fc AND base_covid (life-table)")
-println("  • rho_nilf.csv                 — skilled gross U→NILF hazard ρ_NILF per window")
 println("  • phi_calibration.csv          — training completion rate φ (pooled)")
 println("  • training_share_scale.csv     — per-window κ_w NSC level adjustment")
 

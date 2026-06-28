@@ -518,7 +518,6 @@ function unpack_θ(
         b_Γ      = _get(:b_Γ,      :skl, 5.00),
         ξ        = _get(:ξ,        :skl, 0.0),
         σ_w      = _get(:σ_w,      :skl, 0.0),
-        ρ_NILF   = _get(:ρ_NILF,   :skl, 0.03),
     )
 
     # 3. Disambiguate the SHARED field names (μ, η, k, β, λ, and σ) across the
@@ -534,7 +533,7 @@ function unpack_θ(
     sp_fields = Dict{Symbol,Float64}(
         :μ => sp.μ, :η => sp.η, :k => sp.k, :β => sp.β, :λ => sp.λ, :σ => sp.σ,
         :gamma_PS => sp.gamma_PS, :bS => sp.bS, :a_Γ => sp.a_Γ, :b_Γ => sp.b_Γ,
-        :ξ => sp.ξ, :σ_w => sp.σ_w, :ρ_NILF => sp.ρ_NILF,
+        :ξ => sp.ξ, :σ_w => sp.σ_w,
     )
 
     for (i, ps) in enumerate(spec.free)
@@ -572,7 +571,6 @@ function unpack_θ(
         gamma_PS = sp_fields[:gamma_PS], bS = sp_fields[:bS],
         a_Γ = sp_fields[:a_Γ], b_Γ = sp_fields[:b_Γ],
         ξ = sp_fields[:ξ], σ_w = sp_fields[:σ_w],
-        ρ_NILF = sp_fields[:ρ_NILF],
     )
 
     return cp, up, sp

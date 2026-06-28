@@ -368,35 +368,6 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
         LAMBDA_W, σ_wU_cal, σ_wS_cal)
 flush(stdout)
 
-# ── ρ_NILF: gross skilled U→NILF competing-risk hazard for ltu_share_S ────
-# Empirical alignment input (not a moment, not estimated). Read the skilled
-# row for this window from rho_nilf.csv (data pipeline); crisis windows share
-# their baseline value. Pinned into the SkilledParams via :skl_ρ_NILF below.
-# Falls back to the SkilledParams default with a warning if unavailable.
-function _load_rho_nilf(window::Symbol, derived_dir::String) :: Union{Float64,Nothing}
-    rho_pair = _PAIR_BASELINE[window]
-    path = joinpath(derived_dir, "rho_nilf.csv")
-    if !isfile(path)
-        @warn "rho_nilf.csv not found in $derived_dir — ltu_share_S will use the " *
-              "SkilledParams ρ_NILF default. Re-run data_processing/transitions.jl."
-        return nothing
-    end
-    df = CSV.read(path, DataFrame)
-    df.window = Symbol.(df.window)
-    rows = filter(:window => ==(rho_pair), df)
-    (isempty(rows) || !isfinite(rows.rho_NILF[1])) && return nothing
-    return Float64(rows.rho_NILF[1])
-end
-
-ρ_NILF_cal = _load_rho_nilf(WINDOW, derived_dir)
-if isnothing(ρ_NILF_cal)
-    @warn "ρ_NILF unavailable for $WINDOW — using the SkilledParams default."
-else
-    @printf("  Loaded ρ_NILF = %.5f for %s (skilled net U→NILF hazard)\n",
-            ρ_NILF_cal, WINDOW)
-end
-flush(stdout)
-
 
 # ============================================================
 # 4. Weight matrix
@@ -509,13 +480,11 @@ if WINDOW in (:crisis_fc, :crisis_covid)
             baseline_result.loss_opt, baseline_result.converged)
     flush(stdout)
 
-    # Fixed: external calibration + calibrated σ_w + deep structural from
-    # baseline. bU, bT now live in the unskilled block; bS in the skilled block.
+    # Fixed: external calibration (r, ν, φ) + calibrated σ_w + deep structural
+    # from baseline. bU, bT live in the unskilled block; bS in the skilled block.
     # FIX_PARAMS can additionally pin regime-specific parameters;
     # baseline-derived deep values take priority over FIX_PARAMS.
-    # ρ_NILF is pinned only when the data pipeline supplied it.
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
-    _rho_fixed   = isnothing(ρ_NILF_cal) ? (;) : (skl_ρ_NILF = ρ_NILF_cal,)
     fixed_params = merge(
         _extra_fixed,
         (
@@ -531,7 +500,7 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         bU  = up_base.bU,
         bT  = up_base.bT,
         bS  = sp_base.bS,
-    ), _rho_fixed)
+    ))
 
     # Free parameters: regime-specific only.  Init values follow INIT_MODE:
     #   :warmstart → the matched baseline optimum;  otherwise → DEFAULT_PARAMS.
@@ -561,10 +530,8 @@ if WINDOW in (:crisis_fc, :crisis_covid)
 
 else
     # Baseline estimation.  Fix r / ν / φ and the calibrated σ_w, plus anything
-    # in FIX_PARAMS.  ρ_NILF is pinned only when the data pipeline supplied it;
-    # otherwise the SkilledParams default applies.
+    # in FIX_PARAMS.
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
-    _rho_fixed   = isnothing(ρ_NILF_cal) ? (;) : (skl_ρ_NILF = ρ_NILF_cal,)
     fixed_params = merge(_extra_fixed, (
         r = calib.r,
         ν = calib.nu,
@@ -572,7 +539,7 @@ else
 
         unsk_σ_w = σ_wU_cal,
         skl_σ_w  = σ_wS_cal,
-    ), _rho_fixed)
+    ))
 
     free_params = default_free_params()
 
