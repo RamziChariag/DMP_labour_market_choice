@@ -225,6 +225,13 @@ function skilled_inner_loop!(
     dU_tls    = zeros(Float64, Threads.nthreads())
     dS_tls    = zeros(Float64, Threads.nthreads())
 
+    αS = sim.damp_inner_S
+    B  = sim.early_abort_burnin
+    K  = sim.early_abort_K
+    resid   = Vector{Float64}(undef, sim.maxit_inner)
+    status  = :maxit
+    n_inner = 0
+
     streak = 0
     for it in 1:sim.maxit_inner
         fill!(dU_tls, 0.0)
@@ -258,13 +265,14 @@ function skilled_inner_loop!(
                 U1 = (bS + fU * EU1[ix]) / (r + ν + fU)
                 if U1 > U0
                     sc.d[ix] = 1.0
-                    U_new    = U1
+                    U_raw    = U1
                 else
                     sc.d[ix] = 0.0
-                    U_new    = U0
+                    U_raw    = U0
                 end
 
                 U_old        = sc.U[ix]
+                U_new        = U_old + αS * (U_raw - U_old)   # inner under-relaxation
                 sc.U[ix]     = U_new
                 δU           = U_new - U_old
                 dU_tls[tid]  = max(dU_tls[tid], abs(δU))
@@ -309,15 +317,27 @@ function skilled_inner_loop!(
         end
 
         d = max(maximum(dU_tls), maximum(dS_tls))
+        resid[it] = d
+        n_inner   = it
         if d < sim.tol_inner
             streak += 1
-            streak >= sim.conv_streak && break
+            if streak >= sim.conv_streak
+                status = :converged
+                break
+            end
         else
             streak = 0
         end
+
+        # Divergence early-abort: no contraction over the last K sweeps
+        # (disabled when B == 0).  Keyed on |g_eff| ≥ 1, never on slowness.
+        if B > 0 && it > B + K && resid[it] >= resid[it - K]
+            status = :diverged
+            break
+        end
     end
 
-    return (f = f,)
+    return (f = f, status = status, converged = (status === :converged), iters = n_inner)
 end
 
 
@@ -584,6 +604,7 @@ function solve_skilled_block!(
     poj_prop = zeros(Float64, Nx)
 
     streak = 0
+    diverge_streak = 0
     for it in 1:sim.maxit_outer
         θ_old     = sc.θ
         pstar_old = copy(sc.pstar)
@@ -594,7 +615,22 @@ function solve_skilled_block!(
                                             mS_in = mS_in,
                                             fU    = fU,
                                             EU1   = EU1)
-        f = inner_result.f
+        f          = inner_result.f
+        inner_conv = inner_result.converged
+
+        # Reject the parameter only if the inner map is non-contractive across
+        # K consecutive outer iterations (i.e. K distinct (p*, θ) points).
+        if inner_result.status === :diverged
+            diverge_streak += 1
+            if diverge_streak >= sim.early_abort_K
+                sim.verbose >= 1 && @printf(
+                    "  [outer S]  inner diverged ×%d at it=%d — rejecting parameter\n",
+                    diverge_streak, it)
+                return (converged = false, rejected = true)
+            end
+        else
+            diverge_streak = 0
+        end
 
         # 2. Cutoffs from raw (unclamped) surpluses.
         @threads for ix in 1:Nx
@@ -682,7 +718,7 @@ function solve_skilled_block!(
 
         if !isfinite(sc.θ) || any(!isfinite, sc.pstar) || any(!isfinite, sc.poj)
             sim.verbose >= 1 && @printf("  [outer S]  NaN/Inf in state at it=%d — aborting\n", it)
-            return false
+            return (converged = false, rejected = false)
         end
 
         # Convergence on (Δθ, Δp*, Δp^oj).
@@ -702,7 +738,7 @@ function solve_skilled_block!(
                 sim.verbose >= 2 && @printf(
                     "  [outer S]  converged it=%d  d=%.3e  θ_S=%.4f\n", it, d, sc.θ)
                 solve_stationary_skilled!(model; mS_in = mS_in, fU = fU)
-                return true
+                return (converged = inner_conv, rejected = false)
             end
         else
             streak = 0
@@ -711,5 +747,5 @@ function solve_skilled_block!(
 
     solve_stationary_skilled!(model; mS_in = mS_in, fU = fU)
     sim.verbose >= 1 && @printf("  [outer S]  maxit reached without convergence  θ_S=%.4f\n", sc.θ)
-    return false
+    return (converged = false, rejected = false)
 end

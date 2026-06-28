@@ -145,6 +145,13 @@ function unskilled_inner_loop!(
     U_old       = copy(uc.U)
     T_old       = copy(uc.T)
 
+    αU = sim.damp_inner_U
+    B  = sim.early_abort_burnin
+    K  = sim.early_abort_K
+    resid   = Vector{Float64}(undef, sim.maxit_inner)
+    status  = :maxit
+    n_inner = 0
+
     streak = 0
     for it in 1:sim.maxit_inner
         copyto!(Usearch_old, uc.Usearch)
@@ -194,7 +201,8 @@ function unskilled_inner_loop!(
         denom_search = r + ν + f
         @threads for ix in 1:Nx
             @inbounds begin
-                uc.Usearch[ix] = (bU + f * E1vec[ix]) / denom_search
+                Usearch_raw    = (bU + f * E1vec[ix]) / denom_search
+                uc.Usearch[ix] = Usearch_old[ix] + αU * (Usearch_raw - Usearch_old[ix])
             end
         end
 
@@ -202,16 +210,29 @@ function unskilled_inner_loop!(
         d2 = supnorm(uc.U, U_old)
         d3 = supnorm(uc.T, T_old)
         d  = max(d1, d2, d3)
+        resid[it] = d
+        n_inner   = it
 
         if d < sim.tol_inner
             streak += 1
-            streak >= sim.conv_streak && break
+            if streak >= sim.conv_streak
+                status = :converged
+                break
+            end
         else
             streak = 0
         end
+
+        # Divergence early-abort: no contraction over the last K sweeps
+        # (disabled when B == 0).
+        if B > 0 && it > B + K && resid[it] >= resid[it - K]
+            status = :diverged
+            break
+        end
     end
 
-    return (f = f, Ivec = Ivec, E1vec = E1vec)
+    return (f = f, Ivec = Ivec, E1vec = E1vec,
+            status = status, converged = (status === :converged), iters = n_inner)
 end
 
 
@@ -364,6 +385,7 @@ function solve_unskilled_block!(
     pstar_new = zeros(Float64, Nx)
 
     streak = 0
+    diverge_streak = 0
     for it in 1:sim.maxit_outer
         θ_old     = uc.θ
         pstar_old = copy(uc.pstar)
@@ -374,6 +396,21 @@ function solve_unskilled_block!(
         f     = inner.f
         Ivec  = inner.Ivec
         E1    = inner.E1vec
+        inner_conv = inner.converged
+
+        # Reject only on sustained inner divergence across K consecutive outer
+        # iterations (K distinct (θ, p*) points).
+        if inner.status === :diverged
+            diverge_streak += 1
+            if diverge_streak >= sim.early_abort_K
+                sim.verbose >= 1 && @printf(
+                    "  [outer U]  inner diverged ×%d at it=%d — rejecting parameter\n",
+                    diverge_streak, it)
+                return (converged = false, rejected = true)
+            end
+        else
+            diverge_streak = 0
+        end
 
         # 2. Stationary composition at the current p*.
         solve_stationary_unskilled_pointwise!(
@@ -428,7 +465,7 @@ function solve_unskilled_block!(
 
         if !isfinite(uc.θ) || any(!isfinite, uc.pstar)
             sim.verbose >= 1 && @printf("  [outer U]  NaN/Inf in state at it=%d — aborting\n", it)
-            return false
+            return (converged = false, rejected = false)
         end
 
         # 5. Convergence on (Δθ, Δp*, Δu).
@@ -453,7 +490,7 @@ function solve_unskilled_block!(
                 )
                 copyto!(uc.u, u_new)
                 copyto!(uc.t, t_new)
-                return true
+                return (converged = inner_conv, rejected = false)
             end
         else
             streak = 0
@@ -467,5 +504,5 @@ function solve_unskilled_block!(
     copyto!(uc.u, u_new)
     copyto!(uc.t, t_new)
     sim.verbose >= 1 && @printf("  [outer U]  maxit reached without convergence  θ_U=%.4f\n", uc.θ)
-    return false
+    return (converged = false, rejected = false)
 end

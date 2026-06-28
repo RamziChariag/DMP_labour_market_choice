@@ -112,26 +112,32 @@ flush(stdout)
 #    each SMM iteration fast.
 # ============================================================
 sim_smm = SimParams(
-    tol_inner      = 1e-7,
-    tol_outer_U    = 1e-6,
-    tol_outer_S    = 1e-6,
-    tol_global     = 1e-4,
+    tol_inner          = 1e-7,
+    tol_outer_U        = 1e-6,
+    tol_outer_S        = 1e-6,
+    tol_global         = 1e-4,
 
-    maxit_inner    = 300,
-    maxit_outer    = 200,
-    maxit_global   = 20,
+    damp_inner_U       = 1.00,
+    damp_inner_S       = 1.00,
 
-    conv_streak    = 1,
+    early_abort_burnin = 20,     # B  (0 disables the divergence early-abort)
+    early_abort_K      = 10,      # K  (inner no-contraction window W ≡ K; reject after K divergent outer iters)
 
-    use_anderson   = true,
-    anderson_m     = 1,
-    anderson_reg   = 1e-10,
+    maxit_inner        = 300,
+    maxit_outer        = 200,
+    maxit_global       = 20,
 
-    damp_pstar_U   = 1.00,
-    damp_pstar_S   = 0.50,
+    conv_streak        = 1,
 
-    verbose        = 0,          # 0: model is silent; 1: print outer convergence info per iteration; 2: also print inner iteration details
-    verbose_stride = 100,
+    use_anderson       = true,
+    anderson_m         = 1,
+    anderson_reg       = 1e-10,
+
+    damp_pstar_U       = 1.00,
+    damp_pstar_S       = 0.50,
+
+    verbose            = 0,      # 0: model silent; 1: outer convergence per iter; 2: also inner detail
+    verbose_stride     = 100,
 )
 
 # ============================================================

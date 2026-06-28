@@ -221,7 +221,9 @@ function solve_model!(model::Model) :: SolveResult
         mS_old = copy(mS_cur)
 
         # A. Unskilled block with carried d · u_S in uc.duS_carry.
-        last_conv_U = solve_unskilled_block!(model; US_in = sc.U)
+        res_U = solve_unskilled_block!(model; US_in = sc.U)
+        res_U.rejected && return SolveResult(false, false, false)
+        last_conv_U = res_U.converged
 
         if !isfinite(uc.θ) || any(!isfinite, uc.t) || any(!isfinite, uc.U) || any(!isfinite, uc.pstar)
             sim.verbose >= 1 && @printf("[global]  NaN/Inf in unskilled block at it=%d — aborting\n", it)
@@ -237,10 +239,12 @@ function solve_model!(model::Model) :: SolveResult
         mS_raw_pre = _mS_from_t(uc.t, sc.d, φ, ν, fU)
 
         # D. Skilled block; inner loop updates sc.d.
-        last_conv_S = solve_skilled_block!(model;
-                                            mS_in = mS_raw_pre,
-                                            fU    = fU,
-                                            EU1   = EU1)
+        res_S = solve_skilled_block!(model;
+                                     mS_in = mS_raw_pre,
+                                     fU    = fU,
+                                     EU1   = EU1)
+        res_S.rejected && return SolveResult(false, false, false)
+        last_conv_S = res_S.converged
 
         if !isfinite(sc.θ) || any(!isfinite, sc.U) || any(!isfinite, sc.pstar) ||
            any(!isfinite, sc.d) || any(!isfinite, sc.u)

@@ -174,6 +174,20 @@ Base.@kwdef struct SimParams
 
     verbose        :: Int        # verbosity level
     verbose_stride :: Int        # print every N iterations
+
+    # Inner value-loop under-relaxation (1.0 = undamped).  Damps the iterated
+    # value (skilled U; unskilled U^search) to stabilise oscillatory inner maps
+    # in high-fβ regions; consumed in *_inner_loop!.
+    damp_inner_U   :: Float64 = 1.0
+    damp_inner_S   :: Float64 = 1.0
+
+    # Inner-loop divergence early-abort.  B = early_abort_burnin sweeps are
+    # skipped before the no-contraction test fires; B = 0 disables the early-abort
+    # entirely (and the parameter rejection built on it).  K = early_abort_K is
+    # BOTH the inner window over which "no contraction" is judged (W ≡ K) AND the
+    # number of consecutive divergent outer iterations that rejects the parameter.
+    early_abort_burnin :: Int = 0
+    early_abort_K      :: Int = 5
 end
 
 
