@@ -117,11 +117,14 @@ sim_smm = SimParams(
     tol_outer_S        = 1e-6,
     tol_global         = 1e-4,
 
-    damp_inner_U       = 1.00,
-    damp_inner_S       = 1.00,
+    damp_inner_U       = 0.95,
+    damp_inner_S       = 0.95,
 
-    early_abort_burnin = 20,     # B  (0 disables the divergence early-abort)
-    early_abort_K      = 10,      # K  (inner no-contraction window W ≡ K; reject after K divergent outer iters)
+    inner_B            = 20,     # inner divergence early-abort burn-in (0 disables)
+    inner_K            = 10,      # inner no-contraction window W ≡ K; reject after inner_K divergent outer iters
+
+    outer_B            = 30,     # outer stall-detect burn-in (0 disables the handback)
+    outer_K            = 10,     # outer no-contraction window; hand back to global on stall
 
     maxit_inner        = 300,
     maxit_outer        = 200,
@@ -187,7 +190,7 @@ SKIP_MOMENTS = Symbol[
 # header and calibrate_sigma_w). σ_w is calibrated externally from λ_w rather
 # than estimated, which removes the β–σ_w degeneracy and frees β_U, β_S.
 # Bound–Krueger (1991): λ_w ≈ 0.82 for log annual earnings.
-const LAMBDA_W = 0.78
+const LAMBDA_W = 0.0
 
 @printf("Estimation window: %s\n", WINDOW)
 flush(stdout)
@@ -372,6 +375,20 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 σ_wU_cal, σ_wS_cal = calibrate_sigma_w(LAMBDA_W, moments)
 @printf("  Calibrated σ_w (λ_w = %.4f):  σ_wU = %.5f,  σ_wS = %.5f\n",
         LAMBDA_W, σ_wU_cal, σ_wS_cal)
+
+# σ_w identification switch.  λ_w > 0: pin σ_w at the calibrated value (this is
+# what frees β_U, β_S).  λ_w == 0: leave σ_w FREE (estimated) and pin β instead
+# via FIX_PARAMS (:unsk_bet, :skl_bet) — only one of {β, σ_w} is identified from
+# wage dispersion, so exactly one must be fixed.
+_sigw_fixed = LAMBDA_W > 0.0 ?
+    (unsk_σ_w = σ_wU_cal, skl_σ_w = σ_wS_cal) : NamedTuple()
+if LAMBDA_W == 0.0
+    @printf("  λ_w = 0 → σ_w is ESTIMATED (free), not pinned.\n")
+    if !(haskey(FIX_PARAMS, :unsk_bet) && haskey(FIX_PARAMS, :skl_bet))
+        @warn "λ_w = 0 frees σ_w but β is not fully pinned in FIX_PARAMS " *
+              "(:unsk_bet / :skl_bet) — β and σ_w are jointly under-identified."
+    end
+end
 flush(stdout)
 
 
@@ -493,13 +510,11 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
     fixed_params = merge(
         _extra_fixed,
+        _sigw_fixed,
         (
         r   = calib.r,
         ν   = calib.nu,
         φ   = calib.phi,
-
-        unsk_σ_w = σ_wU_cal,
-        skl_σ_w  = σ_wS_cal,
 
         a_ℓ = cp_base.a_ℓ,
         b_ℓ = cp_base.b_ℓ,
@@ -538,13 +553,10 @@ else
     # Baseline estimation.  Fix r / ν / φ and the calibrated σ_w, plus anything
     # in FIX_PARAMS.
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
-    fixed_params = merge(_extra_fixed, (
+    fixed_params = merge(_extra_fixed, _sigw_fixed, (
         r = calib.r,
         ν = calib.nu,
         φ = calib.phi,
-
-        unsk_σ_w = σ_wU_cal,
-        skl_σ_w  = σ_wS_cal,
     ))
 
     free_params = default_free_params()

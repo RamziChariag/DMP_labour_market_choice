@@ -146,8 +146,8 @@ function unskilled_inner_loop!(
     T_old       = copy(uc.T)
 
     αU = sim.damp_inner_U
-    B  = sim.early_abort_burnin
-    K  = sim.early_abort_K
+    B  = sim.inner_B
+    K  = sim.inner_K
     resid   = Vector{Float64}(undef, sim.maxit_inner)
     status  = :maxit
     n_inner = 0
@@ -186,7 +186,7 @@ function unskilled_inner_loop!(
             Svec = Svec_tls[tid]
             @inbounds begin
                 I, _, _ = solve_unskilled_surplus_on_grid!(
-                    Svec, ug.p, wG, PU, gp.x[ix], r, ν, λ, uc.U[ix],
+                    Svec, ug.p, wG, cp.A * PU, gp.x[ix], r, ν, λ, uc.U[ix],
                     clamp01(uc.pstar[ix])
                 )
                 Ivec[ix] = I
@@ -386,6 +386,9 @@ function solve_unskilled_block!(
 
     streak = 0
     diverge_streak = 0
+    oB = sim.outer_B
+    oK = sim.outer_K
+    outer_resid = Vector{Float64}(undef, sim.maxit_outer)
     for it in 1:sim.maxit_outer
         θ_old     = uc.θ
         pstar_old = copy(uc.pstar)
@@ -402,7 +405,7 @@ function solve_unskilled_block!(
         # iterations (K distinct (θ, p*) points).
         if inner.status === :diverged
             diverge_streak += 1
-            if diverge_streak >= sim.early_abort_K
+            if diverge_streak >= sim.inner_K
                 sim.verbose >= 1 && @printf(
                     "  [outer U]  inner diverged ×%d at it=%d — rejecting parameter\n",
                     diverge_streak, it)
@@ -473,6 +476,7 @@ function solve_unskilled_block!(
         dp = supnorm(uc.pstar, pstar_old)
         du = supnorm(uc.u,     u_old)
         d  = max(dθ, dp, du)
+        outer_resid[it] = d
 
         if sim.verbose >= 2 && (it == 1 || it % sim.verbose_stride == 0)
             @printf("  [outer U it=%d]  maxΔ=%.3e  (Δθ=%.3e  Δp*=%.3e  Δu=%.3e)  θ_U=%.4f\n",
@@ -494,6 +498,22 @@ function solve_unskilled_block!(
             end
         else
             streak = 0
+        end
+
+        # Outer stall: no contraction over outer_K iterations (after outer_B
+        # burn-in) → hand the block back to the global loop (do NOT reject; the
+        # global warm-start refines it).  Disabled when outer_B == 0.
+        if oB > 0 && it > oB + oK && outer_resid[it] >= outer_resid[it - oK]
+            sim.verbose >= 1 && @printf(
+                "  [outer U]  stalled at it=%d (no contraction over %d iters) — handing back to global\n",
+                it, oK)
+            inner_final = unskilled_inner_loop!(model; US_in = US_in)
+            solve_stationary_unskilled_pointwise!(
+                u_new, t_new, gp.ℓ, uc.τT, uc.pstar, inner_final.f, model
+            )
+            copyto!(uc.u, u_new)
+            copyto!(uc.t, t_new)
+            return (converged = false, rejected = false)
         end
     end
 

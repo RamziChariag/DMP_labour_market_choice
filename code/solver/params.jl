@@ -181,13 +181,21 @@ Base.@kwdef struct SimParams
     damp_inner_U   :: Float64 = 1.0
     damp_inner_S   :: Float64 = 1.0
 
-    # Inner-loop divergence early-abort.  B = early_abort_burnin sweeps are
-    # skipped before the no-contraction test fires; B = 0 disables the early-abort
-    # entirely (and the parameter rejection built on it).  K = early_abort_K is
-    # BOTH the inner window over which "no contraction" is judged (W ≡ K) AND the
-    # number of consecutive divergent outer iterations that rejects the parameter.
-    early_abort_burnin :: Int = 0
-    early_abort_K      :: Int = 5
+    # Inner-loop divergence early-abort.  inner_B sweeps are skipped before the
+    # no-contraction test fires; inner_B = 0 disables it (and the parameter
+    # rejection built on it).  inner_K is BOTH the inner no-contraction window
+    # (W ≡ K) AND the number of consecutive divergent outer iterations that
+    # rejects the parameter.
+    inner_B :: Int = 0
+    inner_K :: Int = 5
+
+    # Outer-loop stall detection (same no-contraction test on the block outer
+    # loop).  If the outer residual fails to shrink over outer_K iterations after
+    # an outer_B burn-in, the block stops and hands control back to the GLOBAL
+    # loop — it does NOT reject the parameter (the global warm-start refines it).
+    # outer_B = 0 disables the stall handback.
+    outer_B :: Int = 0
+    outer_K :: Int = 5
 end
 
 

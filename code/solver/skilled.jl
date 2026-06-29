@@ -226,8 +226,8 @@ function skilled_inner_loop!(
     dS_tls    = zeros(Float64, Threads.nthreads())
 
     αS = sim.damp_inner_S
-    B  = sim.early_abort_burnin
-    K  = sim.early_abort_K
+    B  = sim.inner_B
+    K  = sim.inner_K
     resid   = Vector{Float64}(undef, sim.maxit_inner)
     status  = :maxit
     n_inner = 0
@@ -605,6 +605,9 @@ function solve_skilled_block!(
 
     streak = 0
     diverge_streak = 0
+    oB = sim.outer_B
+    oK = sim.outer_K
+    outer_resid = Vector{Float64}(undef, sim.maxit_outer)
     for it in 1:sim.maxit_outer
         θ_old     = sc.θ
         pstar_old = copy(sc.pstar)
@@ -622,7 +625,7 @@ function solve_skilled_block!(
         # K consecutive outer iterations (i.e. K distinct (p*, θ) points).
         if inner_result.status === :diverged
             diverge_streak += 1
-            if diverge_streak >= sim.early_abort_K
+            if diverge_streak >= sim.inner_K
                 sim.verbose >= 1 && @printf(
                     "  [outer S]  inner diverged ×%d at it=%d — rejecting parameter\n",
                     diverge_streak, it)
@@ -726,6 +729,7 @@ function solve_skilled_block!(
         dp = supnorm(sc.pstar, pstar_old)
         dj = supnorm(sc.poj,   poj_old)
         d  = max(dθ, dp, dj)
+        outer_resid[it] = d
 
         if sim.verbose >= 2 && (it == 1 || it % sim.verbose_stride == 0)
             @printf("  [outer S it=%d]  maxΔ=%.3e  (Δθ=%.3e  Δp*=%.3e  Δpoj=%.3e)  θ_S=%.4f\n",
@@ -742,6 +746,17 @@ function solve_skilled_block!(
             end
         else
             streak = 0
+        end
+
+        # Outer stall: no contraction over outer_K iterations (after outer_B
+        # burn-in) → hand the block back to the global loop (do NOT reject; the
+        # global warm-start refines it).  Disabled when outer_B == 0.
+        if oB > 0 && it > oB + oK && outer_resid[it] >= outer_resid[it - oK]
+            sim.verbose >= 1 && @printf(
+                "  [outer S]  stalled at it=%d (no contraction over %d iters) — handing back to global\n",
+                it, oK)
+            solve_stationary_skilled!(model; mS_in = mS_in, fU = fU)
+            return (converged = false, rejected = false)
         end
     end
 

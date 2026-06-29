@@ -386,7 +386,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:unsk,   :k,          0.0010,   5.0000,   0.5000, "unskilled vacancy cost k_U"),
         ParamSpec(:unsk,   :β,          0.0500,   0.9800,   0.4000, "unskilled bargaining β_U"),
         ParamSpec(:unsk,   :λ,          0.0010,   0.8000,   0.0800, "unskilled damage rate λ_U"),
-        ParamSpec(:unsk,   :σ_w,        0.0000,   0.5000,   0.1000, "unskilled wage meas. error σ_wU"),
+        ParamSpec(:unsk,   :σ_w,        0.0000,   0.8000,   0.1000, "unskilled wage meas. error σ_wU"),
 
         # Regime-specific — skilled block
         ParamSpec(:skl,    :μ,          0.0100,   4.5000,   0.9000, "skilled matching eff μ_S"),
@@ -396,7 +396,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:skl,    :λ,          0.0010,   0.8000,   0.0700, "skilled quality shock λ_S"),
         ParamSpec(:skl,    :σ,          0.0000,   1.0000,   0.0500, "OJS flow cost σ_S"),
         ParamSpec(:skl,    :ξ,          0.0000,   0.1000,   0.0050, "skilled exogenous separation ξ_S"),
-        ParamSpec(:skl,    :σ_w,        0.0000,   0.5000,   0.1000, "skilled wage meas. error σ_wS"),
+        ParamSpec(:skl,    :σ_w,        0.0000,   0.8000,   0.1000, "skilled wage meas. error σ_wS"),
     ]
 end
 
