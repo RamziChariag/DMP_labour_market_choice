@@ -190,7 +190,7 @@ SKIP_MOMENTS = Symbol[
 # header and calibrate_sigma_w). σ_w is calibrated externally from λ_w rather
 # than estimated, which removes the β–σ_w degeneracy and frees β_U, β_S.
 # Bound–Krueger (1991): λ_w ≈ 0.82 for log annual earnings.
-const LAMBDA_W = 0.0
+const LAMBDA_W = 0.82
 
 @printf("Estimation window: %s\n", WINDOW)
 flush(stdout)
@@ -249,7 +249,7 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
 INIT_MODE            = :clusters
-CLUSTERS_FORCE_REGEN = false
+CLUSTERS_FORCE_REGEN = true
 INCLUDE_PREV_OPTIMUM = false
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
