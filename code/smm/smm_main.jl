@@ -182,7 +182,7 @@ const _PAIR_BASELINE = Dict(
 #   :overlap_UgtS, :overlap_SltU, :ltu_share_S
 # ============================================================
 SKIP_MOMENTS = Symbol[
-    :wage_premium,
+    #:wage_premium,
     :ur_total,
 ]
 
@@ -190,7 +190,7 @@ SKIP_MOMENTS = Symbol[
 # header and calibrate_sigma_w). σ_w is calibrated externally from λ_w rather
 # than estimated, which removes the β–σ_w degeneracy and frees β_U, β_S.
 # Bound–Krueger (1991): λ_w ≈ 0.82 for log annual earnings.
-const LAMBDA_W = 0.82
+const LAMBDA_W = 0.00
 
 @printf("Estimation window: %s\n", WINDOW)
 flush(stdout)
@@ -218,6 +218,7 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :a_l      => 1.01131,
     # :b_l      => 2.42423,
     # :c        => 2.94633,
+    # :A         => 7.54100,     # From LMR(2016)
     # :PU       => 1.05948,
     # :gamma_PS => 3.83639,
     # :bU       => 0.00000,
@@ -228,10 +229,12 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :b_Gam    => 2.28169,
     # :unsk_mu  => 0.25585,
      :unsk_eta => 0.50000,
+     :unsk_bet => 0.50000,
     # :unsk_k   => 0.10061,
     # :unsk_lam => 0.20263,
     # :skl_mu   => 0.22462,
      :skl_eta  => 0.50000,
+     :skl_bet  => 0.50000,
     # :skl_k    => 0.03317,
     # :skl_lam  => 0.17788,
     # :skl_sig  => 1.10000,
@@ -249,38 +252,38 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
 INIT_MODE            = :clusters
-CLUSTERS_FORCE_REGEN = true
+CLUSTERS_FORCE_REGEN = false
 INCLUDE_PREV_OPTIMUM = false
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
-    :r        => 0.00416667,
-    :nu       => 0.00323032,
-    :phi      => 0.02222129,
-    :a_l      => 0.89590646,
-    :b_l      => 0.31592780,
-    :c        => 6.89855799,
-    :A        => 7.00000000,        # aggregate production scale
-    :PU       => 2.43690010,
-    :gamma_PS => 3.81928381,
-    :bU       => 0.05000000,
-    :bT       => 0.30000000,
-    :bS       => 0.10000000,
-    :alpha_U  => 0.96441928,
-    :a_Gam    => 0.30113408,
-    :b_Gam    => 2.39486736,
-    :unsk_mu  => 0.06678201,
-    :unsk_eta => 0.66207985,
-    :unsk_k   => 0.50000000,
-    :unsk_bet => 0.89331634,
-    :unsk_lam => 0.35571936,
-    :unsk_sigw => 0.1000000,
-    :skl_mu   => 0.48177239,
-    :skl_eta  => 0.89480583,
-    :skl_k    => 0.50000000,
-    :skl_bet  => 0.85611310,
-    :skl_lam  => 0.06309304,
-    :skl_sig  => 0.00978666,
-    :skl_sigw  => 0.1000000,
+    :r        => 0.00416667,        # 0.05/12; table's 0.00417 is rounded
+    :nu       => 0.00336,
+    :phi      => 0.02222129,        # table's 0.02222 is rounded
+    :a_l      => 2.59266,
+    :b_l      => 0.31532,
+    :c        => 10.58040,
+    :A        => 4.83051,           # aggregate production scale
+    :PU       => 6.53357,
+    :gamma_PS => 9.72094,
+    :bU       => 1.38551,
+    :bT       => 3.81919,
+    :bS       => 0.84956,
+    :alpha_U  => 1.85715,
+    :a_Gam    => 7.50429,
+    :b_Gam    => 6.96083,
+    :unsk_mu  => 0.32789,
+    :unsk_eta => 0.50000,
+    :unsk_k   => 1.13394,
+    :unsk_bet => 0.50000,
+    :unsk_lam => 0.37870,
+    :unsk_sigw => 0.23461,
+    :skl_mu   => 0.25346,
+    :skl_eta  => 0.50000,
+    :skl_k    => 2.28365,
+    :skl_bet  => 0.50000,
+    :skl_lam  => 0.13672,
+    :skl_sig  => 0.28564,
+    :skl_sigw  => 0.21904,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
@@ -509,8 +512,6 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     # baseline-derived deep values take priority over FIX_PARAMS.
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
     fixed_params = merge(
-        _extra_fixed,
-        _sigw_fixed,
         (
         r   = calib.r,
         ν   = calib.nu,
@@ -521,7 +522,10 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         bU  = up_base.bU,
         bT  = up_base.bT,
         bS  = sp_base.bS,
-    ))
+        ),
+        _extra_fixed,
+        _sigw_fixed,
+    )
 
     # Free parameters: regime-specific only.  Init values follow INIT_MODE:
     #   :warmstart → the matched baseline optimum;  otherwise → DEFAULT_PARAMS.
@@ -553,11 +557,14 @@ else
     # Baseline estimation.  Fix r / ν / φ and the calibrated σ_w, plus anything
     # in FIX_PARAMS.
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
-    fixed_params = merge(_extra_fixed, _sigw_fixed, (
+    fixed_params = merge((
         r = calib.r,
         ν = calib.nu,
         φ = calib.phi,
-    ))
+        ),
+        _extra_fixed, 
+        _sigw_fixed,
+    )
 
     free_params = default_free_params()
 
@@ -702,7 +709,7 @@ run_params = SMMRunParams(
     de_pop_size  = 120,           # population size (0 ⇒ 10·n_free_params)
     de_f         = 0.70,          # DE differential weight (mutation strength)
     de_cr        = 0.85,          # DE crossover probability
-    de_patience  = 4,             # stop after this many generations with no
+    de_patience  = 2,             # stop after this many generations with no
                                   # improvement
     de_avg_tol   = 1e-6,           # stop when (Q_mean - Q_best)/|Q_best| < tol;
                                   # 0 disables this early-stop
@@ -712,6 +719,9 @@ run_params = SMMRunParams(
     nm_f_tol     = 1e-6,          # function-value tolerance
     nm_x_tol     = 1e-4,          # parameter tolerance (unconstrained space)
     nm_g_tol     = 1e-5,          # gradient tolerance (unconstrained space)
+    nm_no_improve = 1_300,          # early-stop: halt NM after this many objective
+                                  # evaluations with no improvement in best Q
+                                  # (0 disables; same counter as the [iter N] trace)
 
     # ── Tracing ──────────────────────────────────────────────
     show_trace_members     = false,   # per-member trace inside one DE/SA gen

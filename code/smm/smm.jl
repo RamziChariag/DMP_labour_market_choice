@@ -1004,14 +1004,19 @@ function run_smm(
         converged = isfinite(loss_opt)
 
     elseif method in (:neldermead, :lbfgs, :bfgs)
-        theta0     = pack_theta(spec)
-        iter_count = Ref(0)
-        best_loss  = Ref(Inf)
+        theta0        = pack_theta(spec)
+        iter_count    = Ref(0)
+        best_loss     = Ref(Inf)
+        last_improve  = Ref(0)       # eval count at which best_loss last improved
+        stopped_early = Ref(false)   # set when the no-improvement knob halts NM
 
         function obj_traced(theta)
             iter_count[] += 1
             Q = smm_objective(theta, spec)
-            isfinite(Q) && Q < best_loss[] && (best_loss[] = Q)
+            if isfinite(Q) && Q < best_loss[]
+                best_loss[]    = Q
+                last_improve[] = iter_count[]
+            end
             if r.show_trace_generations && iter_count[] % r.trace_stride == 0
                 @printf("  [%s iter %4d]  Q=%-14s  best=%.6e\n",
                         method, iter_count[],
@@ -1022,6 +1027,22 @@ function run_smm(
             return isfinite(Q) ? Q : 1e16
         end
 
+        # Early-stop knob: halt once the best Q has not improved for
+        # nm_no_improve objective evaluations (0 disables). Measured in the
+        # same units as the [iter N] trace above. Only fires after a first
+        # feasible (finite) point has been found. Returning true stops Optim.
+        function nm_stop_cb(_state)
+            if r.nm_no_improve > 0 && isfinite(best_loss[]) &&
+               (iter_count[] - last_improve[]) >= r.nm_no_improve
+                stopped_early[] = true
+                @printf("  [%s EARLY STOP  iter %d]  no improvement for %d evals  best=%.6e\n",
+                        method, iter_count[], r.nm_no_improve, best_loss[])
+                flush(stdout)
+                return true
+            end
+            return false
+        end
+
         opt_method = (method == :neldermead) ? Optim.NelderMead() :
                      (method == :lbfgs)      ? Optim.LBFGS()      : Optim.BFGS()
 
@@ -1029,11 +1050,14 @@ function run_smm(
                                   f_reltol      = r.nm_f_tol,
                                   x_abstol      = r.nm_x_tol,
                                   g_abstol      = r.nm_g_tol,
+                                  callback      = nm_stop_cb,
                                   show_trace = false)
         result    = Optim.optimize(obj_traced, theta0, opt_method, options)
         theta_opt = Optim.minimizer(result)
         loss_opt  = smm_objective(theta_opt, spec)
-        converged = Optim.converged(result) && isfinite(loss_opt)
+        # An intentional no-improvement early stop counts as a valid finish
+        # (a finite best was found), mirroring the SA early-stop convention.
+        converged = (Optim.converged(result) || stopped_early[]) && isfinite(loss_opt)
         niters    = Optim.iterations(result)
 
     else

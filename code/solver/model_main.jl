@@ -67,62 +67,71 @@ flush(stdout)
 # 1. Parameters
 # ============================================================
 common = CommonParams(
-    r   = 0.05,
-    ν   = 0.05,
-    φ   = 0.20,
-    a_ℓ = 2.0,
-    b_ℓ = 5.0,
-    c   = 1.70,
-    A   = 1.0,   # aggregate production scale; set to ≈ data median weekly wage for un-normalised runs
+    r   = 0.00417,    # fixed (≈ 0.05/12, monthly)
+    ν   = 0.00336,    # fixed
+    φ   = 0.02222,    # fixed
+    a_ℓ = 2.59266,
+    b_ℓ = 0.31532,
+    c   = 10.58040,
+    A   = 4.83051,    # LOG scale ⇒ exp(A) ≈ 125.3  (see note 1)
 )
 
 unsk_par = UnskilledParams(
-    μ   = 0.74,
-    η   = 0.60,
-    k   = 0.25,
-    β   = 0.40,
-    λ   = 0.08,
-    PU  = 0.70,
-    bU  = 0.00,
-    bT  = 0.28,
-    α_U = 1.00,
+    μ   = 0.32789,
+    η   = 0.50000,    # fixed
+    k   = 1.13394,
+    β   = 0.50000,    # fixed
+    λ   = 0.37870,
+    PU  = 6.53357,
+    bU  = 1.38551,
+    bT  = 3.81919,
+    α_U = 1.85715,
 )
 
 skl_par = SkilledParams(
-    μ        = 0.90,
-    η        = 0.50,
-    k        = 0.17,
-    β        = 0.32,
-    λ        = 0.07,
-    σ        = 0.01,
-    gamma_PS = 1.85,
-    bS       = 0.01,
-    a_Γ      = 2.0,
-    b_Γ      = 5.0,
-    ξ        = 0.0,    
+    μ        = 0.25346,
+    η        = 0.50000,    # fixed
+    k        = 2.28365,
+    β        = 0.50000,    # fixed
+    λ        = 0.13672,
+    σ        = 0.28564,    # OJS flow cost σ_S (not σ_w)
+    gamma_PS = 9.72094,
+    bS       = 0.84956,
+    a_Γ      = 7.50429,
+    b_Γ      = 6.96083,
+    ξ        = 0.00556,
 )
 
 sim = SimParams(
-    tol_inner      = 1e-8,
-    tol_outer_U    = 1e-6,
-    tol_outer_S    = 1e-7,
-    tol_global     = 1e-3,
+    tol_inner          = 1e-7,
+    tol_outer_U        = 1e-6,
+    tol_outer_S        = 1e-6,
+    tol_global         = 1e-4,
 
-    maxit_inner    = 500,
-    maxit_outer    = 300,
-    maxit_global   = 50,
+    damp_inner_U       = 0.95,
+    damp_inner_S       = 0.95,
 
-    conv_streak    = 2,
+    inner_B            = 20,     # inner divergence early-abort burn-in (0 disables)
+    inner_K            = 10,      # inner no-contraction window W ≡ K; reject after inner_K divergent outer iters
 
-    use_anderson   = true,
-    anderson_m     = 1,
-    anderson_reg   = 1e-10,
+    outer_B            = 30,     # outer stall-detect burn-in (0 disables the handback)
+    outer_K            = 10,     # outer no-contraction window; hand back to global on stall
 
-    damp_pstar_U   = 1.00,
-    damp_pstar_S   = 1.00,
+    maxit_inner        = 300,
+    maxit_outer        = 200,
+    maxit_global       = 20,
 
-    verbose        = 2,
-    verbose_stride = 10,
+    conv_streak        = 1,
+
+    use_anderson       = true,
+    anderson_m         = 1,
+    anderson_reg       = 1e-10,
+
+    damp_pstar_U       = 1.00,
+    damp_pstar_S       = 0.50,
+
+    verbose            = 2,      # 0: model silent; 1: outer convergence per iter; 2: also inner detail
+    verbose_stride     = 10,
 )
 
 const PLOTS_DIR = joinpath(PLOTS_ROOT, "standalone_default")

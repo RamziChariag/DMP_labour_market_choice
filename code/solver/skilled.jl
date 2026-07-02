@@ -211,9 +211,9 @@ function skilled_inner_loop!(
     Np = length(sg.p)
 
     r  = cp.r;   ν  = cp.ν
-    γPS = sp.gamma_PS;  bS = sp.bS * cp.A
+    γPS = sp.gamma_PS;  bS = sp.bS * exp(cp.A)
 
-    β  = sp.β;   λ  = sp.λ;   σ  = sp.σ * cp.A;   ξ  = sp.ξ
+    β  = sp.β;   λ  = sp.λ;   σ  = sp.σ * exp(cp.A);   ξ  = sp.ξ
     μ  = sp.μ;   η  = sp.η
 
     θ  = sc.θ
@@ -243,7 +243,7 @@ function skilled_inner_loop!(
 
             @inbounds begin
                 x     = gp.x[ix]
-                PS_x  = PS_of_x(x, γPS, cp.A)
+                PS_x  = PS_of_x(x, γPS, exp(cp.A))
                 pstar = clamp01(sc.pstar[ix])
                 j0    = pcut_index(sg.p, pstar)
                 j0_soft = max(j0 - 1, 1)
@@ -551,7 +551,7 @@ function update_theta_skilled(model::Model)
 
     (Jbar < 1e-12 || !isfinite(Jbar)) && return 1e-14
 
-    q     = (sp.k * model.common.A) / Jbar
+    q     = (sp.k * exp(model.common.A)) / Jbar
     θ_raw = theta_from_q(q, sp.μ, sp.η)
     return clamp(θ_raw, 1e-14, 100.0)
 end
@@ -594,7 +594,7 @@ function solve_skilled_block!(
 
     r  = cp.r;   ν  = cp.ν
     γPS = sp.gamma_PS
-    β  = sp.β;   λ  = sp.λ;   σ  = sp.σ * cp.A;   ξ  = sp.ξ
+    β  = sp.β;   λ  = sp.λ;   σ  = sp.σ * exp(cp.A);   ξ  = sp.ξ
 
     wΓ = pre.γvals .* sg.wp
 
@@ -639,7 +639,7 @@ function solve_skilled_block!(
         @threads for ix in 1:Nx
             @inbounds begin
                 x = gp.x[ix]
-                PS_x = PS_of_x(x, γPS, cp.A)
+                PS_x = PS_of_x(x, γPS, exp(cp.A))
                 U_x = sc.U[ix]
                 pstar_cur = clamp01(sc.pstar[ix])
                 j0_prev = pcut_index(sg.p, pstar_cur)

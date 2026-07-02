@@ -27,14 +27,16 @@ Base.@kwdef struct CommonParams
 
     c   :: Float64    # training cost coefficient in c(x) = exp(c)·(1−x)·e^{−x}
 
-    A   :: Float64 = 1.0   # aggregate production scale (TFP / demand level); multiplies π_U and π_S
+    A   :: Float64 = 0.0   # LOG aggregate production scale; the model uses exp(A) as the effective scale (multiplies π_U, π_S, b·, k·, σ_S). A = 0 ⇒ effective scale 1.
 end
 
 
 Base.@kwdef struct CommonGrids
-    x   :: Vector{Float64}    # worker-type grid
-    wx  :: Vector{Float64}    # quadrature weights on x-grid
-    ℓ   :: Vector{Float64}    # worker-type density evaluated on x-grid
+    x   :: Vector{Float64}    # worker-type grid (Gauss–Jacobi nodes, see build_type_grid)
+    wx  :: Vector{Float64}    # worker-type POPULATION weights: dot(density, wx) ≈ ∫ density dx
+                              # for any density ∝ ℓ, with dot(ℓ, wx) = 1 exactly. ℓ is folded
+                              # into wx (Gauss–Jacobi), so wx integrates densities, not bare f(x).
+    ℓ   :: Vector{Float64}    # worker-type density Beta(a_ℓ,b_ℓ) evaluated on x-grid (pointwise use)
 end
 
 
@@ -237,12 +239,8 @@ function initialise_model(;
     Np_U :: Int = 200,
     Np_S :: Int = 200,
 )
-    # Grids
-    xgrid,   wx   = build_gl_grid(Nx)
-    pgrid_U, wp_U = build_gl_grid(Np_U)
-    pgrid_S, wp_S = build_gl_grid(Np_S)
-
-    # Common parameters
+    # Common parameters (built before the grids so the worker-type grid can
+    # be tuned to ℓ = Beta(a_ℓ, b_ℓ)).
     cp = CommonParams(
         r   = 0.05,
         ν   = 0.05,
@@ -250,8 +248,14 @@ function initialise_model(;
         a_ℓ = 2.0,
         b_ℓ = 5.0,
         c   = 1.70,
-        A   = 1.0,
+        A   = 0.0,   # log scale ⇒ effective scale exp(0) = 1
     )
+
+    # Grids.  Worker-type grid uses Gauss–Jacobi tuned to ℓ = Beta(a_ℓ, b_ℓ)
+    # (see build_type_grid); match-quality p-grids stay Gauss–Legendre.
+    xgrid,   wx   = build_type_grid(Nx, cp.a_ℓ, cp.b_ℓ)
+    pgrid_U, wp_U = build_gl_grid(Np_U)
+    pgrid_S, wp_S = build_gl_grid(Np_S)
 
     ℓvals = pdf.(Beta(cp.a_ℓ, cp.b_ℓ), xgrid)
 
@@ -317,9 +321,9 @@ function initialise_model(;
     # Initial conditions
     r = cp.r;  ν = cp.ν;  φ = cp.φ
 
-    US_guess     = sp.bS * cp.A / (r + ν)
-    T_init       = fill((up.bT * cp.A + φ * US_guess) / (r + φ + ν), Nx)
-    Usearch_init = fill(up.bU * cp.A / (r + ν), Nx)
+    US_guess     = sp.bS * exp(cp.A) / (r + ν)
+    T_init       = fill((up.bT * exp(cp.A) + φ * US_guess) / (r + φ + ν), Nx)
+    Usearch_init = fill(up.bU * exp(cp.A) / (r + ν), Nx)
     U_init       = max.(Usearch_init, T_init)
     t_seed       = [(ν / (2ν + φ)) * ℓvals[ix] for ix in 1:Nx]
 
@@ -336,7 +340,7 @@ function initialise_model(;
         θ         = 0.5,
     )
 
-    US_init = fill(sp.bS * cp.A / (r + ν), Nx)
+    US_init = fill(sp.bS * exp(cp.A) / (r + ν), Nx)
 
     sc = SkilledCache(
         U     = US_init,

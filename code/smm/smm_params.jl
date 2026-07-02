@@ -133,6 +133,9 @@ Base.@kwdef struct SMMRunParams
     nm_f_tol     :: Float64 = 1e-6
     nm_x_tol     :: Float64 = 1e-5
     nm_g_tol     :: Float64 = 1e-5   # gradient tolerance (unconstrained space)
+    nm_no_improve :: Int    = 0      # early-stop: halt NM after this many objective
+                                     # evaluations with no improvement in best Q
+                                     # (0 disables; same units as the [iter N] trace)
 
     # Tracing
     show_trace_members     :: Bool = false
@@ -355,48 +358,67 @@ Excluded from this list because they are always fixed:
 """
 function default_free_params() :: Vector{ParamSpec}
     return [
-        # Deep structural — common block
-        ParamSpec(:common, :a_ℓ,        0.0100,   8.0000,   2.0000, "worker type shape a_ℓ"),
-        ParamSpec(:common, :b_ℓ,        0.0100,   7.0000,   5.0000, "worker type shape b_ℓ"),
+        # ── Bounds recentred for the exp-scale-A model ──────────────────────────
+        # A is now searched on a LOG scale: the model uses exp(A) as the effective
+        # dollar scale (so a small, readable A ≈ 5.5–6 gives exp(A) ≈ 250–400, the
+        # level the data wages require — mean log wage ≈ 6.7). The remaining
+        # parameters fit the A-invariant moments (unemployment, tightness, rates,
+        # shares) and sit near their base_fc estimates, so each box is tightened
+        # around that estimate. σ_wU, σ_wS get room to absorb residual wage
+        # dispersion (set LAMBDA_W = 0 in smm_main to free them, pinning β). P_U,
+        # γ_PS and λ_U — previously pinned at their upper bounds — are given headroom.
+        #
+        # NB: c is NOT scaled by A, but the training cost is compared against
+        # exp(A)-scaled values, so c sits on a feasibility ridge with A — at the
+        # data-matching exp(A) ≈ 260, c must be ≈ 10–12 (below ≈ 9 the training
+        # margin degenerates). Within that plateau the fit is insensitive to c.
 
-        # Deep structural — institutional flow values (stored by consuming block).
-        # All flow/cost/vacancy parameters are estimated relative to the aggregate
-        # scale A: the model functions multiply them by A internally, so b_U, b_T,
-        # b_S, k_U, k_S, σ_S are dimensionless coefficients on A (LMR convention).
-        # The labels carry plain names; the A-normalization is stated once here.
-        ParamSpec(:unsk,   :bU,         0.0000,   2.0000,   0.0500, "unskilled outside flow b_U"),
-        ParamSpec(:unsk,   :bT,         0.0000,   5.0000,   0.3000, "training flow b_T"),
-        ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.1000, "skilled outside flow b_S"),
+        # Deep structural — common block (worker type shape)
+        ParamSpec(:common, :a_ℓ,        1.0000,   5.0000,   2.8000, "worker type shape a_ℓ"),
+        ParamSpec(:common, :b_ℓ,        0.0500,   4.0000,   0.2000, "worker type shape b_ℓ"),
 
-        # Regime-specific — common block
-        ParamSpec(:common, :c,          0.1000,  12.0000,   7.7000, "training cost coeff c"),
-        # Aggregate production scale; carries the dollar level of wages.
-        ParamSpec(:common, :A,          3.0000, 9.0000, 7.0000, "aggregate production scale A"),
+        # Common block — training cost coeff and aggregate scale
+        ParamSpec(:common, :c,          6.0000,  13.0000,  11.0000, "training cost coeff c"),
+        # Aggregate production scale on a LOG scale; effective dollar scale is exp(A).
+        ParamSpec(:common, :A,          4.0000,   9.0000,   5.6000, "aggregate production scale A"),
 
-        # Regime-specific — aggregate state / offer shape (stored by consuming block)
-        ParamSpec(:unsk,   :PU,         0.5000,   7.0000,   0.7000, "unskilled productivity P_U"),
-        ParamSpec(:skl,    :gamma_PS,   1.0000,  12.0000,   1.8500, "skilled productivity γ_PS"),
-        ParamSpec(:unsk,   :α_U,        0.0100,  20.0000,   1.0000, "unskilled damage shape α_U"),
-        ParamSpec(:skl,    :a_Γ,        0.0100,  10.0000,   2.0000, "skilled offer shape a_Γ"),
-        ParamSpec(:skl,    :b_Γ,        0.0100,  12.0000,   5.0000, "skilled offer shape b_Γ"),
+        # Institutional flow values (stored by consuming block).
+        # b_U, b_T, b_S, k_U, k_S, σ_S are coefficients on the effective scale exp(A);
+        # the model multiplies them by exp(A) internally. (The training cost c is NOT.)
+        ParamSpec(:unsk,   :bU,         0.5000,   2.5000,   1.5000, "unskilled outside flow b_U"),
+        ParamSpec(:unsk,   :bT,         1.0000,   4.0000,   2.6500, "training flow b_T"),
+        ParamSpec(:skl,    :bS,         0.1000,   1.5000,   0.6600, "skilled outside flow b_S"),
 
-        # Regime-specific — unskilled block
-        ParamSpec(:unsk,   :μ,          0.0010,   3.5000,   0.7400, "unskilled matching eff μ_U"),
-        ParamSpec(:unsk,   :η,          0.1000,   0.9800,   0.6000, "unskilled matching elas η_U"),
-        ParamSpec(:unsk,   :k,          0.0010,   5.0000,   0.5000, "unskilled vacancy cost k_U"),
-        ParamSpec(:unsk,   :β,          0.0500,   0.9800,   0.4000, "unskilled bargaining β_U"),
-        ParamSpec(:unsk,   :λ,          0.0010,   0.8000,   0.0800, "unskilled damage rate λ_U"),
-        ParamSpec(:unsk,   :σ_w,        0.0000,   0.8000,   0.1000, "unskilled wage meas. error σ_wU"),
+        # Aggregate state / offer shape (stored by consuming block)
+        ParamSpec(:unsk,   :PU,         4.0000,  12.0000,   7.0000, "unskilled productivity P_U"),
+        ParamSpec(:skl,    :gamma_PS,   8.0000,  18.0000,  11.8000, "skilled productivity γ_PS"),
+        ParamSpec(:unsk,   :α_U,        0.4000,   2.5000,   1.0000, "unskilled damage shape α_U"),
+        ParamSpec(:skl,    :a_Γ,        3.0000,   10.0000,   5.2000, "skilled offer shape a_Γ"),
+        ParamSpec(:skl,    :b_Γ,        6.0000,  13.0000,   9.2000, "skilled offer shape b_Γ"),
 
-        # Regime-specific — skilled block
-        ParamSpec(:skl,    :μ,          0.0100,   4.5000,   0.9000, "skilled matching eff μ_S"),
-        ParamSpec(:skl,    :η,          0.1000,   0.9800,   0.5000, "skilled matching elas η_S"),
-        ParamSpec(:skl,    :k,          0.0010,   5.0000,   0.5000, "skilled vacancy cost k_S"),
-        ParamSpec(:skl,    :β,          0.0500,   0.98000,   0.3200, "skilled bargaining β_S"),
-        ParamSpec(:skl,    :λ,          0.0010,   0.8000,   0.0700, "skilled quality shock λ_S"),
-        ParamSpec(:skl,    :σ,          0.0000,   1.0000,   0.0500, "OJS flow cost σ_S"),
-        ParamSpec(:skl,    :ξ,          0.0000,   0.1000,   0.0050, "skilled exogenous separation ξ_S"),
-        ParamSpec(:skl,    :σ_w,        0.0000,   0.8000,   0.1000, "skilled wage meas. error σ_wS"),
+        # Matching efficiency, matching elasticity, bargaining (U/S paired)
+        ParamSpec(:unsk,   :μ,          0.1000,   0.9000,   0.3500, "unskilled matching eff μ_U"),
+        ParamSpec(:skl,    :μ,          0.0500,   0.5000,   0.1900, "skilled matching eff μ_S"),
+        ParamSpec(:unsk,   :η,          0.3000,   0.7000,   0.5000, "unskilled matching elas η_U"),
+        ParamSpec(:skl,    :η,          0.3000,   0.7000,   0.5000, "skilled matching elas η_S"),
+        ParamSpec(:unsk,   :β,          0.0100,   0.7000,   0.5000, "unskilled bargaining β_U"),
+        ParamSpec(:skl,    :β,          0.0100,   0.7000,   0.5000, "skilled bargaining β_S"),
+
+        # Shock arrival rates (U/S paired)
+        ParamSpec(:unsk,   :λ,          0.1000,   1.5000,   0.8000, "unskilled damage rate λ_U"),
+        ParamSpec(:skl,    :λ,          0.0500,   0.3500,   0.1400, "skilled quality shock λ_S"),
+
+        # Vacancy costs (U/S paired)
+        ParamSpec(:unsk,   :k,          0.3000,   1.8000,   0.8400, "unskilled vacancy cost k_U"),
+        ParamSpec(:skl,    :k,          0.8000,   3.0000,   1.7400, "skilled vacancy cost k_S"),
+
+        # Skilled block — OJS cost, exogenous separation
+        ParamSpec(:skl,    :σ,          0.0000,   0.3000,   0.0900, "OJS flow cost σ_S"),
+        ParamSpec(:skl,    :ξ,          0.0000,   0.0200,   0.0050, "skilled exogenous separation ξ_S"),
+
+        # Wage measurement error (per sector)
+        ParamSpec(:unsk,   :σ_w,        0.0000,   1.0000,   0.5500, "unskilled wage meas. error σ_wU"),
+        ParamSpec(:skl,    :σ_w,        0.0000,   1.0000,   0.5500, "skilled wage meas. error σ_wS"),
     ]
 end
 
@@ -486,7 +508,7 @@ function unpack_θ(
         a_ℓ = _get(:a_ℓ, :common, 2.00),
         b_ℓ = _get(:b_ℓ, :common, 5.00),
         c   = _get(:c,   :common, 1.70),
-        A   = _get(:A,   :common, 1.00),
+        A   = _get(:A,   :common, 0.00),   # log scale; model uses exp(A)
     )
 
     # First-pass build.  The names unique to one block (PU, bU, bT, α_U /
@@ -662,8 +684,9 @@ function print_spec(spec::SMMSpec)
             spec.run.de_pop_size == 0 ? "auto" : string(spec.run.de_pop_size),
             spec.run.de_f, spec.run.de_cr, spec.run.de_patience,
             spec.run.de_avg_tol > 0.0 ? @sprintf("%.1e", spec.run.de_avg_tol) : "off")
-    @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e  g_tol=%.0e\n",
-            spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol, spec.run.nm_g_tol)
+    @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e  g_tol=%.0e  no_improve=%s\n",
+            spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol, spec.run.nm_g_tol,
+            spec.run.nm_no_improve > 0 ? string(spec.run.nm_no_improve) : "off")
     if spec.run.w_cond_target == 2.0
         @printf("  W:    equal weights — Diagonal(weight/m̂²) (cond(W)=%.2e)\n", cond(spec.W))
     else

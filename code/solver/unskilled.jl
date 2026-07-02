@@ -129,7 +129,9 @@ function unskilled_inner_loop!(
 
     r  = cp.r;   ν  = cp.ν;   φ  = cp.φ;   c  = cp.c
     μ  = up.μ;   η  = up.η;   β  = up.β;   λ  = up.λ
-    PU = up.PU;  bU = up.bU * cp.A;  bT = up.bT * cp.A;  α  = up.α_U
+    # Productivity enters the surplus as exp(A)·P_U·x·p (A multiplies π_U); use the
+    # effective scale here so the inner loop matches the p*-update and equilibrium.jl.
+    PU = exp(cp.A) * up.PU;  bU = up.bU * exp(cp.A);  bT = up.bT * exp(cp.A);  α  = up.α_U
 
     θ  = uc.θ
     f  = jobfinding_rate(θ, μ, η)
@@ -186,7 +188,7 @@ function unskilled_inner_loop!(
             Svec = Svec_tls[tid]
             @inbounds begin
                 I, _, _ = solve_unskilled_surplus_on_grid!(
-                    Svec, ug.p, wG, cp.A * PU, gp.x[ix], r, ν, λ, uc.U[ix],
+                    Svec, ug.p, wG, PU, gp.x[ix], r, ν, λ, uc.U[ix],
                     clamp01(uc.pstar[ix])
                 )
                 Ivec[ix] = I
@@ -301,7 +303,7 @@ function update_pstar_from_surplus!(
 
     r  = cp.r;   ν  = cp.ν;   c  = cp.c
     λ  = up.λ;   μ  = up.μ;   η  = up.η
-    PU = up.PU;  bU = up.bU * cp.A
+    PU = up.PU;  bU = up.bU * exp(cp.A)
 
     f_new        = jobfinding_rate(θ_new, μ, η)
     denom_search = r + ν + f_new
@@ -317,7 +319,7 @@ function update_pstar_from_surplus!(
         if x <= 1e-14 || PU <= 1e-14
             pstar_new[ix] = 1.0
         else
-            pstar_new[ix] = clamp01(((r + ν) * U_new - λ * I) / (cp.A * PU * x))
+            pstar_new[ix] = clamp01(((r + ν) * U_new - λ * I) / (exp(cp.A) * PU * x))
         end
     end
     return nothing
@@ -345,7 +347,7 @@ function update_theta_unskilled(model::Model)
         return 1e-14
     end
 
-    q     = (up.k * model.common.A) * U_total / Jbar
+    q     = (up.k * exp(model.common.A)) * U_total / Jbar
     θ_raw = theta_from_q(q, up.μ, up.η)
     return clamp(θ_raw, 1e-14, 100.0)
 end
