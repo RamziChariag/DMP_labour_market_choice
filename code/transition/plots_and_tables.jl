@@ -918,7 +918,7 @@ Re-solve the model at the SMM optimum and extract the training cutoff x̄.
 
 The cutoff is the type x at which the worker is indifferent between
 searching as unskilled and entering training, i.e. U_search(x) = −c(x)+T(x).
-To avoid grid-snapping (the GL grid is coarse), we interpolate the
+To avoid grid-snapping (the quadrature x-grid is coarse and non-uniform), we interpolate the
 crossing point of `net_T(x) − U_search(x)` rather than taking the
 first grid node where τT > 0.5.
 

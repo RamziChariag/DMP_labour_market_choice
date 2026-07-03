@@ -241,6 +241,34 @@ function _count_corners(
 end
 
 
+"""
+    _corner_tags(theta_unc, spec; tol=0.02) → String
+
+Inline companion to `_count_corners`: lists which free parameters sit within
+`tol` of a bound and whether it is the lower or upper bound, e.g.
+` [skl:μ(lower), unsk:k(upper)]`.  Returns "" when nothing is cornered, so it
+can be appended straight after a `corners=%d/%d` field with a single `%s`.
+"""
+function _corner_tags(
+    theta_unc :: AbstractVector{Float64},
+    spec      :: SMMSpec;
+    tol       :: Float64 = 0.02,
+) :: String
+    parts = String[]
+    for (i, ps) in enumerate(spec.free)
+        x     = _to_constrained(theta_unc[i], ps.lb, ps.ub)
+        width = ps.ub - ps.lb
+        width <= 0.0 && continue
+        if (x - ps.lb) / width < tol
+            push!(parts, "$(ps.block):$(ps.name)(lower)")
+        elseif (ps.ub - x) / width < tol
+            push!(parts, "$(ps.block):$(ps.name)(upper)")
+        end
+    end
+    return isempty(parts) ? "" : " [" * join(parts, ", ") * "]"
+end
+
+
 # ============================================================
 # Simulated annealing
 # ============================================================
@@ -324,10 +352,10 @@ function _sa_loop(
 
     if show_trace
         n_corners_init = _count_corners(theta_best, spec)
-        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f  corners=%d/%d\n",
+        @printf("  [SA init]  Q0 = %s  T0=%.4f  step=%.4f  corners=%d/%d%s\n",
                 isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (bad starting point)",
                 T0, step,
-                n_corners_init, length(spec.free))
+                n_corners_init, length(spec.free), _corner_tags(theta_best, spec))
         flush(stdout)
     end
 
@@ -397,9 +425,9 @@ function _sa_loop(
            steps_since_improvement >= reheat_patience
             if show_trace
                 n_corners_es = _count_corners(theta_best, spec)
-                @printf("  [SA EARLY STOP  iter=%5d]  reheats exhausted, no improvement for %d steps, Q_best=%.6e  corners=%d/%d\n",
+                @printf("  [SA EARLY STOP  iter=%5d]  reheats exhausted, no improvement for %d steps, Q_best=%.6e  corners=%d/%d%s\n",
                         t, steps_since_improvement, Q_best,
-                        n_corners_es, length(spec.free))
+                        n_corners_es, length(spec.free), _corner_tags(theta_best, spec))
                 flush(stdout)
             end
             break
@@ -420,9 +448,9 @@ function _sa_loop(
 
             if show_trace
                 n_corners_rh = _count_corners(theta_best, spec)
-                @printf("  [SA REHEAT #%d  iter=%5d]  T %.4f→%.4f  restarting from Q_best=%.6e  corners=%d/%d\n",
+                @printf("  [SA REHEAT #%d  iter=%5d]  T %.4f→%.4f  restarting from Q_best=%.6e  corners=%d/%d%s\n",
                         n_reheats, t, T_before, T_current, Q_best,
-                        n_corners_rh, length(spec.free))
+                        n_corners_rh, length(spec.free), _corner_tags(theta_best, spec))
                 flush(stdout)
             end
         end
@@ -431,12 +459,12 @@ function _sa_loop(
             w_acc = adapt_window > 0 && t >= adapt_window ? mean(win_acc) : n_acc / t
             w_fin = adapt_window > 0 && t >= adapt_window ? mean(win_fin) : n_fin / t
             n_corners = _count_corners(theta_best, spec)
-            @printf("  [SA iter=%5d]  curr=%-14s  best=%.6e  T=%.4f  step=%.4f  acc=%.2f  fin=%.2f  corners=%d/%d  reheats=%d\n",
+            @printf("  [SA iter=%5d]  curr=%-14s  best=%.6e  T=%.4f  step=%.4f  acc=%.2f  fin=%.2f  corners=%d/%d%s  reheats=%d\n",
                     t,
                     isfinite(Q) ? @sprintf("%.6e", Q) : "Inf",
                     Q_best, T_current, step,
                     w_acc, w_fin,
-                    n_corners, length(spec.free),
+                    n_corners, length(spec.free), _corner_tags(theta_best, spec),
                     n_reheats)
             flush(stdout)
         end
@@ -444,9 +472,9 @@ function _sa_loop(
 
     if show_trace
         n_corners_done = _count_corners(theta_best, spec)
-        @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  corners=%d/%d  reheats=%d\n",
+        @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  corners=%d/%d%s  reheats=%d\n",
                 Q_best, n_acc, actual_iters, n_fin, actual_iters,
-                n_corners_done, length(spec.free),
+                n_corners_done, length(spec.free), _corner_tags(theta_best, spec),
                 n_reheats)
         flush(stdout)
     end
@@ -834,12 +862,12 @@ function _run_de(
             n_feas   = length(Q_finite)
             n_bas    = n_feas == 0 ? 0 : _count_basins(pop, Q_pop, spec)
             n_corners = _count_corners(theta_best, spec)
-            @printf("  [DE gen=%4d DONE]  Q_best=%.6e Q_mean=%-14s  feasible=%d/%d  improved=%d  clusters=%d  corners=%d/%d  evals=%d\n",
+            @printf("  [DE gen=%4d DONE]  Q_best=%.6e Q_mean=%-14s  feasible=%d/%d  improved=%d  clusters=%d  corners=%d/%d%s  evals=%d\n",
                     gen,
                     Q_best,
                     isfinite(Q_mean) ? @sprintf("%.6e", Q_mean) : "Inf",
                     n_feas, pop_size, n_imp, n_bas,
-                    n_corners, length(spec.free),
+                    n_corners, length(spec.free), _corner_tags(theta_best, spec),
                     n_eval)
             flush(stdout)
         end
@@ -1007,6 +1035,7 @@ function run_smm(
         theta0        = pack_theta(spec)
         iter_count    = Ref(0)
         best_loss     = Ref(Inf)
+        best_theta    = Ref(copy(theta0))   # incumbent (best) point, for corner reporting
         last_improve  = Ref(0)       # eval count at which best_loss last improved
         stopped_early = Ref(false)   # set when the no-improvement knob halts NM
 
@@ -1015,13 +1044,16 @@ function run_smm(
             Q = smm_objective(theta, spec)
             if isfinite(Q) && Q < best_loss[]
                 best_loss[]    = Q
+                best_theta[]   = copy(theta)
                 last_improve[] = iter_count[]
             end
             if r.show_trace_generations && iter_count[] % r.trace_stride == 0
-                @printf("  [%s iter %4d]  Q=%-14s  best=%.6e\n",
+                n_c = _count_corners(best_theta[], spec)
+                @printf("  [%s iter %4d]  Q=%-14s  best=%.6e  corners=%d/%d%s\n",
                         method, iter_count[],
                         isfinite(Q) ? @sprintf("%.6e", Q) : "Inf",
-                        best_loss[])
+                        best_loss[], n_c, length(spec.free),
+                        _corner_tags(best_theta[], spec))
                 flush(stdout)
             end
             return isfinite(Q) ? Q : 1e16
@@ -1035,8 +1067,10 @@ function run_smm(
             if r.nm_no_improve > 0 && isfinite(best_loss[]) &&
                (iter_count[] - last_improve[]) >= r.nm_no_improve
                 stopped_early[] = true
-                @printf("  [%s EARLY STOP  iter %d]  no improvement for %d evals  best=%.6e\n",
-                        method, iter_count[], r.nm_no_improve, best_loss[])
+                n_c = _count_corners(best_theta[], spec)
+                @printf("  [%s EARLY STOP  iter %d]  no improvement for %d evals  best=%.6e  corners=%d/%d%s\n",
+                        method, iter_count[], r.nm_no_improve, best_loss[],
+                        n_c, length(spec.free), _corner_tags(best_theta[], spec))
                 flush(stdout)
                 return true
             end

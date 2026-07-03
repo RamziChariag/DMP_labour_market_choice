@@ -190,7 +190,7 @@ SKIP_MOMENTS = Symbol[
 # header and calibrate_sigma_w). σ_w is calibrated externally from λ_w rather
 # than estimated, which removes the β–σ_w degeneracy and frees β_U, β_S.
 # Bound–Krueger (1991): λ_w ≈ 0.82 for log annual earnings.
-const LAMBDA_W = 0.00
+const LAMBDA_W = 0.82
 
 @printf("Estimation window: %s\n", WINDOW)
 flush(stdout)
@@ -215,8 +215,8 @@ flush(stdout)
 #   (:unsk_sigw / :skl_sigw = wage measurement-error SD σ_wU / σ_wS)
 # ============================================================
 FIX_PARAMS = Dict{Symbol,Float64}(
-    # :a_l      => 1.01131,
-    # :b_l      => 2.42423,
+     :a_l      => 1.00000,
+     :b_l      => 1.00000,
     # :c        => 2.94633,
     # :A         => 7.54100,     # From LMR(2016)
     # :PU       => 1.05948,
@@ -251,16 +251,16 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :clusters
+INIT_MODE            = :warmstart
 CLUSTERS_FORCE_REGEN = false
-INCLUDE_PREV_OPTIMUM = false
+INCLUDE_PREV_OPTIMUM = true
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r        => 0.00416667,        # 0.05/12; table's 0.00417 is rounded
     :nu       => 0.00336,
     :phi      => 0.02222129,        # table's 0.02222 is rounded
     :a_l      => 2.59266,
-    :b_l      => 0.31532,
+    :b_l      => 1.31532,
     :c        => 10.58040,
     :A        => 4.83051,           # aggregate production scale
     :PU       => 6.53357,
@@ -694,7 +694,7 @@ run_params = SMMRunParams(
     sa_cooling_exp     = 1.0,     # exponent in same schedule (higher = faster cool)
     sa_reheat_patience = 1_000,   # steps without improvement before a reheat, 0 to disable reheats
     sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
-    sa_max_reheats     = 2,       # cap on number of reheats per run
+    sa_max_reheats     = 1,       # cap on number of reheats per run, 0 is unlimited
     sa_adapt_window    = 50,      # rolling window for adaptive step / acceptance
     sa_target_fin      = 0.90,    # target feasibility (finite-Q) fraction;
                                   # below this, step shrinks

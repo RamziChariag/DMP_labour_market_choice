@@ -894,7 +894,7 @@ function make_model_decomposition_panel(;
     tgrid = result.tgrid   # 0 to T_max (120 months), dt=0.5, Nt=241
     Nt    = length(tgrid)
     T_max = tgrid[end]
-    wx    = result.wx       # Gauss-Legendre weights for x-grid
+    wx    = result.wx       # Gauss–Jacobi population weights (integrate densities ∝ ℓ)
     Nx    = length(wx)
 
     # ── Build x-axis: 20% pre-shock + 80% transition ────────────────
