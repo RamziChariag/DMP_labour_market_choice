@@ -11,7 +11,7 @@
 #      bounds and Nelder–Mead grinds on a box edge).
 #   2. PROBE MODE:
 #        SMM_PROBE=1 julia --threads auto code/smm/smm_main_temp.jl
-#      solves 6 hand-picked interior-cutoff points at the full grid,
+#      solves 6 port-verified interior-cutoff points at the full grid,
 #      prints feasibility (with reasons), x̄, masses, key moments vs
 #      targets, then exits.  Run this FIRST.
 #   3. ESTIMATION MODE (default):
@@ -297,7 +297,7 @@ const _TEMP_BOUNDS = Dict{Tuple{Symbol,Symbol},Tuple{Float64,Float64}}(
     (:skl,    :μ)        => (0.01,  4.5),
     (:unsk,   :λ)        => (0.02,  1.5),    # SA corner
     (:skl,    :λ)        => (0.005, 0.5),    # SA corner
-    (:unsk,   :k)        => (0.02,  6.0),
+    (:unsk,   :k)        => (0.005, 6.0),    # port-calibrated seeds sit at k_U ≈ 0.022-0.065
     (:skl,    :k)        => (0.02,  8.0),
     (:skl,    :σ)        => (0.0,   1.5),
 )
@@ -448,9 +448,22 @@ function _solve_and_report(θ::Vector{Float64}, spec; label::String = "")
 end
 
 # Build a θ vector from (block,name)→value overrides on top of base values.
-const _OVERRIDE_KEY = Dict(:gamma_PS => (:skl, :gamma_PS), :PU => (:unsk, :PU),
-                           :c => (:common, :c), :bU => (:unsk, :bU),
-                           :bT => (:unsk, :bT), :bS => (:skl, :bS))
+# Extended key map: seeds carry A, vacancy costs, hazards, and matching
+# efficiencies in addition to the production/cost/flow coordinates.
+const _OVERRIDE_KEY = Dict(
+    :gamma_PS => (:skl,    :gamma_PS),
+    :PU       => (:unsk,   :PU),
+    :c        => (:common, :c),
+    :A        => (:common, :A),
+    :bU       => (:unsk,   :bU),
+    :bT       => (:unsk,   :bT),
+    :bS       => (:skl,    :bS),
+    :kU       => (:unsk,   :k),
+    :kS       => (:skl,    :k),
+    :lamU     => (:unsk,   :λ),
+    :muU      => (:unsk,   :μ),
+    :muS      => (:skl,    :μ),
+)
 
 function _theta_from(base::Dict{Tuple{Symbol,Symbol},Float64}, ov, spec)
     vals = copy(base)
@@ -470,18 +483,62 @@ _spec_base_vals = Dict{Tuple{Symbol,Symbol},Float64}(
     (ps.block, ps.name) => ps.init for ps in spec.free)
 
 # ============================================================
+# Port-verified interior seeds.
+#
+# Found by internal calibration of (kU, kS, c) to (θ_U, θ_S, x̄) on a
+# Python port of this solver; the port reproduces this pipeline's
+# coarse-grid Q to 4-5 digits at the previous optimum (32.017) and at an
+# interior point (29.548), and reproduces the infeasibility pattern of
+# the naive seed grid.  Seeds 1-10 re-verified feasible at exactly these
+# values; port coarse-grid Q: 27.98, 36.24, 36.89, 39.98, 43.61, 44.31,
+# 45.23, 51.46, 72.38, 96.99  (old-basin reference: 29.5-32.0).
+# Seeds 11-14 are unverified local variants of seed 1 — safe because the
+# driver evaluates every seed below and appends only the finite-Q ones.
+# ============================================================
+const _PORT_SEEDS = NamedTuple[
+    # 1  star seed: beats the old basin on the coarse grid (Q = 27.98)
+    (PU=1.3, A=6.4451, gamma_PS=2.5, c=10.2127, bU=0.1930, bT=0.7599, bS=0.1352,
+     kU=0.0377, kS=0.4175, lamU=0.3787, muU=0.3279, muS=0.2535),
+    # 2  same cell, low-λ_U / calibrated-μ variant (Q = 36.24)
+    (PU=1.3, A=6.4451, gamma_PS=2.5, c=9.8560,  bU=0.1930, bT=0.7599, bS=0.1352,
+     kU=0.0654, kS=0.4470, lamU=0.0854, muU=0.2201, muS=0.2257),
+    # 3-4  PU=0.8 cells, low-λ_U (Q = 36.89, 39.98)
+    (PU=0.8, A=6.9306, gamma_PS=1.5, c=10.2964, bU=0.1188, bT=0.4676, bS=0.0971,
+     kU=0.0325, kS=0.2521, lamU=0.0818, muU=0.2236, muS=0.2289),
+    (PU=0.8, A=6.9306, gamma_PS=2.0, c=10.4342, bU=0.1188, bT=0.4676, bS=0.1181,
+     kU=0.0310, kS=0.3007, lamU=0.0818, muU=0.2515, muS=0.2314),
+    # 5-7  best skilled-share cells (share ≈ 0.35, x̄ ≈ 0.63; Q = 43.61-45.23)
+    (PU=0.8, A=6.9306, gamma_PS=2.0, c=9.7866,  bU=0.1188, bT=0.2338, bS=0.1181,
+     kU=0.0239, kS=0.3090, lamU=0.3787, muU=0.3279, muS=0.2535),
+    (PU=0.8, A=6.9306, gamma_PS=2.5, c=9.7281,  bU=0.1188, bT=0.2338, bS=0.1352,
+     kU=0.0240, kS=0.3566, lamU=0.3787, muU=0.3279, muS=0.2535),
+    (PU=0.8, A=6.9306, gamma_PS=2.5, c=10.9262, bU=0.1188, bT=0.4676, bS=0.1352,
+     kU=0.0221, kS=0.3361, lamU=0.3787, muU=0.3279, muS=0.2535),
+    # 8-10  diversity across (PU, γ) cells (Q = 51.46, 72.38, 96.99)
+    (PU=0.8, A=6.9306, gamma_PS=1.5, c=9.8248,  bU=0.2036, bT=0.4676, bS=0.0971,
+     kU=0.0257, kS=0.2523, lamU=0.0818, muU=0.2723, muS=0.2284),
+    (PU=1.3, A=6.4451, gamma_PS=2.0, c=10.1354, bU=0.1930, bT=0.7599, bS=0.1181,
+     kU=0.0327, kS=0.3061, lamU=0.3787, muU=0.3279, muS=0.2535),
+    (PU=2.0, A=6.0143, gamma_PS=4.0, c=10.3299, bU=0.2969, bT=1.1691, bS=0.1702,
+     kU=0.0445, kS=0.6932, lamU=0.3787, muU=0.3279, muS=0.2535),
+    # 11-14  unverified local variants of seed 1 (filtered by the driver)
+    (PU=1.3, A=6.4451, gamma_PS=2.5, c=9.9000,  bU=0.1930, bT=0.7599, bS=0.1352,
+     kU=0.0377, kS=0.4175, lamU=0.3787, muU=0.3279, muS=0.2535),
+    (PU=1.3, A=6.4451, gamma_PS=2.5, c=10.5000, bU=0.1930, bT=0.7599, bS=0.1352,
+     kU=0.0377, kS=0.4175, lamU=0.1500, muU=0.2800, muS=0.2400),
+    (PU=1.3, A=6.7000, gamma_PS=2.5, c=10.4700, bU=0.1930, bT=0.7599, bS=0.1352,
+     kU=0.0290, kS=0.3200, lamU=0.3787, muU=0.3279, muS=0.2535),
+    (PU=1.3, A=6.4451, gamma_PS=3.0, c=10.2100, bU=0.1930, bT=0.7599, bS=0.1500,
+     kU=0.0377, kS=0.5000, lamU=0.3787, muU=0.3279, muS=0.2535),
+]
+
+# ============================================================
 # PROBE MODE  (SMM_PROBE=1) — run this first, then exit.
+# Probes the strongest port-verified seeds at the FULL grid.
 # ============================================================
 if get(ENV, "SMM_PROBE", "0") == "1"
     println("\n", "="^60, "\n  INTERIOR PROBE  (full grid: Nx=$(spec.run.Nx))\n", "="^60)
-    _probe_points = [
-        (gamma_PS=2.5, PU=1.3, c=7.0, bU=0.30, bT=0.60, bS=0.50),
-        (gamma_PS=2.0, PU=1.3, c=6.0, bU=0.30, bT=0.60, bS=0.50),
-        (gamma_PS=3.0, PU=1.3, c=8.0, bU=0.30, bT=0.60, bS=0.50),
-        (gamma_PS=2.5, PU=0.8, c=6.5, bU=0.15, bT=0.35, bS=0.35),
-        (gamma_PS=2.5, PU=2.0, c=8.0, bU=0.40, bT=0.80, bS=0.60),
-        (gamma_PS=4.0, PU=1.5, c=9.0, bU=0.30, bT=0.60, bS=0.50),
-    ]
+    _probe_points = _PORT_SEEDS[[1, 2, 3, 5, 9, 10]]
     for (i, ov) in enumerate(_probe_points)
         _solve_and_report(_theta_from(_spec_base_vals, ov, spec), spec;
                           label = "probe $i: $(ov)")
@@ -528,13 +585,9 @@ if seed_bank !== nothing
         end
     end
 
-    _seed_overrides = NamedTuple[]
-    for γ in (1.5, 2.0, 2.5, 3.0, 4.0), PU in (0.8, 1.3, 2.0), c in (6.0, 7.5, 9.0)
-        push!(_seed_overrides, (gamma_PS=γ, PU=PU, c=c, bU=0.30, bT=0.60, bS=0.50))
-    end
-    for γ in (2.0, 2.5, 3.0), PU in (0.8, 1.3), c in (6.5, 8.0)
-        push!(_seed_overrides, (gamma_PS=γ, PU=PU, c=c, bU=0.15, bT=0.35, bS=0.35))
-    end
+    # Port-verified seed list (see _PORT_SEEDS above).  Non-overridden
+    # coordinates (α_U, a_Γ, b_Γ, σ_S, ξ_S) come from the companions.
+    _seed_overrides = copy(_PORT_SEEDS)
 
     _seed_thetas = [_theta_from(_companion, ov, spec) for ov in _seed_overrides]
     push!(_seed_thetas, _theta_from(_companion, NamedTuple(), spec))  # prev optimum as-is
@@ -554,7 +607,8 @@ if seed_bank !== nothing
             isempty(_ok) ? "—" : @sprintf("%.4e", minimum(_seed_Q[_ok])))
     if isempty(_ok)
         @warn "[interior-seeds] NO interior seed is feasible — run SMM_PROBE=1 and " *
-              "inspect why (dead U-market? degenerate τ?) before trusting any verdict."
+              "inspect why (dead U-market? degenerate τ?) before trusting any verdict. " *
+              "(Large deviations from the port's Q values also merit a look.)"
     else
         _newlab = isempty(seed_bank.labels) ? 1 : maximum(seed_bank.labels) + 1
         seed_bank = SeedBank(
