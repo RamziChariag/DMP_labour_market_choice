@@ -360,40 +360,43 @@ function default_free_params() :: Vector{ParamSpec}
     return [
         # Deep structural — common block (worker type shape; pinned to 1.0 via
         # FIX_PARAMS in the uniform-ℓ runs, specs kept for the Beta appendix run)
-        ParamSpec(:common, :a_ℓ,        0.1000,   5.0000,   2.8000, "worker type shape a_ℓ"),
+        ParamSpec(:common, :a_ℓ,        0.1000,   8.0000,   2.8000, "worker type shape a_ℓ"),
         ParamSpec(:common, :b_ℓ,        0.0500,   4.0000,   1.2000, "worker type shape b_ℓ"),
  
         # Common block — training cost coeff and aggregate scale
-        ParamSpec(:common, :c,          3.0000,  14.5000,  11.0000, "training cost coeff c"),
-        ParamSpec(:common, :A,          3.0000,  18.0000,   5.6000, "aggregate production scale A"),
+        ParamSpec(:common, :c,          -4.0000,  4.0000,  11.0000, "training cost coeff c"),
+        ParamSpec(:common, :A,          0.0000,  13.0000,   5.6000, "aggregate production scale A"),
  
         # Institutional flow values (stored by consuming block).
-        ParamSpec(:unsk,   :bU,         0.0500,   2.5000,   1.5000, "unskilled outside flow b_U"),
-        ParamSpec(:unsk,   :bT,         0.0500,   7.0000,   2.6500, "training flow b_T"),
-        ParamSpec(:skl,    :bS,         0.0200,   2.0000,   0.6600, "skilled outside flow b_S"),
+        ParamSpec(:unsk,   :bU,         0.0000,   2.5000,   1.5000, "unskilled outside flow b_U"),
+        ParamSpec(:unsk,   :bT,         0.0000,   7.0000,   2.6500, "training flow b_T"),
+        ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.6600, "skilled outside flow b_S"),
  
         # Aggregate state / offer shape (stored by consuming block)
-        ParamSpec(:unsk,   :PU,         0.4000,  12.0000,   7.0000, "unskilled productivity P_U"),
-        ParamSpec(:skl,    :gamma_PS,   1.0000,  25.0000,  11.8000, "skilled productivity γ_PS"),
+        ParamSpec(:unsk,   :PU,         0.0001,  6.0000,    3.0000, "unskilled productivity P_U"),
+        ParamSpec(:skl,    :gamma_PS,   1.0000,  8.0000,    5.8000, "skilled productivity γ_PS"),
         ParamSpec(:unsk,   :α_U,        0.2000,  20.5000,   1.0000, "unskilled damage shape α_U"),
         ParamSpec(:skl,    :a_Γ,        0.1000,  20.0000,   5.2000, "skilled offer shape a_Γ"),
         ParamSpec(:skl,    :b_Γ,        0.1000,  18.0000,   9.2000, "skilled offer shape b_Γ"),
  
         # Matching efficiency, matching elasticity, bargaining (U/S paired)
-        ParamSpec(:unsk,   :μ,          0.0200,   3.9000,   0.3500, "unskilled matching eff μ_U"),
-        ParamSpec(:skl,    :μ,          0.0100,   4.5000,   0.1900, "skilled matching eff μ_S"),
-        ParamSpec(:unsk,   :η,          0.3000,   0.7000,   0.5000, "unskilled matching elas η_U"),
-        ParamSpec(:skl,    :η,          0.3000,   0.7000,   0.5000, "skilled matching elas η_S"),
-        ParamSpec(:unsk,   :β,          0.0100,   0.7000,   0.5000, "unskilled bargaining β_U"),
-        ParamSpec(:skl,    :β,          0.0100,   0.7000,   0.5000, "skilled bargaining β_S"),
+        ParamSpec(:unsk,   :μ,          0.0001,   3.9000,   0.3500, "unskilled matching eff μ_U"),
+        ParamSpec(:skl,    :μ,          0.0001,   4.5000,   0.1900, "skilled matching eff μ_S"),
+        ParamSpec(:unsk,   :η,          0.0001,   1.0000,   0.5000, "unskilled matching elas η_U"),
+        ParamSpec(:skl,    :η,          0.0001,   1.0000,   0.5000, "skilled matching elas η_S"),
+        ParamSpec(:unsk,   :β,          0.0010,   0.9000,   0.5000, "unskilled bargaining β_U"),
+        ParamSpec(:skl,    :β,          0.0010,   0.9000,   0.5000, "skilled bargaining β_S"),
  
         # Shock arrival rates (U/S paired)
-        ParamSpec(:unsk,   :λ,          0.0200,   1.5000,   0.8000, "unskilled damage rate λ_U"),
-        ParamSpec(:skl,    :λ,          0.0050,   0.5000,   0.1400, "skilled quality shock λ_S"),
+        ParamSpec(:unsk,   :λ,          0.0001,   1.5000,   0.8000, "unskilled damage rate λ_U"),
+        ParamSpec(:skl,    :λ,          0.0001,   0.5000,   0.1400, "skilled quality shock λ_S"),
  
-        # Vacancy costs (U/S paired)
-        ParamSpec(:unsk,   :k,          0.0200,   6.0000,   0.8400, "unskilled vacancy cost k_U"),
-        ParamSpec(:skl,    :k,          0.0200,   8.0000,   1.7400, "skilled vacancy cost k_S"),
+        # Vacancy costs (U/S paired) — DIMENSIONLESS, in months of average
+        # sectoral output: dollar posting cost = k_j · π̄_j (see grids.jl,
+        # mean_output_U/S).  LMR (2016) estimate 2.34 (HS) / 1.58 (college)
+        # in the same units.
+        ParamSpec(:unsk,   :k,          0.0005,  24.0000,   2.2500, "unskilled vacancy cost k_U (months of avg U output)"),
+        ParamSpec(:skl,    :k,          0.0005,  24.0000,   4.6000, "skilled vacancy cost k_S (months of avg S output)"),
  
         # Skilled block — OJS cost, exogenous separation
         ParamSpec(:skl,    :σ,          0.0000,   1.5000,   0.0900, "OJS flow cost σ_S"),
