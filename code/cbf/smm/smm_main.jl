@@ -184,8 +184,8 @@ const _PAIR_BASELINE = Dict(
 SKIP_MOMENTS = Symbol[
     #:wage_premium,
     :ur_total,
-    # :emp_var_U,   # GAMMA_U: un-skipped — needed to identify γ_U vs α_U (unskilled wage dispersion)
-    # :emp_cm3_U,   # GAMMA_U: un-skipped — unskilled wage skew, pins the damage shape given γ_U
+    :emp_var_U,
+    :emp_cm3_U,
     :emp_var_S,
     :emp_cm3_S,
     :ee_rate_S,
@@ -256,8 +256,8 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :clusters
-CLUSTERS_FORCE_REGEN = true
+INIT_MODE            = :warmstart
+CLUSTERS_FORCE_REGEN = false
 INCLUDE_PREV_OPTIMUM = false
 
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(

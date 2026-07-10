@@ -394,7 +394,7 @@ function default_free_params() :: Vector{ParamSpec}
         # free it together with the within-unskilled variance moments — γ_U and α_U both
         # move unskilled wage dispersion, so without variance targets they are not
         # separately identified.  lb=0 (flat) … ub=1 (exp(x)); it should never want > 1.
-        ParamSpec(:unsk,   :γ_U,        0.0000,   1.0000,   0.3000, "unskilled ability gradient γ_U"),   # FREED (see joint-map: init 0.30, interior)
+        # ParamSpec(:unsk,   :γ_U,        0.0000,   1.0000,   0.0000, "unskilled ability gradient γ_U"),
         ParamSpec(:unsk,   :α_U,        0.2000,  20.5000,   1.0000, "unskilled damage shape α_U"),
         ParamSpec(:skl,    :a_Γ,        0.1000,  20.0000,   5.2000, "skilled offer shape a_Γ"),
         ParamSpec(:skl,    :b_Γ,        0.1000,  18.0000,   9.2000, "skilled offer shape b_Γ"),
@@ -438,7 +438,7 @@ end
 const REGIME_SPECIFIC_PARAMS = Set([
     (:common, :c),   (:common, :A),
     (:unsk,   :PU),  (:skl,  :PS),   (:skl, :γ_S),
-    (:unsk,   :γ_U),   # GAMMA_U: FREED — regime-specific, estimated with γ_S and variance moments.
+    # (:unsk, :γ_U),   # GAMMA_U: add here when you free γ_U (see ParamSpec note above).
     (:unsk,   :α_U), (:skl,  :a_Γ),   (:skl,  :b_Γ),
     (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),  (:unsk, :σ_w),
     (:skl,    :μ),   (:skl, :η),    (:skl, :k),   (:skl, :β),   (:skl, :λ),

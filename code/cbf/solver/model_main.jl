@@ -89,44 +89,44 @@ flush(stdout)
 # ============================================================
 # 1. Parameters
 # ============================================================
-# SMM run: Q = 5.98845476, converged, 2303 iterations
+# SMM run: Q = 1.53442668, converged, 4150 iterations
 common = CommonParams(
     r   = 0.00416667,   # fixed (= 0.05/12, monthly)
     ν   = 0.00335700,   # fixed (base_covid life-table)
     φ   = 0.02222129,   # fixed
-    a_ℓ = 3.74182000,
-    b_ℓ = 1.06033000,
-    c   = 1.72111000,
-    A   = 5.49233000,   # LOG scale
+    a_ℓ = 8.00000000,
+    b_ℓ = 0.14653000,
+    c   = 10.73653000,
+    A   = 5.52584000,   # LOG scale
 )
 
 unsk_par = UnskilledParams(
-    μ   = 1.04035000,
+    μ   = 0.33094000,
     η   = 0.50000000,   # fixed
-    k   = 5.06146000,   # months of average U output
+    k   = 1.66381000,   # months of average U output
     β   = 0.18800000,   # fixed
-    λ   = 0.20493000,
-    PU  = 1.73268000,
-    γ_U = 0.61867000,   # unskilled ability gradient (new)
-    bU  = 2.04326000,
-    bT  = 2.54625000,
-    α_U = 18.35568000,
+    λ   = 0.94995000,
+    PU  = 7.99982000,
+    bU  = 2.17560000,
+    bT  = 1.85923000,
+    α_U = 0.20329000,
     σ_w = 0.23461000,   # fixed
+    γ_U = 0.00000000,   # GAMMA_U: flat unskilled (Day-1 gate). 1.0 = old exp(x).
 )
 
 skl_par = SkilledParams(
-    μ   = 1.86745000,
+    μ   = 0.20023000,
     η   = 0.50000000,   # fixed
-    k   = 18.31015000,  # months of average S output
+    k   = 0.83434000,   # months of average S output
     β   = 0.27200000,   # fixed
-    λ   = 0.72398000,
-    σ   = 0.41343000,   # OJS flow cost σ_S (not σ_w)
-    PS  = 1.46539000,
-    γ_S = 1.03169000,   # skilled ability gradient
-    bS  = 1.43724000,
-    a_Γ = 7.44941000,
-    b_Γ = 1.85594000,
-    ξ   = 0.00415000,
+    λ   = 0.53177000,
+    σ   = 0.00001000,   # OJS flow cost σ_S (not σ_w)
+    PS  = 1.87854000,
+    γ_S = 1.00000000,   # GAMMA_S: paste the estimated γ_S here after the run (1.0 = old exp(x))
+    bS  = 1.54225000,
+    a_Γ = 11.71365000,
+    b_Γ = 1.53564000,
+    ξ   = 0.00494000,
     σ_w = 0.21904000,   # fixed
 )
 
