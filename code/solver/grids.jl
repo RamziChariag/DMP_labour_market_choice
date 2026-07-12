@@ -1,5 +1,6 @@
 ############################################################
-# grids.jl — Grid construction, matching technology, utilities
+# grids.jl — Grid construction, matching technology, the skill
+#            copula, and shared numerical utilities (RoySearch)
 ############################################################
 
 # ============================================================
@@ -37,140 +38,188 @@ end
 
 
 # ============================================================
-# Gauss–Jacobi quadrature for the worker-type dimension
+# Ability marginal as a Gauss–Jacobi mass rule
 #
-# The worker-type density is the Beta(a_ℓ, b_ℓ) pdf
-#   ℓ(x) = x^{a_ℓ−1} (1−x)^{b_ℓ−1} / B(a_ℓ, b_ℓ).
-# When a_ℓ < 1 or b_ℓ < 1 it has an integrable endpoint singularity, and
-# plain Gauss–Legendre systematically under-integrates it (e.g. ∫ℓ ≈ 0.967
-# at N=200 for b_ℓ≈0.32 — mass is silently lost off the top of the type
-# distribution).  Every x-aggregate in the model is ∫ g(x) ℓ(x) dx with
-# g(x) = density/ℓ(x) a smooth conditional-occupancy profile (all stocks are
-# births ℓ(x) × occupancy), so we integrate against ℓ *exactly* with
-# Gauss–Jacobi, whose weight kernel is precisely x^{a−1}(1−x)^{b−1}.
+# Each ability marginal is the Beta(a_ℓ, b_ℓ) density.  Every marginal
+# aggregate in the model is an expectation E_ℓ[g] = ∫ g(a) f_ℓ(a) da with
+# g a smooth conditional-occupancy profile.  Gauss–Jacobi integrates
+# exactly against the kernel a^{a_ℓ−1}(1−a)^{b_ℓ−1}, so it handles the
+# a_ℓ<1 / b_ℓ<1 endpoint singularities that defeat Gauss–Legendre.
 #
 # `gaussjacobi(N, α, β)` gives nodes/weights for
-#   ∫_{−1}^{1} f(t) (1−t)^α (1+t)^β dt.
-# Map x = (t+1)/2 and match x^{a−1}(1−x)^{b−1}: α = b−1 (pairs with 1−t),
-# β = a−1 (pairs with 1+t), giving
-#   ∫_0^1 g(x) x^{a−1}(1−x)^{b−1} dx = 2^{−(a+b−1)} Σ_i w_i g(x_i).
+#   ∫_{−1}^{1} h(t) (1−t)^α (1+t)^β dt.
+# Map a = (t+1)/2 and match a^{a_ℓ−1}(1−a)^{b_ℓ−1}: α = b_ℓ−1 (pairs with
+# 1−t), β = a_ℓ−1 (pairs with 1+t).  Then for any smooth g,
+#   E_ℓ[g] = ∫ g f_ℓ da = (C/B) Σ_i w_i g(a_i),  C = 2^{−(a_ℓ+b_ℓ−1)}.
+# Since E_ℓ[1] = 1 forces (C/B) Σ_i w_i = 1, the population mass weights
+# are simply the normalised Gauss–Jacobi weights
+#   wa_i = w_i / Σ_j w_j,        Σ_i wa_i = 1  (exactly),
+# with no Beta normaliser and no division by the kernel (which would
+# reintroduce the endpoint singularity).  Every marginal expectation is
+# then `dot(g, wa)`, exact to quadrature order for smooth g.
 #
-# We return *population weights* wx that fold ℓ in, so that for any state
-# density D(x) = g(x) ℓ(x):
-#   dot(D, wx) ≈ ∫ D(x) dx      (Gauss–Jacobi accurate for smooth g),
-#   dot(ℓ, wx) = 1              (exactly, to machine precision).
-# Concretely  wx_i = 2^{−(a+b−1)} · w_i / (x_i^{a−1}(1−x_i)^{b−1});
-# the normaliser B(a_ℓ,b_ℓ) cancels and is never formed.
-#
-# IMPORTANT: because ℓ is folded into wx, these weights integrate DENSITIES
-# (objects ∝ ℓ) only.  `dot(density, wx)` is the correct call for every
-# aggregate in this model; do NOT use wx to integrate a bare (non-density)
-# function of x — that would give ∫ f/ℓ · ℓ = ∫ f only if f/ℓ is smooth,
-# which a bare f is not.
+# Under the symmetric-marginals baseline both abilities share this grid
+# and these weights; the two-dimensional joint is assembled from them and
+# the copula density in build_copula (below).
 # ============================================================
 
 """
-    build_type_grid(N, a, b) -> (nodes, weights)
+    build_ability_grid(N, a, b) -> (nodes, weights)
 
-`N`-point Gauss–Jacobi rule on [0, 1] tuned to the worker-type density
-`ℓ = Beta(a, b)`.  Returns nodes `x` and *population weights* `wx` such
-that `dot(D, wx) ≈ ∫ D dx` for any density `D(x) ∝ ℓ(x)`, exact to
-machine precision for the total mass `dot(ℓ, wx) = 1`.  Valid for any
-`a, b > 0`, including the endpoint-singular case `a < 1` or `b < 1`.
+`N`-point Gauss–Jacobi mass rule on [0, 1] for a Beta(a, b) ability
+marginal.  Returns nodes and population mass weights `wa` with
+`sum(wa) = 1` and `dot(g, wa) ≈ E_ℓ[g]` for any smooth `g`.  Valid for
+any `a, b > 0`, including the singular `a<1` / `b<1` regime.
 """
-function build_type_grid(N::Int, a::Float64, b::Float64)
+function build_ability_grid(N::Int, a::Float64, b::Float64)
     (a > 0.0 && b > 0.0) ||
-        error("build_type_grid: Beta shape parameters must be positive (got a=$a, b=$b).")
+        error("build_ability_grid: Beta shape parameters must be positive (got a=$a, b=$b).")
     t, w = gaussjacobi(N, b - 1.0, a - 1.0)        # weight (1−t)^{b−1} (1+t)^{a−1}
     x    = @. 0.5 * (t + 1.0)
-    C    = 2.0^(-(a + b - 1.0))
-    # Unnormalised Beta kernel at the nodes; Jacobi nodes are interior ⇒
-    # strictly positive and finite, so the division below is safe.
-    Wker = @. x^(a - 1.0) * (1.0 - x)^(b - 1.0)
-    wx   = @. C * w / Wker                          # population weights (ℓ folded in)
-    return x, wx
+    wa   = w ./ sum(w)                              # population mass weights, Σ = 1
+    return x, wa
 end
 
 
 # ============================================================
-# Training cost — outside-scaling convention
-#   c(x)        = (1.0 - x) * exp(c̃ - x)      [scale-free, decreasing in x]
-#   dollar cost = exp(A) · c(x)
+# Skill copula
 #
-# The stored parameter is the SCALE-FREE coefficient c̃; every caller
-# multiplies the FUNCTION by exp(A) outside — training_cost itself never
-# sees A.  The training margin therefore compares T(x) − exp(A)·c(x)
-# with U^search(x); since T and U^search also scale with exp(A), the
-# margin depends on (c̃, primitives) but not on A.
-# Interpretation of c̃ on [0,1]:
-#   c̃ ≤ −4  → training is effectively free for every x;
-#   c̃ ≥ +4  → cost is a near-vertical wall at x = 1 (only the top can train).
+# The joint ability density is (notes eq. copula)
+#   ℓ(aU,aS) = f_ℓ(aU) f_ℓ(aS) c_ρ(F_ℓ(aU), F_ℓ(aS)),
+# a Gaussian copula with a single correlation ρ_x on the Gaussian ranks
+#   ζ_u = Φ⁻¹(F_ℓ(aU)),  ζ_v = Φ⁻¹(F_ℓ(aS)),
+#   c_ρ(u,v) = exp(−(ρ²(ζ_u²+ζ_v²) − 2ρ ζ_u ζ_v)/(2(1−ρ²))) / √(1−ρ²).
+#
+# Because wa^U, wa^S are marginal population masses (Σ = 1 each), the
+# two-dimensional aggregation weight is the outer product of the two
+# marginal weight vectors, modulated pointwise by the copula density:
+#   W2[i,j] = c_ρ(F_i, F_j) · wa^U_i · wa^S_j.
+# Then for any surface g(aU,aS),  E_ℓ[g] = Σ_{ij} g_{ij} W2_{ij}.
+#
+# Copula margins are uniform, so ∫ c_ρ(u,v) dv = 1: the aU-marginal of
+# W2 (row sums) returns wa^U exactly, and total mass is 1.  build_copula
+# renormalises row/column/total on the finite grid so these identities
+# hold to machine precision at every ρ_x (mandatory for the ρ_x → 1
+# nesting check against the single-ability model).
+#
+# ρ_x → 1 concentrates c_ρ on the diagonal aU = aS; W2 becomes diagonal
+# with entries wa_i and RoySearch reduces to the one-dimensional model.
 # ============================================================
 
-@inline training_cost(x::Float64, c::Float64) = (1.0 - x) * exp(c-x)
+"""
+    CopulaGrid
+
+Two-dimensional aggregation structure for the skill copula.  `W2[i,j]`
+is the joint population weight at ability pair `(a[i], a[j])` such that
+`sum(g .* W2) ≈ ∫∫ g(aU,aS) ℓ(aU,aS) daU daS` for any surface `g`.
+`ρ_x` is the copula correlation; `F` holds the marginal CDF values at
+the ability nodes.
+"""
+struct CopulaGrid
+    ρ_x :: Float64
+    F   :: Vector{Float64}    # marginal CDF F_ℓ at the ability nodes
+    ζ   :: Vector{Float64}    # Gaussian ranks Φ⁻¹(F) at the ability nodes
+    W2  :: Matrix{Float64}    # joint population weights (rows aU, cols aS)
+end
+
+"""
+    build_copula(ρ_x, xgrid, wa_U, wa_S, a_ℓ, b_ℓ) -> CopulaGrid
+
+Assemble the joint aggregation weights for correlation `ρ_x` on the
+shared ability grid `xgrid` with marginal population weights `wa_U`,
+`wa_S`.  Row sums return `wa_U`, column sums return `wa_S`, and the
+total is 1, all to machine precision after renormalisation.
+"""
+function build_copula(ρ_x::Float64, xgrid::Vector{Float64},
+                      wa_U::Vector{Float64}, wa_S::Vector{Float64},
+                      a_ℓ::Float64, b_ℓ::Float64)
+    N    = length(xgrid)
+    dist = Beta(a_ℓ, b_ℓ)
+    F    = clamp.(cdf.(dist, xgrid), 1e-12, 1.0 - 1e-12)
+    ζ    = quantile.(Normal(), F)
+
+    ρ  = clamp(ρ_x, -0.999, 0.999)
+    W2 = Matrix{Float64}(undef, N, N)
+    if abs(ρ) < 1e-9
+        @inbounds for j in 1:N, i in 1:N
+            W2[i, j] = wa_U[i] * wa_S[j]        # independence: c_ρ ≡ 1
+        end
+    else
+        den = 2.0 * (1.0 - ρ^2)
+        nrm = 1.0 / sqrt(1.0 - ρ^2)
+        @inbounds for j in 1:N
+            ζv = ζ[j]
+            for i in 1:N
+                ζu = ζ[i]
+                c  = nrm * exp(-(ρ^2 * (ζu^2 + ζv^2) - 2.0 * ρ * ζu * ζv) / den)
+                W2[i, j] = c * wa_U[i] * wa_S[j]
+            end
+        end
+    end
+
+    # Sinkhorn-style renormalisation so the discrete margins match wa_U,
+    # wa_S exactly (a few sweeps converge to machine precision; the
+    # continuous copula already has uniform margins, so this only removes
+    # finite-grid quadrature error).
+    for _ in 1:64
+        rs = vec(sum(W2, dims = 2))
+        @inbounds for i in 1:N
+            s = rs[i] > 1e-300 ? wa_U[i] / rs[i] : 0.0
+            @views W2[i, :] .*= s
+        end
+        cs = vec(sum(W2, dims = 1))
+        @inbounds for j in 1:N
+            s = cs[j] > 1e-300 ? wa_S[j] / cs[j] : 0.0
+            @views W2[:, j] .*= s
+        end
+        maximum(abs, vec(sum(W2, dims = 2)) .- wa_U) < 1e-14 && break
+    end
+
+    return CopulaGrid(ρ_x, F, ζ, W2)
+end
 
 
 # ============================================================
-# Ability → productivity map  g(x)   [BASELINE: exp(x)]
-#   π_j(x,p) = exp(A) · P_j · g(x) · p ,   j ∈ {U, S},  P_j constant.
-#   g(x) = exp(x) ∈ [1, e] on x ∈ [0,1]:  floored at 1 (no dead zone at
-#   x = 0), bounded, elegant.  Both sectors share the SAME map; the only
-#   sectoral difference is the level P_U vs P_S.
-#   *** This is the single place to change the x-map.  Swap to
-#       (1.0 + x), (1.0 + γ*x), etc. here and nowhere else. ***
+# Training cost — pecuniary, commensurate with the wage scale
+#   c(aS) = exp(A) · c · (1 − aS) · exp(−aS)      [decreasing in aS]
+#
+# The coefficient c is a linear level multiplier on the shape
+# (1 − aS)·exp(−aS); c = 0 removes the cost.  The exp(A) factor puts the
+# cost on the same pecuniary scale as the training value T(aS) and the
+# outside option U^search(aU), both of which carry exp(A).  Without it,
+# at the estimated A the fixed-unit cost is dwarfed by the exp(A)-scaled
+# margin and drops out of the frontier entirely.  The argument is the
+# SKILLED aptitude aS: workers more apt at skilled work train more
+# cheaply (c'(aS) < 0).
 # ============================================================
 
-@inline prod_map(x::Float64) = exp(x)
+@inline training_cost(aS::Float64, c::Float64, A::Float64) = exp(A) * c * (1.0 - aS) * exp(-aS)
 
 
 # ============================================================
 # Mean sectoral flow output — LMR-style vacancy-cost units
 #
-#   π̄_U ≡ E[π_U(x,p)] = exp(A) · P_U · E_ℓ[g(x)]  · E_G[p],  E_G[p] = α_U/(α_U+1)
-#   π̄_S ≡ E[π_S(x,p)] = exp(A) · P_S · E_ℓ[g(x)]  · E_Γ[p],  E_Γ[p] = a_Γ/(a_Γ+b_Γ)
-#   with g(x) = exp(x)  (EXP-MAP baseline; see prod_map above).
+#   π̄_U ≡ E[π_U] = exp(A) · P_U · E_ℓ[aU] · E_G[p],  E_G[p] = α_U/(α_U+1)
+#   π̄_S ≡ E[π_S] = exp(A) · P_S · E_ℓ[aS] · E_Γ[p],  E_Γ[p] = a_Γ/(a_Γ+b_Γ)
 #
-# E_ℓ[·] is over the population type distribution ℓ (evaluated on the type
-# grid); E_G, E_Γ over the match-quality draw distributions.  Both are
-# exogenous functions of the parameters — no endogenous feedback into
-# free entry.  Vacancy costs are parameterised as k_j · π̄_j with k_j
-# DIMENSIONLESS, measured in months (model periods) of average sectoral
-# output — exactly LMR (2016), where the posting cost is c × mean f(x,y)
-# and the reported c is "months of average output".
+# Production is linear in own ability (notes eq. prod), so the ability
+# factor is the marginal mean E_ℓ[a] = dot(a, wa).  Vacancy costs are
+# k_j · π̄_j with k_j dimensionless (months of average sectoral output),
+# exactly LMR (2016).
 # ============================================================
 
 function mean_output_U(model)
     gp = model.grids;  up = model.unsk_par;  cp = model.common
-    Eg = dot(exp.(up.γ_U .* gp.x) .* gp.ℓ, gp.wx) # GAMMA_U: E_ℓ[exp(γ_U·x)]
-    Ep = up.α_U / (up.α_U + 1.0)             # E_G[p], G = Beta(α_U, 1)
-    return exp(cp.A) * up.PU * Eg * Ep
+    Ea = dot(gp.x, gp.wa_U)                   # E_ℓ[aU]
+    Ep = up.α_U / (up.α_U + 1.0)              # E_G[p], G = Beta(α_U, 1)
+    return exp(cp.A) * up.PU * Ea * Ep
 end
 
 function mean_output_S(model)
     gp = model.grids;  sp = model.skl_par;  cp = model.common
-    P_S = sp.PS
-    Eg  = dot(exp.(sp.γ_S .* gp.x) .* gp.ℓ, gp.wx) # E_ℓ[exp(γ_S·x)]  (GAMMA_S)
-    Ep  = sp.a_Γ / (sp.a_Γ + sp.b_Γ)         # E_Γ[p], Γ = Beta(a_Γ, b_Γ)
-    return exp(cp.A) * P_S * Eg * Ep
-end
-
-
-# ============================================================
-# Skilled flow-productivity coefficient  (GAMMA_S)
-#   PS_of_x(x, P_S, A, γ_S) = A · P_S · exp(γ_S · x)
-#   Returns the FULL coefficient: callers compose flow output as
-#       π_S(x, p) = PS_of_x(x, P_S, A, γ_S) · p        (NO extra · x).
-#   Floored at A·P_S at x = 0; grows with the SKILLED gradient γ_S.
-#   γ_S = 1 recovers the old exp(x) map (= unskilled's slope, no comparative
-#   advantage). γ_S > 1 makes skilled steeper in x, so unskilled is
-#   comparatively more productive at low x (single crossing).
-#   NOTE arg order: A is 3rd, γ_S is 4th (both default). Existing 3-arg calls
-#   PS_of_x(x, P_S, exp(A)) still compile and give γ_S = 1; production call
-#   sites pass the estimated γ_S as the 4th argument.
-# ============================================================
-
-@inline function PS_of_x(x::Float64, P_S::Float64, A::Float64=1.0, γ_S::Float64=1.0)
-    return A * P_S * exp(γ_S * x)
+    Ea = dot(gp.x, gp.wa_S)                   # E_ℓ[aS]
+    Ep = sp.a_Γ / (sp.a_Γ + sp.b_Γ)           # E_Γ[p], Γ = Beta(a_Γ, b_Γ)
+    return exp(cp.A) * sp.PS * Ea * Ep
 end
 
 
@@ -193,13 +242,54 @@ end
 
 
 # ============================================================
-# Cutoff index helpers
+# Soft tail-indicator weight
+#
+# Linear-in-p smoothing of 1{p ≥ p*} across the grid cell that contains
+# p*: returns 1 above the cell, 0 below it, and the fractional coverage
+# inside it.  Makes every tail integral ∫_{p*}^1 (·) dG a continuous
+# function of p*, which the outer fixed point on the reservation cutoff
+# needs to converge smoothly.
+# ============================================================
+
+@inline function _soft_weight(pj::Float64, pstar::Float64,
+                              pgrid::Vector{Float64}, j::Int, Np::Int)
+    pj >= pstar && return 1.0
+    j  >= Np     && return 0.0
+    p_next = pgrid[min(j + 1, Np)]
+    p_next <= pstar && return 0.0
+    cell = p_next - pj
+    cell < 1e-14 && return 0.0
+    return clamp((p_next - pstar) / cell, 0.0, 1.0)
+end
+
+# Companion soft weight for the OJS region {p < p^oj}: 1 below the OJS
+# cutoff, 0 above it, linear across the straddling cell.
+@inline function _soft_oj_weight(pj::Float64, poj::Float64,
+                                 pgrid::Vector{Float64}, j::Int, Np::Int)
+    pj >= poj && return 0.0
+    j  >= Np   && return 1.0
+    p_next = pgrid[min(j + 1, Np)]
+    p_next <= poj && return 1.0
+    cell = p_next - pj
+    cell < 1e-14 && return 1.0
+    return clamp((poj - pj) / cell, 0.0, 1.0)
+end
+
+# Smooth non-negative part: ½(x + √(x²+ε²)) ≈ max(x,0) but C^∞.  Replaces
+# max(·,0) on raw surplus expressions so the outer fixed-point map has no
+# C⁰-but-not-C¹ kink at grid-aligned sign changes (which admit period-2
+# limit cycles in the cutoff iteration).
+@inline smooth_pos(x::Float64, ε::Float64 = 1e-8) = 0.5 * (x + sqrt(x * x + ε * ε))
+
+
+# ============================================================
+# Cutoff index helper
 # ============================================================
 
 """
     pcut_index(pgrid, pstar) -> j
 
-First index `j` such that `pgrid[j] >= pstar`. Returns `Np` if none found.
+First index `j` such that `pgrid[j] >= pstar`. Returns `Np` if none.
 """
 @inline function pcut_index(pgrid::Vector{Float64}, pstar::Float64)
     Np = length(pgrid)

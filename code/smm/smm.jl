@@ -180,16 +180,13 @@ function smm_objective(
         return Inf
     end
 
-    τ  = obj_eq.tauT
-    τv = vec(τ)
+    # Reject a degenerate training margin: with the whole ability grid on one
+    # side of the frontier (nobody trains, or everybody trains) training_share
+    # carries no identifying variation.  The frontier τ(a_U,a_S) is a 2D
+    # indicator, so we check its interior directly rather than the single-step
+    # pattern the old 1D cutoff produced.
+    τv = vec(obj_eq.τ_mat)
     if all(iszero, τv) || all(isone, τv)
-        return Inf
-    end
-    if !all(t -> t == 0 || t == 1, τv)
-        return Inf
-    end
-    dτ = diff(τv)
-    if any(dτ .< 0) || count(!iszero, dτ) > 1
         return Inf
     end
 

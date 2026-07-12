@@ -58,7 +58,6 @@ using Clustering
 using Serialization
 using Plots
 using LaTeXStrings
-using JLD2
 
 println("done."); flush(stdout)
 

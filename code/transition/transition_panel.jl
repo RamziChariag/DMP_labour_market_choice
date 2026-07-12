@@ -62,7 +62,7 @@ print("Loading panel packages... "); flush(stdout)
 using LinearAlgebra
 using Plots
 using LaTeXStrings
-using JLD2
+using Serialization
 using CSV
 using DataFrames
 using Arrow
@@ -769,13 +769,13 @@ function make_transition_panel(;
             cal.start_date, cal.end_date, N, cal.switch_date)
 
     # ── Load TransitionResult ─────────────────────────────────────────────
-    trans_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(suffix).jld2")
+    trans_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(suffix).jls")
     if !isfile(trans_file)
         @warn "Transition result not found: $trans_file\n" *
               "Run the simulation first.  Skipping panel."
         return nothing
     end
-    trans = JLD2.load(trans_file, "result")
+    trans = open(deserialize, trans_file).result
     @printf("  Loaded transition result (converged=%s, scenario=%s)\n",
             trans.converged, trans.scenario)
 
@@ -882,13 +882,12 @@ function make_model_decomposition_panel(;
     _set_theme!()
 
     # ── Load transition result ─────────────────────────────────────────
-    trans_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(suffix).jld2")
+    trans_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(suffix).jls")
     if !isfile(trans_file)
         @warn "Transition result not found: $trans_file"
         return nothing
     end
-    jld = JLD2.load(trans_file)
-    result = jld["result"]
+    result = open(deserialize, trans_file).result
     @printf("  Loaded transition (converged=%s)\n", result.converged)
 
     tgrid = result.tgrid   # 0 to T_max (120 months), dt=0.5, Nt=241
@@ -1093,7 +1092,7 @@ end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     println("="^65)
-    println("  Segmented Search Model — Transition Panel Plots (standalone)")
+    println("  RoySearch — Transition Panel Plots (standalone)")
     println("="^65)
     flush(stdout)
 

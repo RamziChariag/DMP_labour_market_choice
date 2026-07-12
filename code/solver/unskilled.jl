@@ -1,43 +1,45 @@
 ############################################################
-# unskilled.jl — Unskilled block solver
+# unskilled.jl — Unskilled block solver (RoySearch)
 #
-# Outer loop iterates on (θ_U, p*_U, u_U, t).  The inner loop
-# settles (U^search_U, U_U, T, E_U(·, 1), J_U(·, 1)) at fixed
-# (θ_U, p*_U).
+# Under pure-Roy every unskilled-market VALUE object is a function of the
+# unskilled aptitude aU alone (notes §231, §276): U^search, E_U, J_U, p*
+# read aU; the training value T reads the skilled aptitude aS.  The
+# two-dimensional type enters only through
+#   (i)  the training frontier τ(aU,aS) = 1{−c(aS)+T(aS) ≥ U^search(aU)},
+#   (ii) the augmented seeker pool ũ_U = ∬ (u_U + d u_S), and
+#   (iii)the stationary densities u_U(aU,aS), t(aU,aS) on the copula grid.
 #
-# Free entry uses the augmented seeker pool
-#   ũ_U(x) = u_U(x) + d(x) · u_S(x),
-# with the cross-market contribution d·u_S supplied by the
-# skilled block via uc.duS_carry.
+# The training decision is NOT gated by d.  b_T discipline comes purely
+# from comparative advantage (notes Prop bT): the would-be stipend
+# farmers are high-aU / low-aS types who forgo a good unskilled job by
+# training, so raising b_T shifts only the marginal genuine trainee at
+# the frontier.  (The single-ability code gated τ by d as an explicit
+# refinement; RoySearch does not need it and does not use it.)
 #
-# The training decision is gated by the carried cross-market policy
-# uc.d_carry:  τ(x) = 0 wherever d(x) = 1 (a worker who would search
-# the U-market once trained does not train).  See params.jl (d_carry).
+# Outer loop iterates on (θ_U, p*(aU), u_U, t); the inner loop settles
+# (U^search, T, E_U(·,1), J_U(·,1)) at fixed (θ_U, p*).  The cross-market
+# pool d·u_S is supplied by the skilled block via uc.duS_carry and held
+# fixed within one unskilled solve.
 #
 # Functions
-#   build_unskilled_G_weights       dG(p) quadrature weights
-#   G_cdf_unskilled                 Beta(α_U, 1) CDF
-#   solve_unskilled_surplus_on_grid! surplus on the p-grid for one x
-#   unskilled_inner_loop!           iterate values at (θ_U, p*_U)
-#   solve_stationary_unskilled_pointwise! stationary u_U, t
-#   update_pstar_from_surplus!      reservation-quality update
-#   update_theta_unskilled          free-entry tightness update
-#   solve_unskilled_block!          outer loop on (θ_U, p*_U, u_U, t)
+#   build_unskilled_G_weights        dG(p) quadrature weights, G=Beta(α_U,1)
+#   G_cdf_unskilled                  G(p) = p^{α_U}
+#   solve_unskilled_surplus_on_grid! surplus S_U(aU,·) on the p-grid
+#   unskilled_inner_loop!            iterate values at (θ_U, p*)
+#   solve_stationary_unskilled!      stationary u_U, t on the copula grid
+#   update_pstar_from_surplus!       reservation-quality update
+#   update_theta_unskilled           free-entry tightness update
+#   solve_unskilled_block!           outer loop
 ############################################################
 
 
 # ---------------------------------------------------------------------------
-# dG quadrature weights
-#   G = Beta(α_U, 1),  g(p) = α_U · p^(α_U − 1)
+# dG quadrature weights and CDF for the damage shock
+#   G = Beta(α_U, 1),  g(p) = α_U p^{α_U−1},  G(p) = p^{α_U}
 # ---------------------------------------------------------------------------
-function build_unskilled_G_weights(
-    pgrid :: Vector{Float64},
-    wp    :: Vector{Float64},
-    α     :: Float64
-)
-    Np = length(pgrid)
+function build_unskilled_G_weights(pgrid::Vector{Float64}, wp::Vector{Float64}, α::Float64)
     wG = similar(wp)
-    @inbounds for j in 1:Np
+    @inbounds for j in eachindex(pgrid)
         p     = pgrid[j]
         g     = (p <= 0.0) ? 0.0 : α * p^(α - 1.0)
         wG[j] = wp[j] * g
@@ -53,198 +55,137 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Unskilled surplus on the p-grid
+# Unskilled surplus on the p-grid, for one aU
 #
-# Closed-form reduction of equation (11):
-#   S(p) = [PU·x·p − (r+ν)·U + λ·I] / (r+ν+λ)   for p ≥ p*(x),  0 otherwise,
-# where I = ∫_{p*}^1 S(p′) dG(p′) is the scalar tail integral.
-# I satisfies a scalar fixed point, solved analytically.
+# Closed-form reduction of the surplus HJB (notes eq:surplusU):
+#   (r+ν+λ) S(p) = A P_U aU p − (r+ν) U^search(aU) + λ ∫_{p*}^1 S dG,
+#   S(p) = max( [A P_U aU p − (r+ν) U^search + λ I] / (r+ν+λ), 0 ),
+# with the scalar tail integral I = ∫_{p*}^1 S dG solved analytically.
+# Soft thresholding around p* keeps S(·) continuous in p*.
 #
-# The surface is built with soft thresholding around p*(x) so that
-# S(·, p) is a continuous function of p* — necessary for the outer
-# fixed-point iteration on the cutoff.
+# `PUeff` is the effective productivity A P_U aU already carrying exp(A)
+# and the ability level, i.e. the linear-in-aU loading of production.
 # ---------------------------------------------------------------------------
 function solve_unskilled_surplus_on_grid!(
-    Svec    :: Vector{Float64},
-    pgrid   :: Vector{Float64},
-    wG      :: Vector{Float64},
-    PU      :: Float64,
-    x       :: Float64,
-    r       :: Float64,
-    ν       :: Float64,
-    λ       :: Float64,
-    Ux      :: Float64,
-    pstar_x :: Float64,
-    γ_U     :: Float64 = 1.0     # GAMMA_U: unskilled ability gradient (1 = exp(x); 0 = flat)
+    Svec::Vector{Float64}, pgrid::Vector{Float64}, wG::Vector{Float64},
+    PUeff::Float64, r::Float64, ν::Float64, λ::Float64,
+    Ux::Float64, pstar_x::Float64,
 )
     Np = length(pgrid)
 
-    # Soft-weighted tail integrals.
     tail_mass = 0.0
     tail_p1   = 0.0
-    for j in 1:Np
+    @inbounds for j in 1:Np
         ω          = _soft_weight(pgrid[j], pstar_x, pgrid, j, Np)
         tail_mass += ω * wG[j]
         tail_p1   += ω * pgrid[j] * wG[j]
     end
 
-    # Scalar fixed point for I.
     denom = r + ν + λ
-    A     = (PU * exp(γ_U * x) * tail_p1 - (r + ν) * Ux * tail_mass) / denom   # GAMMA_U: PU·exp(γ_U·x)
+    num   = (PUeff * tail_p1 - (r + ν) * Ux * tail_mass) / denom
     B     = (λ / denom) * tail_mass
-    I     = (abs(1.0 - B) < 1e-14) ? 0.0 : (A / (1.0 - B))
+    I     = (abs(1.0 - B) < 1e-14) ? 0.0 : num / (1.0 - B)
 
-    # Fill the surface; clamp at zero to satisfy S(p) ≥ 0.
-    for j in 1:Np
-        ω        = _soft_weight(pgrid[j], pstar_x, pgrid, j, Np)
-        Svec[j]  = max(ω * (PU * exp(γ_U * x) * pgrid[j] - (r + ν) * Ux + λ * I) / denom, 0.0)  # GAMMA_U
+    @inbounds for j in 1:Np
+        ω       = _soft_weight(pgrid[j], pstar_x, pgrid, j, Np)
+        Svec[j] = max(ω * (PUeff * pgrid[j] - (r + ν) * Ux + λ * I) / denom, 0.0)
     end
 
-    return I, tail_mass, 0
+    return I
 end
 
 
 # ---------------------------------------------------------------------------
 # Inner loop
 #
-# Given θ_U and p*_U held fixed, iterate jointly on
-#   T, U_U, U^search_U, J_U(·, 1)
-# until convergence.  The skilled unemployment value U_S is supplied
-# from the global outer loop and treated as exogenous here.
+# Given θ_U and p*(aU) fixed, iterate on (T, U^search, E_U(·,1), J_U(·,1))
+# until convergence.  U_S is supplied from the global loop.
 #
-# At the entry efficiency p = 1, Nash bargaining gives
-#   J_U(x, 1) = (1 − β) S_U(x, 1),
-#   E_U(x, 1) = U_U(x) + β   S_U(x, 1),
-# which the search-value update then consumes via
-#   (r + ν + f_U) U^search_U(x) = b_U + f_U E_U(x, 1).
+# At p = 1, Nash bargaining gives J_U(aU,1) = (1−β) S_U(aU,1),
+# E_U(aU,1) = U^search(aU) + β S_U(aU,1); the search-value update consumes
+# E_U(aU,1) via (r+ν+f_U) U^search = b_U + f_U E_U(aU,1).  The frontier τ
+# is formed here (2D) for the distribution step but does not feed the
+# unskilled outside option, which is U^search(aU) alone (notes §276).
 # ---------------------------------------------------------------------------
-function unskilled_inner_loop!(
-    model :: Model;
-    US_in :: AbstractVector{Float64}
-)
-    cp  = model.common
-    gp  = model.grids
-    up  = model.unsk_par
-    ug  = model.unsk_grids
-    uc  = model.unsk_cache
-    sim = model.sim
+function unskilled_inner_loop!(model::Model; US_in::AbstractVector{Float64})
+    cp = model.common;  gp = model.grids;  up = model.unsk_par
+    ug = model.unsk_grids;  uc = model.unsk_cache;  sim = model.sim
 
-    Nx = length(gp.x)
-    Np = length(ug.p)
+    Nx = length(gp.x);  Np = length(ug.p)
+    r  = cp.r;  ν = cp.ν;  φ = cp.φ
+    μ  = up.μ;  η = up.η;  β = up.β;  λ = up.λ
+    PU = exp(cp.A) * up.PU;  bU = up.bU * exp(cp.A);  bT = up.bT * exp(cp.A);  α = up.α_U
 
-    r  = cp.r;   ν  = cp.ν;   φ  = cp.φ
-    # Training cost: dollar cost = exp(A)·c(x) with c(x) = (1−x)·exp(c̃−x)
-    # scale-free — the aggregate scale multiplies the function OUTSIDE,
-    # like every other flow object (never added to c̃ inside the exponent).
-    Ascale = exp(cp.A)
-    μ  = up.μ;   η  = up.η;   β  = up.β;   λ  = up.λ
-    # Productivity enters the surplus as exp(A)·P_U·x·p (A multiplies π_U); use the
-    # effective scale here so the inner loop matches the p*-update and equilibrium.jl.
-    PU = exp(cp.A) * up.PU;  γ_U = up.γ_U;  bU = up.bU * exp(cp.A);  bT = up.bT * exp(cp.A);  α  = up.α_U   # GAMMA_U
-
-    θ  = uc.θ
-    f  = jobfinding_rate(θ, μ, η)
-
+    f  = jobfinding_rate(uc.θ, μ, η)
     wG = build_unskilled_G_weights(ug.p, ug.wp, α)
 
     Svec_tls = [zeros(Float64, Np) for _ in 1:Threads.nthreads()]
-
     Ivec  = zeros(Float64, Nx)
     E1vec = zeros(Float64, Nx)
 
     Usearch_old = copy(uc.Usearch)
-    U_old       = copy(uc.U)
     T_old       = copy(uc.T)
 
-    αU = sim.damp_inner_U
-    B  = sim.inner_B
-    K  = sim.inner_K
-    resid   = Vector{Float64}(undef, sim.maxit_inner)
-    status  = :maxit
-    n_inner = 0
+    αU     = sim.damp_inner_U
+    B      = sim.inner_B;  K = sim.inner_K
+    resid  = Vector{Float64}(undef, sim.maxit_inner)
+    status = :maxit;  n_inner = 0;  streak = 0
 
-    streak = 0
     for it in 1:sim.maxit_inner
         copyto!(Usearch_old, uc.Usearch)
-        copyto!(U_old,       uc.U)
         copyto!(T_old,       uc.T)
 
-        # Training value:  (r + φ + ν) T(x) = b_T + φ U_S(x)
+        # Training value:  (r + φ + ν) T(aS) = b_T + φ U_S(aS)
         @threads for ix in 1:Nx
             @inbounds uc.T[ix] = (bT + φ * US_in[ix]) / (r + φ + ν)
         end
 
-        # Outside value and training indicator, gated by the cross-market
-        # policy d(x) carried from the skilled block (equilibrium refinement):
-        #   τ(x)    = 1{−exp(A)·c(x) + T(x) ≥ U^search_U(x)} · 1{d(x) = 0}
-        #   U_U(x)  = U^train_U(x) if τ(x) = 1, else U^search_U(x)
-        # A worker who would search the unskilled market once trained
-        # (d(x) = 1) does not initiate training.  This excludes the
-        # train-then-search-unskilled ("stipend-farming") equilibria that
-        # arise under a large b_T, without affecting any equilibrium in
-        # which the training and cross-market regions do not overlap.
+        # Match surplus at the current U^search outside option → J_U(aU,1), E_U(aU,1).
         @threads for ix in 1:Nx
+            Svec = Svec_tls[Threads.threadid()]
             @inbounds begin
-                Utr = -Ascale * training_cost(gp.x[ix], cp.c) + uc.T[ix]
-                Usr = uc.Usearch[ix]
-                if Utr >= Usr && uc.d_carry[ix] < 0.5
-                    uc.U[ix]  = Utr
-                    uc.τT[ix] = 1.0
-                else
-                    uc.U[ix]  = Usr
-                    uc.τT[ix] = 0.0
-                end
-            end
-        end
-
-        # Match surplus → J_U(x, 1) and E_U(x, 1).
-        @threads for ix in 1:Nx
-            tid  = Threads.threadid()
-            Svec = Svec_tls[tid]
-            @inbounds begin
-                I, _, _ = solve_unskilled_surplus_on_grid!(
-                    Svec, ug.p, wG, PU, gp.x[ix], r, ν, λ, uc.U[ix],
-                    clamp01(uc.pstar[ix]), γ_U   # GAMMA_U
-                )
-                Ivec[ix] = I
-
-                S1 = Svec[end]
+                PUeff    = PU * gp.x[ix]                       # A P_U aU (linear loading)
+                Ivec[ix] = solve_unskilled_surplus_on_grid!(
+                    Svec, ug.p, wG, PUeff, r, ν, λ, uc.Usearch[ix], clamp01(uc.pstar[ix]))
+                S1               = Svec[end]
                 uc.Jfrontier[ix] = (1.0 - β) * S1
-                E1vec[ix]        = uc.U[ix] + β * S1
+                E1vec[ix]        = uc.Usearch[ix] + β * S1
             end
         end
 
-        # Search value:  (r + ν + f_U) U^search_U(x) = b_U + f_U E_U(x, 1)
+        # Search value:  (r + ν + f_U) U^search(aU) = b_U + f_U E_U(aU,1)
         denom_search = r + ν + f
         @threads for ix in 1:Nx
             @inbounds begin
-                Usearch_raw    = (bU + f * E1vec[ix]) / denom_search
-                uc.Usearch[ix] = Usearch_old[ix] + αU * (Usearch_raw - Usearch_old[ix])
+                raw            = (bU + f * E1vec[ix]) / denom_search
+                uc.Usearch[ix] = Usearch_old[ix] + αU * (raw - Usearch_old[ix])
             end
         end
 
-        d1 = supnorm(uc.Usearch, Usearch_old)
-        d2 = supnorm(uc.U, U_old)
-        d3 = supnorm(uc.T, T_old)
-        d  = max(d1, d2, d3)
-        resid[it] = d
-        n_inner   = it
+        d = max(supnorm(uc.Usearch, Usearch_old), supnorm(uc.T, T_old))
+        resid[it] = d;  n_inner = it
 
         if d < sim.tol_inner
             streak += 1
-            if streak >= sim.conv_streak
-                status = :converged
-                break
-            end
+            streak >= sim.conv_streak && (status = :converged; break)
         else
             streak = 0
         end
-
-        # Divergence early-abort: no contraction over the last K sweeps
-        # (disabled when B == 0).
         if B > 0 && it > B + K && resid[it] >= resid[it - K]
-            status = :diverged
-            break
+            status = :diverged;  break
+        end
+    end
+
+    # Training frontier τ(aU,aS) = 1{−c(aS) + T(aS) ≥ U^search(aU)}
+    # (2D; no d-gate — b_T discipline is by comparative advantage).
+    # c(aS) is a psychological cost in fixed utility units — NOT scaled by A —
+    # so the training margin shifts with the wage level rather than being scale-invariant.
+    @threads for j in 1:Nx
+        @inbounds begin
+            Utr_j = -training_cost(gp.x[j], cp.c, cp.A) + uc.T[j]   # depends on aS = x[j]
+            for i in 1:Nx
+                uc.τT[i, j] = (Utr_j >= uc.Usearch[i]) ? 1.0 : 0.0      # aU = x[i]
+            end
         end
     end
 
@@ -254,43 +195,38 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Stationary composition — pointwise in x
+# Stationary composition on the copula grid
 #
-# τ(x) = 1 (training type): training is initiated on arrival in
-#   unemployment, so u_U(x) = 0 and t(x) = ν ℓ(x) / (φ + ν).
+# Match rates depend only on aU, and the frontier τ(aU,aS) determines who
+# trains, so the balance is solved per (aU,aS) cell with aU-indexed rates
+# and the joint population weight ℓ(aU,aS) = W2[i,j] (notes §332).
 #
-# τ(x) = 0 (search type): the standard balance gives
-#   u_U(x) = ℓ(x) (δ + ν) / (f_U + δ + ν),    δ = λ_U G(p*(x)),
-#   t(x)   = 0.
+# τ = 1 (train):   u_U = 0,  t = ν W2 / (φ + ν).
+# τ = 0 (search):  u_U = W2 (δ+ν)/(f_U+δ+ν),  t = 0,   δ = λ_U G(p*(aU)).
 # ---------------------------------------------------------------------------
-function solve_stationary_unskilled_pointwise!(
-    u_out      :: AbstractVector{Float64},
-    t_out      :: AbstractVector{Float64},
-    ℓvals      :: AbstractVector{Float64},
-    τvals      :: AbstractVector{Float64},
-    pstar_vals :: AbstractVector{Float64},
-    f          :: Float64,
-    model      :: Model
+function solve_stationary_unskilled!(
+    u_out::Matrix{Float64}, t_out::Matrix{Float64},
+    W2::Matrix{Float64}, τ::Matrix{Float64},
+    pstar::AbstractVector{Float64}, f::Float64, model::Model,
 )
-    ν = model.common.ν
-    φ = model.common.φ
-    λ = model.unsk_par.λ
-    α = model.unsk_par.α_U
+    ν = model.common.ν;  φ = model.common.φ
+    λ = model.unsk_par.λ;  α = model.unsk_par.α_U
+    Nx = length(model.grids.x)
 
-    @inbounds for ix in 1:length(model.grids.x)
-        ℓx    = ℓvals[ix]
-        τ     = τvals[ix]
-        pstar = clamp01(pstar_vals[ix])
-
-        if τ > 0.5
-            u_out[ix] = 0.0
-            t_out[ix] = ν * ℓx / (φ + ν)
-        else
-            δ      = λ * G_cdf_unskilled(pstar, α)
-            f_hire = (pstar < 1.0 - 1e-10) ? f : 0.0
-            denom  = f_hire + δ + ν
-            u_out[ix] = denom > 0.0 ? ℓx * (δ + ν) / denom : 0.0
-            t_out[ix] = 0.0
+    @inbounds for i in 1:Nx                       # aU index
+        pst    = clamp01(pstar[i])
+        δ      = λ * G_cdf_unskilled(pst, α)
+        f_hire = (pst < 1.0 - 1e-10) ? f : 0.0
+        denom  = f_hire + δ + ν
+        usurv  = denom > 0.0 ? (δ + ν) / denom : 0.0
+        for j in 1:Nx                             # aS index
+            if τ[i, j] > 0.5
+                u_out[i, j] = 0.0
+                t_out[i, j] = ν * W2[i, j] / (φ + ν)
+            else
+                u_out[i, j] = W2[i, j] * usurv
+                t_out[i, j] = 0.0
+            end
         end
     end
     return nothing
@@ -300,44 +236,29 @@ end
 # ---------------------------------------------------------------------------
 # Reservation-quality update
 #
-# Solves S_U(x, p*) = 0 for p*(x).  Recomputes U_U(x) against the
-# proposed θ_new so that the new p* is consistent with the same
-# tightness that will be installed by the outer loop.
+# Solves S_U(aU, p*) = 0 for p*(aU) (notes eq:pstarUformula):
+#   p*(aU) = [(r+ν) U^search(aU) − λ I(aU)] / (A P_U aU),
+# recomputing U^search against the proposed θ_new so the new p* is
+# consistent with the tightness the outer loop installs.
 # ---------------------------------------------------------------------------
 function update_pstar_from_surplus!(
-    pstar_new :: AbstractVector{Float64},
-    model     :: Model,
-    Ivec      :: AbstractVector{Float64};
-    θ_new     :: Float64,
-    E1        :: AbstractVector{Float64},
-    T_in      :: AbstractVector{Float64}
+    pstar_new::AbstractVector{Float64}, model::Model, Ivec::AbstractVector{Float64};
+    θ_new::Float64, E1::AbstractVector{Float64},
 )
-    cp = model.common
-    up = model.unsk_par
-    gp = model.grids
-
-    r  = cp.r;   ν  = cp.ν;   Ascale = exp(cp.A)   # cost = exp(A)·c(x) (see inner loop)
-    λ  = up.λ;   μ  = up.μ;   η  = up.η
-    PU = up.PU;  γ_U = up.γ_U;  bU = up.bU * exp(cp.A)   # GAMMA_U
-    dcar = model.unsk_cache.d_carry                 # τ gate (see inner loop)
+    cp = model.common;  up = model.unsk_par;  gp = model.grids
+    r  = cp.r;  ν = cp.ν
+    λ  = up.λ;  μ = up.μ;  η = up.η
+    PU = exp(cp.A) * up.PU;  bU = up.bU * exp(cp.A)
 
     f_new        = jobfinding_rate(θ_new, μ, η)
     denom_search = r + ν + f_new
 
-    @inbounds for ix in 1:length(gp.x)
-        x = gp.x[ix]
-        I = Ivec[ix]
-
-        Usearch_new = (bU + f_new * E1[ix]) / denom_search
-        Utr         = -Ascale * training_cost(x, cp.c) + T_in[ix]
-        # Same gate as the inner loop: training unavailable where d(x) = 1.
-        U_new       = (dcar[ix] < 0.5) ? max(Usearch_new, Utr) : Usearch_new
-
-        if PU <= 1e-14                       # EXP-MAP: g(x)=exp(x)≥1, so no x=0 dead zone
-            pstar_new[ix] = 1.0
-        else
-            pstar_new[ix] = clamp01(((r + ν) * U_new - λ * I) / (exp(cp.A) * PU * exp(γ_U * x)))   # GAMMA_U
-        end
+    @inbounds for i in eachindex(gp.x)
+        aU          = gp.x[i]
+        Usearch_new = (bU + f_new * E1[i]) / denom_search
+        PUeff       = PU * aU
+        pstar_new[i] = (PUeff <= 1e-14) ? 1.0 :
+            clamp01(((r + ν) * Usearch_new - λ * Ivec[i]) / PUeff)
     end
     return nothing
 end
@@ -346,25 +267,24 @@ end
 # ---------------------------------------------------------------------------
 # Free-entry tightness update
 #
-#   q_U(θ_U) = k_U · π̄_U · ũ_U / ∫ J_U(x, 1) · (u_U(x) + d(x) u_S(x)) dx,
-# with ũ_U = ∫ (u_U + d u_S) dx.  The dollar posting cost is k_U · π̄_U:
-# k_U is dimensionless (months of average unskilled output) and π̄_U is
-# the mean unskilled flow output (see mean_output_U in grids.jl).
-# The cross-market contribution d·u_S is carried in uc.duS_carry.
+#   q_U(θ_U) = k_U π̄_U ũ_U / ∬ J_U(aU,1) (u_U + d u_S) daU daS,
+#   ũ_U = ∬ (u_U + d u_S).
+# The dollar posting cost is k_U π̄_U (k_U dimensionless, π̄_U the mean
+# unskilled flow output).  d·u_S is carried in uc.duS_carry.  J_U(aU,1)
+# is aU-indexed and broadcast across aS.
 # ---------------------------------------------------------------------------
 function update_theta_unskilled(model::Model)
-    uc = model.unsk_cache
-    gp = model.grids
-    up = model.unsk_par
+    uc = model.unsk_cache;  up = model.unsk_par
+    ueff = uc.u .+ uc.duS_carry                    # (aU,aS) augmented seeker density
 
-    ueff = uc.u .+ uc.duS_carry
-
-    U_total = dot(ueff,                gp.wx)
-    Jbar    = dot(uc.Jfrontier .* ueff, gp.wx)
-
-    if Jbar < 1e-14 || U_total < 1e-14 || !isfinite(Jbar) || !isfinite(U_total)
-        return 1e-14
+    U_total = sum(ueff)
+    Jbar    = 0.0
+    Nx = size(ueff, 1)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        Jbar += uc.Jfrontier[i] * ueff[i, j]       # J_U reads aU = row i
     end
+
+    (Jbar < 1e-14 || U_total < 1e-14 || !isfinite(Jbar) || !isfinite(U_total)) && return 1e-14
 
     q     = up.k * mean_output_U(model) * U_total / Jbar
     θ_raw = theta_from_q(q, up.μ, up.η)
@@ -373,117 +293,68 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Outer loop
+# Outer loop on (θ_U, p*, u_U, t)
 #
-# Per iteration:
-#   1. Inner loop at the current (θ_U, p*_U).
-#   2. Stationary composition (u_U, t) at the current p*_U.
-#   3. Raw proposals (θ_raw, p*_raw) from free entry and S_U(x, p*) = 0.
-#   4. Install:
-#        Anderson on: joint Anderson(m = 1) on [θ_U; p*_U] with
-#        per-block scaling so both components contribute to the
-#        residual norm on comparable scales.
-#        Anderson off: damped Picard with θ updated first, then p*
-#        recomputed against the post-update θ.
-# Convergence is checked on (Δθ_U, Δp*_U).
+# Per iteration: inner values → stationary composition → raw (θ, p*) from
+# free entry and S_U(aU,p*)=0 → joint Anderson(m=1) install (or damped
+# Picard).  Convergence on (Δθ, Δp*, Δu_U).  Sustained inner divergence
+# rejects the parameter; an outer stall hands back to the global loop.
 # ---------------------------------------------------------------------------
-function solve_unskilled_block!(
-    model :: Model;
-    US_in :: AbstractVector{Float64}
-)
-    gp  = model.grids
-    uc  = model.unsk_cache
-    sim = model.sim
-
+function solve_unskilled_block!(model::Model; US_in::AbstractVector{Float64})
+    gp = model.grids;  uc = model.unsk_cache;  sim = model.sim
     Nx = length(gp.x)
 
-    aa_joint  = Anderson1(1 + Nx)
-    s_θ       = 1.0
-    s_p       = 1.0
+    aa_joint = Anderson1(1 + Nx)
+    s_θ = 1.0;  s_p = 1.0
 
-    u_new     = zeros(Float64, Nx)
-    t_new     = zeros(Float64, Nx)
+    u_new = zeros(Float64, Nx, Nx)
+    t_new = zeros(Float64, Nx, Nx)
     pstar_new = zeros(Float64, Nx)
 
-    streak = 0
-    diverge_streak = 0
-    oB = sim.outer_B
-    oK = sim.outer_K
+    streak = 0;  diverge_streak = 0
+    oB = sim.outer_B;  oK = sim.outer_K
     outer_resid = Vector{Float64}(undef, sim.maxit_outer)
+
     for it in 1:sim.maxit_outer
         θ_old     = uc.θ
         pstar_old = copy(uc.pstar)
         u_old     = copy(uc.u)
 
-        # 1. Inner loop at the current (θ, p*).
         inner = unskilled_inner_loop!(model; US_in = US_in)
-        f     = inner.f
-        Ivec  = inner.Ivec
-        E1    = inner.E1vec
         inner_conv = inner.converged
 
-        # Reject only on sustained inner divergence across K consecutive outer
-        # iterations (K distinct (θ, p*) points).
         if inner.status === :diverged
             diverge_streak += 1
             if diverge_streak >= sim.inner_K
-                sim.verbose >= 1 && @printf(
-                    "  [outer U]  inner diverged ×%d at it=%d — rejecting parameter\n",
-                    diverge_streak, it)
+                sim.verbose >= 1 && @printf("  [outer U]  inner diverged ×%d at it=%d — rejecting parameter\n", diverge_streak, it)
                 return (converged = false, rejected = true)
             end
         else
             diverge_streak = 0
         end
 
-        # 2. Stationary composition at the current p*.
-        solve_stationary_unskilled_pointwise!(
-            u_new, t_new, gp.ℓ, uc.τT, uc.pstar, f, model
-        )
-        copyto!(uc.u, u_new)
-        copyto!(uc.t, t_new)
+        solve_stationary_unskilled!(u_new, t_new, gp.copula.W2, uc.τT, uc.pstar, inner.f, model)
+        copyto!(uc.u, u_new);  copyto!(uc.t, t_new)
 
-        # 3. Raw proposals for (θ, p*).
         θ_raw = update_theta_unskilled(model)
+        θ_for_pstar = sim.use_anderson ? θ_old : (uc.θ = max(θ_raw, 1e-14))
+        update_pstar_from_surplus!(pstar_new, model, inner.Ivec; θ_new = θ_for_pstar, E1 = inner.E1vec)
 
-        if sim.use_anderson
-            update_pstar_from_surplus!(
-                pstar_new, model, Ivec;
-                θ_new = θ_old,
-                E1    = E1,
-                T_in  = uc.T,
-            )
-        else
-            uc.θ = max(θ_raw, 1e-14)
-            update_pstar_from_surplus!(
-                pstar_new, model, Ivec;
-                θ_new = uc.θ,
-                E1    = E1,
-                T_in  = uc.T,
-            )
-        end
-
-        # 4. Install (θ, p*).
         if sim.use_anderson
             if it == 1
                 s_θ = max(abs(θ_raw), abs(θ_old), 1.0)
                 s_p = max(maximum(abs, pstar_new), 1.0)
             end
-
             x_old = vcat([θ_old / s_θ], pstar_old ./ s_p)
             f_raw = vcat([θ_raw / s_θ], pstar_new ./ s_p)
             x_new = anderson1_update!(aa_joint, x_old, f_raw)
-
-            uc.θ = max(x_new[1] * s_θ, 1e-14)
-            @inbounds for ix in 1:Nx
-                uc.pstar[ix] = clamp01(x_new[1 + ix] * s_p)
+            uc.θ  = max(x_new[1] * s_θ, 1e-14)
+            @inbounds for i in 1:Nx
+                uc.pstar[i] = clamp01(x_new[1 + i] * s_p)
             end
         else
-            @inbounds for ix in 1:Nx
-                uc.pstar[ix] = clamp01(
-                    sim.damp_pstar_U * pstar_new[ix] +
-                    (1.0 - sim.damp_pstar_U) * pstar_old[ix]
-                )
+            @inbounds for i in 1:Nx
+                uc.pstar[i] = clamp01(sim.damp_pstar_U * pstar_new[i] + (1.0 - sim.damp_pstar_U) * pstar_old[i])
             end
         end
 
@@ -492,58 +363,41 @@ function solve_unskilled_block!(
             return (converged = false, rejected = false)
         end
 
-        # 5. Convergence on (Δθ, Δp*, Δu).
         dθ = abs(uc.θ - θ_old)
         dp = supnorm(uc.pstar, pstar_old)
-        du = supnorm(uc.u,     u_old)
+        du = supnorm(uc.u, u_old)
         d  = max(dθ, dp, du)
         outer_resid[it] = d
 
         if sim.verbose >= 2 && (it == 1 || it % sim.verbose_stride == 0)
-            @printf("  [outer U it=%d]  maxΔ=%.3e  (Δθ=%.3e  Δp*=%.3e  Δu=%.3e)  θ_U=%.4f\n",
-                    it, d, dθ, dp, du, uc.θ)
+            @printf("  [outer U it=%d]  maxΔ=%.3e  (Δθ=%.3e  Δp*=%.3e  Δu=%.3e)  θ_U=%.4f\n", it, d, dθ, dp, du, uc.θ)
         end
 
         if d < sim.tol_outer_U
             streak += 1
             if streak >= sim.conv_streak
-                sim.verbose >= 2 && @printf(
-                    "  [outer U]  converged it=%d  d=%.3e  θ_U=%.4f\n", it, d, uc.θ)
+                sim.verbose >= 2 && @printf("  [outer U]  converged it=%d  d=%.3e  θ_U=%.4f\n", it, d, uc.θ)
                 inner_final = unskilled_inner_loop!(model; US_in = US_in)
-                solve_stationary_unskilled_pointwise!(
-                    u_new, t_new, gp.ℓ, uc.τT, uc.pstar, inner_final.f, model
-                )
-                copyto!(uc.u, u_new)
-                copyto!(uc.t, t_new)
+                solve_stationary_unskilled!(u_new, t_new, gp.copula.W2, uc.τT, uc.pstar, inner_final.f, model)
+                copyto!(uc.u, u_new);  copyto!(uc.t, t_new)
                 return (converged = inner_conv, rejected = false)
             end
         else
             streak = 0
         end
 
-        # Outer stall: no contraction over outer_K iterations (after outer_B
-        # burn-in) → hand the block back to the global loop (do NOT reject; the
-        # global warm-start refines it).  Disabled when outer_B == 0.
         if oB > 0 && it > oB + oK && outer_resid[it] >= outer_resid[it - oK]
-            sim.verbose >= 1 && @printf(
-                "  [outer U]  stalled at it=%d (no contraction over %d iters) — handing back to global\n",
-                it, oK)
+            sim.verbose >= 1 && @printf("  [outer U]  stalled at it=%d — handing back to global\n", it)
             inner_final = unskilled_inner_loop!(model; US_in = US_in)
-            solve_stationary_unskilled_pointwise!(
-                u_new, t_new, gp.ℓ, uc.τT, uc.pstar, inner_final.f, model
-            )
-            copyto!(uc.u, u_new)
-            copyto!(uc.t, t_new)
+            solve_stationary_unskilled!(u_new, t_new, gp.copula.W2, uc.τT, uc.pstar, inner_final.f, model)
+            copyto!(uc.u, u_new);  copyto!(uc.t, t_new)
             return (converged = false, rejected = false)
         end
     end
 
     inner_final = unskilled_inner_loop!(model; US_in = US_in)
-    solve_stationary_unskilled_pointwise!(
-        u_new, t_new, gp.ℓ, uc.τT, uc.pstar, inner_final.f, model
-    )
-    copyto!(uc.u, u_new)
-    copyto!(uc.t, t_new)
+    solve_stationary_unskilled!(u_new, t_new, gp.copula.W2, uc.τT, uc.pstar, inner_final.f, model)
+    copyto!(uc.u, u_new);  copyto!(uc.t, t_new)
     sim.verbose >= 1 && @printf("  [outer U]  maxit reached without convergence  θ_U=%.4f\n", uc.θ)
     return (converged = false, rejected = false)
 end

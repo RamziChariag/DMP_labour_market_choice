@@ -1,18 +1,17 @@
 ############################################################
-# code/solver/model_main.jl — Standalone single solve + plots
+# solver/model_main.jl — Standalone single solve + plots
 #
-# Usage (from project root):
-#   julia --threads auto code/solver/model_main.jl
+# Usage (from the repo root):
+#   julia --project --threads auto solver/model_main.jl
 #
 # Solves the model at the hard-coded parameters below, prints the
 # SMM moment-fit table (targets from the MOMENT_WINDOW bundle), and
-# writes the full set of equilibrium figures from single_run_plots.jl
-# to OUTPUT_DIR.  To plot at SMM-estimated parameters, use
-# code/solver/plots_main.jl instead.
+# writes the equilibrium figure set from single_run_plots.jl to
+# OUTPUT_DIR.
 ############################################################
 
 println("="^60)
-println("  Segmented Search Model — Standalone Single-Run Plots")
+println("  RoySearch — Standalone Single-Run Plots")
 println("="^60)
 flush(stdout)
 
@@ -89,45 +88,45 @@ flush(stdout)
 # ============================================================
 # 1. Parameters
 # ============================================================
-# SMM run: Q = 5.98845476, converged, 2303 iterations
+# SMM run: Q = 0.885395387, converged = false, 5000 iterations
+
 common = CommonParams(
-    r   = 0.00416667,   # fixed (= 0.05/12, monthly)
-    ν   = 0.00335700,   # fixed (base_covid life-table)
-    φ   = 0.02222129,   # fixed
-    a_ℓ = 3.74182000,
-    b_ℓ = 1.06033000,
-    c   = 1.72111000,
-    A   = 5.49233000,   # LOG scale
+    r   = 0.00417,       # fixed (= 0.05/12, monthly)
+    ν   = 0.00336,       # fixed (base_covid life-table)
+    φ   = 0.02222,       # fixed
+    a_ℓ = 0.98056,       # worker type shape a_ℓ
+    b_ℓ = 1.17407,       # worker type shape b_ℓ
+    ρ_x = -0.66879,      # ability correlation ρ_x
+    c   = 0.04676,       # training cost coeff c
+    A   = 6.77762,       # aggregate production scale A
 )
 
 unsk_par = UnskilledParams(
-    μ   = 1.04035000,
-    η   = 0.50000000,   # fixed
-    k   = 5.06146000,   # months of average U output
-    β   = 0.18800000,   # fixed
-    λ   = 0.20493000,
-    PU  = 1.73268000,
-    γ_U = 0.61867000,   # unskilled ability gradient (new)
-    bU  = 2.04326000,
-    bT  = 2.54625000,
-    α_U = 18.35568000,
-    σ_w = 0.23461000,   # fixed
+    μ   = 0.47152,       # unskilled matching eff μ_U
+    η   = 0.50000,       # fixed (unsk_η)
+    k   = 2.41482,       # unskilled vacancy cost k_U (months of avg U output)
+    β   = 0.18800,       # fixed (unsk_β)
+    λ   = 0.25486,       # unskilled damage rate λ_U
+    PU  = 4.00274,       # unskilled productivity P_U
+    α_U = 1.03234,       # unskilled damage shape α_U
+    bU  = 0.50045,       # unskilled outside flow b_U
+    bT  = 0.00000,       # training flow b_T
+    σ_w = 0.23461,       # fixed (unsk_σ_w)
 )
 
 skl_par = SkilledParams(
-    μ   = 1.86745000,
-    η   = 0.50000000,   # fixed
-    k   = 18.31015000,  # months of average S output
-    β   = 0.27200000,   # fixed
-    λ   = 0.72398000,
-    σ   = 0.41343000,   # OJS flow cost σ_S (not σ_w)
-    PS  = 1.46539000,
-    γ_S = 1.03169000,   # skilled ability gradient
-    bS  = 1.43724000,
-    a_Γ = 7.44941000,
-    b_Γ = 1.85594000,
-    ξ   = 0.00415000,
-    σ_w = 0.21904000,   # fixed
+    μ   = 0.18357,       # skilled matching eff μ_S
+    η   = 0.50000,       # fixed (skl_η)
+    k   = 1.70131,       # skilled vacancy cost k_S (months of avg S output)
+    β   = 0.27200,       # fixed (skl_β)
+    λ   = 0.92000,       # skilled quality shock λ_S
+    σ   = 0.19055,       # OJS flow cost σ_S
+    PS  = 5.45172,       # skilled productivity P_S
+    a_Γ = 20.00000,      # skilled offer shape a_Γ
+    b_Γ = 17.99885,      # skilled offer shape b_Γ
+    bS  = 0.15184,       # skilled outside flow b_S
+    ξ   = 0.00438,       # skilled exogenous separation ξ_S
+    σ_w = 0.21904,       # fixed (skl_σ_w)
 )
 
 # Fallback SimParams — used only if the SMM bundle cannot be read.
@@ -170,10 +169,10 @@ println("Parameters:")
         common.r, common.ν, common.φ)
 @printf("                   a_ℓ=%.5f  b_ℓ=%.5f  c=%.5f\n",
         common.a_ℓ, common.b_ℓ, common.c)
-@printf("  Unsk (regime):   PU=%.5f   bU=%.5f   bT=%.5f   α_U=%.5f   γ_U=%.5f\n",
-        unsk_par.PU, unsk_par.bU, unsk_par.bT, unsk_par.α_U, unsk_par.γ_U)   # GAMMA_U
-@printf("  Skl  (regime):   P_S=%.5f  bS=%.5f  a_Γ=%.5f  b_Γ=%.5f  γ_S=%.5f\n",
-        skl_par.PS, skl_par.bS, skl_par.a_Γ, skl_par.b_Γ, skl_par.γ_S)   # GAMMA_S
+@printf("  Unsk (regime):   PU=%.5f   bU=%.5f   bT=%.5f   α_U=%.5f\n",
+        unsk_par.PU, unsk_par.bU, unsk_par.bT, unsk_par.α_U)
+@printf("  Skl  (regime):   P_S=%.5f  bS=%.5f  a_Γ=%.5f  b_Γ=%.5f\n",
+        skl_par.PS, skl_par.bS, skl_par.a_Γ, skl_par.b_Γ)
 @printf("  UnskilledParams: μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f\n",
         unsk_par.μ, unsk_par.η, unsk_par.k, unsk_par.β, unsk_par.λ)
 @printf("  SkilledParams:   μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f   σ=%.5f\n",
@@ -336,8 +335,7 @@ flush(stdout)
 println("\nGenerating figures...")
 flush(stdout)
 
-@time make_all_plots(obj; output_dir = PLOTS_DIR,
-                          PS    = skl_par.PS)
+@time make_all_plots(obj; output_dir = PLOTS_DIR)
 
 println("\nDone.")
 flush(stdout)

@@ -22,7 +22,8 @@
 #
 #   Deep structural (estimated on base_fc, then HELD FIXED at the baseline
 #   estimates during crisis re-estimation):
-#     common:  a_ℓ, b_ℓ          worker-type Beta shapes
+#     common:  a_ℓ, b_ℓ, ρ_x     ability-distribution primitives (aU marginal
+#                                  shapes + concordance correlation)
 #     unsk:    bU, bT             unskilled / training institutional flow values
 #     skl:     bS                 skilled outside flow value
 #
@@ -34,6 +35,10 @@
 #                                              bargaining, damage hazard
 #     skl:     μ, η, k, β, λ, σ, ξ            same + OJS flow cost
 #                                              + exogenous separation ξ_S
+#
+#   Production is linear in own ability under pure-Roy (π_j = exp(A)·P_j·a_j·p),
+#   so there is no ability gradient to estimate: the single-index γ_U / γ_S of
+#   the old model are gone, replaced by the ρ_x separation device.
 #
 # Note on ξ_S: SkilledParams carries a ξ_S field (exogenous skilled
 # separation hazard), defaulting to 0.0. Total skilled separation into
@@ -358,43 +363,35 @@ Excluded from this list because they are always fixed:
 """
 function default_free_params() :: Vector{ParamSpec}
     return [
-        # Deep structural — common block (worker type shape; pinned to 1.0 via
-        # FIX_PARAMS in the uniform-ℓ runs, specs kept for the Beta appendix run)
+        # Deep structural — common block.  a_ℓ, b_ℓ shape the aU marginal;
+        # ρ_x is the ability correlation, the RoySearch separation device
+        # (Gola concordance).  All three are population primitives: estimated
+        # on base_fc, then held fixed across the business cycle.
         ParamSpec(:common, :a_ℓ,        0.1000,   8.0000,   2.8000, "worker type shape a_ℓ"),
         ParamSpec(:common, :b_ℓ,        0.0500,   4.0000,   1.2000, "worker type shape b_ℓ"),
- 
-        # Common block — training cost coeff and aggregate scale
-        ParamSpec(:common, :c,          0.0000,  15.0000,  11.0000, "training cost coeff c"),
-        ParamSpec(:common, :A,          0.0000,  13.0000,   5.6000, "aggregate production scale A"),
+        # ρ_x ∈ (−1,1): bounds shy of ±1 so the Gaussian copula ζ-map stays
+        # finite.  init −0.55 is the identification-validated point (negative
+        # concordance rescues the unskilled market at fixed productivity).
+        ParamSpec(:common, :ρ_x,       -0.9900,   0.9900,  -0.5500, "ability correlation ρ_x"),
+
+        # Common block — training cost coeff and aggregate scale.
+        # c is a linear level multiplier: c(aS) = c·(1−aS)·exp(−aS).
+        ParamSpec(:common, :c,          0.0000,  10.0000,   1.0000, "training cost coeff c"),
+        ParamSpec(:common, :A,          0.0000,  10.0000,   5.6000, "aggregate production scale A"),
  
         # Institutional flow values (stored by consuming block).
         ParamSpec(:unsk,   :bU,         0.0000,   2.5000,   1.5000, "unskilled outside flow b_U"),
         ParamSpec(:unsk,   :bT,         0.0000,   7.0000,   2.6500, "training flow b_T"),
         ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.6600, "skilled outside flow b_S"),
  
-        # Aggregate state / offer shape (stored by consuming block)
-        # EXP-MAP rescale: π_j = exp(A)·P_j·exp(x)·p.  The x-map mean rose from
-        # E[x]≈0.5 / E[x²]≈0.33 to E[exp(x)]≈1.7–2.3, i.e. output ~3× higher for a
-        # given P, so the P levels scale DOWN ~3×.  Inits are the previous
-        # level-run optima (P_U≈6, P_S≈26) divided by ~3.  NOTE: only exp(A)·P_j
-        # is pinned by wage levels, so (A, P_U, P_S) share one flat direction —
-        # if A drifts, P_U/P_S drift with it.  To identify them individually,
-        # fix A (e.g. A=0) or fix one P; see PATCH_NOTES / decision map.
+        # Productivity levels.  Under pure-Roy production is linear in own
+        # ability, π_U = exp(A) P_U aU p and π_S = exp(A) P_S aS p (no
+        # ability gradient — the redesign replaced the exp(γx) map with the
+        # ρ_x separation device).  Only exp(A)·P_j is pinned by wage levels,
+        # so (A, P_U, P_S) share one flat direction; fix A (e.g. A=0) or one
+        # P to identify them individually.  The premium loads on log(P_S/P_U).
         ParamSpec(:unsk,   :PU,         0.0001,   8.0000,   1.8000, "unskilled productivity P_U"),
         ParamSpec(:skl,    :PS,         0.0001,  20.0000,   4.5000, "skilled productivity P_S"),
-        # GAMMA_S: skilled ability gradient, π_S = A·P_S·exp(γ_S·x)·p.  lb=1 pins
-        # γ_S ≥ unskilled's slope (exp(x)) ⇒ single crossing / comparative advantage;
-        # γ_S = 1 recovers no-comparative-advantage.  Generous ub so the crossing can
-        # sit interior even at a large P_U/P_S (need γ_S − 1 > ln(P_U/P_S)).
-        ParamSpec(:skl,    :γ_S,        1.0000,   6.0000,   2.0000, "skilled ability gradient γ_S"),
-        # GAMMA_U: unskilled ability gradient, π_U = A·P_U·exp(γ_U·x)·p.  FIXED at 0 (flat)
-        # for the Day-1 gate (not in the free set below) — with γ_S free this maximises
-        # comparative advantage so low-x workers stay viable in U.  To FREE it later,
-        # uncomment the next line AND add (:unsk, :γ_U) to REGIME_SPECIFIC_PARAMS.  Only
-        # free it together with the within-unskilled variance moments — γ_U and α_U both
-        # move unskilled wage dispersion, so without variance targets they are not
-        # separately identified.  lb=0 (flat) … ub=1 (exp(x)); it should never want > 1.
-        ParamSpec(:unsk,   :γ_U,        0.0000,   1.0000,   0.3000, "unskilled ability gradient γ_U"),   # FREED (see joint-map: init 0.30, interior)
         ParamSpec(:unsk,   :α_U,        0.2000,  20.5000,   1.0000, "unskilled damage shape α_U"),
         ParamSpec(:skl,    :a_Γ,        0.1000,  20.0000,   5.2000, "skilled offer shape a_Γ"),
         ParamSpec(:skl,    :b_Γ,        0.1000,  18.0000,   9.2000, "skilled offer shape b_Γ"),
@@ -437,8 +434,7 @@ end
 # get fixed at the baseline estimate; regime-specific ones stay free).
 const REGIME_SPECIFIC_PARAMS = Set([
     (:common, :c),   (:common, :A),
-    (:unsk,   :PU),  (:skl,  :PS),   (:skl, :γ_S),
-    (:unsk,   :γ_U),   # GAMMA_U: FREED — regime-specific, estimated with γ_S and variance moments.
+    (:unsk,   :PU),  (:skl,  :PS),
     (:unsk,   :α_U), (:skl,  :a_Γ),   (:skl,  :b_Γ),
     (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),  (:unsk, :σ_w),
     (:skl,    :μ),   (:skl, :η),    (:skl, :k),   (:skl, :β),   (:skl, :λ),
@@ -447,9 +443,11 @@ const REGIME_SPECIFIC_PARAMS = Set([
 
 # Convenience: the complement is the deep set (everything in
 # default_free_params that is NOT regime-specific).  Useful for
-# pinning baseline-derived deep parameters in a crisis run.
+# pinning baseline-derived deep parameters in a crisis run.  The
+# ability-distribution primitives (a_ℓ, b_ℓ, ρ_x) are deep: population
+# structure does not switch at the business-cycle frequency.
 const DEEP_PARAMS = Set([
-    (:common, :a_ℓ), (:common, :b_ℓ),
+    (:common, :a_ℓ), (:common, :b_ℓ), (:common, :ρ_x),
     (:unsk,   :bU),  (:unsk,  :bT),  (:skl,  :bS),
 ])
 
@@ -517,7 +515,8 @@ function unpack_θ(
         φ   = _get(:φ,   :common, 0.20),
         a_ℓ = _get(:a_ℓ, :common, 2.00),
         b_ℓ = _get(:b_ℓ, :common, 5.00),
-        c   = _get(:c,   :common, 1.70),
+        ρ_x = _get(:ρ_x, :common, -0.55),
+        c   = _get(:c,   :common, 1.00),
         A   = _get(:A,   :common, 0.00),   # log scale; model uses exp(A)
     )
 
@@ -535,7 +534,6 @@ function unpack_θ(
         bT  = _get(:bT,  :unsk, 0.28),
         α_U = _get(:α_U, :unsk, 1.00),
         σ_w = _get(:σ_w, :unsk, 0.0),
-        γ_U = _get(:γ_U, :unsk, 0.0),   # GAMMA_U: default 0 ⇒ flat unskilled (Day-1 gate)
     )
 
     sp = SkilledParams(
@@ -545,8 +543,7 @@ function unpack_θ(
         β        = _get(:β,        :skl, 0.32),
         λ        = _get(:λ,        :skl, 0.07),
         σ        = _get(:σ,        :skl, 0.01),
-        PS = _get(:PS, :skl, 1.85),
-        γ_S      = _get(:γ_S,      :skl, 1.0),   # GAMMA_S
+        PS       = _get(:PS,       :skl, 1.85),
         bS       = _get(:bS,       :skl, 0.01),
         a_Γ      = _get(:a_Γ,      :skl, 2.00),
         b_Γ      = _get(:b_Γ,      :skl, 5.00),
@@ -562,11 +559,11 @@ function unpack_θ(
     up_fields = Dict{Symbol,Float64}(
         :μ => up.μ, :η => up.η, :k => up.k, :β => up.β, :λ => up.λ,
         :PU => up.PU, :bU => up.bU, :bT => up.bT, :α_U => up.α_U,
-        :σ_w => up.σ_w, :γ_U => up.γ_U,   # GAMMA_U
+        :σ_w => up.σ_w,
     )
     sp_fields = Dict{Symbol,Float64}(
         :μ => sp.μ, :η => sp.η, :k => sp.k, :β => sp.β, :λ => sp.λ, :σ => sp.σ,
-        :PS => sp.PS, :γ_S => sp.γ_S, :bS => sp.bS, :a_Γ => sp.a_Γ, :b_Γ => sp.b_Γ,
+        :PS => sp.PS, :bS => sp.bS, :a_Γ => sp.a_Γ, :b_Γ => sp.b_Γ,
         :ξ => sp.ξ, :σ_w => sp.σ_w,
     )
 
@@ -596,13 +593,13 @@ function unpack_θ(
         λ = up_fields[:λ],
         PU = up_fields[:PU], bU = up_fields[:bU],
         bT = up_fields[:bT], α_U = up_fields[:α_U],
-        σ_w = up_fields[:σ_w], γ_U = up_fields[:γ_U],   # GAMMA_U
+        σ_w = up_fields[:σ_w],
     )
     sp = SkilledParams(
         μ = sp_fields[:μ], η = sp_fields[:η],
         k = sp_fields[:k], β = sp_fields[:β],
         λ = sp_fields[:λ], σ = sp_fields[:σ],
-        PS = sp_fields[:PS], γ_S = sp_fields[:γ_S], bS = sp_fields[:bS],
+        PS = sp_fields[:PS], bS = sp_fields[:bS],
         a_Γ = sp_fields[:a_Γ], b_Γ = sp_fields[:b_Γ],
         ξ = sp_fields[:ξ], σ_w = sp_fields[:σ_w],
     )

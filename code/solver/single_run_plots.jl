@@ -1,583 +1,481 @@
 ############################################################
-# single_run_plots.jl — Equilibrium plots
+# single_run_plots.jl — RoySearch equilibrium figures
 #
-# make_all_plots(obj; output_dir, PS)
-#   Generates and saves every figure to output_dir.
-#   obj — NamedTuple from compute_equilibrium_objects().
+#   make_all_plots(obj; output_dir)
+#     Generates and saves every figure to output_dir.
+#     obj — NamedTuple from compute_equilibrium_objects()
+#
+# All ability axes are in RANK space F_ℓ(a) = cumulative marginal
+# weight, because the ability mass concentrates at the support edges
+# (Lise–Meghir–Robin convention).  The model is 2D in (a_U, a_S):
+# unskilled objects are indexed by a_U, skilled objects by a_S, and
+# aggregate planes live on the (a_U, a_S) copula grid.
 #
 # `using Plots`, `using LaTeXStrings`, and `using Interpolations`
-# must be loaded before this file's functions are called.
+# are loaded in the driver before these functions are called.
 ############################################################
 
+# ── Shared style ────────────────────────────────────────────
+# One place. Every figure draws from these so the set stays
+# visually consistent (axis labels, palette, in-plot text).
 function _set_theme!()
     gr()
     theme(:default)
     default(
-        fontfamily          = "Computer Modern",
-        framestyle          = :box,
-        titlefontsize       = 11,
-        guidefontsize       = 10,
-        tickfontsize        = 8,
-        legendfontsize      = 8,
-        linewidth           = 1.8,
-        grid                = true,
-        gridalpha           = 0.05,
-        left_margin         = 7Plots.mm,
+        fontfamily     = "Computer Modern",
+        framestyle     = :box,
+        titlefontsize  = 11,
+        guidefontsize  = 10,
+        tickfontsize   = 8,
+        legendfontsize = 8,
+        linewidth      = 1.8,
+        grid           = true,
+        gridalpha      = 0.05,
+        left_margin    = 7Plots.mm,
     )
 end
 
-const _C1 = :steelblue
-const _C2 = :firebrick
-const _C3 = :seagreen
-const _C4 = :darkorange
-const _C5 = :mediumpurple
+# Segment palette — unskilled, skilled, training/τ, directed search d,
+# unemployment, reservation-cutoff overlay.
+const _C_U     = :steelblue
+const _C_S     = :firebrick
+const _C_TRAIN = :seagreen
+const _C_D     = :darkorange
+const _C_UNEMP = :dimgray
+const _C_STAR  = :red
 
+# Canonical rank-axis labels (used verbatim by every figure).
+const _LAB_RANK_U = L"unskilled-ability rank $F_\ell(a_U)$"
+const _LAB_RANK_S = L"skilled-ability rank $F_\ell(a_S)$"
+
+# Ability rank = midpoint cumulative marginal weight on the ability grid.
+_rank(wa) = (cumsum(wa) .- 0.5 .* wa) ./ sum(wa)
+
+# Aggregate a 2D (a_U, a_S) mass to a per-a_U vector (sum over a_S) …
+_row_agg(M) = vec(sum(M; dims = 2))
+# … and to a per-a_S vector (sum over a_U).
+_col_agg(M) = vec(sum(M; dims = 1))
+
+# In-plot region text: one treatment for all figures (matches the
+# sorting-plane "stay unskilled" style — white, non-bold, centred).
+_region!(p, x, y, s; color = :white) =
+    annotate!(p, x, y, text(s, color, :center, 11))
 
 # ============================================================
-# Figures
+# 1. Sorting plane — the mechanism figure
+#    Copula density on ability ranks, with the training frontier τ
+#    and the directed-search band d overlaid.  τ, d line labels are
+#    drawn horizontally at a fixed offset above each line.
 # ============================================================
+function fig_sorting_plane(obj)
+    rkU = _rank(obj.waU)
+    rkS = _rank(obj.waS)
 
-function fig_densities(obj)
-    xg = obj.xg
+    # Copula density on the rank grid: W2 already carries the marginal
+    # weights, so divide them out to expose the copula c_ρ(u,v) implied
+    # by (a_ℓ, b_ℓ, ρ_x).
+    dens = obj.W2 ./ (obj.waU * obj.waS')
 
-    p1a = plot(xg, obj.uU,    label=L"u_U(x)",           color=_C1)
-    plot!(p1a, xg, obj.tU,    label=L"t(x)",             color=_C2)
-    plot!(p1a, xg, obj.eU_vec,label=L"e_U(x)",           color=_C3)
-    plot!(p1a, xg, obj.mU_x,  label=L"m_U(x)",           color=:black, ls=:dash)
-    title!(p1a, "Unskilled segment densities")
-    xlabel!(p1a, L"x")
-    ylabel!(p1a, "Density")
+    # Cap the colour range at a robust upper percentile.  At strong |ρ_x|
+    # the copula density spikes in two corners, which otherwise saturates
+    # the scale and renders the whole interior at magma's dark end (the
+    # "no surface" symptom); clims exposes the interior gradient.
+    hi = quantile(vec(dens), 0.98)
+    p = heatmap(rkU, rkS, dens',
+                xlabel = _LAB_RANK_U, ylabel = _LAB_RANK_S,
+                color = :magma, legend = false, grid = false,
+                clims = (0.0, hi),
+                yguidefontrotation = -90, left_margin = 10Plots.mm)
 
-    p1b = plot(xg, obj.uS,    label=L"u_S(x)",           color=_C1)
-    plot!(p1b, xg, obj.eS_tot,label=L"e_S^{\rm tot}(x)", color=_C3)
-    plot!(p1b, xg, obj.mS_vec,label=L"m_S(x)",           color=:black, ls=:dash)
-    title!(p1b, "Skilled segment densities")
-    xlabel!(p1b, L"x")
-    ylabel!(p1b, "Density")
-
-    plot(p1a, p1b, layout=(1,2), size=(900,380), margin=5Plots.mm)
-end
-
-function fig_unskilled_values(obj)
-    xg = obj.xg
-    x_bar_idx = findfirst(obj.tauT .> 0.5)
-    x_bar = isnothing(x_bar_idx) ? NaN : xg[x_bar_idx]
-
-    p2 = plot(xg, obj.Usearch, label=L"U_U^{\rm search}(x)", color=_C1)
-    plot!(p2, xg, obj.net_T,   label=L"-c(x) + T(x)",        color=_C2)
-    plot!(p2, xg, obj.UU,      label=L"U_U(x)=\max",         color=:black, ls=:dash, lw=2.2)
-
-    if !isnan(x_bar)
-        annotate!(p2, xg[end]*0.95, minimum(obj.Usearch)*1.02,
-                  text(L"\bar{x} \approx %$(round(x_bar, digits=3))", :right, 8, :darkgray))
+    # Training frontier τ(a_U,a_S): boundary of the train region on the
+    # rank grid.  Column-wise first ranks where τ switches to 1.
+    τ_edge = fill(NaN, length(rkU))
+    for i in 1:length(rkU)
+        j = findfirst(obj.τ_mat[i, :] .> 0.5)
+        τ_edge[i] = isnothing(j) ? NaN : rkS[j]
     end
-    xlabel!(p2, L"x")
-    ylabel!(p2, "Value")
-    p2
+    plot!(p, rkU, τ_edge, color = _C_TRAIN, lw = 2.4)
+
+    # Directed-search band d (transition-only): boundary of the d>0 set.
+    d_edge = fill(NaN, length(rkU))
+    for i in 1:length(rkU)
+        j = findfirst(obj.d[i, :] .> 0.5)
+        d_edge[i] = isnothing(j) ? NaN : rkS[j]
+    end
+    plot!(p, rkU, d_edge, color = _C_D, lw = 1.5, ls = :dot)
+
+    # Region labels — identical font, pulled toward region centres.
+    _region!(p, 0.30, 0.80, "train")
+    _region!(p, 0.62, 0.20, "stay unskilled")
+
+    # Line labels: horizontal, same x, identical vertical offset above
+    # each curve.  Interpolate each edge at x_lab to sit on its line.
+    x_lab, gap = 0.70, 0.055
+    yτ = _interp_edge(rkU, τ_edge, x_lab)
+    yd = _interp_edge(rkU, d_edge, x_lab)
+    isnan(yτ) || annotate!(p, x_lab, yτ + gap, text(L"\tau(a_U,a_S)", _C_TRAIN, :left, 11))
+    isnan(yd) || annotate!(p, x_lab, yd + gap, text(L"d(a_U,a_S)",   _C_D,     :left, 11))
+
+    xlims!(p, 0, 1); ylims!(p, 0, 1)
+    p
 end
 
-function fig_employment_heatmaps(obj; percentile_print = 1.00)
-    xg  = obj.xg
-    pgU = obj.pgU
-    pg  = obj.pg
+# Linear interpolation of an edge curve (with NaNs) at a query rank.
+function _interp_edge(x, y, xq)
+    ok = .!isnan.(y)
+    (count(ok) < 2) && return NaN
+    linear_interpolation(x[ok], y[ok]; extrapolation_bc = NaN)(xq)
+end
 
-    x_lo,  x_hi  = 0.0, percentile_print
-    pU_lo, pU_hi = 0.0, percentile_print
-    pS_lo, pS_hi = 0.0, percentile_print
+# ============================================================
+# 2. Segment densities over ability rank
+#    m_U / m_S segment-mass lines removed (per request); the
+#    unemployed / training / employed shares remain.
+# ============================================================
+function fig_densities(obj)
+    rkU = _rank(obj.waU)
+    rkS = _rank(obj.waS)
 
-    ix = x_lo  .≤ xg  .≤ x_hi
-    iU = pU_lo .≤ pgU .≤ pU_hi
-    iS = pS_lo .≤ pg  .≤ pS_hi
+    uU = _row_agg(obj.uU);   tU = _row_agg(obj.tU);   eU = _row_agg(obj.eU_mat)
+    uS = _col_agg(obj.uS_mat)
 
-    xg_w  = xg[ix]
-    pgU_w = pgU[iU];  eU_w = obj.eU_surface[ix, iU]
-    pg_w  = pg[iS];   eS_w = obj.eS_mat[ix, iS]
+    p1a = plot(rkU, uU, label = L"u_U(a_U)", color = _C_UNEMP)
+    plot!(p1a, rkU, tU, label = L"t(a_U)",   color = _C_TRAIN)
+    plot!(p1a, rkU, eU, label = L"e_U(a_U)", color = _C_U)
+    xlabel!(p1a, _LAB_RANK_U); ylabel!(p1a, "Density")
 
-    pstar_U_w = obj.pstar_U[ix]
-    pstar_S_w = obj.pstar_S[ix]
-    poj_w     = obj.poj[ix]
+    p1b = plot(rkS, uS,          label = L"u_S(a_S)",           color = _C_UNEMP)
+    plot!(p1b, rkS, obj.eS_totS, label = L"e_S^{\rm tot}(a_S)", color = _C_S)
+    xlabel!(p1b, _LAB_RANK_S); ylabel!(p1b, "Density")
 
-    p3a = heatmap(xg_w, pgU_w, eU_w',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"Unskilled employment $e_U(x,p)$",
-                  color=:plasma, legend=false, grid=false,
-                  yguidefontrotation=-90)
-    contour!(p3a, xg_w, pgU_w, eU_w',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
-    plot!(p3a, xg_w, pstar_U_w, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
+    plot(p1a, p1b, layout = (1, 2), size = (900, 380), margin = 5Plots.mm)
+end
+
+# ============================================================
+# 3. Segment values — two panels on their own governing rank
+#    (unskilled search value in a_U; net training value in a_S).
+# ============================================================
+function fig_unskilled_values(obj)
+    rkU = _rank(obj.waU)
+    rkS = _rank(obj.waS)
+
+    p2a = plot(rkU, obj.Usearch, label = L"U_U^{\rm search}(a_U)",
+               color = _C_U, legend = :bottomright)
+    xlabel!(p2a, _LAB_RANK_U); ylabel!(p2a, "Value")
+
+    p2b = plot(rkS, obj.net_T, label = L"-c(a_S) + T(a_S)",
+               color = _C_TRAIN, legend = :bottomright)
+    hline!(p2b, [0.0], ls = :dot, color = :gray, label = "")
+    xlabel!(p2b, _LAB_RANK_S); ylabel!(p2b, "Value")
+
+    plot(p2a, p2b, layout = (1, 2), size = (900, 380), margin = 5Plots.mm)
+end
+
+# ============================================================
+# 4. Employment heatmaps — ability rank × match quality p
+# ============================================================
+function fig_employment_heatmaps(obj)
+    rkU = _rank(obj.waU); rkS = _rank(obj.waS)
+
+    p3a = heatmap(rkU, obj.pgU, obj.eU_surface',
+                  xlabel = _LAB_RANK_U, ylabel = L"p",
+                  title = L"Unskilled employment $e_U(a_U,p)$",
+                  color = :plasma, legend = false, grid = false,
+                  yguidefontrotation = -90)
+    contour!(p3a, rkU, obj.pgU, obj.eU_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
+    plot!(p3a, rkU, obj.pstar_U, color = _C_STAR, lw = 2, ls = :dash)
     ylims!(p3a, 0.0, 1.0)
-    p3b = heatmap(xg_w, pg_w, eS_w',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"Skilled employment $e_S(x,p)$",
-                  color=:viridis, legend=false, grid=false,
-                  yguidefontrotation=-90)
-    contour!(p3b, xg_w, pg_w, eS_w',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
-    plot!(p3b, xg_w, pstar_S_w, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
-    plot!(p3b, xg_w, poj_w,     color=:white, lw=2, ls=:dot, xlims=(0, 1), ylims=(0, 1))
+    xlims!(p3a, 0.0, 1.0)
+
+    p3b = heatmap(rkS, obj.pg, obj.eS_pS',
+                  xlabel = _LAB_RANK_S, ylabel = L"p",
+                  title = L"Skilled employment $e_S(a_S,p)$",
+                  color = :viridis, legend = false, grid = false,
+                  yguidefontrotation = -90)
+    contour!(p3b, rkS, obj.pg, obj.eS_pS',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
+    plot!(p3b, rkS, obj.pstar_S, color = _C_STAR, lw = 2, ls = :dash)
+    plot!(p3b, rkS, obj.poj,     color = :white,  lw = 2, ls = :dot)
     ylims!(p3b, 0.0, 1.0)
-    plot(p3a, p3b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
+    xlims!(p3b, 0.0, 1.0)
+
+    plot(p3a, p3b, layout = (1, 2), size = (1100, 440), margin = 5Plots.mm)
 end
 
-function fig_total_employment(obj; percentile_print = 1.00)
-    xg  = obj.xg
-    pg  = obj.pg
-    pgU = obj.pgU
+# ============================================================
+# 5. Total employment — a plane over the two ability ranks
+#    (like the sorting plane).  No title.
+# ============================================================
+function fig_total_employment(obj)
+    rkU = _rank(obj.waU); rkS = _rank(obj.waS)
 
-    x_lo,  x_hi  = 0.0, percentile_print
-    pU_lo, pU_hi = 0.0, percentile_print
-    pS_lo, pS_hi = 0.0, percentile_print
+    # e_U is 2D mass on (a_U,a_S); e_S is per-a_S.  Broadcast e_S across
+    # a_U by the copula column shares to place both on the same plane.
+    eU_plane = obj.eU_mat
+    colshare = obj.W2 ./ (sum(obj.W2; dims = 1) .+ eps())
+    eS_plane = colshare .* obj.eS_totS'
+    e_total  = eU_plane .+ eS_plane
 
-    ix = x_lo  .≤ xg  .≤ x_hi
-    iU = pU_lo .≤ pgU .≤ pU_hi
-    iS = pS_lo .≤ pg  .≤ pS_hi
-
-    xg_w  = xg[ix]
-    pg_w  = pg[iS]
-    eU_w  = obj.eU_surface[ix, iU]
-    eS_w  = obj.eS_mat[ix, iS]
-
-    e_total_w = eU_w .+ eS_w
-
-    p3c = heatmap(xg_w, pg_w, e_total_w',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"Total employment $e_U(x,p)+e_S(x,p)$",
-                  color=:viridis, legend=false, grid=false,
-                  yguidefontrotation=-90)
-    contour!(p3c, xg_w, pg_w, e_total_w',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
-    ylims!(p3c, 0.0, 1.0)
-    p3c
+    p = heatmap(rkU, rkS, e_total',
+                xlabel = _LAB_RANK_U, ylabel = _LAB_RANK_S,
+                color = :viridis, legend = false, grid = false,
+                yguidefontrotation = -90, left_margin = 10Plots.mm)
+    contour!(p, rkU, rkS, e_total',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
+    p
 end
 
-function fig_training_policy(obj)
-    p4 = plot(obj.xg, obj.tauT,
-              label=L"\tau(x)", color=_C2, lw=2, legend=false)
-    xlabel!(p4, L"x")
-    ylabel!(p4, L"\tau(x)")
-    plot!(p4, yguidefontrotation=-90)
-    ylims!(p4, -0.05, 1.15)
-    p4
-end
-
-# Cross-market policy d(x) and the two unemployment-value branches.
-function fig_cross_market_policy(obj)
-    xg = obj.xg
-
-    pa = plot(xg, obj.d,
-              label = L"d(x)",
-              color = _C5, lw = 2.4, legend = false)
-    xlabel!(pa, L"x")
-    ylabel!(pa, L"d(x)")
-    plot!(pa, yguidefontrotation=-90)
-    ylims!(pa, -0.05, 1.15)
-    title!(pa, "Cross-market search policy")
-
-    pb = plot(xg, obj.US, label=L"U_S(x)=\max", color=_C3, lw=2)
-    plot!(pb, xg, obj.UU, label=L"U_U(x)",      color=_C1, lw=2)
-    xlabel!(pb, L"x")
-    ylabel!(pb, "Value")
-    title!(pb, "Unemployment values")
-
-    plot(pa, pb, layout=(1,2), size=(1000,380), margin=5Plots.mm)
-end
-
-function fig_unskilled_frontier(obj)
-    xg = obj.xg
-
-    p5a = plot(xg, obj.JU_frontier, label=L"J_U(x,1)", color=_C1, legend=false)
-    hline!(p5a, [0.0], ls=:dot, color=:gray, label="")
-    title!(p5a, L"Frontier firm value $J_U(x,p{=}1)$")
-    xlabel!(p5a, L"x")
-    ylabel!(p5a, L"$J_U$", yguidefontrotation=-90)
-
-    p5b = plot(xg, obj.pstar_U, label=L"p^*(x)", color=_C4, legend=false)
-    title!(p5b, L"Unskilled reservation rule $p^*(x)$")
-    xlabel!(p5b, L"x")
-    ylabel!(p5b, L"p^*")
-    plot!(p5b, yguidefontrotation=-90)
-    ylims!(p5b, 0, 1)
-
-    plot(p5a, p5b, layout=(1,2), size=(900,380), margin=5Plots.mm)
-end
-
+# ============================================================
+# 6. Unskilled value surfaces — J_U(a_U,p), E_U(a_U,p)
+# ============================================================
 function fig_unskilled_value_surfaces(obj)
-    xg  = obj.xg
-    pgU = obj.pgU
+    rkU = _rank(obj.waU)
 
-    p6a = heatmap(xg, pgU, obj.JU_surface',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"Firm value $J_U(x,p)$", color=:plasma,
-                  legend=false, grid=false, yguidefontrotation=-90,
-                  left_margin=12Plots.mm)
-    contour!(p6a, xg, pgU, obj.JU_surface',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
-    plot!(p6a, xg, obj.pstar_U, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
+    p6a = heatmap(rkU, obj.pgU, obj.JU_surface',
+                  xlabel = _LAB_RANK_U, ylabel = L"p",
+                  title = L"Firm value $J_U(a_U,p)$", color = :plasma,
+                  legend = false, grid = false, yguidefontrotation = -90,
+                  left_margin = 12Plots.mm)
+    contour!(p6a, rkU, obj.pgU, obj.JU_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
+    plot!(p6a, rkU, obj.pstar_U, color = _C_STAR, lw = 2, ls = :dash)
     ylims!(p6a, 0.0, 1.0)
+    xlims!(p6a, 0.0, 1.0)
 
-    p6b = heatmap(xg, pgU, obj.EU_surface',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"Worker value $E_U(x,p)$", color=:plasma,
-                  legend=false, grid=false, yguidefontrotation=-90)
-    contour!(p6b, xg, pgU, obj.EU_surface',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
-    plot!(p6b, xg, obj.pstar_U, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
+    p6b = heatmap(rkU, obj.pgU, obj.EU_surface',
+                  xlabel = _LAB_RANK_U, ylabel = L"p",
+                  title = L"Worker value $E_U(a_U,p)$", color = :plasma,
+                  legend = false, grid = false, yguidefontrotation = -90)
+    contour!(p6b, rkU, obj.pgU, obj.EU_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
+    plot!(p6b, rkU, obj.pstar_U, color = _C_STAR, lw = 2, ls = :dash)
     ylims!(p6b, 0.0, 1.0)
+    xlims!(p6b, 0.0, 1.0)
 
-    plot(p6a, p6b, layout=(1,2), size=(1000,420), margin=5Plots.mm)
+    plot(p6a, p6b, layout = (1, 2), size = (1000, 420), margin = 5Plots.mm)
 end
 
-function fig_skilled_cutoffs(obj)
-    xg = obj.xg
-    p7 = plot(xg, obj.pstar_S, label=L"p_S^*(x)", color=_C1, legend=false)
-    plot!(p7, xg, obj.poj, label=L"p^{\rm oj}(x)", color=_C2, legend=false)
-    xlabel!(p7, L"x")
-    ylabel!(p7, L"p")
-    plot!(p7, yguidefontrotation=-90, left_margin=5Plots.mm)
-    ylims!(p7, 0, 1)
-    p7
-end
-
+# ============================================================
+# 7. Skilled worker / firm value surfaces (appendix)
+# ============================================================
 function fig_skilled_worker_values(obj)
-    xg = obj.xg
-    pg = obj.pg
+    rkS = _rank(obj.waS)
 
-    p8a = heatmap(xg, pg, obj.E0_surface',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"E_S^0(x,p)", color=:matter,
-                  legend=false, grid=false, yguidefontrotation=-90)
-    contour!(p8a, xg, pg, obj.E0_surface',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
+    p8a = heatmap(rkS, obj.pg, obj.E0_surface',
+                  xlabel = _LAB_RANK_S, ylabel = L"p",
+                  title = L"E_S^0(a_S,p)", color = :matter,
+                  legend = false, grid = false, yguidefontrotation = -90)
+    contour!(p8a, rkS, obj.pg, obj.E0_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
     ylims!(p8a, 0.0, 1.0)
 
-    p8b = heatmap(xg, pg, obj.E1_surface',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"E_S^1(x,p)", color=:viridis,
-                  legend=false, grid=false, yguidefontrotation=-90)
-    contour!(p8b, xg, pg, obj.E1_surface',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
+    p8b = heatmap(rkS, obj.pg, obj.E1_surface',
+                  xlabel = _LAB_RANK_S, ylabel = L"p",
+                  title = L"E_S^1(a_S,p)", color = :viridis,
+                  legend = false, grid = false, yguidefontrotation = -90)
+    contour!(p8b, rkS, obj.pg, obj.E1_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
     ylims!(p8b, 0.0, 1.0)
 
-    plot(p8a, p8b, layout=(1,2), size=(1000,400), margin=5Plots.mm)
+    plot(p8a, p8b, layout = (1, 2), size = (1000, 400), margin = 5Plots.mm)
 end
 
 function fig_skilled_firm_values(obj)
-    xg = obj.xg
-    pg = obj.pg
+    rkS = _rank(obj.waS)
 
-    p9a = heatmap(xg, pg, obj.J0_surface',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"J_S^0(x,p)", color=:matter,
-                  legend=false, grid=false, yguidefontrotation=-90)
-    contour!(p9a, xg, pg, obj.J0_surface',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
+    p9a = heatmap(rkS, obj.pg, obj.J0_surface',
+                  xlabel = _LAB_RANK_S, ylabel = L"p",
+                  title = L"J_S^0(a_S,p)", color = :matter,
+                  legend = false, grid = false, yguidefontrotation = -90)
+    contour!(p9a, rkS, obj.pg, obj.J0_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
     ylims!(p9a, 0.0, 1.0)
 
-    p9b = heatmap(xg, pg, obj.J1_surface',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"J_S^1(x,p)", color=:viridis,
-                  legend=false, grid=false, yguidefontrotation=-90)
-    contour!(p9b, xg, pg, obj.J1_surface',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
+    p9b = heatmap(rkS, obj.pg, obj.J1_surface',
+                  xlabel = _LAB_RANK_S, ylabel = L"p",
+                  title = L"J_S^1(a_S,p)", color = :viridis,
+                  legend = false, grid = false, yguidefontrotation = -90)
+    contour!(p9b, rkS, obj.pg, obj.J1_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
     ylims!(p9b, 0.0, 1.0)
 
-    plot(p9a, p9b, layout=(1,2), size=(1000,400), margin=5Plots.mm)
+    plot(p9a, p9b, layout = (1, 2), size = (1000, 400), margin = 5Plots.mm)
 end
 
+# ============================================================
+# 8. Surplus heatmaps (appendix) — ability rank × p
+# ============================================================
 function fig_surplus_heatmaps(obj)
-    xg  = obj.xg
-    pgU = obj.pgU
-    pg  = obj.pg
+    rkU = _rank(obj.waU); rkS = _rank(obj.waS)
 
-    p10a = heatmap(xg, pgU, obj.SU_surface',
-                   xlabel=L"x", ylabel=L"p",
-                   title=L"Unskilled surplus $S_U(x,p)$", color=:plasma,
-                   legend=false, grid=false, yguidefontrotation=-90,
-                   left_margin=12Plots.mm)
-    contour!(p10a, xg, pgU, obj.SU_surface',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
-    plot!(p10a, xg, obj.pstar_U, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
+    p10a = heatmap(rkU, obj.pgU, obj.SU_surface',
+                   xlabel = _LAB_RANK_U, ylabel = L"p",
+                   title = L"Unskilled surplus $S_U(a_U,p)$", color = :plasma,
+                   legend = false, grid = false, yguidefontrotation = -90,
+                   left_margin = 12Plots.mm)
+    contour!(p10a, rkU, obj.pgU, obj.SU_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
+    plot!(p10a, rkU, obj.pstar_U, color = _C_STAR, lw = 2, ls = :dash)
     ylims!(p10a, 0.0, 1.0)
+    xlims!(p10a, 0.0, 1.0)
 
-    p10b = heatmap(xg, pg, obj.Smax_surface',
-                   xlabel=L"x", ylabel=L"p",
-                   title=L"Skilled surplus $\max(S_U^0,S_S^1)$", color=:viridis,
-                   legend=false, grid=false, yguidefontrotation=-90)
-    contour!(p10b, xg, pg, obj.Smax_surface',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
-    plot!(p10b, xg, obj.pstar_S, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
-    plot!(p10b, xg, obj.poj,     color=:white, lw=2, ls=:dot, xlims=(0, 1), ylims=(0, 1))
+    p10b = heatmap(rkS, obj.pg, obj.Smax_surface',
+                   xlabel = _LAB_RANK_S, ylabel = L"p",
+                   title = L"Skilled surplus $\max(S_S^0,S_S^1)$", color = :viridis,
+                   legend = false, grid = false, yguidefontrotation = -90)
+    contour!(p10b, rkS, obj.pg, obj.Smax_surface',
+             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
+    plot!(p10b, rkS, obj.pstar_S, color = _C_STAR, lw = 2, ls = :dash)
+    plot!(p10b, rkS, obj.poj,     color = :white,  lw = 2, ls = :dot)
     ylims!(p10b, 0.0, 1.0)
+    xlims!(p10b, 0.0, 1.0)
 
-    plot(p10a, p10b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
+    plot(p10a, p10b, layout = (1, 2), size = (1100, 440), margin = 5Plots.mm)
 end
 
+# ============================================================
+# 9. Unemployment values — U_U(a_U) and U_S(a_S)
+#    RoySearch has no scalar UU field: the unskilled unemployment
+#    value is U_U^search(a_U).  Each series is plotted against its
+#    own governing rank.
+# ============================================================
 function fig_unemployment_values(obj)
-    xg = obj.xg
-    p11 = plot(xg, obj.US, label=L"U_S(x)", color=_C3, lw=2)
-    plot!(p11, xg, obj.UU, label=L"U_U(x)", color=_C1, lw=2)
-    xlabel!(p11, L"x")
-    ylabel!(p11, "Value")
-    p11
+    rkU = _rank(obj.waU); rkS = _rank(obj.waS)
+
+    p11a = plot(rkU, obj.Usearch, label = L"U_U(a_U)", color = _C_U, lw = 2)
+    xlabel!(p11a, _LAB_RANK_U); ylabel!(p11a, "Value")
+
+    p11b = plot(rkS, obj.US, label = L"U_S(a_S)", color = _C_S, lw = 2)
+    xlabel!(p11b, _LAB_RANK_S); ylabel!(p11b, "Value")
+
+    plot(p11a, p11b, layout = (1, 2), size = (900, 380), margin = 5Plots.mm)
 end
 
+# ============================================================
+# W1. Unskilled wage surface — ability rank × p
+# ============================================================
 function fig_unskilled_wage(obj)
-    xg  = obj.xg
-    pgU = obj.pgU
+    rkU = _rank(obj.waU)
 
-    pW1 = heatmap(xg, pgU, obj.wU_surface',
-                  xlabel=L"x", ylabel=L"p",
-                  legend=false, grid=false, yguidefontrotation=-90,
-                  left_margin=12Plots.mm)
-    contour!(pW1, xg, pgU, obj.wU_surface',
-             color=:white, alpha=0.45, lw=0.8, levels=15)
-    plot!(pW1, xg, obj.pstar_U, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
+    pW1 = heatmap(rkU, obj.pgU, obj.wU_surface',
+                  xlabel = _LAB_RANK_U, ylabel = L"p",
+                  color = :plasma, legend = false, grid = false,
+                  yguidefontrotation = -90, left_margin = 12Plots.mm)
+    contour!(pW1, rkU, obj.pgU, obj.wU_surface',
+             color = :white, alpha = 0.45, lw = 0.8, levels = 15)
+    plot!(pW1, rkU, obj.pstar_U, color = _C_STAR, lw = 2, ls = :dash)
     ylims!(pW1, 0.0, 1.0)
+    xlims!(pW1, 0.0, 1.0)
     pW1
 end
 
+# ============================================================
+# W2. Skilled wage surfaces — no-OJS and OJS
+# ============================================================
 function fig_skilled_wages(obj)
-    xg = obj.xg
-    pg = obj.pg
+    rkS = _rank(obj.waS)
 
-    pW2a = heatmap(xg, pg, obj.wS0_surface',
-                   xlabel=L"x", ylabel=L"p",
-                   title=L"Skilled wage, no OJS: $w_S^0(x,p)$", color=:matter,
-                   legend=false, grid=false, yguidefontrotation=-90,
-                   left_margin=12Plots.mm)
-    contour!(pW2a, xg, pg, obj.wS0_surface',
-             color=:white, alpha=0.45, lw=0.8, levels=15)
-    plot!(pW2a, xg, obj.pstar_S, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
-    plot!(pW2a, xg, obj.poj,     color=:white, lw=2, ls=:dot, xlims=(0, 1), ylims=(0, 1))
+    pW2a = heatmap(rkS, obj.pg, obj.wS0_surface',
+                   xlabel = _LAB_RANK_S, ylabel = L"p",
+                   title = L"Skilled wage, no OJS: $w_S^0(a_S,p)$", color = :matter,
+                   legend = false, grid = false, yguidefontrotation = -90,
+                   left_margin = 12Plots.mm)
+    contour!(pW2a, rkS, obj.pg, obj.wS0_surface',
+             color = :white, alpha = 0.45, lw = 0.8, levels = 15)
+    plot!(pW2a, rkS, obj.pstar_S, color = _C_STAR, lw = 2, ls = :dash)
+    plot!(pW2a, rkS, obj.poj,     color = :white,  lw = 2, ls = :dot)
     ylims!(pW2a, 0.0, 1.0)
+    xlims!(pW2a, 0.0, 1.0)
 
-    pW2b = heatmap(xg, pg, obj.wS1_surface',
-                   xlabel=L"x", ylabel=L"p",
-                   title=L"Skilled wage, OJS: $w_S^1(x,p)$", color=:viridis,
-                   legend=false, grid=false, yguidefontrotation=-90,
-                   left_margin=12Plots.mm)
-    contour!(pW2b, xg, pg, obj.wS1_surface',
-             color=:white, alpha=0.45, lw=0.8, levels=15)
-    plot!(pW2b, xg, obj.pstar_S, color=:red, lw=2, ls=:dash, xlims=(0, 1), ylims=(0, 1))
-    plot!(pW2b, xg, obj.poj,     color=:white, lw=2, ls=:dot, xlims=(0, 1), ylims=(0, 1))
+    pW2b = heatmap(rkS, obj.pg, obj.wS1_surface',
+                   xlabel = _LAB_RANK_S, ylabel = L"p",
+                   title = L"Skilled wage, OJS: $w_S^1(a_S,p)$", color = :viridis,
+                   legend = false, grid = false, yguidefontrotation = -90)
+    contour!(pW2b, rkS, obj.pg, obj.wS1_surface',
+             color = :white, alpha = 0.45, lw = 0.8, levels = 15)
+    plot!(pW2b, rkS, obj.pstar_S, color = _C_STAR, lw = 2, ls = :dash)
     ylims!(pW2b, 0.0, 1.0)
+    xlims!(pW2b, 0.0, 1.0)
 
-    plot(pW2a, pW2b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
+    plot(pW2a, pW2b, layout = (1, 2), size = (1000, 400), margin = 5Plots.mm)
 end
 
-# Mean log wage gap by x, computed on the OJS-aware realised skilled wage
-# and the unskilled wage interpolated onto the skilled p-grid.
-function fig_skill_premium(obj)
-    xg = obj.xg
-    pg = obj.pg
-
-    wS_actual = fill(NaN, obj.Nx, obj.NpS)
-    for ix in 1:obj.Nx
-        poj_ix = clamp01(obj.poj[ix])
-        for jp in 1:obj.NpS
-            wS_actual[ix, jp] = pg[jp] < poj_ix ? obj.wS1_surface[ix, jp] : obj.wS0_surface[ix, jp]
-        end
-    end
-
-    wU_on_pg = fill(NaN, obj.Nx, obj.NpS)
-    for ix in 1:obj.Nx
-        itp = linear_interpolation(obj.pgU, obj.wU_surface[ix, :],
-                                   extrapolation_bc=NaN)
-        wU_on_pg[ix, :] = itp.(pg)
-    end
-
-    eU_on_pg = zeros(obj.Nx, obj.NpS)
-    for ix in 1:obj.Nx
-        itp = linear_interpolation(obj.pgU, obj.eU_surface[ix, :],
-                                   extrapolation_bc=0.0)
-        eU_on_pg[ix, :] = max.(itp.(pg), 0.0)
-    end
-
-    eS_mat = obj.eS_mat
-    premium_log_by_x = fill(NaN, obj.Nx)
-
-    for ix in 1:obj.Nx
-        numS = 0.0
-        denS = 0.0
-        numU = 0.0
-        denU = 0.0
-        for jp in 1:obj.NpS-1
-            dp = pg[jp+1] - pg[jp]
-
-            wS1 = wS_actual[ix, jp]
-            wS2 = wS_actual[ix, jp+1]
-            eS1 = eS_mat[ix, jp]
-            eS2 = eS_mat[ix, jp+1]
-
-            wU1 = wU_on_pg[ix, jp]
-            wU2 = wU_on_pg[ix, jp+1]
-            eU1 = eU_on_pg[ix, jp]
-            eU2 = eU_on_pg[ix, jp+1]
-
-            if isfinite(wS1) && isfinite(wS2)
-                numS += 0.5 * (wS1*eS1 + wS2*eS2) * dp
-                denS += 0.5 * (eS1 + eS2) * dp
-            end
-
-            if isfinite(wU1) && isfinite(wU2)
-                numU += 0.5 * (wU1*eU1 + wU2*eU2) * dp
-                denU += 0.5 * (eU1 + eU2) * dp
-            end
-        end
-
-        if denS > 0 && denU > 0
-            wSbar = numS / denS
-            wUbar = numU / denU
-            premium_log_by_x[ix] = log(wSbar) - log(wUbar)
-        end
-    end
-
-    pW3 = plot(xg, premium_log_by_x,
-               xlabel=L"x",
-               ylabel=L"ln(\bar w_S(x)) - ln(\bar w_U(x))",
-               title=L"Skill premium by type $x$",
-               lw=2,
-               label="")
-    hline!(pW3, [0.0], color=:black, ls=:dash, lw=1, label="")
-    pW3
-end
-
+# ============================================================
+# W4. Wage densities
+#    Left  — unskilled vs skilled (pooled).
+#    Right — skilled by OJS status, s=0 and s=1 on ONE joint
+#            normalization so they collectively integrate to 1;
+#            distinct fills retained.
+# ============================================================
 function fig_wage_densities(obj)
-    pW4a = plot(obj.wmid, obj.dens_U, label="Unskilled",
-                color=:steelblue, lw=2, fill=(0, 0.15, :steelblue))
-    plot!(pW4a, obj.wmid, obj.dens_S, label="Skilled (all)",
-          color=:firebrick, lw=2, fill=(0, 0.15, :firebrick))
-    title!(pW4a, "Wage density: unskilled vs skilled")
-    xlabel!(pW4a, "Wage")
-    ylabel!(pW4a, "Density")
+    pW4a = plot(obj.wmid, obj.dens_U, label = "Unskilled",
+                color = _C_U, lw = 2, fill = (0, 0.15, _C_U))
+    plot!(pW4a, obj.wmid, obj.dens_S, label = "Skilled (all)",
+          color = _C_S, lw = 2, fill = (0, 0.15, _C_S))
+    xlabel!(pW4a, "Wage"); ylabel!(pW4a, "Density")
 
-    pW4b = plot(obj.wmid, obj.dens_S0, label=L"Skilled,\ s{=}0\ (no\ OJS)",
-                color=:seagreen, lw=2, fill=(0, 0.15, :seagreen))
-    plot!(pW4b, obj.wmid, obj.dens_S1, label=L"Skilled,\ s{=}1\ (OJS)",
-          color=:darkorange, lw=2, fill=(0, 0.15, :darkorange))
-    title!(pW4b, "Wage density: skilled by OJS status")
-    xlabel!(pW4b, "Wage")
-    ylabel!(pW4b, "")
+    # Joint normalization of the two OJS-status densities: rescale by
+    # their common integral so ∫(f_{S0}+f_{S1}) dw = 1.  This preserves
+    # their relative scale (mass share) instead of normalizing each to 1.
+    dw    = obj.wmid[2] - obj.wmid[1]
+    Zjoint = sum(obj.dens_S0 .+ obj.dens_S1) * dw
+    dS0 = obj.dens_S0 ./ Zjoint
+    dS1 = obj.dens_S1 ./ Zjoint
 
-    plot(pW4a, pW4b, layout=(1,2), size=(1100,400), margin=5Plots.mm)
+    pW4b = plot(obj.wmid, dS0, label = L"Skilled $s{=}0$ (no OJS)",
+                color = _C_TRAIN, lw = 2, fill = (0, 0.30, _C_TRAIN))
+    plot!(pW4b, obj.wmid, dS1, label = L"Skilled $s{=}1$ (OJS)",
+          color = _C_D, lw = 2, fill = (0, 0.30, _C_D))
+    xlabel!(pW4b, "Wage"); ylabel!(pW4b, "Density (joint)")
+
+    plot(pW4a, pW4b, layout = (1, 2), size = (1100, 400), margin = 5Plots.mm)
 end
 
-function fig_wage_densities_pooled(obj)
-    pW4c = plot(obj.wmid, obj.dens_U, label="Unskilled", color=:steelblue, lw=2)
-    plot!(pW4c, obj.wmid, obj.dens_S0, label=L"Skilled\ s{=}0", color=:seagreen, lw=2)
-    plot!(pW4c, obj.wmid, obj.dens_S1, label=L"Skilled\ s{=}1", color=:darkorange, lw=2, ls=:dash)
-    plot!(pW4c, obj.wmid, obj.dens_S,  label="Skilled (pooled)", color=:firebrick, lw=2.2, ls=:dot)
-    title!(pW4c, "Wage densities: all employment types")
-    xlabel!(pW4c, "Wage")
-    ylabel!(pW4c, "Density")
-    plot(pW4c, size=(720,480), margin=5Plots.mm)
-end
-
+# ============================================================
+# W5. Pooled wage density
+# ============================================================
 function fig_wage_pooled_density(obj)
     dens_pooled = obj.dens_U .+ obj.dens_S
     dw          = obj.wmid[2] - obj.wmid[1]
     Z_w         = sum(0.5 .* (dens_pooled[1:end-1] .+ dens_pooled[2:end])) * dw
-    dens_pooled_norm = dens_pooled ./ Z_w
 
-    pW5a = plot(obj.wmid, dens_pooled_norm,
-                color=:darkviolet, lw=2.2, fill=(0, 0.15, :darkviolet),
-                label="Pooled")
-    plot!(pW5a, obj.wmid, obj.dens_U ./ Z_w, label="Unskilled",
-          color=_C1, lw=1.4, ls=:dash)
-    plot!(pW5a, obj.wmid, obj.dens_S ./ Z_w, label="Skilled",
-          color=_C2, lw=1.4, ls=:dash)
-    xlabel!(pW5a, "Wage")
-    ylabel!(pW5a, "Density")
-    plot(pW5a, size=(720,480), margin=5Plots.mm)
+    pW5 = plot(obj.wmid, dens_pooled ./ Z_w,
+               color = :mediumpurple, lw = 2.2, fill = (0, 0.15, :mediumpurple),
+               label = "Pooled")
+    plot!(pW5, obj.wmid, obj.dens_U ./ Z_w, label = "Unskilled",
+          color = _C_U, lw = 1.4, ls = :dash)
+    plot!(pW5, obj.wmid, obj.dens_S ./ Z_w, label = "Skilled",
+          color = _C_S, lw = 1.4, ls = :dash)
+    xlabel!(pW5, "Wage"); ylabel!(pW5, "Density")
+    plot(pW5, size = (720, 480), margin = 5Plots.mm)
 end
-
-"""
-    fig_skilled_employment_by_PS(obj, PS; percentile_print=1.00)
-
-Skilled employment density with P_S(x) = P_S·x on the horizontal
-axis.  Because the GL nodes are non-uniform, the GL grid is
-interpolated onto a uniform P_S grid before calling heatmap.
-"""
-function fig_skilled_employment_by_PS(obj, PS::Float64;
-                                       percentile_print::Float64 = 1.00)
-    xg  = obj.xg
-    pg  = obj.pg
-    Nx  = obj.Nx
-
-    PSg = [PS_of_x(x, PS) for x in xg]
-
-    PS_lo      = PSg[1]
-    PS_hi      = PS
-    PS_uniform = collect(range(PS_lo, PS_hi; length = Nx))
-
-    iS    = 0.0 .≤ pg .≤ percentile_print
-    pg_w  = pg[iS]
-    NpW   = sum(iS)
-    eS_w  = obj.eS_mat[:, iS]
-
-    eS_on_PS = zeros(Nx, NpW)
-    for jp in 1:NpW
-        itp = linear_interpolation(PSg, eS_w[:, jp]; extrapolation_bc = 0.0)
-        eS_on_PS[:, jp] = max.(itp.(PS_uniform), 0.0)
-    end
-
-    itp_pstar = linear_interpolation(PSg, obj.pstar_S; extrapolation_bc = NaN)
-    itp_poj   = linear_interpolation(PSg, obj.poj;     extrapolation_bc = NaN)
-    pstar_PS  = itp_pstar.(PS_uniform)
-    poj_PS    = itp_poj.(PS_uniform)
-
-    fig = heatmap(PS_uniform, pg_w, eS_on_PS',
-                  xlabel = L"P_S(x) = P_S\, x",
-                  ylabel = L"p",
-                  title  = L"Skilled employment $e_S$ by $(P_S(x),\, p)$",
-                  color  = :viridis, legend = false, grid = false,
-                  yguidefontrotation = -90)
-    contour!(fig, PS_uniform, pg_w, eS_on_PS',
-             color = :white, alpha = 0.4, lw = 0.8, levels = 15)
-    plot!(fig, PS_uniform, pstar_PS,
-          color = :red,   lw = 2, ls = :dash, label = L"p_S^*(x)")
-    plot!(fig, PS_uniform, poj_PS,
-          color = :white, lw = 2, ls = :dot,  label = L"p^{\rm oj}(x)")
-    xlims!(fig, 0.0, PS_hi)
-    ylims!(fig, 0.0, 1.0)
-    fig
-end
-
 
 # ============================================================
 # Master function — make and save all figures
 # ============================================================
-
-function make_all_plots(obj; output_dir::String = "output/plots",
-                              PS::Union{Float64,Nothing} = nothing)
+function make_all_plots(obj; output_dir::String = "output/plots")
     mkpath(output_dir)
     _set_theme!()
 
     figures = [
-        ("fig01_densities",            fig_densities(obj)),
-        ("fig02_unskilled_values",     fig_unskilled_values(obj)),
-        ("fig03_employment_heatmaps",  fig_employment_heatmaps(obj)),
-        ("fig03b_total_employment",    fig_total_employment(obj)),
-        ("fig03c_skilled_emp_by_PS",   isnothing(PS) ? nothing : fig_skilled_employment_by_PS(obj, PS)),
-        ("fig04_training_policy",      fig_training_policy(obj)),
-        ("fig04b_cross_market_policy", fig_cross_market_policy(obj)),
-        ("fig05_unskilled_frontier",   fig_unskilled_frontier(obj)),
-        ("fig06_unskilled_surfaces",   fig_unskilled_value_surfaces(obj)),
-        ("fig07_skilled_cutoffs",      fig_skilled_cutoffs(obj)),
-        ("fig08_skilled_worker_vals",  fig_skilled_worker_values(obj)),
-        ("fig09_skilled_firm_vals",    fig_skilled_firm_values(obj)),
-        ("fig10_surplus_heatmaps",     fig_surplus_heatmaps(obj)),
-        ("fig11_unemployment_values",  fig_unemployment_values(obj)),
-        ("figW1_unskilled_wage",       fig_unskilled_wage(obj)),
-        ("figW2_skilled_wages",        fig_skilled_wages(obj)),
-        ("figW3_skill_premium",        fig_skill_premium(obj)),
-        ("figW4_wage_densities",       fig_wage_densities(obj)),
-        ("figW4b_wage_densities_pool", fig_wage_densities_pooled(obj)),
-        ("figW5_pooled_wage_density",  fig_wage_pooled_density(obj)),
+        ("fig01_sorting_plane",       fig_sorting_plane(obj)),
+        ("fig02_densities",           fig_densities(obj)),
+        ("fig03_segment_values",      fig_unskilled_values(obj)),
+        ("fig04_employment_heatmaps", fig_employment_heatmaps(obj)),
+        ("fig05_total_employment",    fig_total_employment(obj)),
+        ("fig06_unskilled_surfaces",  fig_unskilled_value_surfaces(obj)),
+        ("fig07_unemployment_values", fig_unemployment_values(obj)),
+        ("fig08_wage_densities",      fig_wage_densities(obj)),
+        ("fig09_pooled_wage_density", fig_wage_pooled_density(obj)),
+        ("figA1_skilled_worker_vals", fig_skilled_worker_values(obj)),
+        ("figA2_skilled_firm_vals",   fig_skilled_firm_values(obj)),
+        ("figA3_surplus_heatmaps",    fig_surplus_heatmaps(obj)),
+        ("figA4_unskilled_wage",      fig_unskilled_wage(obj)),
+        ("figA5_skilled_wages",       fig_skilled_wages(obj)),
     ]
 
     for (name, fig) in figures
-        isnothing(fig) && continue
         path = joinpath(output_dir, name * ".png")
         savefig(fig, path)
         println("  saved: $path")

@@ -1,12 +1,23 @@
 ############################################################
-# transition_params.jl — Parameters and path storage for
-#                         backward-forward transition dynamics
-#                         (PS(x) = P_S·x quadratic variant)
+# transition_params.jl — Parameters and path storage for the
+#                         RoySearch backward–forward transition.
 #
 # Contains:
 #   TransitionParams   — algorithm control knobs
-#   TransitionPath     — full time-indexed path (internal)
+#   TransitionPath     — full time-indexed working storage (internal)
 #   TransitionResult   — serialisable output for downstream use
+#
+# State layout on the (aU, aS) copula grid
+# ────────────────────────────────────────
+# Value functions are one-dimensional in ability (unskilled in aU, skilled
+# in aS), exactly as in the stationary solver.  Only the segment masses and
+# the training policy are two-dimensional; the skilled p-composition is
+# per-aS (the p-dynamics read only aS — notes §386).  The path therefore
+# stores:
+#   · 1D value paths        (Nx × Nt)          indexed by aU or aS
+#   · skilled surfaces      (Nx × NpS × Nt)    indexed by (aS, p)
+#   · 2D segment masses     (Nx × Nx × Nt)     indexed by (aU, aS)
+#   · per-aS employment     (Nx × NpS × Nt)    indexed by (aS, p)
 ############################################################
 
 # ──────────────────────────────────────────────────────────
@@ -16,15 +27,15 @@
 """
     TransitionParams
 
-Controls the backward-forward iteration for transition dynamics.
+Controls the backward–forward iteration for transition dynamics.
 
 # Fields
 - `T_max`   : horizon length (model time units, e.g. months)
 - `N_steps` : number of time steps  ⇒  Nt = N_steps + 1 grid points
 - `dt`      : step size = T_max / N_steps  (computed)
-- `tol`     : convergence tolerance on θ paths (sup-norm)
-- `maxit`   : maximum backward-forward iterations
-- `damp`    : dampening on θ update ∈ (0, 1]
+- `tol`     : convergence tolerance on the tightness paths (sup-norm)
+- `maxit`   : maximum backward–forward iterations
+- `damp`    : dampening on the tightness update ∈ (0, 1]
 - `verbose` : print iteration info
 """
 mutable struct TransitionParams
@@ -58,100 +69,65 @@ end
 """
     TransitionPath
 
-Stores the complete time-indexed path of value functions, policies,
-and distributions during the backward-forward iteration.
-
-All matrices are dimensioned (Nx, Nt) or (Nx, Np, Nt) where
-Nt = N_steps + 1  is the number of time-grid points (including t=0
-and t=T_max).
-
-Convention: column n  ↔  time tgrid[n].
-
-## Inherited distributions (initialized from z₀ SS, evolved forward)
-
-The following fields are set to z₀ stationary values at t=0 and
-then evolved via their laws of motion.  NO equilibrium condition
-(e.g. eS = 0 below the cutoff) is enforced at any later date:
-they are allowed to decay naturally.
-
-  - uU  : unskilled unemployed density
-  - tU  : training density
-  - uS  : skilled unemployed density
-  - mS  : skilled segment mass  (NOT pinned to (φ/ν)·t during transition)
-  - eS  : skilled employment density on (x, p) grid
-           ↳ workers at p < p*_S(x,t) face natural outflow at (ν+ξ+λ)
-             and receive no new inflow; they are NOT instantly zeroed out.
+Complete time-indexed path of value functions, policies, tightness, and
+distributions over the transition horizon.  `Nt = N_steps + 1` dates; the
+ability grid has `Nx` nodes and the skilled match-quality grid `NpS`.
 """
 mutable struct TransitionPath
-    # ── Time grid ─────────────────────────────────────────
-    tgrid :: Vector{Float64}          # length Nt
+    tgrid :: Vector{Float64}          # (Nt) calendar of model-time nodes
 
-    # ── Tightness paths ──────────────────────────────────
-    θU :: Vector{Float64}             # length Nt
-    θS :: Vector{Float64}             # length Nt
+    # Tightness paths
+    θU :: Vector{Float64}             # (Nt)
+    θS :: Vector{Float64}             # (Nt)
 
-    # ── Unskilled value functions  (Nx × Nt) ─────────────
-    U        :: Matrix{Float64}       # outside value U_U(x,t)
-    Usearch  :: Matrix{Float64}       # search value
-    T_val    :: Matrix{Float64}       # training value
-    Jfrontier :: Matrix{Float64}      # firm value at p = 1
+    # Unskilled value paths (indexed by aU, except T_val indexed by aS)
+    Usearch   :: Matrix{Float64}      # (Nx,Nt) U^search(aU)
+    T_val     :: Matrix{Float64}      # (Nx,Nt) T(aS): value of training
+    Jfrontier :: Matrix{Float64}      # (Nx,Nt) J_U(aU,1)
+    pstar_U   :: Matrix{Float64}      # (Nx,Nt) p*_U(aU)
 
-    # ── Unskilled policies  (Nx × Nt) ────────────────────
-    τT      :: Matrix{Float64}        # training indicator
-    pstar_U :: Matrix{Float64}        # reservation quality p*_U(x,t)
+    # Skilled value paths (indexed by aS)
+    US      :: Matrix{Float64}        # (Nx,Nt) U_S(aS)
+    pstar_S :: Matrix{Float64}        # (Nx,Nt) p*_S(aS)
+    poj     :: Matrix{Float64}        # (Nx,Nt) p^oj_S(aS)
+    E0 :: Array{Float64,3}            # (Nx,NpS,Nt) E_S^0(aS,p)
+    E1 :: Array{Float64,3}            # (Nx,NpS,Nt) E_S^1(aS,p)
+    J0 :: Array{Float64,3}            # (Nx,NpS,Nt) J_S^0(aS,p)
+    J1 :: Array{Float64,3}            # (Nx,NpS,Nt) J_S^1(aS,p)
 
-    # ── Skilled value functions ───────────────────────────
-    US :: Matrix{Float64}             # U_S(x,t)  (Nx × Nt)
-    E0 :: Array{Float64, 3}          # E⁰_S(x,p,t)  (Nx × NpS × Nt)
-    E1 :: Array{Float64, 3}          # E¹_S(x,p,t)
-    J0 :: Array{Float64, 3}          # J⁰_S(x,p,t)
-    J1 :: Array{Float64, 3}          # J¹_S(x,p,t)
+    # Two-dimensional segment masses on the (aU,aS) copula grid
+    uU :: Array{Float64,3}            # (Nx,Nx,Nt) untrained unemployed
+    tU :: Array{Float64,3}            # (Nx,Nx,Nt) in training
+    uS :: Array{Float64,3}            # (Nx,Nx,Nt) skilled unemployed
+    mS :: Array{Float64,3}            # (Nx,Nx,Nt) trained-segment mass
+    τT :: Array{Float64,3}            # (Nx,Nx,Nt) training policy indicator
 
-    # ── Skilled policies  (Nx × Nt) ──────────────────────
-    pstar_S :: Matrix{Float64}
-    poj     :: Matrix{Float64}
-
-    # ── Distributions  (Nx × Nt) — all inherited from z₀ ─
-    uU :: Matrix{Float64}             # unskilled unemployed density
-    tU :: Matrix{Float64}             # training density
-    uS :: Matrix{Float64}             # skilled unemployed density
-    mS :: Matrix{Float64}             # skilled segment mass  m_S(x,t)
-
-    # ── Skilled employment  (Nx × NpS × Nt) — inherited ──
-    eS :: Array{Float64, 3}
+    # Per-aS skilled employment p-composition (for wages and OJS seekers)
+    eS :: Array{Float64,3}            # (Nx,NpS,Nt) e_S(aS,p)
 end
 
 """
-    TransitionPath(model_z0, model_z1, tp)
+    allocate_path(model, tp) -> TransitionPath
 
-Pre-allocate all arrays.  Grids are taken from `model_z0` (assumed
-identical to `model_z1`).
+Allocate a zero-initialised path sized to `model`'s grids and `tp`'s horizon.
 """
-function TransitionPath(model_z0::Model, ::Model, tp::TransitionParams)
-    Nx  = length(model_z0.grids.x)
-    NpS = length(model_z0.skl_grids.p)
+function allocate_path(model::Model, tp::TransitionParams)
     Nt  = tp.N_steps + 1
+    Nx  = length(model.grids.x)
+    NpS = length(model.skl_grids.p)
+    tgrid = collect(range(0.0, tp.T_max; length = Nt))
 
-    tgrid = collect(range(0.0, tp.T_max, length = Nt))
+    z2(a, b)    = zeros(Float64, a, b)
+    z3(a, b, c) = zeros(Float64, a, b, c)
 
-    TransitionPath(
+    return TransitionPath(
         tgrid,
-        # tightness
-        zeros(Nt), zeros(Nt),
-        # unskilled values  (Nx × Nt)
-        zeros(Nx, Nt), zeros(Nx, Nt), zeros(Nx, Nt), zeros(Nx, Nt),
-        # unskilled policies
-        zeros(Nx, Nt), zeros(Nx, Nt),
-        # skilled values
-        zeros(Nx, Nt),                                     # US
-        zeros(Nx, NpS, Nt), zeros(Nx, NpS, Nt),           # E0, E1
-        zeros(Nx, NpS, Nt), zeros(Nx, NpS, Nt),           # J0, J1
-        # skilled policies
-        zeros(Nx, Nt), zeros(Nx, Nt),
-        # distributions (all inherited from z₀ SS at t=0)
-        zeros(Nx, Nt), zeros(Nx, Nt), zeros(Nx, Nt), zeros(Nx, Nt),
-        # skilled employment (inherited, no cutoff enforcement)
-        zeros(Nx, NpS, Nt),
+        zeros(Float64, Nt), zeros(Float64, Nt),
+        z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt),
+        z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt),
+        z3(Nx, NpS, Nt), z3(Nx, NpS, Nt), z3(Nx, NpS, Nt), z3(Nx, NpS, Nt),
+        z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt),
+        z3(Nx, NpS, Nt),
     )
 end
 
@@ -163,30 +139,26 @@ end
 """
     TransitionResult
 
-Immutable, serialisable container holding the converged transition
-path plus aggregate time-series that are convenient for plotting.
-
-Saved to disk via JLD2; everything needed to make any plot or table
-is included without re-solving.
+Downstream-facing summary of a solved transition.  Aggregate series are
+length-`Nt` vectors; the distribution fields `uU`, `tU`, `uS`, `mS` are
+ability-*marginal densities* (`Nx × Nt`) so the panel/table layer aggregates
+them as `dot(wx, field[:, n])` with `wx = wa` the marginal population
+weights.  The full 2D masses are not serialised — the marginal profiles
+carry everything the plotting layer consumes and keep the bundle small.
 """
 struct TransitionResult
-    # ── Metadata ──────────────────────────────────────────
-    scenario     :: Symbol      # :fc or :covid
-    converged    :: Bool
-    n_iterations :: Int
-    final_dist   :: Float64
+    scenario   :: Symbol
+    converged  :: Bool
+    n_iter     :: Int
+    final_dist :: Float64
 
-    # ── Time grid ─────────────────────────────────────────
-    tgrid :: Vector{Float64}    # length Nt
+    tgrid :: Vector{Float64}
+    θU    :: Vector{Float64}
+    θS    :: Vector{Float64}
+    fU    :: Vector{Float64}
+    fS    :: Vector{Float64}
 
-    # ── Tightness ─────────────────────────────────────────
-    θU :: Vector{Float64}
-    θS :: Vector{Float64}
-
-    # ── Aggregate time-series (length Nt) ─────────────────
-    fU             :: Vector{Float64}   # job-finding rate path
-    fS             :: Vector{Float64}
-    ur_U           :: Vector{Float64}   # unemployment rates
+    ur_U           :: Vector{Float64}
     ur_S           :: Vector{Float64}
     ur_total       :: Vector{Float64}
     skilled_share  :: Vector{Float64}
@@ -194,26 +166,15 @@ struct TransitionResult
     mean_wage_U    :: Vector{Float64}
     mean_wage_S    :: Vector{Float64}
 
-    # ── Full distribution paths  (Nx × Nt) ───────────────
+    # Ability-marginal density profiles (Nx × Nt)
     uU :: Matrix{Float64}
     tU :: Matrix{Float64}
     uS :: Matrix{Float64}
     mS :: Matrix{Float64}
-    eS :: Array{Float64, 3}            # Nx × NpS × Nt
 
-    # ── Policy paths  (Nx × Nt) ──────────────────────────
-    τT      :: Matrix{Float64}
-    pstar_U :: Matrix{Float64}
-    pstar_S :: Matrix{Float64}
-    poj     :: Matrix{Float64}
-
-    # ── Value-function paths  (Nx × Nt; for diagnostics) ─
-    U  :: Matrix{Float64}
-    US :: Matrix{Float64}
-
-    # ── Grids (for self-contained plotting) ──────────────
-    xg  :: Vector{Float64}
-    wx  :: Vector{Float64}
-    pgS :: Vector{Float64}
-    wpS :: Vector{Float64}
+    # Grids for downstream integration
+    wx :: Vector{Float64}      # ability marginal weights (wa)
+    x  :: Vector{Float64}      # ability nodes
+    p  :: Vector{Float64}      # skilled match-quality nodes
+    wp :: Vector{Float64}      # skilled match-quality weights
 end

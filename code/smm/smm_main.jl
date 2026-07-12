@@ -1,8 +1,8 @@
 ############################################################
-# code/smm/smm_main.jl — SMM estimation entry point
+# smm/smm_main.jl — SMM estimation entry point
 #
-# Usage (from project root):
-#   julia --threads auto code/smm/smm_main.jl
+# Usage (from the repo root):
+#   julia --project --threads auto smm/smm_main.jl
 #
 # Project layout:
 #   code/
@@ -24,17 +24,18 @@
 #
 # Two-stage workflow (Model Notes §2 / data_and_moments.pdf §18):
 #   Baseline window  (:base_fc, :base_covid):
-#       Fix (r, ν, φ) from external calibration.
-#       Estimate all 22 structural + regime parameters.
+#       Fix (r, ν, φ) from external calibration, η_U/η_S at 0.5 (Hosios),
+#       and σ_wU/σ_wS from λ_w.  Estimate the remaining free parameters
+#       (all 6 deep + 21 regime specs, less those pinned via FIX_PARAMS).
 #       ν is loaded from nu_estimation.csv using the row for the
 #       corresponding baseline (one row per crisis pair).
 #   Crisis window    (:crisis_fc, :crisis_covid):
 #       Load the matching base bundle (base_fc → crisis_fc;
 #       base_covid → crisis_covid).
 #       Fix the deep structural parameters at the baseline estimates:
-#           common  a_ℓ, b_ℓ
+#           common  a_ℓ, b_ℓ, ρ_x
 #           regime  bU, bT, bS
-#       Re-estimate only the 17 regime-specific parameters.
+#       Re-estimate only the regime-specific parameters.
 #       ν comes from the baseline row (NOT a crisis-specific value).
 #
 # WINDOWS are read from data/derived/windows.json — the single source
@@ -45,7 +46,7 @@
 ############################################################
 
 println("="^60)
-println("  Segmented Search Model — SMM Estimation")
+println("  RoySearch — SMM Estimation")
 println("="^60)
 flush(stdout)
 
@@ -184,11 +185,9 @@ const _PAIR_BASELINE = Dict(
 SKIP_MOMENTS = Symbol[
     #:wage_premium,
     :ur_total,
-    # :emp_var_U,   # GAMMA_U: un-skipped — needed to identify γ_U vs α_U (unskilled wage dispersion)
-    # :emp_cm3_U,   # GAMMA_U: un-skipped — unskilled wage skew, pins the damage shape given γ_U
-    :emp_var_S,
-    :emp_cm3_S,
-    :ee_rate_S,
+    #:emp_var_S,
+    #:emp_cm3_S,
+    #:ee_rate_S,
 ]
 
 # Wage-reliability calibration knob (single source of truth for both the run
@@ -212,7 +211,7 @@ flush(stdout)
 # the pinned block below from the data rather than pinned here.
 #
 # Valid keys (ASCII):
-#   common:  :a_l  :b_l  :c
+#   common:  :a_l  :b_l  :rho_x  :c  :A
 #   regime:  :PU  :PS  :bU  :bT  :bS  :alpha_U  :a_Gam  :b_Gam
 #   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam  :unsk_sigw
 #   skl:     :skl_mu   :skl_eta   :skl_k   :skl_bet
@@ -223,9 +222,9 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :a_l      => 1.00000,
     # :b_l      => 1.00000,
     # :c        => 2.94633,
-    # :A         => 7.54100,     # From LMR(2016)
+    # :A        => 7.54100,     # From LMR(2016)
     # :PU       => 1.05948,
-    # :PS => 3.83639,
+    # :PS       => 3.83639,
     # :bU       => 0.00000,
     # :bT       => 0.35082,
     # :bS       => 0.56935,
@@ -234,12 +233,12 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :b_Gam    => 2.28169,
     # :unsk_mu  => 0.25585,
      :unsk_eta => 0.50000,
-     :unsk_bet => 0.18800,
+    # :unsk_bet => 0.18800,
     # :unsk_k   => 0.10061,
     # :unsk_lam => 0.20263,
     # :skl_mu   => 0.22462,
      :skl_eta  => 0.50000,
-     :skl_bet  => 0.27200,
+    # :skl_bet  => 0.27200,
     # :skl_k    => 0.03317,
     # :skl_lam  => 0.17788,
     # :skl_sig  => 1.10000,
@@ -266,6 +265,7 @@ const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :phi      => 0.02222129,        # table's 0.02222 is rounded
     :a_l      => 1.97515,
     :b_l      => 0.21721,
+    :rho_x    => -0.55000,          # ability correlation (Gola concordance)
     :c        => 4.71211,
     :A        => 6.12526,           # aggregate production scale (log)
     :PU       => 5.21548,
@@ -295,7 +295,7 @@ const DEFAULT_PARAMS = Dict{Symbol,Float64}(
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
 const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:common, :a_ℓ) => :a_l,     (:common, :b_ℓ)  => :b_l,     (:common, :c)   => :c,
-    (:common, :A)   => :A,
+    (:common, :ρ_x) => :rho_x,   (:common, :A)    => :A,
     (:unsk,   :PU)  => :PU,      (:skl,    :PS) => :PS,
     (:unsk,   :bU)  => :bU,      (:unsk,   :bT)   => :bT,      (:skl,    :bS)  => :bS,
     (:unsk,   :α_U) => :alpha_U, (:skl,    :a_Γ)  => :a_Gam,  (:skl,    :b_Γ) => :b_Gam,
@@ -314,6 +314,7 @@ const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :phi      => :φ,
     :a_l      => :a_ℓ,
     :b_l      => :b_ℓ,
+    :rho_x    => :ρ_x,
     :c        => :c,
     :A        => :A,
     :PU       => :PU,
@@ -811,8 +812,8 @@ mkpath(SMM_OUT_DIR)
 
 save_results(results, joinpath(TABLES_DIR, "smm_estimates_$(WINDOW)$(W_SUFFIX).csv"))
 
-# The .jls bundle is consumed by code/solver/plots_main.jl and any
-# transition-dynamics post-processor.
+# The .jls bundle is consumed by solver/plots.jl, the transition entry point
+# (transition/transition_main.jl), and MCMC standard errors (smm/MCMC_main.jl).
 smm_jls_path = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
 open(smm_jls_path, "w") do io
     serialize(io, (result = results, spec = spec, sim = sim_smm))

@@ -15,14 +15,14 @@
 #   output/smm/mcmc_chain_{window}.jls     raw draws (trace / R̂ / ESS / plots)
 #
 # Usage (from project root — threads strongly recommended):
-#   julia --threads auto code/smm/MCMC_main.jl
+#   julia --threads auto roysearch/smm/MCMC_main.jl
 #
 # Point estimates stay from your SMM run (relative/equal weights); the SEs
 # here are computed under the diagonal weight, seeded at that optimum.
 ############################################################
 
 println("="^60)
-println("  Segmented Search Model — DE-MC standard errors")
+println("  RoySearch — DE-MC standard errors")
 println("="^60)
 flush(stdout)
 

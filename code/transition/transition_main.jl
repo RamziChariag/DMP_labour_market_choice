@@ -1,29 +1,26 @@
 ############################################################
-# transition_main.jl — Single-entry-point orchestrator
-#                       (PS(x) = P_S·x quadratic variant)
+# transition_main.jl — Single-entry-point orchestrator (RoySearch)
 #
-# One main run does everything:
-#   1. (Optional) run the transition simulation for each scenario
-#      and save  output/transition/transition_<sc><W>.jld2
-#   2. (Optional) generate the transition panels
-#      (data-vs-model and model-decomposition)
-#   3. (Optional) generate model-fit & parameter LaTeX tables,
-#      the training-cutoff table, and the model-fit scatter
+# One run does everything:
+#   1. (Optional) run the transition simulation for each scenario and save
+#      output/transition/transition_<sc><W>.jls
+#   2. (Optional) generate the transition panels (data-vs-model and
+#      model-decomposition)
+#   3. (Optional) generate model-fit & parameter LaTeX tables, the
+#      training-cutoff table, and the model-fit scatter
 #
 # Sub-scripts:
-#   transition_simulation.jl   — defines run_transition_simulation(...)
-#   transition_panel.jl        — defines make_transition_panel(...) and
-#                                       make_model_decomposition_panel(...)
-#   plots_and_tables.jl        — defines load_all_smm_bundles!(),
-#                                       make_model_fit_tables(),
-#                                       make_parameter_tables(),
-#                                       make_xbar_table(),
-#                                       make_model_fit_scatter(...)
+#   transition_simulation.jl   — run_transition_simulation(...)
+#   transition_panel.jl        — make_transition_panel(...),
+#                                make_model_decomposition_panel(...)
+#   plots_and_tables.jl        — load_all_smm_bundles!(),
+#                                make_model_fit_tables(), make_parameter_tables(),
+#                                make_xbar_table(), make_model_fit_scatter(...)
 #
-# Usage (from project root):
-#   julia --threads auto code/transition/transition_main.jl
+# Usage (from the repo root):
+#   julia --threads auto roysearch/transition/transition_main.jl
 #
-# All user-facing switches live in section 1 below.
+# All user-facing switches live in section 1.
 ############################################################
 
 # ═══════════════════════════════════════════════════════════
@@ -33,31 +30,26 @@
 # Which scenarios to run.  Use [:fc], [:covid], or [:fc, :covid].
 const SCENARIOS = [:fc, :covid]
 
-# Weight-matrix mode used when the SMM results were estimated.
-# Must match the W_COND_TARGET that was set in code/smm/smm_main.jl.
-#   0.0  →  "_diagonalW"
-#   1.0  →  "_compressedW"
-#   2.0  →  "_equalW"
-#   >2.0 →  "_fullW"
+# Weight-matrix mode used when the SMM results were estimated — must match
+# the W_COND_TARGET set in smm/smm_main.jl.
+#   0.0 → "_diagonalW"   1.0 → "_compressedW"   2.0 → "_equalW"   >2.0 → "_fullW"
 const W_COND_TARGET = 2.0
 
 # Simulation switch
 #   true  → always (re)run the transition simulation for every SCENARIO
-#   false → use the existing transition_<scenario><W>.jld2 if it is
-#           on disk; if it is NOT, print a warning and run a fresh
-#           simulation anyway.
+#   false → reuse the existing transition_<sc><W>.jls if on disk; otherwise
+#           warn and run a fresh simulation anyway.
 const RERUN_SIMULATION = true
 
 # Plot/table switches
-const RUN_PANELS           = true   # transition-dynamics 3×2 panels
+const RUN_PANELS           = true   # transition-dynamics panels
 const RUN_TABLES_AND_PLOTS = true   # model-fit + parameter tables, scatter
 
-# Grid sizes for the stationary-equilibrium solves (transition uses these).
-# Intentionally finer than the SMM run for clean convergence on a single
-# parameter draw — see the original transition_main for the rationale.
-const TR_Nx    = 200
-const TR_Np_U  = 200
-const TR_Np_S  = 200
+# Grid sizes for the stationary solves (finer than SMM for clean convergence
+# on a single parameter draw).
+const TR_Nx   = 200
+const TR_Np_U = 200
+const TR_Np_S = 200
 
 # Transition-algorithm control knobs
 const TR_T_MAX   = 120.0   # model months (10 years)
@@ -82,12 +74,10 @@ using Parameters
 using Printf
 using Base.Threads
 using Serialization
-using JLD2
 using CSV
 using DataFrames
 using Plots
 using LaTeXStrings
-using Arrow
 using Dates
 using Optim
 using Clustering
@@ -99,8 +89,8 @@ println("done."); flush(stdout)
 # ═══════════════════════════════════════════════════════════
 const TRANSITION_DIR = @__DIR__
 const PROJECT_ROOT   = joinpath(TRANSITION_DIR, "..", "..")
-const SOLVER_DIR     = joinpath(PROJECT_ROOT, "code", "solver")
-const SMM_DIR        = joinpath(PROJECT_ROOT, "code", "smm")
+const SOLVER_DIR     = joinpath(TRANSITION_DIR, "..", "solver")
+const SMM_DIR        = joinpath(TRANSITION_DIR, "..", "smm")
 const OUTPUT_DIR     = joinpath(PROJECT_ROOT, "output")
 const SMM_OUT_DIR    = joinpath(OUTPUT_DIR, "smm")
 const TRANS_OUT_DIR  = joinpath(OUTPUT_DIR, "transition")
@@ -112,7 +102,6 @@ mkpath(TRANS_OUT_DIR)
 mkpath(PLOTS_DIR)
 mkpath(TABLES_DIR)
 
-# Weight-matrix suffix helper (also re-exposed for the sub-scripts).
 function _w_suffix(cond_target::Float64)
     cond_target == 0.0 && return "_diagonalW"
     cond_target == 1.0 && return "_compressedW"
@@ -157,7 +146,7 @@ println("done."); flush(stdout)
 # 6. BANNER
 # ═══════════════════════════════════════════════════════════
 println("\n" * "="^65)
-println("  Segmented Search Model — Transition Run (PS(x) variant)")
+println("  RoySearch — Transition Run")
 println("="^65)
 @printf("  Scenarios:            %s\n", join(SCENARIOS, ", "))
 @printf("  W_COND_TARGET:        %.1f  (%s)\n", W_COND_TARGET, W_SUFFIX)
@@ -172,42 +161,24 @@ flush(stdout)
 # 7. SIMULATION PHASE  (per scenario)
 # ═══════════════════════════════════════════════════════════
 for scenario in SCENARIOS
-    out_file = joinpath(TRANS_OUT_DIR,
-                        "transition_$(scenario)$(W_SUFFIX).jld2")
+    out_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(W_SUFFIX).jls")
 
     if RERUN_SIMULATION
-        @printf("[%s] RERUN_SIMULATION=true → running a new simulation.\n",
-                scenario)
+        @printf("[%s] RERUN_SIMULATION=true → running a new simulation.\n", scenario)
         flush(stdout)
-        run_transition_simulation(
-            scenario, W_COND_TARGET;
-            Nx      = TR_Nx,
-            Np_U    = TR_Np_U,
-            Np_S    = TR_Np_S,
-            T_max   = TR_T_MAX,
-            N_steps = TR_N_STEPS,
-            tol     = TR_TOL,
-            maxit   = TR_MAXIT,
-            damp    = TR_DAMP,
-        )
+        run_transition_simulation(scenario, W_COND_TARGET;
+            Nx = TR_Nx, Np_U = TR_Np_U, Np_S = TR_Np_S,
+            T_max = TR_T_MAX, N_steps = TR_N_STEPS,
+            tol = TR_TOL, maxit = TR_MAXIT, damp = TR_DAMP)
     elseif isfile(out_file)
-        @printf("[%s] Re-using existing transition data: %s\n",
-                scenario, out_file)
+        @printf("[%s] Re-using existing transition data: %s\n", scenario, out_file)
         flush(stdout)
     else
-        @warn "[$scenario] No existing transition data at $out_file — " *
-              "running a fresh simulation anyway."
-        run_transition_simulation(
-            scenario, W_COND_TARGET;
-            Nx      = TR_Nx,
-            Np_U    = TR_Np_U,
-            Np_S    = TR_Np_S,
-            T_max   = TR_T_MAX,
-            N_steps = TR_N_STEPS,
-            tol     = TR_TOL,
-            maxit   = TR_MAXIT,
-            damp    = TR_DAMP,
-        )
+        @warn "[$scenario] No existing transition data at $out_file — running a fresh simulation anyway."
+        run_transition_simulation(scenario, W_COND_TARGET;
+            Nx = TR_Nx, Np_U = TR_Np_U, Np_S = TR_Np_S,
+            T_max = TR_T_MAX, N_steps = TR_N_STEPS,
+            tol = TR_TOL, maxit = TR_MAXIT, damp = TR_DAMP)
     end
 end
 
@@ -217,8 +188,7 @@ end
 if RUN_PANELS
     println("\n" * "="^65)
     println("  Generating transition panels")
-    println("="^65)
-    flush(stdout)
+    println("="^65); flush(stdout)
     for scenario in SCENARIOS
         make_transition_panel(; scenario = scenario, suffix = W_SUFFIX)
         make_model_decomposition_panel(; scenario = scenario, suffix = W_SUFFIX)
@@ -231,10 +201,9 @@ end
 if RUN_TABLES_AND_PLOTS
     println("\n" * "="^65)
     println("  Generating model-fit & parameter tables, scatter plots")
-    println("="^65)
-    flush(stdout)
+    println("="^65); flush(stdout)
 
-    load_all_smm_bundles!()       # populates the global `smm_bundles` Dict
+    load_all_smm_bundles!()
     make_model_fit_tables()
     make_parameter_tables()
     make_xbar_table()
