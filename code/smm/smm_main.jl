@@ -26,7 +26,7 @@
 #   Baseline window  (:base_fc, :base_covid):
 #       Fix (r, ν, φ) from external calibration, η_U/η_S at 0.5 (Hosios),
 #       and σ_wU/σ_wS from λ_w.  Estimate the remaining free parameters
-#       (all 6 deep + 21 regime specs, less those pinned via FIX_PARAMS).
+#       (all 6 deep + 22 regime specs, less those pinned via FIX_PARAMS).
 #       ν is loaded from nu_estimation.csv using the row for the
 #       corresponding baseline (one row per crisis pair).
 #   Crisis window    (:crisis_fc, :crisis_covid):
@@ -45,8 +45,9 @@
 # pre-adjusted values (see the moments.jl header for the convention).
 ############################################################
 
+const ROYSEARCH_VERSION = "12.1"
 println("="^60)
-println("  RoySearch — SMM Estimation")
+println("  RoySearch v$(ROYSEARCH_VERSION) — SMM Estimation")
 println("="^60)
 flush(stdout)
 
@@ -172,7 +173,7 @@ const _PAIR_BASELINE = Dict(
 # but kept in MOMENT_NAMES and the data pipeline so a robustness rerun is a
 # one-line edit here.
 #
-# Valid names (28 moments in MOMENT_NAMES order):
+# Valid names (31 moments in MOMENT_NAMES order):
 #   :ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
 #   :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
 #   :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S,
@@ -180,7 +181,12 @@ const _PAIR_BASELINE = Dict(
 #   :mean_wage_U, :mean_wage_S,
 #   :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S, :p75_wage_U, :p75_wage_S,
 #   :wage_premium, :theta_U, :theta_S,
-#   :overlap_UgtS, :overlap_SltU, :ltu_share_S
+#   :overlap_UgtS, :overlap_SltU, :ltu_share_S,
+#   :wchg_rate_U, :wchg_rate_S, :ee_step_S
+#
+# A moment whose data target is NaN for the active window is auto-held-out of
+# the objective (see ACTIVE_SKIP_MOMENTS below), so wchg_rate_j need NOT be
+# listed here — it activates automatically once its SIPP data is built.
 # ============================================================
 SKIP_MOMENTS = Symbol[
     #:wage_premium,
@@ -188,7 +194,26 @@ SKIP_MOMENTS = Symbol[
     #:emp_var_S,
     #:emp_cm3_S,
     #:ee_rate_S,
+    # ee_step_S (SIPP skilled EE-move wage step) identifies β_S. It is COMPUTED
+    # and carried through the pipeline (target + Σ̂ diagonal) but held out of the
+    # objective while β_S is pinned in FIX_PARAMS below. Removing :skl_bet from
+    # FIX_PARAMS frees β_S; delete the next line at the same time to activate
+    # ee_step_S as the moment that pins it.
+    #:ee_step_S,
 ]
+
+# ── Per-window objective holdouts ───────────────────────────────────────────
+# Per-window mechanism for excluding a moment from the objective in specific
+# windows only (kept general for future use). Currently EMPTY: wchg_rate_{U,S}
+# is targeted in ALL FOUR windows. The classic FC windows now carry the BBG
+# break-filtered wchg (sipp.jl §make_sipp_wchg) — the earnings-based series
+# under the pre-2014 independent-interviewing design is measurement-noise-
+# inflated, so the FC target is the Barattieri–Basu–Gottschalk hazard on the
+# hourly-rate series (a documented lower bound), which lands on the same order
+# of magnitude as the redesign wchg and pins λ_S without forcing the corner.
+# To hold a moment out of the objective in a window, add
+# `window => [:moment, …]` here.
+const WINDOW_SKIP_MOMENTS = Dict{Symbol,Vector{Symbol}}()
 
 # Wage-reliability calibration knob (single source of truth for both the run
 # header and calibrate_sigma_w). σ_w is calibrated externally from λ_w rather
@@ -201,22 +226,18 @@ flush(stdout)
 
 # ============================================================
 # Parameters to pin at a fixed value during estimation.
-# r / ν / φ are always fixed from external calibration and do
-# not need to appear here.
-#
-# η_U / η_S are pinned at 0.5 (Hosios): the matching elasticity is not
-# identified without aggregate U–V variation (LMR). The bargaining weights
-# β_U / β_S are FREE — the β–σ_w degeneracy is removed by calibrating σ_w
-# externally (calibrate_sigma_w from λ_w), so σ_wU / σ_wS are injected into
-# the pinned block below from the data rather than pinned here.
+# r / ν / φ are always fixed from external calibration and do not appear here.
+# σ_wU / σ_wS are calibrated externally (calibrate_sigma_w from λ_w) and injected
+# into the pinned block from the data rather than listed here.
 #
 # Valid keys (ASCII):
 #   common:  :a_l  :b_l  :rho_x  :c  :A
 #   regime:  :PU  :PS  :bU  :bT  :bS  :alpha_U  :a_Gam  :b_Gam
-#   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam  :unsk_sigw
+#   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam  :unsk_xi  :unsk_sigw
 #   skl:     :skl_mu   :skl_eta   :skl_k   :skl_bet
-#            :skl_lam  :skl_sig   :skl_sigw
+#            :skl_lam  :skl_sig   :skl_sigw  :skl_xi  :skl_delta
 #   (:unsk_sigw / :skl_sigw = wage measurement-error SD σ_wU / σ_wS)
+#   (:skl_delta = offer/shock support ratio δ_S; :skl_xi = exogenous separation ξ_S)
 # ============================================================
 FIX_PARAMS = Dict{Symbol,Float64}(
     # :a_l      => 1.00000,
@@ -233,7 +254,7 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :b_Gam    => 2.28169,
     # :unsk_mu  => 0.25585,
      :unsk_eta => 0.50000,
-    # :unsk_bet => 0.18800,
+     :unsk_bet => 0.18800,
     # :unsk_k   => 0.10061,
     # :unsk_lam => 0.20263,
     # :skl_mu   => 0.22462,
@@ -246,50 +267,54 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 
 # ============================================================
 # INIT_MODE — how the optimiser is seeded.
-#   :default    seed from DEFAULT_PARAMS (below), all windows; skip the
-#               candidate layer.
-#   :warmstart  seed from a saved optimum (single warm start); if the
-#               relevant optimum is missing/invalid, falls back to DEFAULT_PARAMS.
-#   :clusters   generate (or load) the Sobol→hclust candidate bank and seed
-#               SA (one chain per cluster) and DE (round-robin) from it.
+#   :default    seed the spec init from DEFAULT_PARAMS; skip the candidate layer.
+#   :warmstart  seed from a saved optimum; fall back to DEFAULT_PARAMS if absent.
+#   :clusters   seed SA/DE from the Sobol→hclust candidate bank.
+# USE_AS_SEED           true: optimise from the seed; false: evaluate the seed
+#                       point directly and skip SA/DE/NM.
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 # ============================================================
-INIT_MODE            = :clusters
+INIT_MODE            = :default
+USE_AS_SEED          = true
 CLUSTERS_FORCE_REGEN = true
 INCLUDE_PREV_OPTIMUM = false
 
+# Starting values for the free parameters, keyed by the ASCII convention in
+# _DEFAULT_PARAM_KEY. Fixed r/ν/φ are ignored here (set from calibration files).
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
-    :r        => 0.00416667,        # 0.05/12; table's 0.00417 is rounded
+    :r        => 0.00417,
     :nu       => 0.00336,
-    :phi      => 0.02222129,        # table's 0.02222 is rounded
-    :a_l      => 1.97515,
-    :b_l      => 0.21721,
-    :rho_x    => -0.55000,          # ability correlation (Gola concordance)
-    :c        => 4.71211,
-    :A        => 6.12526,           # aggregate production scale (log)
-    :PU       => 5.21548,
-    :PS       => 12.81343,
-    :bU       => 2.13073,
-    :bT       => 3.78997,
-    :bS       => 0.00235,
-    :alpha_U  => 5.02564,
-    :a_Gam    => 12.37436,
-    :b_Gam    => 17.96723,
-    :unsk_mu  => 0.42000,
-    :unsk_eta => 0.50000,
-    :unsk_k   => 0.28098,           # months of avg U output
-    :unsk_bet => 0.18800,
-    :unsk_lam => 0.94811,
-    :unsk_sigw => 0.23461,
-    :skl_mu   => 0.24370,
-    :skl_eta  => 0.50000,
-    :skl_k    => 2.78890,           # months of avg S output
-    :skl_bet  => 0.27200,
-    :skl_lam  => 0.77010,
-    :skl_sig  => 1.02726,
-    :skl_sigw  => 0.21904,
-    :skl_xi   => 0.00000,
+    :phi      => 0.02222,
+    :a_l      => 1.57709,
+    :b_l      => 2.83207,
+    :rho_x    => -0.75346,
+    :c        => 12.27538,
+    :A        => 6.12501,
+    :PU       => 4.57506,
+    :PS       => 16.11843,
+    :bU       => 0.56593,
+    :bT       => 4.95329,
+    :bS       => 0.05262,
+    :alpha_U  => 2.78439,
+    :a_Gam    => 1.62524,
+    :b_Gam    => 4.36931,
+    :unsk_mu   => 0.36000,
+    :unsk_eta  => 0.50000,
+    :unsk_k    => 2.50000,
+    :unsk_bet  => 0.18800,
+    :unsk_lam  => 0.23065,
+    :unsk_xi   => 0.00836,
+    :unsk_sigw => 0.23446,
+    :skl_mu    => 0.27267,
+    :skl_eta   => 0.50000,
+    :skl_k     => 2.47610,
+    :skl_bet   => 0.27200,
+    :skl_lam   => 0.09889,
+    :skl_sig   => 0.52286,
+    :skl_sigw  => 0.21888,
+    :skl_xi    => 0.00588,
+    :skl_delta => 0.86897,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
@@ -304,7 +329,7 @@ const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:skl,    :μ)   => :skl_mu,  (:skl,    :η)    => :skl_eta,  (:skl,   :k)   => :skl_k,
     (:skl,    :β)   => :skl_bet, (:skl,    :λ)   => :skl_lam,
     (:skl,    :σ)   => :skl_sig, (:skl,    :σ_w)  => :skl_sigw,
-    (:skl,    :ξ)   => :skl_xi,
+    (:unsk,   :ξ)   => :unsk_xi, (:skl,    :ξ)   => :skl_xi,  (:skl,    :δ)    => :skl_delta,
 )
 
 # ASCII key (FIX_PARAMS convention) → unicode fixed-NamedTuple key.
@@ -318,7 +343,7 @@ const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :c        => :c,
     :A        => :A,
     :PU       => :PU,
-    :PS => :PS,
+    :PS       => :PS,
     :bU       => :bU,
     :bT       => :bT,
     :bS       => :bS,
@@ -330,6 +355,7 @@ const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :unsk_k   => :unsk_k,
     :unsk_bet => :unsk_β,
     :unsk_lam => :unsk_λ,
+    :unsk_xi  => :unsk_ξ,
     :unsk_sigw => :unsk_σ_w,
     :skl_mu   => :skl_μ,
     :skl_eta  => :skl_η,
@@ -339,6 +365,7 @@ const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :skl_sig  => :skl_σ,
     :skl_sigw  => :skl_σ_w,
     :skl_xi   => :skl_ξ,
+    :skl_delta => :skl_δ,
 )
 
 """
@@ -381,6 +408,33 @@ flush(stdout)
 
 moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 
+# ── Auto-hold-out of NaN targets ──────────────────────────────────────────
+# A moment whose data target is NaN for this window (no source data yet —
+# e.g. wchg_rate_j before base_covid SIPP is built) cannot enter g'Wg. Union
+# such moments into the skip set so the objective, weight matrix, and Σ̂ trace
+# are all subsetted identically. This is what lets a base_covid run proceed
+# unchanged today while crisis_covid (with SIPP) uses the moment — no name is
+# hardcoded into SKIP_MOMENTS, so each moment activates automatically once its
+# data appears.
+_nan_targets = Symbol[k for k in keys(moments) if !isfinite(moments[k].value)]
+
+# Per-window holdouts (WINDOW_SKIP_MOMENTS above): a FINITE moment whose data
+# construction is unreliable in this window is dropped from the objective here.
+# Unlike the NaN path this is deliberate — the target is measured and finite,
+# so it would NOT auto-hold-out — hence the explicit per-window spec.
+_window_skip = get(WINDOW_SKIP_MOMENTS, WINDOW, Symbol[])
+ACTIVE_SKIP_MOMENTS = sort(unique(vcat(SKIP_MOMENTS, _nan_targets, _window_skip)))
+if !isempty(_nan_targets)
+    @printf("Auto-skipping %d moment(s) with NaN target in %s: %s\n",
+            length(_nan_targets), WINDOW, join(string.(_nan_targets), ", "))
+    flush(stdout)
+end
+if !isempty(_window_skip)
+    @printf("Per-window holdout: %d moment(s) excluded from objective in %s: %s\n",
+            length(_window_skip), WINDOW, join(string.(_window_skip), ", "))
+    flush(stdout)
+end
+
 # ── σ_w calibration (class (ii): calibrated model parameters) ─────────────
 # σ_{w,j}² = (1−λ_w)·Var̂[log w_j]. Calibrated from the data here, then pinned
 # in the fixed block alongside r, ν, φ (§6). This is what frees β_U, β_S.
@@ -406,10 +460,12 @@ flush(stdout)
 # ============================================================
 # 4. Weight matrix
 #    W_COND_TARGET controls which weighting scheme is used:
-#      0.0   diagonal from sigma_{window}.csv
-#      1.0   compressed diagonal:  w = log(1 + 1/σ²)
-#      2.0   equal weights (identity, no W matrix)
-#      >2.0  full optimal W (shrunk if κ > target)
+#      0.0   diagonal-σ: W = Diagonal(1/σ̂²_samp) from sampling_var_{window}.csv
+#            (per-moment sampling variances on one footing; the insurance run —
+#            same point estimates as equal weight, honest sampling-based SEs)
+#      1.0   compressed diagonal:  w = log(1 + 1/σ²) from diag(Σ̂)
+#      2.0   equal weights (identity, no W matrix) — the paper default
+#      >2.0  full optimal W = Σ̂⁻¹ from sigma_{window}.csv (shrunk if κ > target)
 # ============================================================
 W_COND_TARGET = 2.0  
 
@@ -424,7 +480,7 @@ W_SUFFIX = _w_suffix(W_COND_TARGET)
 
 W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
                              cond_target=W_COND_TARGET,
-                             skip_moments=SKIP_MOMENTS)
+                             skip_moments=ACTIVE_SKIP_MOMENTS)
 
 # Display-only divisor for the reported scalar Q.  Equal weights keep
 # the readable relative-deviation magnitude (q_scale = 1.0); the matrix
@@ -434,7 +490,7 @@ Q_SCALE = if W_COND_TARGET == 2.0
     1.0
 else
     load_sigma_trace(; window=WINDOW, derived_dir=derived_dir,
-                       skip_moments=SKIP_MOMENTS)
+                       skip_moments=ACTIVE_SKIP_MOMENTS)
 end
 @printf("  q_scale (display-only Q divisor) = %.6e\n", Q_SCALE)
 
@@ -698,11 +754,11 @@ run_params = SMMRunParams(
     sa_T0              = 10.0,    # initial temperature (≤0 ⇒ auto-calibrate
                                   # from uphill probes)
     sa_step            = 0.20,    # initial proposal sd in unconstrained space
-    sa_cooling_rate    = 0.5,     # rate in T(t) = T_reheat / log(1+rate·t)^exp
-    sa_cooling_exp     = 1.0,     # exponent in same schedule (higher = faster cool)
-    sa_reheat_patience = 1_000,   # steps without improvement before a reheat, 0 to disable reheats
-    sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
-    sa_max_reheats     = 1,       # cap on number of reheats per run, 0 is unlimited
+    sa_cooling_rate    = 1.0,     # rate in T(t) = T_reheat / log(1+rate·t)^exp
+    sa_cooling_exp     = 2.5,     # exponent in same schedule (higher = faster cool)
+    sa_reheat_patience = 400,   # steps without improvement before a reheat, 0 to disable reheats
+    sa_reheat_factor   = 2.00,    # multiplicative reheat: T ← T · factor
+    sa_max_reheats     = 3,       # cap on number of reheats per run, 0 is unlimited
     sa_adapt_window    = 50,      # rolling window for adaptive step / acceptance
     sa_target_fin      = 0.90,    # target feasibility (finite-Q) fraction;
                                   # below this, step shrinks
@@ -723,7 +779,7 @@ run_params = SMMRunParams(
                                   # 0 disables this early-stop
 
     # ── Nelder-Mead local polish ─────────────────────────────
-    nm_max_iter  = 5_000,         # max NM iterations
+    nm_max_iter  = 7_000,         # max NM iterations
     nm_f_tol     = 1e-6,          # function-value tolerance
     nm_x_tol     = 1e-4,          # parameter tolerance (unconstrained space)
     nm_g_tol     = 1e-5,          # gradient tolerance (unconstrained space)
@@ -747,7 +803,7 @@ spec = build_smm_spec(
     run          = run_params,
     W            = W_opt,
     q_scale      = Q_SCALE,
-    skip_moments = SKIP_MOMENTS,
+    skip_moments = ACTIVE_SKIP_MOMENTS,
 )
 
 print_spec(spec)
@@ -758,7 +814,9 @@ print_spec(spec)
 seed_bank    = nothing
 prev_optimum = nothing
 
-if INIT_MODE == :clusters
+# Skip the candidate bank when the seed is evaluated directly (USE_AS_SEED =
+# false): building it would solve the model n_sample times for an unused seed.
+if INIT_MODE == :clusters && USE_AS_SEED
     cand_path = joinpath(SMM_OUT_DIR, "candidates_$(WINDOW)$(W_SUFFIX).jls")
     seed_bank = load_or_generate_candidates(spec, cand_path;
                                             window      = WINDOW,
@@ -792,17 +850,33 @@ if INIT_MODE == :clusters
 end
 
 # ============================================================
-# 9. Run estimation
+# 9. Run estimation  (or direct evaluation — see USE_AS_SEED)
 # ============================================================
-println("Starting SMM optimisation..."); flush(stdout)
+if USE_AS_SEED
+    println("Starting SMM optimisation..."); flush(stdout)
 
-# Stage 1: global search (seeded per INIT_MODE; seed_bank/prev_optimum set in §8b)
-res = run_smm(spec; method = :sa, seed_bank = seed_bank, prev_optimum = prev_optimum)
+    # Stage 1: global search (seed_bank/prev_optimum set in §8b).
+    res = run_smm(spec; method = :sa, seed_bank = seed_bank, prev_optimum = prev_optimum)
 
-# Stage 2: local polish from the global optimum
-res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead)
+    # Stage 2: local polish from the global optimum.
+    res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead)
 
-results = res_pol
+    results = res_pol
+else
+    # Evaluate the seed point directly: solve once at pack_θ(spec), compute Q,
+    # and rebuild the same SMMResult a normal run writes. iterations = 0 marks
+    # the no-optimisation path; converged records only that Q is finite.
+    println("Evaluating the seed point directly (no optimisation)..."); flush(stdout)
+
+    θ_direct  = pack_θ(spec)
+    Q_direct  = smm_objective(θ_direct, spec)
+    cp_d, up_d, sp_d = unpack_θ(θ_direct, spec)
+    params_d  = _params_to_namedtuple(cp_d, up_d, sp_d, spec)
+    results   = SMMResult(θ_direct, params_d, Q_direct, isfinite(Q_direct), 0, spec)
+    @printf("Direct evaluation: Q = %.8e\n", Q_direct)
+    print_results(results)
+    flush(stdout)
+end
 
 # ============================================================
 # 10. Save results

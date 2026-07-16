@@ -31,20 +31,23 @@
 #     common:  c                              training cost coefficient
 #     unsk:    PU, α_U                         unskilled productivity / damage shape
 #     skl:     PS, a_Γ, b_Γ              skilled productivity / offer shape
-#     unsk:    μ, η, k, β, λ                  matching, vacancy cost,
-#                                              bargaining, damage hazard
-#     skl:     μ, η, k, β, λ, σ, ξ            same + OJS flow cost
+#     unsk:    μ, η, k, β, λ, ξ               matching, vacancy cost,
+#                                              bargaining, damage hazard,
+#                                              exogenous separation ξ_U
+#     skl:     μ, η, k, β, λ, σ, ξ, δ         same + OJS flow cost
 #                                              + exogenous separation ξ_S
+#                                              + offer/shock support ratio δ_S
 #
 #   Production is linear in own ability under pure-Roy (π_j = exp(A)·P_j·a_j·p),
 #   so there is no ability gradient to estimate: the single-index γ_U / γ_S of
 #   the old model are gone, replaced by the ρ_x separation device.
 #
-# Note on ξ_S: SkilledParams carries a ξ_S field (exogenous skilled
-# separation hazard), defaulting to 0.0. Total skilled separation into
-# unemployment is ξ_S + λ_S · Γ(p*_S). Pinning ξ_S = 0 (FIX_PARAMS
-# :skl_xi => 0.0, or dropping it from the free list) recovers the
-# purely-endogenous variant exactly.
+# Note on ξ_U / ξ_S: each of UnskilledParams / SkilledParams carries an
+# exogenous-separation field ξ, defaulting to 0.0. Total separation into
+# unemployment is ξ_U + λ_U · G(p*_U) (unskilled) and ξ_S + λ_S · Γ(p*_S)
+# (skilled). Pinning a ξ to 0 (FIX_PARAMS :unsk_xi / :skl_xi => 0.0, or
+# dropping it from the free list) recovers the purely-endogenous variant
+# for that sector exactly.
 ############################################################
 
 
@@ -374,10 +377,9 @@ function default_free_params() :: Vector{ParamSpec}
         # concordance rescues the unskilled market at fixed productivity).
         ParamSpec(:common, :ρ_x,       -0.9900,   0.9900,  -0.5500, "ability correlation ρ_x"),
 
-        # Common block — training cost coeff and aggregate scale.
-        # c is a linear level multiplier: c(aS) = c·(1−aS)·exp(−aS).
-        ParamSpec(:common, :c,          0.0000,  10.0000,   1.0000, "training cost coeff c"),
-        ParamSpec(:common, :A,          0.0000,  10.0000,   5.6000, "aggregate production scale A"),
+        # Common block — training cost coeff and aggregate scale
+        ParamSpec(:common, :c,          0.0000,  15.0000,  11.0000, "training cost coeff c"),
+        ParamSpec(:common, :A,          0.0000,  13.0000,   5.6000, "aggregate production scale A"),
  
         # Institutional flow values (stored by consuming block).
         ParamSpec(:unsk,   :bU,         0.0000,   2.5000,   1.5000, "unskilled outside flow b_U"),
@@ -392,35 +394,45 @@ function default_free_params() :: Vector{ParamSpec}
         # P to identify them individually.  The premium loads on log(P_S/P_U).
         ParamSpec(:unsk,   :PU,         0.0001,   8.0000,   1.8000, "unskilled productivity P_U"),
         ParamSpec(:skl,    :PS,         0.0001,  20.0000,   4.5000, "skilled productivity P_S"),
-        ParamSpec(:unsk,   :α_U,        0.2000,  20.5000,   1.0000, "unskilled damage shape α_U"),
-        ParamSpec(:skl,    :a_Γ,        0.1000,  20.0000,   5.2000, "skilled offer shape a_Γ"),
-        ParamSpec(:skl,    :b_Γ,        0.1000,  18.0000,   9.2000, "skilled offer shape b_Γ"),
+        ParamSpec(:unsk,   :α_U,        0.2000,  6.0000,   1.0000, "unskilled damage shape α_U"),
+        ParamSpec(:skl,    :a_Γ,        0.1000,  12.0000,   5.2000, "skilled offer shape a_Γ"),
+        ParamSpec(:skl,    :b_Γ,        0.1000,  10.0000,   9.2000, "skilled offer shape b_Γ"),
+        ParamSpec(:skl,    :δ,          0.0500,   1.0000,   0.6000, "shock/offer support ratio δ_S"),
  
         # Matching efficiency, matching elasticity, bargaining (U/S paired)
-        ParamSpec(:unsk,   :μ,          0.0001,   3.9000,   0.3500, "unskilled matching eff μ_U"),
-        ParamSpec(:skl,    :μ,          0.0001,   4.5000,   0.1900, "skilled matching eff μ_S"),
+        ParamSpec(:unsk,   :μ,          0.0001,   2.0000,   0.3500, "unskilled matching eff μ_U"),
+        ParamSpec(:skl,    :μ,          0.0001,   2.0000,   0.1900, "skilled matching eff μ_S"),
         ParamSpec(:unsk,   :η,          0.0001,   1.0000,   0.5000, "unskilled matching elas η_U"),
         ParamSpec(:skl,    :η,          0.0001,   1.0000,   0.5000, "skilled matching elas η_S"),
         ParamSpec(:unsk,   :β,          0.0010,   0.9000,   0.5000, "unskilled bargaining β_U"),
-        ParamSpec(:skl,    :β,          0.0010,   0.9000,   0.5000, "skilled bargaining β_S"),
+        ParamSpec(:skl,    :β,          0.0001,   0.9000,   0.5000, "skilled bargaining β_S"),
  
         # Shock arrival rates (U/S paired)
         # λ_U init lowered 0.80 → 0.10: sep_rate_U ≈ λ_U·G(p*) ≈ 0.013/mo wants a
         # SMALL λ_U; starting high pushes the chain into the tightness-breaking
         # region that drove λ_U → 0 in prior runs.  Bounds unchanged.
         ParamSpec(:unsk,   :λ,          0.0001,   0.95000,   0.1000, "unskilled damage rate λ_U"),
-        ParamSpec(:skl,    :λ,          0.0001,   0.92000,   0.1400, "skilled quality shock λ_S"),
- 
+        ParamSpec(:skl,    :λ,          0.0001,   0.20000,   0.0400, "skilled quality shock λ_S"),
+
         # Vacancy costs (U/S paired) — DIMENSIONLESS, in months of average
         # sectoral output: dollar posting cost = k_j · π̄_j (see grids.jl,
         # mean_output_U/S).  LMR (2016) estimate 2.34 (HS) / 1.58 (college)
         # in the same units.
-        ParamSpec(:unsk,   :k,          0.0005,  24.0000,   2.2500, "unskilled vacancy cost k_U (months of avg U output)"),
-        ParamSpec(:skl,    :k,          0.0005,  24.0000,   4.6000, "skilled vacancy cost k_S (months of avg S output)"),
+        ParamSpec(:unsk,   :k,          0.0005,  12.0000,   2.2500, "unskilled vacancy cost k_U (months of avg U output)"),
+        ParamSpec(:skl,    :k,          0.0005,  12.0000,   4.6000, "skilled vacancy cost k_S (months of avg S output)"),
  
-        # Skilled block — OJS cost, exogenous separation
+        # Skilled block — OJS cost, exogenous separation, offer/shock support ratio.
+        # δ_S compresses the λ_S-shock redraw onto [0,δ_S]; it carries endogenous
+        # separation and the EE ladder (both dead at δ_S = 1, the single-distribution
+        # limit).  ξ_S is the exogenous baseline hazard; (ξ_S, δ_S, λ_S) jointly
+        # split sep_rate_S / ee_rate_S into baseline and endogenous margins.
+        # Exogenous separation baseline ξ_U — a quality-independent hazard on
+        # top of the endogenous margin λ_U·G(p*).  Mirrors the skilled ξ_S
+        # below (same bounds); gives sep_rate_U a live lever when p*_U → 0
+        # collapses the endogenous part.
         ParamSpec(:skl,    :σ,          0.0000,   1.5000,   0.0900, "OJS flow cost σ_S"),
-        ParamSpec(:skl,    :ξ,          0.0000,   0.5200,   0.0050, "skilled exogenous separation ξ_S"),
+        ParamSpec(:unsk,   :ξ,          0.0000,   0.0500,   0.0000, "unskilled exogenous separation ξ_U"),
+        ParamSpec(:skl,    :ξ,          0.0000,   0.0500,   0.0000, "skilled exogenous separation ξ_S"),
  
         # Wage measurement error (per sector; pinned when λ_w > 0)
         ParamSpec(:unsk,   :σ_w,        0.0000,   1.0000,   0.6000, "unskilled wage meas. error σ_wU"),
@@ -436,9 +448,9 @@ const REGIME_SPECIFIC_PARAMS = Set([
     (:common, :c),   (:common, :A),
     (:unsk,   :PU),  (:skl,  :PS),
     (:unsk,   :α_U), (:skl,  :a_Γ),   (:skl,  :b_Γ),
-    (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),  (:unsk, :σ_w),
+    (:unsk,   :μ),   (:unsk, :η),   (:unsk, :k),  (:unsk, :β),  (:unsk, :λ),  (:unsk, :ξ),  (:unsk, :σ_w),
     (:skl,    :μ),   (:skl, :η),    (:skl, :k),   (:skl, :β),   (:skl, :λ),
-    (:skl,    :σ),   (:skl, :ξ),    (:skl, :σ_w),
+    (:skl,    :σ),   (:skl, :ξ),    (:skl, :δ),   (:skl, :σ_w),
 ])
 
 # Convenience: the complement is the deep set (everything in
@@ -516,7 +528,7 @@ function unpack_θ(
         a_ℓ = _get(:a_ℓ, :common, 2.00),
         b_ℓ = _get(:b_ℓ, :common, 5.00),
         ρ_x = _get(:ρ_x, :common, -0.55),
-        c   = _get(:c,   :common, 1.00),
+        c   = _get(:c,   :common, 1.70),
         A   = _get(:A,   :common, 0.00),   # log scale; model uses exp(A)
     )
 
@@ -533,6 +545,7 @@ function unpack_θ(
         bU  = _get(:bU,  :unsk, 0.00),
         bT  = _get(:bT,  :unsk, 0.28),
         α_U = _get(:α_U, :unsk, 1.00),
+        ξ   = _get(:ξ,   :unsk, 0.0),
         σ_w = _get(:σ_w, :unsk, 0.0),
     )
 
@@ -547,6 +560,7 @@ function unpack_θ(
         bS       = _get(:bS,       :skl, 0.01),
         a_Γ      = _get(:a_Γ,      :skl, 2.00),
         b_Γ      = _get(:b_Γ,      :skl, 5.00),
+        δ        = _get(:δ,        :skl, 1.0),
         ξ        = _get(:ξ,        :skl, 0.0),
         σ_w      = _get(:σ_w,      :skl, 0.0),
     )
@@ -559,12 +573,12 @@ function unpack_θ(
     up_fields = Dict{Symbol,Float64}(
         :μ => up.μ, :η => up.η, :k => up.k, :β => up.β, :λ => up.λ,
         :PU => up.PU, :bU => up.bU, :bT => up.bT, :α_U => up.α_U,
-        :σ_w => up.σ_w,
+        :ξ => up.ξ, :σ_w => up.σ_w,
     )
     sp_fields = Dict{Symbol,Float64}(
         :μ => sp.μ, :η => sp.η, :k => sp.k, :β => sp.β, :λ => sp.λ, :σ => sp.σ,
         :PS => sp.PS, :bS => sp.bS, :a_Γ => sp.a_Γ, :b_Γ => sp.b_Γ,
-        :ξ => sp.ξ, :σ_w => sp.σ_w,
+        :δ => sp.δ, :ξ => sp.ξ, :σ_w => sp.σ_w,
     )
 
     for (i, ps) in enumerate(spec.free)
@@ -593,7 +607,7 @@ function unpack_θ(
         λ = up_fields[:λ],
         PU = up_fields[:PU], bU = up_fields[:bU],
         bT = up_fields[:bT], α_U = up_fields[:α_U],
-        σ_w = up_fields[:σ_w],
+        ξ = up_fields[:ξ], σ_w = up_fields[:σ_w],
     )
     sp = SkilledParams(
         μ = sp_fields[:μ], η = sp_fields[:η],
@@ -601,7 +615,7 @@ function unpack_θ(
         λ = sp_fields[:λ], σ = sp_fields[:σ],
         PS = sp_fields[:PS], bS = sp_fields[:bS],
         a_Γ = sp_fields[:a_Γ], b_Γ = sp_fields[:b_Γ],
-        ξ = sp_fields[:ξ], σ_w = sp_fields[:σ_w],
+        δ = sp_fields[:δ], ξ = sp_fields[:ξ], σ_w = sp_fields[:σ_w],
     )
 
     return cp, up, sp
