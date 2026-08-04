@@ -4,3 +4,13 @@
 /data/derived/*.arrow
 /latex/
 literature.zip
+/code/roysearch_v*/          # 209 tracked files, ~115 MB
+/code/roysearch_v*.zip
+/code/notebooks/             # 38 tracked files, ~78 MB, none over 50 MB
+*.jld2                       # 88 MB transition output
+/output/logs/
+/output/figures/
+/output/tables/
+/output/smm/mcmc_chain_*.jls
+/output/smm/candidates_*.jls
+!/output/smm/smm_result_*.jls   # keep: warmstart seeds
