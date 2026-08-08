@@ -8,7 +8,6 @@ literature.zip
 /code/roysearch_v*.zip
 /code/notebooks/             # 38 tracked files, ~78 MB, none over 50 MB
 *.jld2                       # 88 MB transition output
-/output/logs/
 /output/figures/
 /output/tables/
 /output/smm/mcmc_chain_*.jls

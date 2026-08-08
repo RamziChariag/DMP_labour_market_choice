@@ -1,29 +1,29 @@
 block,name,label,estimate,lb,ub,fixed
-common,a_ℓ,worker type shape a_ℓ,1.05725591,0.10000000,8.00000000,false
-common,b_ℓ,worker type shape b_ℓ,2.21363465,0.05000000,4.00000000,false
-common,ρ_x,ability correlation ρ_x,-0.92883213,-0.99000000,-0.10000000,false
-common,c,training cost coeff c,12.20816258,0.00000000,15.00000000,false
-common,A,aggregate production scale A,5.95100788,0.00000000,13.00000000,false
-unsk,bU,unskilled outside flow b_U,0.11974191,0.00000000,2.50000000,false
-unsk,bT,training flow b_T,3.73239526,0.00000000,7.00000000,false
-skl,bS,skilled outside flow b_S,0.05882377,0.00000000,2.00000000,false
-unsk,PU,unskilled productivity P_U,5.96745225,0.00010000,8.00000000,false
-skl,PS,skilled productivity P_S,12.00600220,0.00010000,20.00000000,false
-unsk,α_U,unskilled damage shape α_U,2.35095190,0.20000000,6.00000000,false
-skl,a_Γ,skilled offer shape a_Γ,1.13571571,0.10000000,12.00000000,false
-skl,b_Γ,skilled offer shape b_Γ,1.57230812,0.10000000,10.00000000,false
-skl,δ,shock/offer support ratio δ_S,0.95565307,0.05000000,1.00000000,false
-unsk,μ,unskilled matching eff μ_U,0.42449745,0.00010000,2.00000000,false
-skl,μ,skilled matching eff μ_S,0.24470157,0.00010000,2.00000000,false
-unsk,β,unskilled bargaining β_U,0.53370921,0.00100000,0.90000000,false
-skl,β,skilled bargaining β_S,0.44114642,0.00010000,0.90000000,false
-unsk,λ,unskilled damage rate λ_U,0.15532984,0.00010000,0.55000000,false
-skl,λ,skilled quality shock λ_S,0.13426600,0.00010000,0.30000000,false
-unsk,k,unskilled vacancy cost k_U (months of avg U output),2.19828041,0.00050000,12.00000000,false
-skl,k,skilled vacancy cost k_S (months of avg S output),1.69146278,0.00050000,12.00000000,false
-skl,σ,OJS flow cost σ_S,0.97899209,0.00000000,1.50000000,false
-unsk,ξ,unskilled exogenous separation ξ_U,0.00530501,0.00000000,0.02000000,false
-skl,ξ,skilled exogenous separation ξ_S,0.00442437,0.00000000,0.02000000,false
+common,a_ℓ,worker type shape a_ℓ,1.02332915,0.10000000,8.00000000,false
+common,b_ℓ,worker type shape b_ℓ,2.13941872,0.05000000,4.00000000,false
+common,ρ_x,ability correlation ρ_x,-0.88569900,-1.00000000,-0.10000000,false
+common,c,training cost coeff c,12.36851301,0.00000000,15.00000000,false
+common,A,aggregate production scale A,5.91014021,0.00000000,13.00000000,false
+unsk,bU,unskilled outside flow b_U,0.31232328,0.00000000,2.50000000,false
+unsk,bT,training flow b_T,5.00988506,0.00000000,7.00000000,false
+skl,bS,skilled outside flow b_S,0.04446072,0.00000000,2.00000000,false
+unsk,PU,unskilled productivity P_U,5.75304773,0.00010000,8.00000000,false
+skl,PS,skilled productivity P_S,13.03541455,0.00010000,20.00000000,false
+unsk,α_U,unskilled damage shape α_U,3.38782009,0.20000000,6.00000000,false
+skl,a_Γ,skilled offer shape a_Γ,0.96432793,0.10000000,12.00000000,false
+skl,b_Γ,skilled offer shape b_Γ,1.45724274,0.10000000,10.00000000,false
+skl,δ,shock/offer support ratio δ_S,0.98169205,0.05000000,1.00000000,false
+unsk,μ,unskilled matching eff μ_U,0.42694899,0.00010000,2.00000000,false
+skl,μ,skilled matching eff μ_S,0.24511908,0.00010000,2.00000000,false
+unsk,β,unskilled bargaining β_U,0.54207700,0.00100000,0.90000000,false
+skl,β,skilled bargaining β_S,0.43020339,0.00010000,0.90000000,false
+unsk,λ,unskilled damage rate λ_U,0.15751768,0.00010000,0.55000000,false
+skl,λ,skilled quality shock λ_S,0.14144729,0.00010000,0.50000000,false
+unsk,k,unskilled vacancy cost k_U (months of avg U output),1.63680449,0.00050000,12.00000000,false
+skl,k,skilled vacancy cost k_S (months of avg S output),1.85171207,0.00050000,12.00000000,false
+skl,σ,OJS flow cost σ_S,1.04958620,0.00000000,1.50000000,false
+unsk,ξ,unskilled exogenous separation ξ_U,0.00934997,0.00000000,0.02000000,false
+skl,ξ,skilled exogenous separation ξ_S,0.00437688,0.00000000,0.02000000,false
 fixed,r,r,0.00416667,,,true
 fixed,ν,ν,0.00323032,,,true
 fixed,φ,φ,0.02222129,,,true
@@ -32,6 +32,6 @@ fixed,skl_η,skl_η,0.50000000,,,true
 fixed,unsk_σ_w,unsk_σ_w,0.25549225,,,true
 fixed,skl_σ_w,skl_σ_w,0.23267843,,,true
 
-# Q = 1.3581168940e+03
+# Q = 1.1685787347e+03
 # converged = true
-# iterations = 2429
+# iterations = 4133

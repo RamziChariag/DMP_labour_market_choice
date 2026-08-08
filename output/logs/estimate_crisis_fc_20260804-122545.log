@@ -1,0 +1,133 @@
+============================================================
+  RoySearch v15.7 — SMM Estimation
+============================================================
+Loading packages... done.
+Loading solver modules... done.
+Loading SMM modules... done.
+Threads available: 2
+
+Estimation window: crisis_fc
+  Window definition (windows.json):  Financial crisis  ym = 200801..201012  ASEC 2009..2011
+  Calibrated σ_w (λ_w = 0.7800):  σ_wU = 0.25333,  σ_wS = 0.23485
+  load_weight_matrix: subsetting to 28 / 31 active moments (skipping: ee_step_S, ur_total, wage_premium)
+  cond_target == 0.0 → diagonal-σ W = Diagonal(1/σ̂²_samp) from /Users/ramzi.chariag/Documents/CEU/PhD/Research/Search and matching/code/smm/../../data/derived/sampling_var_crisis_fc.csv
+  q_scale (display-only Q divisor) = 1.000000e+00
+
+Loading externally calibrated parameters (r, ν, φ)...
+  Loaded nu = 0.00323 from /Users/ramzi.chariag/Documents/CEU/PhD/Research/Search and matching/code/smm/../../data/derived/nu_estimation.csv  (window=crisis_fc → uses base_fc row)
+  Loaded phi = 0.02222 from /Users/ramzi.chariag/Documents/CEU/PhD/Research/Search and matching/code/smm/../../data/derived/phi_calibration.csv
+  Calibrated:  r = 0.004167,  ν = 0.00323,  φ = 0.02222
+
+Crisis window detected — loading baseline (base_fc) from:
+  /Users/ramzi.chariag/Documents/CEU/PhD/Research/Search and matching/code/smm/../../output/smm/smm_result_base_fc_diagonalW.jls
+  Baseline Q = 1.358117e+03  (converged = true)
+
+  Deep structural parameters FIXED from baseline:
+    common:  a_ℓ=1.0573  b_ℓ=2.2136  ρ_x=-0.9288
+    unsk:    bU=0.1197  bT=3.7324      skl:  bS=0.0588
+  Regime-specific parameters FREE (23 params); init from baseline optimum
+  Fixed params:  13  |  Free params:  23
+  FIX_PARAMS pinned (2): unsk_eta, skl_eta
+SMMSpec: fixed override dropped free params: η, η, σ_w, σ_w
+SMMSpec: skip_moments zeroed weights for (3): ee_step_S, ur_total, wage_premium
+
+╔══════════════════════════════════════════════════════╗
+║  SMM Estimation Specification                        ║
+╠══════════════════════════════════════════════════════╣
+║  Free parameters (19)                                ║
+╠══════════════════════════════════════════════════════╣
+  block   name                          lb        ub      init
+  ────────────────────────────────────────────────────────
+  common  training cost coeff c     0.0000   15.0000   12.2082
+  common  aggregate production scale A    0.0000   13.0000    5.9510
+  unsk    unskilled productivity P_U    0.0001    8.0000    5.9675
+  skl     skilled productivity P_S    0.0001   20.0000   12.0060
+  unsk    unskilled damage shape α_U    0.2000    6.0000    2.3510
+  skl     skilled offer shape a_Γ    0.1000   12.0000    1.1357
+  skl     skilled offer shape b_Γ    0.1000   10.0000    1.5723
+  skl     shock/offer support ratio δ_S    0.0500    1.0000    0.9557
+  unsk    unskilled matching eff μ_U    0.0001    2.0000    0.4245
+  skl     skilled matching eff μ_S    0.0001    2.0000    0.2447
+  unsk    unskilled bargaining β_U    0.0010    0.9000    0.5337
+  skl     skilled bargaining β_S    0.0001    0.9000    0.4411
+  unsk    unskilled damage rate λ_U    0.0001    0.5500    0.1553
+  skl     skilled quality shock λ_S    0.0001    0.5000    0.1343
+  unsk    unskilled vacancy cost k_U (months of avg U output)    0.0005   12.0000    2.1983
+  skl     skilled vacancy cost k_S (months of avg S output)    0.0005   12.0000    1.6915
+  skl     OJS flow cost σ_S         0.0000    1.5000    0.9790
+  unsk    unskilled exogenous separation ξ_U    0.0000    0.0200    0.0053
+  skl     skilled exogenous separation ξ_S    0.0000    0.0200    0.0044
+
+╠══════════════════════════════════════════════════════╣
+║  Fixed parameters (13)                                ║
+╠══════════════════════════════════════════════════════╣
+  r                    = 0.004167
+  ν                    = 0.003230
+  φ                    = 0.022221
+  a_ℓ                  = 1.057256
+  b_ℓ                  = 2.213635
+  ρ_x                  = -0.928832
+  bS                   = 0.058824
+  bT                   = 3.732395
+  bU                   = 0.119742
+  unsk_η               = 0.500000
+  skl_η                = 0.500000
+  unsk_σ_w             = 0.253330
+  skl_σ_w              = 0.234850
+
+╠══════════════════════════════════════════════════════╣
+║  Active moments (28)                                 ║
+╠══════════════════════════════════════════════════════╣
+  (Weighting: matrix W — raw deviations g'Wg)
+  (Q divided by q_scale = 1.000000e+00 for display)
+
+  moment                      target     W diag wt
+  ────────────────────────────────────────────────
+  ur_U                        0.1027    1.3008e+07
+  ur_S                        0.0417    1.4333e+07
+  skilled_share               0.3207    8.1287e+06
+  training_share              0.0473    2.4680e+07
+  emp_var_U                   0.2917    9.6545e+04
+  emp_cm3_U                  -0.0283    1.4732e+05
+  emp_var_S                   0.2507    9.4629e+04
+  emp_cm3_S                  -0.0544    9.6770e+04
+  jfr_U                       0.2107    3.7173e+05
+  sep_rate_U                  0.0206    3.8822e+07
+  jfr_S                       0.2375    6.1065e+04
+  sep_rate_S                  0.0082    4.8200e+07
+  ee_rate_S                   0.0061    1.1783e+06
+  mean_wage_U                 6.5331    5.1563e+04
+  mean_wage_S                 6.9149    5.9390e+04
+  p25_wage_U                  6.1850    2.3050e+04
+  p25_wage_S                  6.6165    3.3465e+04
+  p50_wage_U                  6.5632    3.0659e+04
+  p50_wage_S                  6.9295    4.5013e+04
+  p75_wage_U                  6.9220    3.4305e+04
+  p75_wage_S                  7.2544    3.2277e+04
+  theta_U                     0.2258    2.8175e+06
+  theta_S                     0.6461    5.9851e+04
+  overlap_UgtS                0.2266    4.7546e+04
+  overlap_SltU                0.2070    4.5343e+04
+  ltu_share_S                 0.3241    1.0165e+05
+  wchg_rate_U                 0.1031    4.4711e+05
+  wchg_rate_S                 0.0911    7.6316e+04
+
+╠══════════════════════════════════════════════════════╣
+║  Skipped moments ( 3, weight = 0)                   ║
+╠══════════════════════════════════════════════════════╣
+  moment                      target
+  ──────────────────────────────────
+  ur_total                    0.0831
+  wage_premium                0.3818
+  ee_step_S                   0.0687
+
+  Grid: Nx=120  Np_U=120  Np_S=120
+  λ_w (wage-reliability calibration knob, σ_w = √((1−λ_w)·Var̂[log w])): 0.7800
+  SA:  max_iter=20000  T0=10.00  step=0.20  cooling_rate=1.00  cooling_exp=1.80  reheat_patience=400  reheat_factor=4.00  adapt_window=50  target_fin=0.90
+  DE:   max_iter=3000  pop_size=200  f=0.70  cr=0.85  patience=3  avg_tol=1.0e-06
+  NM:   max_iter=7000  f_tol=1e-02  x_tol=1e-06  g_tol=0e+00  no_improve=4000
+  W:    diagonal-σ — Diagonal(1/σ̂²_samp) (cond(W)=2.09e+03)
+  Q scale (display-only divisor): 1.000000e+00
+╚══════════════════════════════════════════════════════╝
+
+Starting SMM optimisation...

@@ -1,0 +1,30 @@
+============================================================
+  RoySearch v15.7 — SMM Estimation
+============================================================
+Loading packages... done.
+Loading solver modules... done.
+Loading SMM modules... done.
+Threads available: 8
+
+Estimation window: base_fc
+  Window definition (windows.json):  Pre-FC baseline  ym = 200301..200712  ASEC 2004..2008
+  Calibrated σ_w (λ_w = 0.7800):  σ_wU = 0.25549,  σ_wS = 0.23268
+  load_weight_matrix: subsetting to 28 / 31 active moments (skipping: ee_step_S, ur_total, wage_premium)
+  cond_target == 0.0 → diagonal-σ W = Diagonal(1/σ̂²_samp) from /Users/ramzi.chariag/Documents/CEU/PhD/Research/Search and matching/code/smm/../../data/derived/sampling_var_base_fc.csv
+  q_scale (display-only Q divisor) = 1.000000e+00
+
+Loading externally calibrated parameters (r, ν, φ)...
+  Loaded nu = 0.00323 from /Users/ramzi.chariag/Documents/CEU/PhD/Research/Search and matching/code/smm/../../data/derived/nu_estimation.csv  (window=base_fc → uses base_fc row)
+  Loaded phi = 0.02222 from /Users/ramzi.chariag/Documents/CEU/PhD/Research/Search and matching/code/smm/../../data/derived/phi_calibration.csv
+  Calibrated:  r = 0.004167,  ν = 0.00323,  φ = 0.02222
+
+  INIT_MODE = :warmstart — loading prior parameter values from:
+    /Users/ramzi.chariag/Documents/CEU/PhD/Research/Search and matching/code/smm/../../output/smm/smm_result_base_fc_diagonalW.jls
+    Prior Q = 1.358117e+03  (converged = true)
+    Warm-start: matched 25 / 29 parameters from prior run.
+
+  Baseline mode: all structural + regime params are FREE (29 total)
+  Fixed params:  7  |  Free params:  29
+  FIX_PARAMS pinned (2): unsk_eta, skl_eta
+SMMSpec: fixed override dropped free params: η, η, σ_w, σ_w
+SMMSpec: skip_moments zeroed weights for (3): ee_step_S, ur_total, wage_premium

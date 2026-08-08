@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — refuse a commit that would add bulk to the clone.
+#
+# Install once per clone (hooks live in .git and do not travel with a push):
+#   git config core.hooksPath .githooks
+#
+# Two checks, because a single-file size limit misses the way bloat usually
+# arrives — many files each under the limit:
+#   1. any single staged file over SINGLE_LIMIT
+#   2. the staged batch totalling over BATCH_LIMIT
+#
+# It reports and refuses; it does not edit .gitignore. A hook that silently
+# rewrites tracked state during a commit makes the next commit harder to reason
+# about, and the fix belongs in .gitignore where it is reviewable.
+set -uo pipefail
+
+SINGLE_LIMIT=$((20 * 1024 * 1024))
+BATCH_LIMIT=$((50 * 1024 * 1024))
+
+total=0
+oversize=()
+while IFS= read -r -d '' file; do
+    [ -f "$file" ] || continue
+    size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0)
+    total=$((total + size))
+    [ "$size" -gt "$SINGLE_LIMIT" ] && oversize+=("$file ($((size / 1048576)) MB)")
+done < <(git diff --cached --name-only --diff-filter=ACM -z)
+
+fail=0
+if [ "${#oversize[@]}" -gt 0 ]; then
+    echo "pre-commit: staged file(s) over $((SINGLE_LIMIT / 1048576)) MB:"
+    printf '  %s\n' "${oversize[@]}"
+    fail=1
+fi
+if [ "$total" -gt "$BATCH_LIMIT" ]; then
+    echo "pre-commit: staged batch is $((total / 1048576)) MB (limit $((BATCH_LIMIT / 1048576)) MB)."
+    echo "  Many small files add up; a per-file limit would not have caught this."
+    fail=1
+fi
+
+if [ "$fail" -eq 1 ]; then
+    cat <<'EOF'
+
+Add the offending paths to .gitignore, then unstage them:
+  git restore --staged <path>
+Run `bash scripts/check_repo.sh` to see what a clone would contain.
+Deliberate exception: git commit --no-verify
+EOF
+    exit 1
+fi
+exit 0
