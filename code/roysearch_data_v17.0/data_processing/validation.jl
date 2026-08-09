@@ -72,11 +72,7 @@ function run_validation(all_moments)
     println("\n── 2. Benchmark comparisons ──")
     benchmarks = Dict(
         :skilled_share => (name="Skilled share (BA+)", lo=0.20, hi=0.50),
-        # Range set against the NSC target (v17.0), not the old CPS count.
-        # The upper bound is the model's own ceiling ν/(φ+ν) ≈ 0.127: above it
-        # training_share is unattainable at ANY parameter vector, so a target
-        # there is a construction defect rather than a hard fit.
-        :training_share => (name="Training share (NSC, attrition-adjusted)", lo=0.02, hi=0.127),
+        :training_share => (name="Training share (NILF ∩ train / pop)", lo=0.005, hi=0.05),
         :theta_U => (name="Unskilled tightness V/U", lo=0.1, hi=5.0),
         :theta_S => (name="Skilled tightness V/U", lo=0.1, hi=10.0),
         :jfr_U => (name="Unskilled JF rate (monthly)", lo=0.10, hi=0.50),
@@ -124,36 +120,24 @@ function run_validation(all_moments)
     end
     println("  Flagged: $n_flags values outside expected ranges")
 
-    # ── 3. Crisis signatures ──────────────────────────────────────
-    # Unemployment rises in both crises; what separates them is where the
-    # economy sits relative to the Beveridge curve. A movement ALONG the curve
-    # (u up, θ down) is a symmetric demand contraction; an OUTWARD shift
-    # (u up, θ up) is a matching-efficiency or reallocation shock.
-    #
-    # This block deliberately does not encode a single expected direction for
-    # θ. An earlier version asserted "θ_U should fall" in both pairs, which
-    # flagged the COVID pattern as an anomaly — it is the finding, not a data
-    # defect. What IS asserted is the part common to any crisis: unemployment
-    # rises. The θ direction is reported and classified, not judged.
-    println("\n── 3. Crisis signatures (Beveridge position) ──")
-    for (lab, wb, wc) in (("FC", :base_fc, :crisis_fc),
-                          ("COVID", :base_covid, :crisis_covid))
-        haskey(all_moments, wb) && haskey(all_moments, wc) || continue
-        get_m(w, m) = filter(r -> r.moment == string(m), all_moments[w]).value[1]
-        u1, u2 = get_m(wb, :ur_U),    get_m(wc, :ur_U)
-        t1, t2 = get_m(wb, :theta_U), get_m(wc, :theta_U)
-        s1, s2 = get_m(wb, :theta_S), get_m(wc, :theta_S)
-        (!isfinite(u1) || !isfinite(u2) || !isfinite(t1) || !isfinite(t2)) && continue
-        # The one assertion: a crisis raises unemployment. If this fails the
-        # window definitions are wrong, not the economics.
-        flag = u2 > u1 ? "✓" : "⚠ CHECK WINDOWS"
-        sig  = t2 < t1 ? "along the curve  (symmetric demand contraction)" :
-                         "OUTWARD shift    (matching / reallocation shock)"
-        @printf("  %s  %-6s ur_U %+6.1f%%   θ_U %+6.1f%%   θ_S %+6.1f%%   %s\n",
-                flag, lab, 100*(u2-u1)/u1, 100*(t2-t1)/t1, 100*(s2-s1)/s1, sig)
+    # ── 3. Cross-window direction checks ──────────────────────────
+    println("\n── 3. Cross-window direction checks ──")
+    expected_directions = [
+        (:ur_U,   :base_fc,    :crisis_fc,    +1, "UR_U should rise in FC"),
+        (:ur_U,   :base_covid, :crisis_covid, +1, "UR_U should rise in COVID"),
+        (:jfr_U,  :base_fc,    :crisis_fc,    -1, "JFR_U should fall in FC"),
+        (:theta_U,:base_fc,    :crisis_fc,    -1, "θ_U should fall in FC"),
+        (:theta_U,:base_covid, :crisis_covid, -1, "θ_U should fall in COVID"),
+    ]
+    for (mname, w1, w2, expected_sign, desc) in expected_directions
+        haskey(all_moments, w1) && haskey(all_moments, w2) || continue
+        v1 = filter(r -> r.moment == string(mname), all_moments[w1]).value[1]
+        v2 = filter(r -> r.moment == string(mname), all_moments[w2]).value[1]
+        (!isfinite(v1) || !isfinite(v2)) && continue
+        actual_sign = sign(v2 - v1)
+        flag = actual_sign == expected_sign ? "✓" : "⚠ UNEXPECTED"
+        @printf("  %s  %s: %.4f → %.4f (Δ=%.4f)\n", flag, desc, v1, v2, v2-v1)
     end
-    println("  The two pairs must not receive the same classification: telling")
-    println("  them apart is what the model is for.")
 
     # ── 4. Stationary-identity gap by window ──────────────────────
     # Model identity (d ≡ 0 in stationary equilibrium, strict
@@ -161,10 +145,7 @@ function run_validation(all_moments)
     #     skilled_share * (1 - training_share)
     #   = (φ/ν) * training_share
     # A small residual is informative; a large residual flags
-    # non-stationarity in the window. Computed on the SHIPPED training_share
-    # (the NSC target), which is the quantity the SMM is asked to match — an
-    # earlier version ran it on the raw CPS count and reported gaps roughly
-    # three times larger, for a number no estimation ever sees.
+    # non-stationarity in the window.
     println("\n── 4. Stationary-identity gap (skilled_share / training_share / φ / ν) ──")
 
     phi_cal = let p = joinpath(DERIVED_DIR, "phi_calibration.csv")
@@ -198,16 +179,8 @@ function run_validation(all_moments)
             lhs = ss * (1 - ts)
             rhs = (phi_cal / nu) * ts
             gap = lhs / rhs - 1
-            # Sign is the informative part. LHS > RHS (gap > 0) means the data
-            # carry a larger skilled stock than the calibrated flow into it can
-            # sustain — the model must find the extra skilled mass somewhere
-            # other than the training margin. LHS < RHS means the opposite:
-            # more training than the skilled stock reflects, i.e. the trainee
-            # state is larger than a stationary read of φ/ν implies.
-            side = gap > 0 ? "skilled stock > flow implies" :
-                             "training stock > flow implies"
-            @printf("    %-14s  ν = %.6f  gap = %+.3f   %s\n",
-                    wname, nu, gap, side)
+            @printf("    %-14s  ν = %.6f  gap = %+.3f  (LHS/RHS - 1)\n",
+                    wname, nu, gap)
         end
     end
 

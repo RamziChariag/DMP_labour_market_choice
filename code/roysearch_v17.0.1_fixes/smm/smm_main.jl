@@ -707,7 +707,7 @@ run_params = SMMRunParams(
     λ_w = LAMBDA_W,
 
     # ── Simulated annealing ──────────────────────────────────
-    sa_max_iter        = _env_int("ROYSEARCH_SA_MAX_ITER", 30_000),   # max SA iterations
+    sa_max_iter        = _env_int("ROYSEARCH_SA_MAX_ITER", 20_000),   # max SA iterations
     sa_T0              = 0.0,     # ≤0 ⇒ auto-calibrate: T0 solves
                                   # exp(−sa_t0_rel·Q0 / T0) = sa_t0_accept
     sa_step            = 0.20,    # initial proposal sd in unconstrained space
@@ -716,7 +716,7 @@ run_params = SMMRunParams(
     sa_cooling_exp     = 2.0,     # SA_HALFLIFE = 0 selects that branch
     sa_reheat_patience = 400,     # steps without improvement before a reheat, 0 to disable reheats
     sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
-    sa_max_reheats     = _env_int("ROYSEARCH_SA_MAX_REHEATS", 4),  # cap per run, 0 = unlimited
+    sa_max_reheats     = _env_int("ROYSEARCH_SA_MAX_REHEATS", 1),  # cap per run, 0 = unlimited
     sa_adapt_window    = 50,      # rolling window for adaptive step / acceptance
     sa_target_fin      = 0.90,    # target feasibility (finite-Q) fraction;
                                   # below this, step shrinks

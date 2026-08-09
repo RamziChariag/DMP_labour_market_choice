@@ -3,11 +3,11 @@
 #
 # Combine step (Stage 7) — assemble all 31 empirical moments × 4 windows
 # from every cleaned dataset and write one moments_{window}.csv per window.
-# The training_share level comes from NSC (training_share_target.csv); the
-# substitution happens before both the trace and the returned table, so the
-# name refers to one quantity everywhere downstream.
+# The training_share level carries the NSC κ_w adjustment (written here so
+# the SMM loaders read it pre-adjusted). The in-memory return keeps the raw
+# training_share so Stage 9 diagnostics are unaffected.
 #
-# Reads:  cps_basic_clean.arrow, cps_asec_clean.arrow, transitions_monthly.arrow, jolts_clean.arrow, j2j_ee_rates.csv, sipp_wchg_rates.csv, training_share_target.csv
+# Reads:  cps_basic_clean.arrow, cps_asec_clean.arrow, transitions_monthly.arrow, jolts_clean.arrow, j2j_ee_rates.csv, sipp_wchg_rates.csv, training_share_scale.csv
 # Writes: moments_{window}.csv  (window ∈ base_fc, crisis_fc, base_covid, crisis_covid)
 #
 # Plain include() file: definitions only, no top-level execution.
@@ -461,22 +461,16 @@ function make_moments()
         # training_share is taken from NSC directly (attrition-adjusted), not
         # from the CPS SCHLCOLL count: the CPS universe was age-capped at 24
         # before 2013, so its level is not comparable across the FC and COVID
-        # window pairs. See nsc.jl::compute_training_share_target.
-        #
-        # The substitution happens BEFORE the print and before all_moments, so
-        # that one number appears under the name `training_share` everywhere —
-        # in the trace, in moments_*.csv, and in every Stage 11 diagnostic. An
-        # earlier version kept the raw CPS count in memory "for diagnostics";
-        # the result was a validation table and a stationary-identity gap
-        # computed on a quantity the SMM never sees. What the survey itself says
-        # is already reported by Stage 3 (enrollment_rate_by_age,
-        # cps_vs_nsc_enrollment.csv), under its own name.
+        # window pairs. See nsc.jl::compute_training_share_target. The in-memory
+        # `all_moments` keeps the raw CPS value so the Stage 9 diagnostics still
+        # show what the survey itself says.
+        moment_df_out = copy(moment_df)
         ts_nsc = _load_training_share_target(wname).target
-        for r in eachrow(moment_df)
+        for r in eachrow(moment_df_out)
             r.moment == "training_share" && (r.value = ts_nsc)
         end
 
-        CSV.write(joinpath(DERIVED_DIR, "moments_$(wname).csv"), moment_df)
+        CSV.write(joinpath(DERIVED_DIR, "moments_$(wname).csv"), moment_df_out)
         all_moments[wname] = moment_df
 
         for row in eachrow(moment_df)

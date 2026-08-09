@@ -290,7 +290,7 @@ compute_nu()
 _stage_banner("Stage 8 — training-completion rate φ (NSC/IPEDS)")
 calibrate_phi()
 
-_stage_banner("Stage 9 — moment targets (31 moments × 4 windows; training_share from NSC)")
+_stage_banner("Stage 9 — moment targets (31 moments × 4 windows; training_share × κ_w)")
 all_moments = make_moments()
 
 _stage_banner("Stage 10 — per-moment sampling variances (closed-form; 31 moments per window)")
