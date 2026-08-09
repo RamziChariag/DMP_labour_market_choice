@@ -1,19 +1,406 @@
 ============================================================
   RoySearch v17.0 — SMM Estimation
 ============================================================
-Loading packages... ERROR: LoadError: ArgumentError: Package Distributions not found in current path.
-- Run `import Pkg; Pkg.add("Distributions")` to install the Distributions package.
-Stacktrace:
- [1] macro expansion
-   @ ./loading.jl:1842 [inlined]
- [2] macro expansion
-   @ ./lock.jl:267 [inlined]
- [3] __require(into::Module, mod::Symbol)
-   @ Base ./loading.jl:1823
- [4] #invoke_in_world#3
-   @ ./essentials.jl:926 [inlined]
- [5] invoke_in_world
-   @ ./essentials.jl:923 [inlined]
- [6] require(into::Module, mod::Symbol)
-   @ Base ./loading.jl:1816
-in expression starting at /home/chariag1_ramzi/DMP_labour_market_choice/code/smm/smm_main.jl:69
+Loading packages... done.
+Loading solver modules... done.
+Loading SMM modules... done.
+Threads available: 15
+
+Estimation window: base_covid
+  Window definition (windows.json):  Pre-COVID baseline  ym = 201501..201912  ASEC 2016..2020
+  Calibrated σ_w (λ_w = 0.7800):  σ_wU = 0.25921,  σ_wS = 0.24198
+  load_weight_matrix: subsetting to 28 / 31 active moments (skipping: ee_step_S, ur_total, wage_premium)
+  cond_target == 0.0 → diagonal-σ W = Diagonal(1/σ̂²_samp) from /home/chariag1_ramzi/DMP_labour_market_choice/code/smm/../../data/derived/sampling_var_base_covid.csv
+  q_scale (display-only Q divisor) = 1.000000e+00
+
+Loading externally calibrated parameters (r, ν, φ)...
+  Loaded nu = 0.00336 from /home/chariag1_ramzi/DMP_labour_market_choice/code/smm/../../data/derived/nu_estimation.csv  (window=base_covid → uses base_covid row)
+  Loaded phi = 0.02222 from /home/chariag1_ramzi/DMP_labour_market_choice/code/smm/../../data/derived/phi_calibration.csv
+  Calibrated:  r = 0.004167,  ν = 0.00336,  φ = 0.02222
+
+  INIT_MODE = :warmstart — loading prior parameter values from:
+    /home/chariag1_ramzi/DMP_labour_market_choice/code/smm/../../output/smm/smm_result_base_covid_diagonalW.jls
+    Prior Q = 4.425282e+03  (converged = true)
+    Warm-start: matched 25 / 29 parameters from prior run.
+    Unmatched (kept at spec default): η, η, σ_w, σ_w
+
+  Baseline mode: all structural + regime params are FREE (29 total)
+  Fixed params:  7  |  Free params:  29
+  FIX_PARAMS pinned (2): unsk_eta, skl_eta
+SMMSpec: fixed override dropped free params: η, η, σ_w, σ_w
+SMMSpec: skip_moments zeroed weights for (3): ee_step_S, ur_total, wage_premium
+
+╔══════════════════════════════════════════════════════╗
+║  SMM Estimation Specification                        ║
+╠══════════════════════════════════════════════════════╣
+║  Free parameters (25)                                ║
+╠══════════════════════════════════════════════════════╣
+  block   name                          lb        ub      init
+  ────────────────────────────────────────────────────────
+  common  worker type shape a_ℓ     0.1000    8.0000    0.8425
+  common  worker type shape b_ℓ     0.0500    4.0000    2.1600
+  common  ability correlation ρ_x   -1.0000   -0.1000   -0.9742
+  common  training cost coeff c     0.0000   15.0000   12.0210
+  common  aggregate production scale A    0.0000   13.0000    6.1463
+  unsk    unskilled outside flow b_U    0.0000    2.5000    0.1743
+  unsk    training flow b_T         0.0000    7.0000    4.1366
+  skl     skilled outside flow b_S    0.0000    2.0000    0.1530
+  unsk    unskilled productivity P_U    0.0001    8.0000    5.5950
+  skl     skilled productivity P_S    0.0001   20.0000   11.0413
+  unsk    unskilled damage shape α_U    0.2000    6.0000    1.8773
+  skl     skilled offer shape a_Γ    0.1000   12.0000    1.4123
+  skl     skilled offer shape b_Γ    0.1000   10.0000    1.6758
+  skl     shock/offer support ratio δ_S    0.0500    1.0000    0.9427
+  unsk    unskilled matching eff μ_U    0.0001    2.0000    0.3168
+  skl     skilled matching eff μ_S    0.0001    2.0000    0.1996
+  unsk    unskilled bargaining β_U    0.0010    0.9000    0.4709
+  skl     skilled bargaining β_S    0.0001    0.9000    0.5460
+  unsk    unskilled damage rate λ_U    0.0001    0.5500    0.2117
+  skl     skilled quality shock λ_S    0.0001    0.5000    0.2203
+  unsk    unskilled vacancy cost k_U (months of avg U output)    0.0005   12.0000    1.5231
+  skl     skilled vacancy cost k_S (months of avg S output)    0.0005   12.0000    0.7453
+  skl     OJS flow cost σ_S         0.0000    1.5000    0.7534
+  unsk    unskilled exogenous separation ξ_U    0.0000    0.0200    0.0092
+  skl     skilled exogenous separation ξ_S    0.0000    0.0200    0.0039
+
+╠══════════════════════════════════════════════════════╣
+║  Fixed parameters (7)                                ║
+╠══════════════════════════════════════════════════════╣
+  r                    = 0.004167
+  ν                    = 0.003357
+  φ                    = 0.022221
+  unsk_η               = 0.500000
+  skl_η                = 0.500000
+  unsk_σ_w             = 0.259210
+  skl_σ_w              = 0.241981
+
+╠══════════════════════════════════════════════════════╣
+║  Active moments (28)                                 ║
+╠══════════════════════════════════════════════════════╣
+  (Weighting: matrix W — raw deviations g'Wg)
+  (Q divided by q_scale = 1.000000e+00 for display)
+
+  moment                      target     W diag wt
+  ────────────────────────────────────────────────
+  ur_U                        0.0563    1.1787e+07
+  ur_S                        0.0247    1.5079e+07
+  skilled_share               0.3766    2.0207e+06
+  training_share              0.0760    2.6275e+06
+  emp_var_U                   0.3054    8.1195e+04
+  emp_cm3_U                  -0.0090    1.1251e+05
+  emp_var_S                   0.2662    1.0607e+05
+  emp_cm3_S                  -0.0434    1.1036e+05
+  jfr_U                       0.2964    1.8786e+05
+  sep_rate_U                  0.0133    8.4939e+07
+  jfr_S                       0.3170    4.3416e+04
+  sep_rate_S                  0.0059    1.1368e+08
+  ee_rate_S                   0.0085    9.7813e+06
+  mean_wage_U                 6.5349    4.7413e+04
+  mean_wage_S                 6.9198    6.5279e+04
+  p25_wage_U                  6.1707    2.7064e+04
+  p25_wage_S                  6.6004    5.1646e+04
+  p50_wage_U                  6.5396    3.5213e+04
+  p50_wage_S                  6.9213    5.1563e+04
+  p75_wage_U                  6.9159    3.2707e+04
+  p75_wage_S                  7.2696    4.4911e+04
+  theta_U                     0.8151    1.5400e+05
+  theta_S                     1.8369    7.3387e+03
+  overlap_UgtS                0.2390    4.7932e+04
+  overlap_SltU                0.2061    4.5979e+04
+  ltu_share_S                 0.2564    5.1147e+04
+  wchg_rate_U                 0.2085    2.0069e+06
+  wchg_rate_S                 0.2224    1.1504e+06
+
+╠══════════════════════════════════════════════════════╣
+║  Skipped moments ( 3, weight = 0)                   ║
+╠══════════════════════════════════════════════════════╣
+  moment                      target
+  ──────────────────────────────────
+  ur_total                    0.0444
+  wage_premium                0.3849
+  ee_step_S                   0.1090
+
+  Grid: Nx=120  Np_U=120  Np_S=120
+  λ_w (wage-reliability calibration knob, σ_w = √((1−λ_w)·Var̂[log w])): 0.7800
+  SA:  max_iter=30000  T0=0.00  step=0.20  cooling_rate=1.00  cooling_exp=2.00  reheat_patience=400  reheat_factor=4.00  adapt_window=50  target_fin=0.90
+  DE:   max_iter=3000  pop_size=200  f=0.70  cr=0.85  patience=3  avg_tol=1.0e-06
+  NM:   max_iter=20000  f_tol=1e-03  x_tol=1e-05  g_tol=1e-08  no_improve=4000
+  SA:   3 coords/iter, per-coordinate step;  cooling geometric, half-life 5000;  stop ΔQ < 0.05 per 100 iters
+  NM:   stop ΔQ < 0.05 per 100 evals, sustained over 300 evals
+  W:    diagonal-σ — Diagonal(1/σ̂²_samp) (cond(W)=1.55e+04)
+  Q scale (display-only divisor): 1.000000e+00
+╚══════════════════════════════════════════════════════╝
+
+Starting SMM optimisation...
+
+Starting SMM  (sa,  25 free params)
+  [SA T0 auto]  T0 = 0.2069  (0.0% of Q0 = 2.490969e+03 accepted w.p. 0.30)
+  [SA init]  Q0 = 2.490969e+03  T0=0.2069  step range=0.200000  corners=0/25
+  [SA iter=  100]  curr=2.480165e+03    best=2.480165e+03  T=0.2041  step range=0.066667‥0.150000  acc=0.00  fin=0.50  corners=0/25  reheats=0
+  [SA iter=  200]  curr=2.408783e+03    best=2.408783e+03  T=0.2013  step range=0.007407‥0.026471  acc=0.10  fin=0.68  corners=0/25  reheats=0
+  [SA iter=  300]  curr=2.359825e+03    best=2.359825e+03  T=0.1985  step range=0.000823‥0.009907  acc=0.18  fin=0.48  corners=0/25  reheats=0
+  [SA iter=  400]  curr=2.344338e+03    best=2.344338e+03  T=0.1958  step range=0.000274‥0.007430  acc=0.36  fin=0.78  corners=0/25  reheats=0
+  [SA iter=  500]  curr=2.333152e+03    best=2.333006e+03  T=0.1931  step range=0.000046‥0.004246  acc=0.40  fin=0.78  corners=0/25  reheats=0
+  [SA iter=  600]  curr=2.322220e+03    best=2.321604e+03  T=0.1904  step range=0.000027‥0.003959  acc=0.38  fin=0.78  corners=0/25  reheats=0
+  [SA iter=  700]  curr=2.312003e+03    best=2.312003e+03  T=0.1878  step range=0.000020‥0.002592  acc=0.36  fin=1.00  corners=0/25  reheats=0
+  [SA iter=  800]  curr=2.299156e+03    best=2.299156e+03  T=0.1852  step range=0.000020‥0.003455  acc=0.58  fin=0.84  corners=0/25  reheats=0
+  [SA iter=  900]  curr=2.293269e+03    best=2.293269e+03  T=0.1827  step range=0.000030‥0.004506  acc=0.64  fin=0.86  corners=0/25  reheats=0
+  [SA iter= 1000]  curr=2.286749e+03    best=2.286749e+03  T=0.1801  step range=0.000030‥0.004558  acc=0.52  fin=0.98  corners=0/25  reheats=0
+  [SA iter= 1100]  curr=2.284723e+03    best=2.284297e+03  T=0.1777  step range=0.000020‥0.003419  acc=0.50  fin=0.94  corners=0/25  reheats=0
+  [SA iter= 1200]  curr=2.284039e+03    best=2.283849e+03  T=0.1752  step range=0.000040‥0.005983  acc=0.58  fin=0.92  corners=0/25  reheats=0
+  [SA iter= 1300]  curr=2.283416e+03    best=2.282954e+03  T=0.1728  step range=0.000040‥0.005304  acc=0.32  fin=0.96  corners=0/25  reheats=0
+  [SA iter= 1400]  curr=2.284463e+03    best=2.282954e+03  T=0.1704  step range=0.000020‥0.004052  acc=0.34  fin=0.72  corners=0/25  reheats=0
+  [SA iter= 1500]  curr=2.284838e+03    best=2.282954e+03  T=0.1681  step range=0.000028‥0.004052  acc=0.76  fin=1.00  corners=0/25  reheats=0
+  [SA iter= 1600]  curr=2.283486e+03    best=2.282954e+03  T=0.1658  step range=0.000040‥0.003794  acc=0.64  fin=0.96  corners=0/25  reheats=0
+  [SA REHEAT #1  iter= 1672]  T 0.1641→0.6565  in place at Q=2.283452e+03 (best=2.282954e+03)  corners=0/25
+  [SA iter= 1700]  curr=2.283914e+03    best=2.282954e+03  T=0.6540  step range=0.000041‥0.008221  acc=0.50  fin=0.98  corners=0/25  reheats=1
+  [SA iter= 1800]  curr=2.287076e+03    best=2.282954e+03  T=0.6450  step range=0.000053‥0.008221  acc=0.64  fin=1.00  corners=0/25  reheats=1
+  [SA iter= 1900]  curr=2.284870e+03    best=2.282954e+03  T=0.6361  step range=0.000048‥0.009118  acc=0.68  fin=0.92  corners=0/25  reheats=1
+  [SA iter= 2000]  curr=2.281206e+03    best=2.281206e+03  T=0.6274  step range=0.000105‥0.019104  acc=0.58  fin=0.88  corners=0/25  reheats=1
+  [SA iter= 2100]  curr=2.279426e+03    best=2.279198e+03  T=0.6187  step range=0.000047‥0.049324  acc=0.64  fin=0.92  corners=0/25  reheats=1
+  [SA iter= 2200]  curr=2.278168e+03    best=2.278027e+03  T=0.6102  step range=0.000047‥0.020178  acc=0.52  fin=0.94  corners=0/25  reheats=1
+  [SA iter= 2300]  curr=2.272007e+03    best=2.271638e+03  T=0.6018  step range=0.000063‥0.020178  acc=0.58  fin=0.80  corners=0/25  reheats=1
+  [SA iter= 2400]  curr=2.268654e+03    best=2.268480e+03  T=0.5935  step range=0.000080‥0.026904  acc=0.60  fin=0.84  corners=0/25  reheats=1
+  [SA iter= 2500]  curr=2.267737e+03    best=2.266456e+03  T=0.5854  step range=0.000069‥0.010762  acc=0.62  fin=0.86  corners=0/25  reheats=1
+  [SA iter= 2600]  curr=2.263050e+03    best=2.263050e+03  T=0.5773  step range=0.000027‥0.018833  acc=0.50  fin=0.82  corners=0/25  reheats=1
+  [SA iter= 2700]  curr=2.263142e+03    best=2.262821e+03  T=0.5693  step range=0.000029‥0.043943  acc=0.46  fin=0.76  corners=0/25  reheats=1
+  [SA iter= 2800]  curr=2.257394e+03    best=2.256938e+03  T=0.5615  step range=0.000029‥0.039060  acc=0.50  fin=0.74  corners=0/25  reheats=1
+  [SA iter= 2900]  curr=2.255472e+03    best=2.254588e+03  T=0.5538  step range=0.000020‥0.030690  acc=0.44  fin=0.80  corners=0/25  reheats=1
+  [SA iter= 3000]  curr=2.255237e+03    best=2.254517e+03  T=0.5462  step range=0.000041‥0.024970  acc=0.60  fin=0.84  corners=0/25  reheats=1
+  [SA iter= 3100]  curr=2.256749e+03    best=2.254517e+03  T=0.5386  step range=0.000041‥0.024970  acc=0.44  fin=0.68  corners=0/25  reheats=1
+  [SA iter= 3200]  curr=2.258241e+03    best=2.254517e+03  T=0.5312  step range=0.000028‥0.010701  acc=0.38  fin=0.62  corners=0/25  reheats=1
+  [SA iter= 3300]  curr=2.259073e+03    best=2.254517e+03  T=0.5239  step range=0.000046‥0.042747  acc=0.58  fin=0.78  corners=0/25  reheats=1
+  [SA REHEAT #2  iter= 3375]  T 0.5185→2.0739  in place at Q=2.259239e+03 (best=2.254517e+03)  corners=0/25
+  [SA iter= 3400]  curr=2.263861e+03    best=2.254517e+03  T=2.0671  step range=0.000035‥0.067174  acc=0.52  fin=0.84  corners=0/25  reheats=2
+  [SA iter= 3500]  curr=2.261264e+03    best=2.254517e+03  T=2.0386  step range=0.000091‥0.164203  acc=0.62  fin=0.86  corners=0/25  reheats=2
+  [SA iter= 3600]  curr=2.259106e+03    best=2.254517e+03  T=2.0105  step range=0.000157‥0.152475  acc=0.44  fin=0.70  corners=0/25  reheats=2
+  [SA iter= 3700]  curr=2.270846e+03    best=2.254517e+03  T=1.9829  step range=0.000154‥0.050825  acc=0.58  fin=0.90  corners=0/25  reheats=2
+  [SA REHEAT #3  iter= 3775]  T 1.9623→7.8494  in place at Q=2.264845e+03 (best=2.254517e+03)  corners=0/25
+  [SA iter= 3800]  curr=2.268974e+03    best=2.254517e+03  T=7.8233  step range=0.000176‥0.050825  acc=0.62  fin=0.78  corners=0/25  reheats=3
+  [SA iter= 3900]  curr=2.296943e+03    best=2.254517e+03  T=7.7156  step range=0.000144‥0.050825  acc=0.20  fin=0.72  corners=0/25  reheats=3
+  [SA iter= 4000]  curr=2.258342e+03    best=2.254517e+03  T=7.6094  step range=0.000144‥0.050825  acc=0.52  fin=0.70  corners=0/25  reheats=3
+  [SA iter= 4100]  curr=2.271784e+03    best=2.254517e+03  T=7.5046  step range=0.000133‥0.057178  acc=0.44  fin=0.62  corners=0/25  reheats=3
+  [SA REHEAT #4  iter= 4175]  T 7.4270→29.7079  in place at Q=2.265016e+03 (best=2.254517e+03)  corners=0/25
+  [SA iter= 4200]  curr=2.296488e+03    best=2.254517e+03  T=29.6093  step range=0.000133‥0.057178  acc=0.62  fin=0.78  corners=0/25  reheats=4
+  [SA iter= 4300]  curr=2.306471e+03    best=2.254517e+03  T=29.2016  step range=0.000072‥0.050825  acc=0.64  fin=0.72  corners=0/25  reheats=4
+  [SA iter= 4400]  curr=2.259731e+03    best=2.251395e+03  T=28.7996  step range=0.000024‥0.089851  acc=0.60  fin=0.74  corners=0/25  reheats=4
+  [SA iter= 4500]  curr=2.311699e+03    best=2.251395e+03  T=28.4031  step range=0.000069‥0.187870  acc=0.66  fin=0.80  corners=0/25  reheats=4
+  [SA iter= 4600]  curr=2.266020e+03    best=2.251395e+03  T=28.0121  step range=0.000069‥0.187870  acc=0.42  fin=0.68  corners=0/25  reheats=4
+  [SA iter= 4700]  curr=2.297888e+03    best=2.251395e+03  T=27.6264  step range=0.000039‥0.125247  acc=0.42  fin=0.54  corners=0/25  reheats=4
+  [SA REHEAT #5  iter= 4795]  T 27.2650→109.0599  in place at Q=2.303025e+03 (best=2.251395e+03)  corners=0/25
+  [SA iter= 4800]  curr=2.307063e+03    best=2.251395e+03  T=108.9994  step range=0.000079‥0.125247  acc=0.40  fin=0.52  corners=0/25  reheats=5
+  [SA iter= 4900]  curr=2.414082e+03    best=2.251395e+03  T=107.4988  step range=0.000236‥0.125247  acc=0.72  fin=0.76  corners=0/25  reheats=5
+  [SA iter= 5000]  curr=2.578781e+03    best=2.251395e+03  T=106.0188  step range=0.000412‥0.333992  acc=0.44  fin=0.58  corners=0/25  reheats=5
+  [SA iter= 5100]  curr=2.601079e+03    best=2.251395e+03  T=104.5592  step range=0.000412‥0.375741  acc=0.62  fin=0.74  corners=0/25  reheats=5
+  [SA REHEAT #6  iter= 5195]  T 103.1912→412.7648  in place at Q=2.396464e+03 (best=2.251395e+03)  corners=0/25
+  [SA iter= 5200]  curr=2.340427e+03    best=2.251395e+03  T=412.5360  step range=0.000464‥0.375741  acc=0.58  fin=0.70  corners=0/25  reheats=6
+  [SA iter= 5300]  curr=2.986450e+03    best=2.251395e+03  T=406.8565  step range=0.000464‥0.375741  acc=0.58  fin=0.62  corners=0/25  reheats=6
+  [SA iter= 5400]  curr=3.262637e+03    best=2.251395e+03  T=401.2552  step range=0.000619‥0.365218  acc=0.64  fin=0.80  corners=0/25  reheats=6
+  [SA iter= 5500]  curr=3.785836e+03    best=2.251395e+03  T=395.7310  step range=0.001340‥0.125247  acc=0.48  fin=0.70  corners=0/25  reheats=6
+  [SA REHEAT #7  iter= 5595]  T 390.5535→1562.2139  in place at Q=2.251395e+03 (best=2.251395e+03)  corners=0/25
+  [SA iter= 5600]  curr=2.624024e+03    best=2.251395e+03  T=1561.3478  step range=0.001137‥0.121739  acc=0.48  fin=0.60  corners=0/25  reheats=7
+  [SA iter= 5700]  curr=6.236392e+03    best=2.251395e+03  T=1539.8523  step range=0.001050‥0.125729  acc=0.48  fin=0.58  corners=0/25  reheats=7
+  [SA iter= 5800]  curr=1.356465e+04    best=2.251395e+03  T=1518.6527  step range=0.001011‥0.220026  acc=0.50  fin=0.62  corners=0/25  reheats=7
+  [SA iter= 5900]  curr=1.027823e+04    best=2.251395e+03  T=1497.7450  step range=0.001050‥0.165020  acc=0.52  fin=0.56  corners=0/25  reheats=7
+  [SA REHEAT #8  iter= 5995]  T 1478.1493→5912.5972  in place at Q=2.251395e+03 (best=2.251395e+03)  corners=0/25
+  [SA iter= 6000]  curr=2.615006e+03    best=2.251395e+03  T=5909.3194  step range=0.001214‥0.165020  acc=0.56  fin=0.66  corners=0/25  reheats=8
+  [SA iter= 6100]  curr=6.283011e+03    best=2.251395e+03  T=5827.9641  step range=0.001588‥0.495060  acc=0.62  fin=0.72  corners=0/25  reheats=8
+  [SA iter= 6200]  curr=1.325662e+04    best=2.251395e+03  T=5747.7288  step range=0.002081‥0.777951  acc=0.54  fin=0.56  corners=0/25  reheats=8
+  [SA iter= 6300]  curr=8.279878e+03    best=2.251395e+03  T=5668.5981  step range=0.003641‥0.407498  acc=0.54  fin=0.66  corners=0/25  reheats=8
+  [SA EARLY STOP  iter= 6395]  reheats exhausted, no improvement for 400 steps, Q_best=2.251395e+03  corners=0/25
+  [SA done]  Q_best=2.251395e+03  accepted 3166/6395  finite 4792/6395  corners=0/25  reheats=8
+
+SMM complete:  Q=2.251395e+03  converged=true (sa-stop)  iters=6395
+
+╔══════════════════════════════════════════════════════╗
+║  SMM Estimates                                       ║
+╠══════════════════════════════════════════════════════╣
+  block   parameter                 estimate
+  ------------------------------------------
+  common  worker type shape a_ℓ      0.86459
+  common  worker type shape b_ℓ      2.15393
+  common  ability correlation ρ_x    -0.96001
+  common  training cost coeff c     11.99719
+  common  aggregate production scale A     6.13610
+  unsk    unskilled outside flow b_U     0.15588
+  unsk    training flow b_T          4.16065
+  skl     skilled outside flow b_S     0.21600
+  unsk    unskilled productivity P_U     5.54343
+  skl     skilled productivity P_S    11.02717
+  unsk    unskilled damage shape α_U     1.89089
+  skl     skilled offer shape a_Γ     1.41031
+  skl     skilled offer shape b_Γ     1.65137
+  skl     shock/offer support ratio δ_S     0.94377
+  unsk    unskilled matching eff μ_U     0.31636
+  skl     skilled matching eff μ_S     0.19919
+  unsk    unskilled bargaining β_U     0.47688
+  skl     skilled bargaining β_S     0.53260
+  unsk    unskilled damage rate λ_U     0.21105
+  skl     skilled quality shock λ_S     0.21921
+  unsk    unskilled vacancy cost k_U (months of avg U output)     1.54410
+  skl     skilled vacancy cost k_S (months of avg S output)     0.73181
+  skl     OJS flow cost σ_S          0.71302
+  unsk    unskilled exogenous separation ξ_U     0.00977
+  skl     skilled exogenous separation ξ_S     0.00438
+
+  Fixed:
+    r                            0.00417
+    ν                            0.00336
+    φ                            0.02222
+    unsk_η                       0.50000
+    skl_η                        0.50000
+    unsk_σ_w                     0.25921
+    skl_σ_w                      0.24198
+
+  Q = 2.25139508e+03  |  converged = true (sa-stop)  |  iters = 6395
+╚══════════════════════════════════════════════════════╝
+
+
+Starting SMM  (neldermead,  25 free params)
+  [NM simplex]  25/25 coordinates admit a step within ΔQ<1 (cap 0.2)
+  [neldermead iter  100]  Q=2.240258e+03    best=2.220462e+03  corners=0/25
+  [neldermead iter  200]  Q=2.218022e+03    best=2.210270e+03  corners=0/25
+  [neldermead iter  300]  Q=2.229785e+03    best=2.203575e+03  corners=0/25
+  [neldermead iter  400]  Q=2.213182e+03    best=2.203387e+03  corners=0/25
+  [neldermead iter  500]  Q=Inf             best=2.202437e+03  corners=0/25
+  [neldermead iter  600]  Q=Inf             best=2.202437e+03  corners=0/25
+  [neldermead iter  700]  Q=Inf             best=2.198382e+03  corners=0/25
+  [neldermead iter  800]  Q=Inf             best=2.198382e+03  corners=0/25
+  [neldermead iter  900]  Q=Inf             best=2.198283e+03  corners=0/25
+  [neldermead iter 1000]  Q=Inf             best=2.198145e+03  corners=0/25
+  [neldermead iter 1100]  Q=2.198304e+03    best=2.197638e+03  corners=0/25
+  [neldermead iter 1200]  Q=2.197442e+03    best=2.195576e+03  corners=0/25
+  [neldermead iter 1300]  Q=Inf             best=2.195576e+03  corners=0/25
+  [neldermead iter 1400]  Q=2.196290e+03    best=2.194563e+03  corners=0/25
+  [neldermead iter 1500]  Q=2.195418e+03    best=2.193766e+03  corners=0/25
+  [neldermead iter 1600]  Q=Inf             best=2.193766e+03  corners=0/25
+  [neldermead iter 1700]  Q=Inf             best=2.193766e+03  corners=0/25
+  [neldermead iter 1800]  Q=2.194883e+03    best=2.193766e+03  corners=0/25
+  [neldermead iter 1900]  Q=2.194687e+03    best=2.193766e+03  corners=0/25
+  [neldermead iter 2000]  Q=2.194307e+03    best=2.193766e+03  corners=0/25
+  [neldermead iter 2100]  Q=Inf             best=2.193242e+03  corners=0/25
+  [neldermead iter 2200]  Q=2.193093e+03    best=2.192793e+03  corners=0/25
+  [neldermead iter 2300]  Q=2.192819e+03    best=2.192793e+03  corners=0/25
+  [neldermead iter 2400]  Q=2.192225e+03    best=2.192225e+03  corners=0/25
+  [neldermead iter 2500]  Q=2.191393e+03    best=2.191373e+03  corners=0/25
+  [neldermead iter 2600]  Q=2.190320e+03    best=2.190304e+03  corners=0/25
+  [neldermead iter 2700]  Q=2.189274e+03    best=2.189274e+03  corners=0/25
+  [neldermead iter 2800]  Q=2.188254e+03    best=2.188254e+03  corners=0/25
+  [neldermead iter 2900]  Q=2.186981e+03    best=2.186949e+03  corners=0/25
+  [neldermead iter 3000]  Q=2.185265e+03    best=2.185265e+03  corners=0/25
+  [neldermead iter 3100]  Q=2.183481e+03    best=2.183481e+03  corners=0/25
+  [neldermead iter 3200]  Q=2.181503e+03    best=2.181423e+03  corners=0/25
+  [neldermead iter 3300]  Q=2.178769e+03    best=2.178769e+03  corners=0/25
+  [neldermead iter 3400]  Q=2.176593e+03    best=2.176547e+03  corners=0/25
+  [neldermead iter 3500]  Q=2.174029e+03    best=2.174012e+03  corners=0/25
+  [neldermead iter 3600]  Q=2.172069e+03    best=2.172069e+03  corners=0/25
+  [neldermead iter 3700]  Q=2.171929e+03    best=2.171455e+03  corners=0/25
+  [neldermead iter 3800]  Q=2.170221e+03    best=2.170218e+03  corners=0/25
+  [neldermead iter 3900]  Q=2.170028e+03    best=2.169565e+03  corners=0/25
+  [neldermead iter 4000]  Q=2.168655e+03    best=2.168655e+03  corners=0/25
+  [neldermead iter 4100]  Q=2.166773e+03    best=2.166773e+03  corners=0/25
+  [neldermead iter 4200]  Q=2.164936e+03    best=2.164936e+03  corners=0/25
+  [neldermead iter 4300]  Q=2.163070e+03    best=2.163070e+03  corners=0/25
+  [neldermead iter 4400]  Q=2.161772e+03    best=2.161772e+03  corners=0/25
+  [neldermead iter 4500]  Q=2.161079e+03    best=2.161079e+03  corners=0/25
+  [neldermead iter 4600]  Q=Inf             best=2.160475e+03  corners=0/25
+  [neldermead iter 4700]  Q=2.160134e+03    best=2.159923e+03  corners=0/25
+  [neldermead iter 4800]  Q=2.159265e+03    best=2.159265e+03  corners=0/25
+  [neldermead iter 4900]  Q=2.158368e+03    best=2.158368e+03  corners=0/25
+  [neldermead iter 5000]  Q=2.157291e+03    best=2.157274e+03  corners=0/25
+  [neldermead iter 5100]  Q=2.156082e+03    best=2.155344e+03  corners=0/25
+  [neldermead iter 5200]  Q=2.154558e+03    best=2.154558e+03  corners=0/25
+  [neldermead iter 5300]  Q=2.153446e+03    best=2.153445e+03  corners=0/25
+  [neldermead iter 5400]  Q=2.152454e+03    best=2.152454e+03  corners=0/25
+  [neldermead iter 5500]  Q=2.151050e+03    best=2.151018e+03  corners=0/25
+  [neldermead iter 5600]  Q=2.149441e+03    best=2.149441e+03  corners=0/25
+  [neldermead iter 5700]  Q=2.147886e+03    best=2.147859e+03  corners=0/25
+  [neldermead iter 5800]  Q=2.145882e+03    best=2.145882e+03  corners=0/25
+  [neldermead iter 5900]  Q=2.143697e+03    best=2.143697e+03  corners=0/25
+  [neldermead iter 6000]  Q=2.141736e+03    best=2.141686e+03  corners=0/25
+  [neldermead iter 6100]  Q=2.141535e+03    best=2.141393e+03  corners=0/25
+  [neldermead iter 6200]  Q=2.141093e+03    best=2.141093e+03  corners=0/25
+  [neldermead iter 6300]  Q=2.140672e+03    best=2.140605e+03  corners=0/25
+  [neldermead iter 6400]  Q=2.140154e+03    best=2.140154e+03  corners=0/25
+  [neldermead iter 6500]  Q=Inf             best=2.139820e+03  corners=0/25
+  [neldermead iter 6600]  Q=2.139568e+03    best=2.139568e+03  corners=0/25
+  [neldermead iter 6700]  Q=2.139207e+03    best=2.139177e+03  corners=0/25
+  [neldermead iter 6800]  Q=2.138744e+03    best=2.138744e+03  corners=0/25
+  [neldermead iter 6900]  Q=2.138317e+03    best=2.138309e+03  corners=0/25
+  [neldermead iter 7000]  Q=2.137784e+03    best=2.137784e+03  corners=0/25
+  [neldermead iter 7100]  Q=2.137233e+03    best=2.137207e+03  corners=0/25
+  [neldermead iter 7200]  Q=2.136621e+03    best=2.136621e+03  corners=0/25
+  [neldermead iter 7300]  Q=2.136121e+03    best=2.136102e+03  corners=0/25
+  [neldermead iter 7400]  Q=2.135929e+03    best=2.135843e+03  corners=0/25
+  [neldermead iter 7500]  Q=Inf             best=2.135819e+03  corners=0/25
+  [neldermead iter 7600]  Q=2.135860e+03    best=2.135802e+03  corners=0/25
+  [neldermead iter 7700]  Q=2.135801e+03    best=2.135789e+03  corners=0/25
+  [neldermead iter 7800]  Q=Inf             best=2.135789e+03  corners=0/25
+  [neldermead iter 7900]  Q=2.135836e+03    best=2.135789e+03  corners=0/25
+  [neldermead iter 8000]  Q=2.136237e+03    best=2.135789e+03  corners=0/25
+  [neldermead iter 8100]  Q=Inf             best=2.135789e+03  corners=0/25
+  [neldermead iter 8200]  Q=2.135789e+03    best=2.135788e+03  corners=0/25
+  [neldermead iter 8300]  Q=Inf             best=2.135788e+03  corners=0/25
+  [neldermead iter 8400]  Q=2.135813e+03    best=2.135786e+03  corners=0/25
+  [neldermead iter 8500]  Q=Inf             best=2.135786e+03  corners=0/25
+  [neldermead iter 8600]  Q=Inf             best=2.135786e+03  corners=0/25
+  [neldermead iter 8700]  Q=2.136230e+03    best=2.135786e+03  corners=0/25
+  [neldermead iter 8800]  Q=2.135787e+03    best=2.135786e+03  corners=0/25
+  [neldermead iter 8900]  Q=Inf             best=2.135786e+03  corners=0/25
+  [neldermead iter 9000]  Q=2.135786e+03    best=2.135785e+03  corners=0/25
+  [neldermead iter 9100]  Q=2.136228e+03    best=2.135785e+03  corners=0/25
+  [neldermead iter 9200]  Q=2.135780e+03    best=2.135780e+03  corners=0/25
+  [neldermead iter 9300]  Q=2.135769e+03    best=2.135769e+03  corners=0/25
+  [neldermead iter 9400]  Q=2.135756e+03    best=2.135756e+03  corners=0/25
+  [neldermead iter 9500]  Q=2.135736e+03    best=2.135736e+03  corners=0/25
+  [neldermead EARLY STOP  iter 9533]  ΔQ < 0.05 per 100 evals over 301 evals  best=2.135729e+03  corners=0/25
+
+SMM complete:  Q=2.135729e+03  converged=true (rate)  iters=4161
+
+╔══════════════════════════════════════════════════════╗
+║  SMM Estimates                                       ║
+╠══════════════════════════════════════════════════════╣
+  block   parameter                 estimate
+  ------------------------------------------
+  common  worker type shape a_ℓ      0.88121
+  common  worker type shape b_ℓ      2.20308
+  common  ability correlation ρ_x    -0.95412
+  common  training cost coeff c     12.01767
+  common  aggregate production scale A     6.13284
+  unsk    unskilled outside flow b_U     0.15321
+  unsk    training flow b_T          4.27356
+  skl     skilled outside flow b_S     0.20319
+  unsk    unskilled productivity P_U     5.57860
+  skl     skilled productivity P_S    11.12711
+  unsk    unskilled damage shape α_U     1.90359
+  skl     skilled offer shape a_Γ     1.45831
+  skl     skilled offer shape b_Γ     1.73412
+  skl     shock/offer support ratio δ_S     0.94319
+  unsk    unskilled matching eff μ_U     0.31864
+  skl     skilled matching eff μ_S     0.21542
+  unsk    unskilled bargaining β_U     0.47627
+  skl     skilled bargaining β_S     0.52516
+  unsk    unskilled damage rate λ_U     0.21100
+  skl     skilled quality shock λ_S     0.22147
+  unsk    unskilled vacancy cost k_U (months of avg U output)     1.54881
+  skl     skilled vacancy cost k_S (months of avg S output)     0.76228
+  skl     OJS flow cost σ_S          0.73613
+  unsk    unskilled exogenous separation ξ_U     0.00986
+  skl     skilled exogenous separation ξ_S     0.00480
+
+  Fixed:
+    r                            0.00417
+    ν                            0.00336
+    φ                            0.02222
+    unsk_η                       0.50000
+    skl_η                        0.50000
+    unsk_σ_w                     0.25921
+    skl_σ_w                      0.24198
+
+  Q = 2.13572889e+03  |  converged = true (rate)  |  iters = 4161
+╚══════════════════════════════════════════════════════╝
+
+Results saved to: /home/chariag1_ramzi/DMP_labour_market_choice/code/smm/../../output/tables/smm_estimates_base_covid_diagonalW.csv
+Serialized SMM result → /home/chariag1_ramzi/DMP_labour_market_choice/code/smm/../../output/smm/smm_result_base_covid_diagonalW.jls
+
+Done.
