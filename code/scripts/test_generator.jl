@@ -2,7 +2,7 @@
 # test_generator.jl — exercise the SHIPPING generate_population and its DE call sites
 # against a stub objective, so every branch is checked at zero solver cost.
 #
-#   RSROOT=<repo> julia -t 4 test_generator.jl
+#   julia --project=. -t 4 code/scripts/test_generator.jl
 #
 # The stub replaces smm_objective with a quadratic bowl plus a controllable infeasible
 # region. That fixes the two quantities the generator's logic keys on — how many
@@ -14,7 +14,12 @@ using Distributions, FastGaussQuadrature, Interpolations, Parameters, Base.Threa
 using Optim, CSV, DataFrames, Clustering, QuasiMonteCarlo, JSON3
 BLAS.set_num_threads(1)
 
-const R = ENV["RSROOT"]
+# The repo is found from this file's own location, not from an environment variable:
+# a test that needs setting up before it can run is a test that gets skipped.
+# find_repo_root walks up for the pair of markers rather than assuming a fixed depth,
+# so it is correct whether scripts/ sits at the root or under code/.
+include(joinpath(@__DIR__, "repo_root.jl"))
+const R = find_repo_root()
 for f in ("grids", "params", "unskilled", "skilled", "solver", "equilibrium")
     include(joinpath(R, "code", "solver", f * ".jl"))
 end
