@@ -112,6 +112,8 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
                   CR::Float64 = 0.90, δ::Int = 1,
                   b_add::Float64 = 1e-4, b_mult::Float64 = 1e-2,
                   jump_every::Int = 10, init::Symbol = :at_seed, init_screen::Int = 0,
+                  init_scale::Union{Nothing,AbstractVector} = nothing,
+                  init_width::Union{Nothing,AbstractVector} = nothing,
                   parallel::Bool = true,
                   rng::AbstractRNG = MersenneTwister(20260624),
                   verbose::Bool = true, print_every::Int = 250,
@@ -191,9 +193,21 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
         lpc   = Vector{Float64}(undef, ncand)
         keep  = Int[]
         radius = 0.0
-        for r in (1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4)
+        # PER-COORDINATE scale. One scalar radius cannot serve coordinates whose
+        # posterior widths span orders of magnitude: DE-MC's step size is the
+        # population's own spread, so it contracts a population that starts too narrow
+        # but not one that starts too wide (contraction needs accepted moves, and an
+        # over-dispersed proposal is rejected). init_scale = nothing reproduces the
+        # v17.1 isotropic draw exactly, so old call sites are unaffected.
+        s = init_scale === nothing ? ones(d) : collect(float.(init_scale))
+        length(s) == d || error("run_demc: init_scale has length $(length(s)), expected $d")
+        all(x -> isfinite(x) && x > 0, s) ||
+            error("run_demc: init_scale must be finite and strictly positive")
+        # The ladder is now a MULTIPLIER on s: the vector carries the units, so r = 1.0
+        # is the intended scale and shrinking happens only if feasibility forces it.
+        for r in (1.0, 0.3, 0.1, 0.03, 0.01)
             for j in 1:ncand, k in 1:d
-                cand[k, j] = θ0f[k] + r * randn(rng)
+                cand[k, j] = θ0f[k] + r * s[k] * randn(rng)
             end
             @views cand[:, 1] .= θ0f          # the seed always survives the screen
             _eval_population!(lpc, logπ, cand, ncand, parallel)
@@ -206,8 +220,34 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
                   "candidates. The seed sits in a basin too narrow to sample from; " *
                   "use init = :at_seed, or re-estimate.")
         order = keep[sortperm(lpc[keep], rev = true)]          # best log-target first
-        verbose && @printf("[demc] screen: radius=%.1e  %d/%d feasible  logπ %.4e … %.4e  (median seeded)\n",
-                           radius, length(keep), ncand, lpc[order[1]], lpc[order[end]])
+        # Report the realised scale, and the one number that says whether the
+        # precondition holds: how many coordinates start WIDER than the target scale
+        # they were given. That count must be 0 — a non-zero value means the population
+        # cannot contract in those directions and their reported SD is biased upward.
+        if verbose
+            eff = radius .* s          # the scale actually drawn from, per coordinate
+            # A coordinate is over-dispersed iff the scale actually drawn from exceeds
+            # that coordinate's own POSTERIOR WIDTH. The comparison must be against the
+            # width itself (init_width), NOT against s: s is already the clamped scale,
+            # so eff .<= s holds by construction and comparing the two would be a
+            # tautology that always reports 0. The clamp is exactly where genuine
+            # over-dispersion enters — MCMC_SCREEN_CAP raises the scale of any
+            # coordinate whose width is below the cap — so the cap is what this must
+            # catch. init_width is the unclamped se_t vector in the same t units.
+            nover = init_width === nothing ? -1 : count(k -> eff[k] > init_width[k], 1:d)
+            @printf("[demc] screen: mult=%.2f  scale in t: min=%.2e med=%.2e max=%.2e  %s\n",
+                    radius, minimum(eff), median(eff), maximum(eff),
+                    init_width === nothing ? "(no width vector: over-dispersion unchecked)" :
+                        @sprintf("over-dispersed: %d/%d", nover, d))
+            if nover > 0
+                worst = argmax([init_width[k] > 0 ? eff[k] / init_width[k] : 0.0 for k in 1:d])
+                @printf("[demc] screen: WARNING %d coordinate(s) start WIDER than their own posterior; \
+worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is biased UP.\n",
+                        nover, worst, eff[worst] / init_width[worst])
+            end
+            @printf("[demc] screen: %d/%d feasible  logπ %.4e … %.4e  (median seeded)\n",
+                    length(keep), ncand, lpc[order[1]], lpc[order[end]])
+        end
         mid = max(1, length(order) ÷ 2)                        # middle of the ranking
         for c in 1:N
             src = order[mod1(mid + (c - 1), length(order))]    # cycle if survivors < N
@@ -327,9 +367,20 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
         end
 
         if verbose && (g % print_every == 0 || g == gens)
-            @printf("[demc] gen %5d/%d  acc=%.3f  fin=%.2f  max logπ=%.6e  (cum acc=%.3f)\n",
+            # Acceptance alone cannot say whether the run is producing a posterior: it
+            # falls as the population leaves a collapsed start whether or not the chain
+            # is mixing. Worst R̂ and min ESS across coordinates are what decide the
+            # deliverable, so they belong on every progress line rather than only in the
+            # final table. Reuses converged_sequential (the check_every stopping rule) so
+            # the numbers printed here and the ones that stop the run are the same object.
+            _, wr, me = converged_sequential(chain, g, burn_frac, d;
+                                             rhat_max = rhat_max, ess_min = ess_target)
+            @printf("[demc] gen %5d/%d  acc=%.3f  fin=%.2f  max logπ=%.6e  (cum acc=%.3f)  \
+                     worst R̂=%s  min ESS=%s\n",
                     g, gens, wacc / max(wprop, 1), wfin / max(wprop, 1),
-                    maximum(lp), nacc / (g * N)); flush(stdout)
+                    maximum(lp), nacc / (g * N),
+                    isfinite(wr) ? @sprintf("%.3f", wr) : "n/a",
+                    isfinite(me) ? @sprintf("%.0f", me) : "n/a"); flush(stdout)
             wacc = 0; wfin = 0; wprop = 0
         end
 

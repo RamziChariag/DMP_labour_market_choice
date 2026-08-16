@@ -107,7 +107,26 @@ Base.@kwdef struct SMMRunParams
     de_f         :: Float64 = 0.65
     de_cr        :: Float64 = 0.85
     de_patience  :: Int     = 20
-    de_avg_tol   :: Float64 = 0.01     # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 disables
+    de_avg_tol   :: Float64 = 0.0      # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 disables.
+                                       # Off: across a six-configuration sweep this rule
+                                       # correlated +0.915 with achieved ΔQ, i.e. it ranked
+                                       # the run that converged prematurely as the most
+                                       # converged one.
+
+    # Population generator.  Appended, never inserted: Serialization rebuilds a struct by
+    # field position, so a field added anywhere but the end shifts every later value.
+    de_gen_per_k   :: Int     = 30     # candidates drawn at each sparsity k = 1:n_free
+    de_reheat_flat :: Int     = 6      # reheat once Q_best has been flat this many
+                                       # generations and
+    de_reheat_rate :: Float64 = 0.04   # the improved-member rate is below this
+    de_max_reheats :: Int     = 50     # a reheat that finds no improvement ends the run,
+                                       # so this is a guard rather than the usual stop
+    de_adapt_fcr   :: Bool    = false  # take de_f and de_cr from the generator's own
+                                       # draws instead of the values set above. Off by
+                                       # default: the derived cr is the winning sparsity
+                                       # as a fraction of the free count, which on a
+                                       # near-flat allocation lands near 1/n_free and
+                                       # moves one coordinate per proposal.
 
     # Simulated annealing
     sa_max_iter      :: Int     = 5_000
@@ -125,7 +144,10 @@ Base.@kwdef struct SMMRunParams
     # objective by sa_t0_rel of its current level is accepted with probability
     # sa_t0_accept.  Anchored to Q rather than to probed move sizes, so it is
     # invariant to the weighting matrix and to the objective's scale.
-    sa_t0_rel        :: Float64 = 0.05
+    # 0.05 was set for a cold start and gives T0 = 48 at Q ≈ 1164 — a move of 58 in Q,
+    # which is a different basin. Warm starts, which is how every window now runs, need
+    # the run's own per-100-iteration gain of ~0.1 in Q as the reference scale.
+    sa_t0_rel        :: Float64 = 1e-4
     sa_t0_accept     :: Float64 = 0.30
     # On a reheat, snap back to the incumbent when the walk has drifted more than
     # this fraction above Q_best; within the tolerance it reheats in place.
@@ -142,7 +164,10 @@ Base.@kwdef struct SMMRunParams
     # (calibrate_sigma_w), so λ_w configures the run and is reported in the
     # header only — it never appears in the parameter tables. Bound–Krueger
     # (1991) give λ_w ≈ 0.82 for log annual earnings.
-    λ_w :: Float64 = 0.82
+    # smm_main.jl sets this from LAMBDA_W on every run; the default matters only to a
+    # bundle read outside that path, so it tracks the value the project actually uses
+    # rather than the Bound-Krueger figure it was originally taken from.
+    λ_w :: Float64 = 0.78
 
     # Nelder-Mead polish.
     #
@@ -180,6 +205,123 @@ Base.@kwdef struct SMMRunParams
     show_trace_generations :: Bool = true
     trace_stride           :: Int  = 10
 
+    # ── Start-point construction ─────────────────────────────
+    # How the optimiser's starting points are built. These were top-level constants in
+    # smm_main.jl, which meant a serialised bundle did not record them and a run could
+    # not be reproduced from its own output.
+    use_as_seed          :: Bool    = true   # feed the warm-start optimum in as a seed
+    seed_perturb_frac    :: Float64 = 0.05   # fraction of each box width to jitter it by
+    clusters_force_regen :: Bool    = true   # rebuild the seed bank rather than reuse it
+    include_prev_optimum :: Bool    = false  # add this window's previous optimum as a start
+
+    # ── Rate-based stopping (SA and Nelder-Mead) ─────────────
+    # Both optimisers stop on the RATE of improvement over a trailing window rather than
+    # on an absolute tolerance: on a Q of order 1e3 an absolute threshold is either
+    # unreachable or fires immediately, while a rate is scale-free. tol = 0 disables the
+    # test and falls back to the iteration caps above.
+    sa_rate_tol   :: Float64 = 0.05
+    sa_rate_span  :: Int     = 300
+    sa_halflife   :: Int     = 5_000   # geometric cooling half-life, in iterations
+    nm_rate_tol   :: Float64 = 0.05
+    nm_rate_span  :: Int     = 300
+
+    # Nelder-Mead initial simplex edge, as a fraction of each box width. Optim's default
+    # builds a simplex whose vertices are mostly infeasible here; 0.2 keeps them inside.
+    nm_simplex_step :: Float64 = 0.2
+
+    # ── Local search around incumbents ───────────────────────
+    # SA perturbs a random subset of sa_subset_k coordinates per step rather than all d:
+    # a full-dimensional move compounds many small increases in Q and is rejected.
+    # The generator perturbs each chosen coordinate by de_local_sigma of its own ΔQ<1
+    # width — a units-free fraction of a measured scale, not a fraction of the box.
+    sa_subset_k    :: Int     = 3
+    de_local_sigma :: Float64 = 0.33
+
+end
+
+# ============================================================
+# RunProvenance — where a serialised bundle came from
+# ============================================================
+
+"""Current bundle-format version. Bump only on a shape change; see `RunProvenance`."""
+const BUNDLE_SCHEMA = 1
+
+"""
+    RunProvenance
+
+Identifies the run that produced a bundle. Serialised alongside the estimate so a
+result carries its own origin: with several machines estimating different windows in
+parallel, "which code produced this number" cannot be answered from the filename.
+
+`schema` is the bundle-format version, and it is the field a loader checks. It changes
+only when the SHAPE of a serialised bundle changes, not when a parameter value does —
+`SMMRunParams` is `@kwdef`, so ADDING a field with a default leaves old bundles
+loadable and does not bump the schema. Removing or renaming one does.
+
+`unrecorded` names fields that were reconstructed rather than read from the original
+run. A bundle migrated from a version that did not store a setting carries that
+setting's name here rather than silently presenting a default as fact.
+"""
+Base.@kwdef struct RunProvenance
+    schema     :: Int             = 1
+    version    :: String          = "unknown"   # ROYSEARCH_VERSION at write time
+    window     :: Symbol          = :unknown
+    w_suffix   :: String          = ""
+    git_sha    :: String          = ""          # empty when git is unavailable
+    host       :: String          = ""
+    julia      :: String          = string(VERSION)
+    written_at :: String          = ""          # ISO 8601, UTC
+    unrecorded :: Vector{Symbol}  = Symbol[]
+end
+
+"""
+    run_provenance(; window, w_suffix, version, unrecorded = Symbol[])
+
+Build a `RunProvenance` for the current process. `git_sha` and `host` are probed and
+left empty on failure rather than raising: provenance is metadata, and a run must not
+die because a machine has no git.
+"""
+function run_provenance(; window::Symbol, w_suffix::AbstractString,
+                          version::AbstractString, unrecorded::Vector{Symbol} = Symbol[])
+    sha = try
+        strip(read(`git rev-parse --short HEAD`, String))
+    catch
+        ""
+    end
+    host = try
+        gethostname()
+    catch
+        ""
+    end
+    return RunProvenance(; schema = BUNDLE_SCHEMA, version = String(version),
+                         window = window, w_suffix = String(w_suffix),
+                         git_sha = String(sha), host = String(host),
+                         written_at = _utc_now_iso(), unrecorded = unrecorded)
+end
+
+# Formatted without Dates: smm_params.jl is included by the solver path too, and the
+# dependency would be carried for one timestamp.
+function _utc_now_iso()
+    t = round(Int, time())
+    days, rem = divrem(t, 86_400)
+    h, rem2   = divrem(rem, 3_600)
+    mi, s     = divrem(rem2, 60)
+    y, mo, d  = _civil_from_days(days)
+    return @sprintf("%04d-%02d-%02dT%02d:%02d:%02dZ", y, mo, d, h, mi, s)
+end
+
+# Howard Hinnant's days-from-civil inverse, for a UTC date without a date library.
+function _civil_from_days(z::Int)
+    z += 719_468
+    era = fld(z, 146_097)
+    doe = z - era * 146_097
+    yoe = fld(doe - fld(doe, 1_460) + fld(doe, 36_524) - fld(doe, 146_096), 365)
+    y   = yoe + era * 400
+    doy = doe - (365 * yoe + fld(yoe, 4) - fld(yoe, 100))
+    mp  = fld(5 * doy + 2, 153)
+    d   = doy - fld(153 * mp + 2, 5) + 1
+    m   = mp < 10 ? mp + 3 : mp - 9
+    return (m <= 2 ? y + 1 : y), m, d
 end
 
 # ============================================================
@@ -390,50 +532,50 @@ function default_free_params() :: Vector{ParamSpec}
         # ρ_x is the ability correlation, the RoySearch separation device
         # (Gola concordance).  All three are population primitives: estimated
         # on base_fc, then held fixed across the business cycle.
-        ParamSpec(:common, :a_ℓ,        0.1000,   8.0000,   2.8000, "worker type shape a_ℓ"),
-        ParamSpec(:common, :b_ℓ,        0.0500,   4.0000,   1.2000, "worker type shape b_ℓ"),
+        ParamSpec(:common, :a_ℓ,        0.1000,   8.0000,   0.9784448485, "worker type shape a_ℓ"),
+        ParamSpec(:common, :b_ℓ,        0.0500,   4.0000,   2.1764456531, "worker type shape b_ℓ"),
         # ρ_x ∈ (−1,1): bounds shy of ±1 so the Gaussian copula ζ-map stays finite.
-        ParamSpec(:common, :ρ_x,       -1.0000,   -0.1000,  -0.5500, "ability correlation ρ_x"),
+        ParamSpec(:common, :ρ_x,       -1.0000,   -0.1000,  -0.8584420745, "ability correlation ρ_x"),
 
         # Common block — training cost coeff and aggregate scale
-        ParamSpec(:common, :c,          0.0000,  15.0000,  11.0000, "training cost coeff c"),
-        ParamSpec(:common, :A,          0.0000,  13.0000,   5.6000, "aggregate production scale A"),
+        ParamSpec(:common, :c,          0.0000,  15.0000,  11.2013992326, "training cost coeff c"),
+        ParamSpec(:common, :A,          3.0000,  13.0000,   7.6672520832, "aggregate production scale A"),
  
         # Institutional flow values (stored by consuming block).
-        ParamSpec(:unsk,   :bU,         0.0000,   2.5000,   1.5000, "unskilled outside flow b_U"),
-        ParamSpec(:unsk,   :bT,         0.0000,   7.0000,   2.6500, "training flow b_T"),
-        ParamSpec(:skl,    :bS,         0.0000,   2.0000,   0.6600, "skilled outside flow b_S"),
+        ParamSpec(:unsk,   :bU,         0.000000,   0.407241,   0.0624763281, "unskilled outside flow b_U"),
+        ParamSpec(:unsk,   :bT,         0.000000,   1.140275,   2.6500, "training flow b_T"),
+        ParamSpec(:skl,    :bS,         0.000000,   0.325793,   0.0009379460, "skilled outside flow b_S"),
  
         # Productivity levels.  Under pure-Roy production is linear in own
         # ability, π_U = exp(A) P_U aU p and π_S = exp(A) P_S aS p (no ability
         # gradient).  Only exp(A)·P_j is pinned by wage levels,
         # so (A, P_U, P_S) share one flat direction; fix A (e.g. A=0) or one
         # P to identify them individually.  The premium loads on log(P_S/P_U).
-        ParamSpec(:unsk,   :PU,         0.0001,   8.0000,   1.8000, "unskilled productivity P_U"),
-        ParamSpec(:skl,    :PS,         0.0001,  20.0000,   4.5000, "skilled productivity P_S"),
-        ParamSpec(:unsk,   :α_U,        0.2000,  6.0000,   1.0000, "unskilled damage shape α_U"),
-        ParamSpec(:skl,    :a_Γ,        0.1000,  12.0000,   5.2000, "skilled offer shape a_Γ"),
-        ParamSpec(:skl,    :b_Γ,        0.1000,  10.0000,   9.2000, "skilled offer shape b_Γ"),
-        ParamSpec(:skl,    :δ,          0.0500,   1.0000,   0.6000, "shock/offer support ratio δ_S"),
+        ParamSpec(:unsk,   :PU,         0.000016,   1.303171,   1.0000000000, "unskilled productivity P_U"),
+        ParamSpec(:skl,    :PS,         0.000016,  3.257928,   2.0379458634, "skilled productivity P_S"),
+        ParamSpec(:unsk,   :α_U,        0.2000,  6.0000,   3.6128895315, "unskilled damage shape α_U"),
+        ParamSpec(:skl,    :a_Γ,        0.1000,  12.0000,   0.9313199019, "skilled offer shape a_Γ"),
+        ParamSpec(:skl,    :b_Γ,        0.1000,  10.0000,   1.0836027498, "skilled offer shape b_Γ"),
+        ParamSpec(:skl,    :δ,          0.0500,   1.0000,   0.9762609987, "shock/offer support ratio δ_S"),
  
         # Matching efficiency, matching elasticity, bargaining (U/S paired)
-        ParamSpec(:unsk,   :μ,          0.0001,   2.0000,   0.3500, "unskilled matching eff μ_U"),
-        ParamSpec(:skl,    :μ,          0.0001,   2.0000,   0.1900, "skilled matching eff μ_S"),
+        ParamSpec(:unsk,   :μ,          0.0001,   2.0000,   0.4418512904, "unskilled matching eff μ_U"),
+        ParamSpec(:skl,    :μ,          0.0001,   2.0000,   0.3094428030, "skilled matching eff μ_S"),
         ParamSpec(:unsk,   :η,          0.0001,   1.0000,   0.5000, "unskilled matching elas η_U"),
         ParamSpec(:skl,    :η,          0.0001,   1.0000,   0.5000, "skilled matching elas η_S"),
-        ParamSpec(:unsk,   :β,          0.0010,   0.9000,   0.18800, "unskilled bargaining β_U"),
-        ParamSpec(:skl,    :β,          0.0001,   0.9000,   0.27200, "skilled bargaining β_S"),
+        ParamSpec(:unsk,   :β,          0.0010,   0.9000,   0.5786184961, "unskilled bargaining β_U"),
+        ParamSpec(:skl,    :β,          0.0001,   0.9000,   0.4020074196, "skilled bargaining β_S"),
  
         # Shock arrival rates (U/S paired)
-        ParamSpec(:unsk,   :λ,          0.0001,   0.55000,   0.1000, "unskilled damage rate λ_U"),
-        ParamSpec(:skl,    :λ,          0.0001,   0.50000,   0.0400, "skilled quality shock λ_S"),
+        ParamSpec(:unsk,   :λ,          0.0001,   0.55000,   0.1636215087, "unskilled damage rate λ_U"),
+        ParamSpec(:skl,    :λ,          0.0001,   0.50000,   0.1723853761, "skilled quality shock λ_S"),
 
         # Vacancy costs (U/S paired) — DIMENSIONLESS, in months of average
         # sectoral output: dollar posting cost = k_j · π̄_j (see grids.jl,
         # mean_output_U/S).  LMR (2016) estimate 2.34 (HS) / 1.58 (college)
         # in the same units.
-        ParamSpec(:unsk,   :k,          0.0005,  12.0000,   2.2500, "unskilled vacancy cost k_U (months of avg U output)"),
-        ParamSpec(:skl,    :k,          0.0005,  12.0000,   4.6000, "skilled vacancy cost k_S (months of avg S output)"),
+        ParamSpec(:unsk,   :k,          0.0005,  12.0000,   1.2422995320, "unskilled vacancy cost k_U (months of avg U output)"),
+        ParamSpec(:skl,    :k,          0.0005,  12.0000,   2.1924463263, "skilled vacancy cost k_S (months of avg S output)"),
  
         # Skilled block — OJS cost, exogenous separation, offer/shock support ratio.
         # δ_S compresses the λ_S-shock redraw onto [0,δ_S]; it carries endogenous
@@ -444,9 +586,9 @@ function default_free_params() :: Vector{ParamSpec}
         # top of the endogenous margin λ_U·G(p*).  Mirrors the skilled ξ_S
         # below (same bounds); gives sep_rate_U a live lever when p*_U → 0
         # collapses the endogenous part.
-        ParamSpec(:skl,    :σ,          0.0000,   1.5000,   0.0900, "OJS flow cost σ_S"),
-        ParamSpec(:unsk,   :ξ,          0.0000,   0.0200,   0.0000, "unskilled exogenous separation ξ_U"),
-        ParamSpec(:skl,    :ξ,          0.0000,   0.0200,   0.0000, "skilled exogenous separation ξ_S"),
+        ParamSpec(:skl,    :σ,          0.000000,   0.244345,   0.1570873133, "OJS flow cost σ_S"),
+        ParamSpec(:unsk,   :ξ,          0.0000,   0.0200,   0.0063398088, "unskilled exogenous separation ξ_U"),
+        ParamSpec(:skl,    :ξ,          0.0000,   0.0200,   0.0055193416, "skilled exogenous separation ξ_S"),
  
         # Wage measurement error (per sector; pinned when λ_w > 0)
         ParamSpec(:unsk,   :σ_w,        0.0000,   1.0000,   0.6000, "unskilled wage meas. error σ_wU"),
@@ -865,23 +1007,28 @@ Display the estimation problem: free parameters with bounds, fixed
 overrides, and active / skipped moments.
 """
 function print_spec(spec::SMMSpec;
-                    sa_subset_k  :: Int     = 0,
-                    sa_halflife  :: Int     = 0,
-                    sa_rate_tol  :: Float64 = 0.0,
-                    nm_rate_tol  :: Float64 = 0.0,
-                    nm_rate_span :: Int     = 0)
+                    sa_subset_k    :: Int     = 0,
+                    sa_halflife    :: Int     = 0,
+                    sa_rate_tol    :: Float64 = 0.0,
+                    nm_rate_tol    :: Float64 = 0.0,
+                    nm_rate_span   :: Int     = 0,
+                    de_gen_per_k   :: Int     = 0,
+                    de_local_sigma :: Float64 = 0.0)
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimation Specification                        ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
     @printf("║  Free parameters (%d)                                ║\n",
             length(spec.free))
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    @printf("  %-6s  %-22s  %8s  %8s  %8s\n",
-            "block", "name", "lb", "ub", "init")
-    @printf("  %s\n", "─"^56)
+    # The symbol, not the label: these tables are read against each other, and a
+    # description column wide enough for the longest label pushes the numbers out of
+    # alignment. The labels survive in the CSV writers, where width does not matter.
+    @printf("  %-6s  %-8s  %10s  %10s  %10s\n",
+            "block", "param", "lb", "ub", "init")
+    @printf("  %s\n", "─"^50)
     for ps in spec.free
-        @printf("  %-6s  %-22s  %8.4f  %8.4f  %8.4f\n",
-                ps.block, ps.label, ps.lb, ps.ub, ps.init)
+        @printf("  %-6s  %-8s  %10.4f  %10.4f  %10.4f\n",
+                ps.block, ps.name, ps.lb, ps.ub, ps.init)
     end
 
     if length(spec.fixed) > 0
@@ -956,6 +1103,8 @@ function print_spec(spec::SMMSpec;
             sa_rate_tol > 0 ? @sprintf("%.3g", sa_rate_tol) : "off")
     @printf("  NM:   stop ΔQ < %s per 100 evals, sustained over %d evals\n",
             nm_rate_tol > 0 ? @sprintf("%.3g", nm_rate_tol) : "off", nm_rate_span)
+    @printf("  DE:   population — %d draws at each k=1:%d at %.2f×measured width; slots and f,cr from yield\n",
+            de_gen_per_k, length(spec.free), de_local_sigma)
     if spec.run.w_cond_target == 2.0
         @printf("  W:    equal weights — Diagonal(weight/m̂²) (cond(W)=%.2e)\n", cond(spec.W))
     else

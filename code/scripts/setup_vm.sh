@@ -76,12 +76,20 @@ julia --project=. --threads=2 -e '
 cat <<EOF
 
 === ready ===
-Run the batch under tmux so it survives a dropped SSH session:
+Run the estimation under tmux so it survives a dropped SSH session. smm_main.jl is
+the entry point; every setting is a ROYSEARCH_* environment variable, so the run is
+configured before the command rather than by editing source.
 
   tmux new -s roysearch
   cd $REPO_ROOT
-  julia code/run_all.jl --task=estimate --concurrent
+  export ROYSEARCH_WINDOW=base_covid
+  export ROYSEARCH_INIT_MODE=warmstart
+  export ROYSEARCH_DE_ADAPT_FCR=true
+  export ROYSEARCH_DE_GEN_PER_K=60
+  export JULIA_NUM_THREADS=\$(nproc)
+  export OPENBLAS_NUM_THREADS=1
+  julia --project=. code/smm/smm_main.jl 2>&1 | tee output/logs/base_covid.log
 
-Detach with Ctrl-b d, reattach with: tmux attach -t roysearch
-Logs stream to output/logs/ regardless.
+Detach with Ctrl-b d (press Ctrl-b, release, then d). Reattach: tmux attach -t roysearch
+Detaching does NOT stop the run. Closing the SSH window does NOT stop it either.
 EOF

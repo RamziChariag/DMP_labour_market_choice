@@ -53,7 +53,7 @@
 # pre-adjusted values directly.
 ############################################################
 
-const ROYSEARCH_VERSION = "17.0"
+const ROYSEARCH_VERSION = "18.4.0"
 println("="^60)
 println("  Segmented Search Model v$(ROYSEARCH_VERSION) — Data Processing Pipeline")
 println("="^60)

@@ -247,6 +247,8 @@ FIX_PARAMS = Dict{Symbol,Float64}(
     # :unsk_bet => 0.18800,
      :skl_eta  => 0.50000,
     # :skl_bet  => 0.27200,
+     :bT       => 0.00000,
+     :PU       => 1.00000,
 )
 
 # ============================================================
@@ -265,54 +267,73 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 #                       window the paired baseline optimum is a separate,
 #                       always-on start under :clusters (§8b).
 # ============================================================
-INIT_MODE            = _env_sym("ROYSEARCH_INIT_MODE", :warmstart)
-USE_AS_SEED          = _env_bool("ROYSEARCH_USE_AS_SEED", true)
-SEED_PERTURB_FRAC    = 0.05
-CLUSTERS_FORCE_REGEN = true
-INCLUDE_PREV_OPTIMUM = false
+# INIT_MODE selects the start-point strategy; the settings that configure each strategy
+# (use_as_seed, seed_perturb_frac, clusters_force_regen, include_prev_optimum) live in
+# SMMRunParams below, so a serialised bundle records how its own run was started.
+INIT_MODE = _env_sym("ROYSEARCH_INIT_MODE", :warmstart)
 
 # Starting values for the free parameters, keyed by the ASCII convention in
 # _DEFAULT_PARAM_KEY. Fixed r/ν/φ are ignored here (set from calibration files).
+# The base_fc optimum, from output/tables/smm_estimates_base_fc_diagonalW.csv
+# (Q = 1.1823409777e+03, converged, 876 iterations), expressed on the P_U = 1 ray.
+#
+# The CSV records the estimate in its original units, where P_U was free and settled at
+# 6.13887191. That is one point on a curve, not a point: A enters the solver only as
+# exp(A) multiplying every output-denominated level, so A -> A + s with P_U, P_S, b_U,
+# b_S and sigma_S scaled by exp(-s) leaves every moment identical to machine precision.
+# Fixing P_U = 1 picks one member of that curve as the numeraire and makes the remaining
+# five separately identified.
+#
+# The conversion is therefore a change of units, not a change of model:
+#     A            <- A + log(6.13887191)      = 5.85261109 + 1.81464100
+#     P_U, P_S, b_U, b_S, sigma_S  <- / 6.13887191
+# Everything else — shapes, rates, shares, and k_U/k_S which are already denominated in
+# months of average output — is dimensionless and carries over unchanged.
+#
+# Pasting the CSV values literally would put P_U (6.139), P_S (12.511) and sigma_S
+# (0.964) outside their current boxes, where the seed loader clamps silently to the
+# edge; the start would then not be the base_fc optimum at all.
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r         => 0.00416667,
     :nu        => 0.00323032,
     :phi       => 0.02222129,
 
-    :a_l       => 1.05725591,
-    :b_l       => 2.21363465,
-    :rho_x     => -0.92883213,
-    :c         => 12.20816258,
-    :A         => 5.95100788,
+    :a_l       => 0.97844485,
+    :b_l       => 2.17644565,
+    :rho_x     => -0.85844207,
+    :c         => 11.20139923,
+    :A         => 7.66725209,   # 5.85261109 + log(P_U_old)
 
-    :PU        => 5.96745225,
-    :PS        => 12.00600220,
+    :PU        => 1.00000000,   # the numeraire
+    :PS        => 2.03794586,   # 12.51068861 / P_U_old — skilled productivity RELATIVE
+                                # to unskilled, which is the identified object
 
-    :bU        => 0.11974191,
-    :bT        => 3.73239526,
-    :bS        => 0.05882377,
+    :bU        => 0.06247633,   # 0.38353418 / P_U_old
+    :bT        => 0.00000000,   # pinned: no income while training
+    :bS        => 0.00093795,   # 0.00575793 / P_U_old
 
-    :alpha_U   => 2.35095190,
+    :alpha_U   => 3.61288953,
 
-    :a_Gam     => 1.13571571,
-    :b_Gam     => 1.57230812,
-    :skl_delta => 0.95565307,
+    :a_Gam     => 0.93131990,
+    :b_Gam     => 1.08360275,
+    :skl_delta => 0.97626100,
 
-    :unsk_mu   => 0.42449745,
+    :unsk_mu   => 0.44185129,
     :unsk_eta  => 0.50000000,
-    :unsk_k    => 2.19828041,
-    :unsk_bet  => 0.53370921,
-    :unsk_lam  => 0.15532984,
-    :unsk_xi   => 0.00530501,
+    :unsk_k    => 1.24229953,
+    :unsk_bet  => 0.57861850,
+    :unsk_lam  => 0.16362151,
+    :unsk_xi   => 0.00633981,
     :unsk_sigw => 0.25549225,
 
-    :skl_mu    => 0.24470157,
+    :skl_mu    => 0.30944280,
     :skl_eta   => 0.50000000,
-    :skl_k     => 1.69146278,
-    :skl_bet   => 0.44114642,
-    :skl_lam   => 0.13426600,
-    :skl_sig   => 0.97899209,
+    :skl_k     => 2.19244633,
+    :skl_bet   => 0.40200742,
+    :skl_lam   => 0.17238538,
+    :skl_sig   => 0.15708731,   # 0.96433889 / P_U_old
     :skl_sigw  => 0.23267843,
-    :skl_xi    => 0.00442437,
+    :skl_xi    => 0.00551934,
 )
 
 # (block, unicode name) → DEFAULT_PARAMS key (ASCII).
@@ -676,10 +697,6 @@ flush(stdout)
 # T0 = 48 at Q ≈ 1164 — a move of 58 in Q, which is a different basin. From a warm
 # start the relevant scale is the run's own per-100-iteration gain, ~0.1 in Q.
 # ============================================================
-SA_RATE_TOL   = _env_f64("ROYSEARCH_SA_RATE_TOL", 0.05)
-SA_RATE_SPAN  = _env_int("ROYSEARCH_SA_RATE_SPAN", 300)
-SA_HALFLIFE   = _env_int("ROYSEARCH_SA_HALFLIFE", 5000)
-SA_T0_REL     = _env_f64("ROYSEARCH_SA_T0_REL", 1e-4)
 
 run_params = SMMRunParams(
     # ── Discretisation grids ─────────────────────────────────
@@ -711,9 +728,10 @@ run_params = SMMRunParams(
     sa_T0              = 0.0,     # ≤0 ⇒ auto-calibrate: T0 solves
                                   # exp(−sa_t0_rel·Q0 / T0) = sa_t0_accept
     sa_step            = 0.20,    # initial proposal sd in unconstrained space
-    sa_t0_rel          = SA_T0_REL,  # move size, as a fraction of Q, that T0 keeps live
+    sa_t0_rel          = _env_f64("ROYSEARCH_SA_T0_REL", 1e-4),
+                                     # move size, as a fraction of Q, that T0 keeps live
     sa_cooling_rate    = 1.0,     # logarithmic-schedule knobs, used only when
-    sa_cooling_exp     = 2.0,     # SA_HALFLIFE = 0 selects that branch
+    sa_cooling_exp     = 2.0,     # sa_halflife = 0 selects that branch
     sa_reheat_patience = 400,     # steps without improvement before a reheat, 0 to disable reheats
     sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
     sa_max_reheats     = _env_int("ROYSEARCH_SA_MAX_REHEATS", 4),  # cap per run, 0 = unlimited
@@ -727,14 +745,64 @@ run_params = SMMRunParams(
     sa_seed            = 42,      # base seed for the parallel SA chains
 
     # ── Differential evolution ───────────────────────────────
-    de_max_iter  = 3_000,         # max generations
-    de_pop_size  = 200,           # population size (0 ⇒ 10·n_free_params)
-    de_f         = 0.70,          # DE differential weight (mutation strength)
-    de_cr        = 0.85,          # DE crossover probability
-    de_patience  = 3,             # stop after this many generations with no
-                                  # improvement
-    de_avg_tol   = 1e-6,          # stop when (Q_mean - Q_best)/|Q_best| < tol;
-                                  # 0 disables this early-stop
+    # Values below are from a six-configuration sweep at equal evaluation budget
+    # (~1500 solves each) seeded at the base_fc optimum, varying one factor at a
+    # time against f=0.7, cr=0.9, k=3, pop=48.  ΔQ achieved:
+    #     f    0.5 → 25.2   0.7 → 88.3   0.9 → 33.6
+    #     cr   0.5 → 77.2   0.9 → 88.3
+    #     k    3   → 88.3   8   → 104.5
+    #     pop  48  → 88.3   96  → 106.0   (despite half the generations)
+    # f = 0.9 fails because almost nothing beats its parent (improved rate 0.021
+    # against 0.188 at 0.7); f = 0.5 improves often but converges prematurely
+    # (population spread collapses to 0.13 of the initial width).
+    de_max_iter  = _env_int("ROYSEARCH_DE_MAX_ITER", 3_000),
+    # 10·n_free_params, the standard DE rule.  EXTRAPOLATED, not measured: the sweep
+    # tested 48 and 96 only, where 96 won at equal budget despite running half the
+    # generations.  The direction is established; 240 is not.
+    de_pop_size  = _env_int("ROYSEARCH_DE_POP_SIZE", 240),
+    de_f         = _env_f64("ROYSEARCH_DE_F", 0.70),        # differential weight
+    # High crossover is right for the OPTIMISER and wrong for the sampler, and the
+    # asymmetry is in the selection rule.  DE judges each member against its own
+    # parent, so a coordinate whose population has converged contributes a step of
+    # f·(b_k−c_k) ≈ 0 and costs nothing to include: many coordinates may move, but
+    # a settled one effectively does not.  Metropolis instead judges the whole
+    # vector in one accept/reject, where every masked coordinate adds its own
+    # off-ridge error to that single decision.
+    de_cr        = _env_f64("ROYSEARCH_DE_CR", 0.90),       # crossover probability
+    de_patience  = _env_int("ROYSEARCH_DE_PATIENCE", 25),
+                                  # stop after this many generations with no
+                                  # improvement.  Late in a descent whole
+                                  # generations pass without a member beating its
+                                  # parent while the population is still
+                                  # contracting, so a short patience ends a run
+                                  # that has not finished.
+    de_avg_tol   = _env_f64("ROYSEARCH_DE_AVG_TOL", 0.0),
+                                  # stop when (Q_mean - Q_best)/|Q_best| < tol; 0 off.
+                                  # Off by default: across the six-configuration sweep
+                                  # this measure correlated +0.915 with achieved ΔQ, so
+                                  # it ranks a prematurely converged run as the most
+                                  # converged one.
+
+    # ── Population generator and reheat ──────────────────────
+    # The generator draws candidates at every sparsity, allocates the population by
+    # measured yield, and reads f and cr off the same draws; the reheat rebuilds it at
+    # the current best, which re-measures each coordinate's width there and so adapts
+    # the step scale with no schedule.
+    de_gen_per_k   = _env_int("ROYSEARCH_DE_GEN_PER_K", 60),
+    de_adapt_fcr   = _env_bool("ROYSEARCH_DE_ADAPT_FCR", true),
+                                  # false: de_f and de_cr above are used as set. true:
+                                  # both are read off the generator's yield table and
+                                  # recomputed at each reheat.
+                                  # candidates per sparsity; the allocation is only as
+                                  # good as this sample, and 3 was visibly noisy
+    de_reheat_flat = _env_int("ROYSEARCH_DE_REHEAT_FLAT", 6),
+    de_reheat_rate = _env_f64("ROYSEARCH_DE_REHEAT_RATE", 0.04),
+                                  # both conditions must hold: Q_best alone goes flat for
+                                  # up to 12 generations mid-descent, and the improved
+                                  # rate alone dips on ordinary generations
+    de_max_reheats = _env_int("ROYSEARCH_DE_MAX_REHEATS", 50),
+                                  # a reheat that finds no improvement ends the run, so
+                                  # this is a guard rather than the expected stop
 
     # ── Nelder-Mead local polish ─────────────────────────────
     # None of Optim's three tolerances stops this method usefully.  Its
@@ -784,6 +852,29 @@ run_params = SMMRunParams(
                                   # evaluations with no improvement in best Q
                                   # (0 disables; same counter as the [iter N] trace)
 
+    # ── Start-point construction ─────────────────────────────
+    use_as_seed          = _env_bool("ROYSEARCH_USE_AS_SEED", true),
+    seed_perturb_frac    = _env_f64("ROYSEARCH_SEED_PERTURB_FRAC", 0.05),
+    clusters_force_regen = _env_bool("ROYSEARCH_CLUSTERS_FORCE_REGEN", true),
+    include_prev_optimum = _env_bool("ROYSEARCH_INCLUDE_PREV_OPTIMUM", false),
+
+    # ── Rate-based stopping ──────────────────────────────────
+    sa_rate_tol     = _env_f64("ROYSEARCH_SA_RATE_TOL", 0.05),
+    sa_rate_span    = _env_int("ROYSEARCH_SA_RATE_SPAN", 300),
+    sa_halflife     = _env_int("ROYSEARCH_SA_HALFLIFE", 5_000),
+    nm_rate_tol     = _env_f64("ROYSEARCH_NM_RATE_TOL", 0.05),
+    nm_rate_span    = _env_int("ROYSEARCH_NM_RATE_SPAN", 300),
+    nm_simplex_step = _env_f64("ROYSEARCH_NM_SIMPLEX_STEP", 0.2),
+
+    # ── Local search around incumbents ───────────────────────
+    sa_subset_k    = _env_int("ROYSEARCH_SA_SUBSET_K", 3),
+    # k is how many coordinates of the seed each initial DE member perturbs.  The
+    # descent this window needs is a joint move within the skilled block, so a
+    # population seeded along sparse directions cannot express it: k = 8 reached
+    # ΔQ = 104.5 against 88.3 at k = 3 on the same budget, with a LOWER improvement
+    # rate (0.042 vs 0.188) — fewer accepted moves, each worth more.
+    de_local_sigma = _env_f64("ROYSEARCH_DE_LOCAL_SIGMA", 0.33),
+
     # ── Tracing ──────────────────────────────────────────────
     show_trace_members     = false,   # per-member trace inside one DE/SA gen
     show_trace_generations = true,    # per-generation / per-iteration summary
@@ -810,8 +901,6 @@ run_params = SMMRunParams(
 # 10 500-11 100, so the setting is forgiving.  Set NM_RATE_TOL = 0.0 to disable and
 # fall back to nm_no_improve.
 # ============================================================
-NM_RATE_TOL  = _env_f64("ROYSEARCH_NM_RATE_TOL", 0.05)
-NM_RATE_SPAN = _env_int("ROYSEARCH_NM_RATE_SPAN", 300)
 
 # ============================================================
 # Nelder-Mead initial simplex
@@ -835,7 +924,6 @@ NM_RATE_SPAN = _env_int("ROYSEARCH_NM_RATE_SPAN", 300)
 # point: 26/26 vertices feasible with a best vertex 5.7 below the seed, against 11/26
 # feasible and no improving vertex under Optim's default.
 # ============================================================
-NM_SIMPLEX_STEP = _env_f64("ROYSEARCH_NM_SIMPLEX_STEP", 0.2)
 
 # ============================================================
 # SA proposal and DE population
@@ -853,29 +941,25 @@ NM_SIMPLEX_STEP = _env_f64("ROYSEARCH_NM_SIMPLEX_STEP", 0.2)
 # those, moves whose individual components are infeasible alone but feasible together.
 # A strict one-at-a-time sweep cannot propose those.
 #
-# DE_LOCAL_K and DE_LOCAL_SIGMA configure the differential-evolution population, which
-# the two-stage run below does NOT call — stage 2 is Nelder-Mead.  They apply whenever
-# method = :de is used: the population is built by perturbing that many coordinates of
-# the initial point, each at DE_LOCAL_SIGMA times its own ΔQ<1 width, instead of
-# drawing uniformly over the box.  Measured useful-draw rate 0.51 at k=3 against 0.08
-# at k=25 and ~0 for the box draw; the loss with density is not infeasibility (which
-# barely moves) but the compounding of many small increases in Q.  de_cr stays high:
-# the population's sparsity already caps proposal density, and CR's job is recombining
-# members into points between them.
+# The DE population is generated, not drawn at a fixed sparsity: de_gen_per_k candidates
+# at every k = 1:n_free, each chosen coordinate perturbed by de_local_sigma times its own
+# ΔQ<1 width, with the slots allocated by measured yield and de_f, de_cr read off the same
+# draws. Sparsity still matters — measured useful-draw rate 0.51 at k=3 against 0.08 at
+# k=25, where the loss is not infeasibility (which barely moves) but the compounding of
+# many small increases in Q — but the trade-off is now measured per run rather than fixed
+# in advance, and re-measured at each reheat.
 # ============================================================
-SA_SUBSET_K    = _env_int("ROYSEARCH_SA_SUBSET_K", 3)
-DE_LOCAL_K     = _env_int("ROYSEARCH_DE_LOCAL_K", 3)
-DE_LOCAL_SIGMA = _env_f64("ROYSEARCH_DE_LOCAL_SIGMA", 0.33)
 
 # ============================================================
 # 8. Build SMM spec
 # ============================================================
 # USE_AS_SEED = false starts the optimiser from a perturbation of the entered
 # init rather than the init itself.
-if !USE_AS_SEED
-    free_params = perturb_free_init(free_params, SEED_PERTURB_FRAC, Random.default_rng())
+if !run_params.use_as_seed
+    free_params = perturb_free_init(free_params, run_params.seed_perturb_frac,
+                                    Random.default_rng())
     @printf("  Perturbed the seed init (SD = %.0f%% of each bound range).\n",
-            100 * SEED_PERTURB_FRAC)
+            100 * run_params.seed_perturb_frac)
     flush(stdout)
 end
 
@@ -894,9 +978,10 @@ spec = build_smm_spec(
 # failure mode that left ρ_x at −0.55 in both crisis windows through v14.8.
 assert_all_params_accounted(spec; context = "$(WINDOW) spec")
 
-print_spec(spec; sa_subset_k = SA_SUBSET_K, sa_halflife = SA_HALFLIFE,
-           sa_rate_tol = SA_RATE_TOL,
-           nm_rate_tol = NM_RATE_TOL, nm_rate_span = NM_RATE_SPAN)
+print_spec(spec; sa_subset_k = run_params.sa_subset_k, sa_halflife = run_params.sa_halflife,
+           sa_rate_tol = run_params.sa_rate_tol,
+           nm_rate_tol = run_params.nm_rate_tol, nm_rate_span = run_params.nm_rate_span,
+           de_gen_per_k = run_params.de_gen_per_k, de_local_sigma = run_params.de_local_sigma)
 
 # ============================================================
 # 8b. Candidate seed bank (used when INIT_MODE = :clusters)
@@ -908,7 +993,7 @@ if INIT_MODE == :clusters
     cand_path = joinpath(SMM_OUT_DIR, "candidates_$(WINDOW)$(W_SUFFIX).jls")
     seed_bank = load_or_generate_candidates(spec, cand_path;
                                             window      = WINDOW,
-                                            force_regen = CLUSTERS_FORCE_REGEN,
+                                            force_regen = run_params.clusters_force_regen,
                                             show_trace  = true)
     if isempty(seed_bank.candidates)
         @warn "Candidate bank is empty — SA/DE will fall back to the spec's init point."
@@ -958,7 +1043,7 @@ if INIT_MODE == :clusters
 
     # Optional guaranteed previous optimum.  Valid only if its free-parameter
     # (block, name) sequence AND fixed-parameter values match the current spec.
-    if INCLUDE_PREV_OPTIMUM
+    if run_params.include_prev_optimum
         _opt_jls = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
         _opt = _load_smm_bundle(_opt_jls; delete_on_fail=false, label="previous optimum")
         if !isnothing(_opt)
@@ -983,23 +1068,29 @@ end
 # ============================================================
 println("Starting SMM optimisation..."); flush(stdout)
 
-# Stage 1: annealing from the warm start (seed_bank/prev_optimum set in §8b).
-res = run_smm(spec; method = :sa, seed_bank = seed_bank, prev_optimum = prev_optimum,
-              sa_subset_k = SA_SUBSET_K,
-              sa_rate_tol = SA_RATE_TOL, sa_rate_span = SA_RATE_SPAN,
-              sa_cooling_halflife = SA_HALFLIFE)
+# Annealing then differential evolution, from the warm start (seed_bank/prev_optimum set
+# in §8b). The two stages do different jobs and neither substitutes for the other.
+#
+# Annealing is the global search. It accepts uphill moves and so crosses the box, which
+# is what takes Q from ~1e6 at a cold start into the right basin within a few thousand
+# iterations. What it cannot do is descend once inside: it perturbs a handful of
+# coordinates at a time, and the descent available from a good point is a JOINT move —
+# raising μ_S alone re-prices θ_S through free entry and breaks a moment already fitted
+# to 0.1%, so only a simultaneous change across the skilled block and the type-shape
+# parameters lowers Q.
+#
+# DE builds exactly that object: its step is a difference between population members, so
+# it proposes correlated moves across many coordinates at once. It takes over from SA's
+# answer and replaces the Nelder-Mead polish of earlier versions, which could not
+# construct the direction either. Greedy selection (keep a child only if it beats its own
+# parent) is what contracts the population and keeps every member feasible.
+#
+# seed_bank and prev_optimum stay arguments: they are run-time objects built in §8b, not
+# settings, and a SeedBank in the spec would be serialised into every bundle. Every SA and
+# DE setting travels in spec.run.
+res = run_smm(spec; method = :sa_de, seed_bank = seed_bank, prev_optimum = prev_optimum)
 
-# Stage 2: local polish from the annealed optimum.  Nelder-Mead earns this slot on
-# the record: from Q = 1194.798 it delivered 26.2 over 9142 evaluations while the
-# annealing stage that preceded it delivered 0.00.  Its long flat stretches are the
-# simplex against an infeasible wall rather than convergence, which is why the rate
-# rule pauses on them instead of stopping.
-res_pol = run_smm(_spec_with_init(spec, res.theta_opt); method = :neldermead,
-                  nm_rate_tol     = NM_RATE_TOL,
-                  nm_rate_span    = NM_RATE_SPAN,
-                  nm_simplex_step = NM_SIMPLEX_STEP)
-
-results = res_pol
+results = res
 
 # ============================================================
 # 10. Save results
@@ -1012,10 +1103,15 @@ save_results(results, joinpath(TABLES_DIR, "smm_estimates_$(WINDOW)$(W_SUFFIX).c
 # The .jls bundle is consumed by solver/plots.jl, the transition entry point
 # (transition/transition_main.jl), and MCMC standard errors (smm/MCMC_main.jl).
 smm_jls_path = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
+prov = run_provenance(window = WINDOW, w_suffix = W_SUFFIX, version = ROYSEARCH_VERSION)
 open(smm_jls_path, "w") do io
-    serialize(io, (result = results, spec = spec, sim = sim_smm))
+    serialize(io, (result = results, spec = spec, sim = sim_smm, provenance = prov))
 end
 @printf("Serialized SMM result → %s\n", smm_jls_path)
+@printf("  provenance: schema %d, v%s, %s%s, git %s, host %s\n",
+        prov.schema, prov.version, prov.window, prov.w_suffix,
+        isempty(prov.git_sha) ? "(none)" : prov.git_sha,
+        isempty(prov.host) ? "(none)" : prov.host)
 
 println("\nDone.")
 flush(stdout)

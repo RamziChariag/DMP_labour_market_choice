@@ -956,6 +956,390 @@ end
 
 DE/rand/1/bin in unconstrained (logit) space.
 """
+
+"""
+    generate_population(seed, spec, n_slots; per_k, sigma, cap, rng) → (pop, f, cr, table)
+
+Build a DE population around `seed`, and read the proposal parameters off the same
+draws. Used identically for the initial population and for a reheat; only the seed
+differs.
+
+WHY IT IS BUILT THIS WAY
+
+`_feasible_widths` measures, per coordinate, the displacement that raises Q by 1.0 at
+`seed`. That is the per-parameter scale and it is re-measured on every call, so a
+reheat at a better point automatically produces a tighter cloud: near an optimum the
+surface is more curved, the widths shrink, and `sigma` — a units-free fraction of a
+width, not a scale — keeps meaning the same thing. This is the whole scale-adaptation
+mechanism; nothing anneals on a schedule.
+
+Candidates are drawn at every sparsity `k = 1:n_free`, `per_k` of them, and the slots
+are allocated by measured yield rather than by a shape chosen in advance. A move that
+touches more coordinates is worth more because a proposal must be able to re-price what
+it disturbs (a market's free-entry pair, the boundary controls), which is why the weight
+carries the factor `k/n_free`.
+
+The score deliberately does NOT count improvements. Improvements are threshold events
+and they vanish near an optimum — which is exactly the state that triggers a reheat, so
+a count-based rule would be undefined at the moment it is called. Scoring the mean
+shortfall below the incumbent is continuous, and when nothing improves it falls back to
+ranking by mean damage, i.e. which sparsity does least harm.
+
+`f` and `cr` come out of the same table. The generator has just measured which
+displacement is productive, namely `sigma * width`; the DE step in coordinate k is
+`f * (b_k - c_k)` with standard deviation `f * s_k * sqrt(2)` for a population spread
+`s_k`, so matching the two gives `f`. `cr` is the winning sparsity as a fraction of the
+free count. Recomputing both at each reheat replaces adaptive-parameter schemes.
+"""
+function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
+                             per_k       :: Int     = 30,
+                             sigma       :: Float64 = 0.33,
+                             cap         :: Float64 = 0.20,
+                             fill_from   :: Union{Nothing,Vector{Vector{Float64}}} = nothing,
+                             fill_Q      :: Union{Nothing,Vector{Float64}}         = nothing,
+                             prev_widths :: Union{Nothing,Vector{Float64}}         = nothing,
+                             require_improvement :: Bool = false,
+                             verbose     :: Bool    = true,
+                             rng                   = Random.default_rng())
+    npar = length(spec.free)
+
+    # Both phases cost hundreds of solves — minutes at full size — so each announces
+    # itself and its cost up front: a silent generator is indistinguishable from a hung
+    # one. _feasible_widths runs 12 bisections per direction, two directions per
+    # coordinate, so its price is 24 solves per free parameter.
+    if verbose
+        @printf("  [DE pop]  starting population generator: %d slots, %d free parameters\n",
+                n_slots, npar)
+        @printf("  [DE pop]  step 1/2 — ΔQ<1 width per parameter: 12 bisections × 2 directions × %d params = %d solves\n",
+                npar, 24 * npar)
+        flush(stdout)
+    end
+    t0     = time()
+    widths = _feasible_widths(seed, spec, cap)
+    Q_seed = smm_objective(seed, spec)
+
+    # A coordinate the bisection cannot move at this point has no usable scale. Keeping
+    # the previous call's width is better than a zero, which would freeze the coordinate
+    # in the new population and remove it from the search for the rest of the run. The
+    # first call has no previous width, and none is needed: at the seed every coordinate
+    # is measurable by construction.
+    n_reverted = 0
+    if prev_widths !== nothing
+        for j in 1:npar
+            if !(isfinite(widths[j]) && abs(widths[j]) > 0) &&
+               isfinite(prev_widths[j]) && abs(prev_widths[j]) > 0
+                widths[j] = prev_widths[j]
+                n_reverted += 1
+            end
+        end
+    end
+
+    if verbose
+        wf = filter(w -> isfinite(w) && w > 0, abs.(widths))
+        @printf("  [DE pop]  widths done in %.0fs: %d/%d parameters admit a step, median %.3g, range %.2g–%.2g%s\n",
+                time() - t0, length(wf), npar,
+                isempty(wf) ? NaN : median(wf),
+                isempty(wf) ? NaN : minimum(wf), isempty(wf) ? NaN : maximum(wf),
+                n_reverted > 0 ? @sprintf("  (%d kept previous scale)", n_reverted) : "")
+        @printf("  [DE pop]  step 2/2 — %d candidates at each sparsity k = 1:%d;  Q_seed=%.6e\n",
+                per_k, npar, Q_seed)
+        @printf("  [DE pop]  evaluating %d candidates...\n", per_k * npar)
+        flush(stdout)
+    end
+
+    # Draw per_k candidates at each sparsity, then evaluate the whole block at once so
+    # the solves thread over the full set rather than per k.
+    cand = Vector{Vector{Float64}}(undef, per_k * npar)
+    ksrc = Vector{Int}(undef, per_k * npar)
+    idx  = 0
+    for k in 1:npar, _ in 1:per_k
+        θ = copy(seed)
+        for j in randperm(rng, npar)[1:k]
+            θ[j] += sigma * abs(widths[j]) * randn(rng)
+        end
+        idx += 1; cand[idx] = θ; ksrc[idx] = k
+    end
+    t1 = time()
+    Qs = Vector{Float64}(undef, length(cand))
+    Threads.@threads for i in eachindex(cand)
+        Qs[i] = smm_objective(cand[i], spec)
+    end
+    if verbose
+        # Counted against the same reference the pool uses, so the printed numbers and the
+        # allocation cannot disagree when the seed itself did not solve.
+        nf = count(isfinite, Qs)
+        nb = isfinite(Q_seed) ? count(q -> isfinite(q) && q < Q_seed, Qs) : nf
+        @printf("  [DE pop]  %d candidates in %.0fs: %d feasible, %d better than the seed  (selecting on %s)\n",
+                length(cand), time() - t1, nf, nb,
+                require_improvement ? "improvement" : "feasibility")
+        if require_improvement && nb == 0
+            @printf("  [DE pop]  BARREN: no candidate improves on the incumbent. Building the final\n")
+            @printf("  [DE pop]          population as a 50/50 random mix with the previous generation.\n")
+        end
+        # Below roughly twice the slot count the allocation stops being a choice: filling
+        # the population takes nearly every feasible candidate at every sparsity, so the
+        # slots track feasibility (which favours low k) rather than the yield weight, and
+        # the shape flattens. Measured at 53% feasibility, per_k must be about 2·n_slots/
+        # (0.53·n_free) for the weight to bind.
+        # The headroom that matters is in the pool the fill actually draws from, which is
+        # the improving candidates at a reheat and the feasible ones at initialisation.
+        n_pool = require_improvement ? nb : nf
+        if n_pool > 0 && n_pool < 2 * n_slots
+            @printf("  [DE pop]  WARNING: only %d %s for %d slots (%.1fx). The weight cannot\n",
+                    n_pool, require_improvement ? "improving" : "feasible",
+                    n_slots, n_pool / n_slots)
+            @printf("  [DE pop]           select at this headroom — raise gen_per_k to ~%d or lower pop_size.\n",
+                    ceil(Int, 2 * n_slots / (max(n_pool / length(cand), 0.05) * npar)))
+        end
+        flush(stdout)
+    end
+
+    # Score each sparsity on the mean improvement its feasible candidates deliver. A k
+    # that improves nothing scores zero and earns no slots — that is the mechanism by
+    # which cr falls as the run advances: large joint moves stop paying first, so the
+    # allocation migrates to smaller k on its own and the proposal narrows with it.
+    #
+    # Two things would break that and neither is here. A per-k damage fallback would give
+    # a non-improving high k a positive score for being least-bad, which competes with
+    # genuine improvements at low k and sends cr back UP once high k stops paying. And a
+    # floor of one slot per k would park 20-odd members at high sparsity forever, holding
+    # cr up by construction. The damage ranking is kept only for the case where NOTHING
+    # improves anywhere, where it is the only ordering available.
+    # Admissible pool. At a reheat the seed is theta_best, a point the run has already
+    # worked to reach, so a candidate that merely solves is not new material — only an
+    # improvement is. At initialisation the seed is the warm start and feasibility is the
+    # only filter available, because the first population has to be built from whatever
+    # the solver returns. Both counts are reported either way.
+    #
+    # An infeasible seed is possible — a warm start whose spec has since changed may not
+    # solve. There is then no incumbent to improve on, so every feasible draw is new
+    # material and the pool reverts to feasibility. Treating it as "nothing improved"
+    # would declare the run finished on its first reheat; using the best draw as the
+    # reference would be worse still, since nothing can beat a minimum by construction.
+    # Q_ref exists so the score's shortfalls stay finite in that case.
+    feas_idx = [i for i in eachindex(Qs) if isfinite(Qs[i])]
+    seed_ok  = isfinite(Q_seed)
+    Q_ref    = seed_ok ? Q_seed :
+               (isempty(feas_idx) ? Inf : maximum(Qs[feas_idx]))
+    imp_idx  = seed_ok ? [i for i in feas_idx if Qs[i] < Q_seed] : feas_idx
+    pool     = Set(require_improvement ? imp_idx : feas_idx)
+    barren   = require_improvement && isempty(imp_idx)
+
+    score = zeros(npar); n_feas = zeros(Int, npar); dmg = zeros(npar)
+    for k in 1:npar
+        q = [Qs[i] for i in eachindex(Qs) if ksrc[i] == k && isfinite(Qs[i])]
+        n_feas[k] = length(q)
+        isempty(q) && continue
+        score[k] = mean(max.(0.0, Q_ref .- q))
+        dmg[k]   = 1.0 / (1.0 + mean(q .- Q_ref))
+    end
+    all(score .<= 0) && (score = dmg)            # no k improves: rank by least damage
+
+    # Each fallback covers the case the one before it cannot. A non-finite or all-zero
+    # weight has to be caught explicitly rather than by `all(w .<= 0)`: NaN <= 0 is false,
+    # so a NaN would pass straight through every guard into round(Int, ·) and abort the
+    # run. The bare k-shape is the last resort — the quotas are advisory once no sparsity
+    # has candidates, since the fill loops can only take what exists.
+    w = score .* (collect(1:npar) ./ npar)
+    all(isfinite, w) || (w = float.(n_feas))
+    all(w .<= 0)     && (w = float.(n_feas))     # nothing scored: rank by feasibility
+    (all(isfinite, w) && any(w .> 0)) || (w = collect(1:npar) ./ npar)
+    want = round.(Int, n_slots .* w ./ sum(w))
+
+    # Fill from each k's best candidates. A k that cannot supply its quota passes the
+    # shortfall on, so the population is always full even when feasibility is poor —
+    # but the shortfall must follow the WEIGHT, not the index. Walking k upward from 1
+    # hands every unmet slot to the lowest sparsities, which have the most spare
+    # candidates precisely because they are the most feasible: the redistribution then
+    # inverts the allocation it was meant to top up. Spilling in descending weight order
+    # keeps the shape the weight expresses.
+    # Two tiers, and the distinction is the point. Improvements are what the allocation is
+    # measuring, so they are drawn first and counted separately in taken_imp, which the
+    # log reports so a fallback is visible. Feasible non-improving draws are usable members
+    # (they carry a spread and can win a later comparison), so they fill whatever the
+    # improvements could not, but they say nothing about which sparsity is paying and are
+    # therefore counted only in taken. Filling from the second tier before reaching back
+    # to the previous generation keeps the population as fresh as the draws allow.
+    order = Dict(k => sort([i for i in eachindex(Qs) if ksrc[i] == k && i in pool],
+                           by = i -> Qs[i]) for k in 1:npar)
+    spare = Dict(k => sort([i for i in feas_idx if ksrc[i] == k && !(i in pool)],
+                           by = i -> Qs[i]) for k in 1:npar)
+    pop   = Vector{Vector{Float64}}()
+    taken = zeros(Int, npar)          # every member drawn at k, whatever its tier
+    taken_imp = zeros(Int, npar)      # improving members only — the yield signal
+
+    for k in 1:npar, i in order[k][1:min(want[k], length(order[k]))]
+        push!(pop, cand[i]); taken[k] += 1; taken_imp[k] += 1
+        length(pop) >= n_slots && break
+    end
+    for k in sortperm(w, rev = true)
+        length(pop) >= n_slots && break
+        for i in order[k][(taken_imp[k]+1):end]
+            push!(pop, cand[i]); taken[k] += 1; taken_imp[k] += 1
+            length(pop) >= n_slots && break
+        end
+    end
+    for k in sortperm(w, rev = true)
+        length(pop) >= n_slots && break
+        for i in spare[k]
+            push!(pop, cand[i]); taken[k] += 1
+            length(pop) >= n_slots && break
+        end
+    end
+    # Every feasible draw is spent and the population is still short. Duplicating the
+    # seed would fill the slots with a single point and collapse the difference vectors
+    # the DE step is built from, so the remainder comes from the best members of the
+    # generation that preceded this call: real, feasible, and already spread. On the
+    # first call there is no such generation and the seed is the only thing available.
+    n_carried = 0
+    n_fresh   = 0        # members of a barren mix that came from the new draws
+
+    # A BARREN reheat: a freshly scaled population drawn at the best point improved on it
+    # nowhere. Two things are then known — the previous population was stale, and the new
+    # scale finds nothing — so neither source alone is worth another pass. The response is
+    # one last population that is half new draws and half the previous generation, mixed
+    # at random rather than by rank: the run has no ranking signal left to exploit, and
+    # randomness is the only source of new directions remaining. If a stall follows this,
+    # it is convergence and the caller exits.
+    if barren
+        # fill_from is required here: without a previous generation there is no second
+        # half to mix with, and silently falling through would build the final population
+        # out of non-improving draws and seed copies. The reheat call site always passes
+        # the live population, so this is a contract check rather than a branch.
+        if fill_from === nothing || isempty(fill_from)
+            error("generate_population: a barren reheat needs fill_from, the previous generation")
+        end
+        empty!(pop); fill!(taken, 0); fill!(taken_imp, 0)
+        # Half new, half carried — or as close as the draws allow. When fewer than half
+        # the slots are feasible the new half is short and the previous generation covers
+        # the remainder, so the population is always full; n_fresh records what the split
+        # actually was rather than what was asked for.
+        for i in shuffle(rng, feas_idx)               # feasible, since none improve
+            length(pop) >= n_slots ÷ 2 && break
+            push!(pop, cand[i]); taken[ksrc[i]] += 1
+        end
+        n_fresh = length(pop)
+        for i in shuffle(rng, eachindex(fill_from))
+            length(pop) >= n_slots && break
+            push!(pop, copy(fill_from[i])); n_carried += 1
+        end
+    end
+
+    if length(pop) < n_slots && fill_from !== nothing && !isempty(fill_from)
+        rank = fill_Q === nothing ? eachindex(fill_from) :
+               sort(eachindex(fill_from), by = i -> fill_Q[i])
+        for i in rank
+            length(pop) >= n_slots && break
+            push!(pop, copy(fill_from[i])); n_carried += 1
+        end
+    end
+
+    # Still short, and there is nothing left to carry — the first call, or a reheat whose
+    # predecessor was itself small. Infeasible draws are admissible members: DE evaluates
+    # the population and an infeasible member simply never wins a comparison, whereas a
+    # duplicated seed contributes a zero difference vector and silently narrows the step.
+    # Taking them in ascending k keeps the pad away from the sparsities the weight wants.
+    n_padded = 0
+    if length(pop) < n_slots
+        for k in 1:npar, i in [j for j in eachindex(Qs) if ksrc[j] == k && !isfinite(Qs[j])]
+            length(pop) >= n_slots && break
+            push!(pop, cand[i]); n_padded += 1
+        end
+    end
+    while length(pop) < n_slots
+        push!(pop, copy(seed)); n_padded += 1
+    end
+    pop[1] = copy(seed)
+
+    # cr: the sparsity the allocation favours, as a fraction of the free count. The
+    # summary is the slot-weighted mean k rather than argmax(taken): the allocation is
+    # routinely near-flat across sparsities and ties at the top, where argmax returns the
+    # FIRST maximum — k=1 whenever k=1 and k=2 tie, giving cr = 1/n_free and a proposal
+    # that moves a single coordinate. The weighted mean uses the whole distribution and
+    # cannot be decided by an arbitrary tie.
+    # On a barren call `taken` describes a random shuffle of half a population, not a
+    # yield-driven allocation, so summarising it would report a sparsity nothing measured.
+    # The weight vector is still the honest statement of which sparsities the draws
+    # favoured, so cr comes from that instead.
+    # cr summarises which sparsity is PAYING, and it is read off `score` — the mean
+    # improvement each sparsity delivered across all its draws. Two alternatives were
+    # measured on simulated yields and both are worse.
+    #
+    # Allocated slots look like the natural basis but collapse spuriously. A quota is
+    # capped by the improving draws actually available, and as improvements grow scarce
+    # the high sparsities hit that cap first, so the allocation tilts low for a reason
+    # that has nothing to do with which sparsity pays. Under a uniform thinning that
+    # leaves the true cr unchanged, slot-based cr fell 16% while score-based fell 3%.
+    #
+    # The allocation weight `w` is score·k/n_free, so it counts the k-preference twice —
+    # once in the score and once in the multiplier — and reads high throughout. It is
+    # still the only signal left on a barren call, where every score is zero.
+    basis  = barren ? w : score
+    k_star = sum(basis) > 0 ?
+             max(1, round(Int, sum(collect(1:npar) .* basis) / sum(basis))) : npar
+    cr_out = clamp(k_star / npar, 1.0 / npar, 1.0)
+
+    # f: match the DE step to the displacement just measured as productive. Coordinates
+    # whose realised spread is degenerate carry no information and are skipped.
+    #
+    # On a barren call the population is part carried-over members whose spread was set at
+    # a different point, so the realised spread is not the one the widths were measured
+    # against. Only the fresh members speak to the current scale, and n_fresh is however
+    # many the draws actually supplied — not n_slots÷2, which is only the target. With
+    # fewer than two fresh members there is no spread to measure and the whole population
+    # is the only estimate available.
+    P  = (barren && n_fresh >= 2) ? reduce(hcat, pop[1:n_fresh]) : reduce(hcat, pop)
+    fs = Float64[]
+    for j in 1:npar
+        s_j = std(@view P[j, :])
+        (s_j > 0 && isfinite(widths[j])) &&
+            push!(fs, sigma * abs(widths[j]) / (s_j * sqrt(2)))
+    end
+    # The clamp bounds a step multiplier that would otherwise be set by a spread the
+    # widths were not measured against. Hitting a bound means the estimate was outside the
+    # usable range rather than merely large, so it is reported: silently returning a bound
+    # would present a rejected estimate as a measurement.
+    f_raw   = isempty(fs) ? 0.7 : median(fs)
+    f_out   = clamp(f_raw, 0.1, 1.5)
+    f_clamp = f_out != f_raw
+
+    if verbose
+        # Which sparsities won, and whether the allocation had to fall back. Both are
+        # judgements about the run: an all-zero score means no candidate beat the seed,
+        # and a floored k* means the yield estimates were too noisy to rank.
+        top = sortperm(taken, rev = true)[1:min(5, npar)]
+        # Improving slots first, total in parentheses when the two differ — the gap is the
+        # feasible fallback, and cr is read off the first number only.
+        @printf("  [DE pop]  top sparsities by allocated slots: %s\n",
+                join([taken_imp[k] == taken[k] ?
+                      @sprintf("k=%d→%d", k, taken[k]) :
+                      @sprintf("k=%d→%d(%d)", k, taken_imp[k], taken[k])
+                      for k in top if taken[k] > 0], "  "))
+        n_fb = sum(taken) - sum(taken_imp)
+        n_fb > 0 && @printf("  [DE pop]  %d of %d slots filled from feasible non-improving draws\n",
+                            n_fb, sum(taken))
+        @printf("  [DE pop]  done: f=%.3f%s  cr=%.3f (k*=%d of %d)  best candidate Q=%.6e\n",
+                f_out, f_clamp ? @sprintf(" (clamped from %.3f)", f_raw) : "",
+                cr_out, k_star, npar,
+                isempty(feas_idx) ? NaN : minimum(Qs[feas_idx]))
+        flush(stdout)
+    end
+
+    # n_carried counts members taken from the PREVIOUS generation, and only that. The
+    # caller reads it as "this was the last productive reheat": the fresh draws could not
+    # supply a population, so re-measuring the scale has nothing left to offer and the
+    # next stall is convergence. n_padded is kept separate because padding with
+    # infeasible draws or seed copies means the BUDGET was too small, which is a
+    # configuration problem rather than evidence about the surface — conflating them
+    # would let a thin initial draw declare the run finished.
+    table = (k = collect(1:npar), n_feasible = n_feas, score = score,
+             weight = w, slots = taken, slots_imp = taken_imp,
+             n_carried = n_carried, n_padded = n_padded,
+             n_reverted = n_reverted, widths = widths, barren = barren, n_fresh = n_fresh,
+             n_feas_total = length(feas_idx), n_better = length(imp_idx))
+    return pop, f_out, cr_out, table
+end
+
 function _run_de(
     spec         :: SMMSpec;
     max_iter     :: Int     = 5000,
@@ -964,9 +1348,16 @@ function _run_de(
     cr           :: Float64 = 0.85,
     patience     :: Int     = 20,
     avg_tol      :: Float64 = 0.01,
-    local_k      :: Int     = 0,
-    local_sigma  :: Float64 = 0.33,
+    local_sigma  :: Float64 = 0.33,   # perturbation as a fraction of each coordinate's
+                                      # own ΔQ<1 width
     local_sigma_cap :: Float64 = 0.20,
+    gen_per_k    :: Int     = 30,     # candidates drawn at each sparsity k = 1:n_free
+    adapt_fcr    :: Bool    = false,  # derive f and cr from the draws, or keep the
+                                      # values passed in
+    reheat_flat  :: Int     = 6,      # reheat after this many generations with no
+                                      # improvement in Q_best, and
+    reheat_rate  :: Float64 = 0.04,   # an improved-member rate below this
+    max_reheats  :: Int     = 50,
     seed_bank    :: Union{Nothing,SeedBank}        = nothing,
     prev_optimum :: Union{Nothing,Vector{Float64}} = nothing,
     show_members :: Bool    = false,
@@ -987,45 +1378,30 @@ function _run_de(
     # orders of magnitude — the box spans ±4 in unconstrained space while the
     # measured feasible half-widths run from 6e-5 to 1e-1 — so essentially every
     # member is infeasible and the difference vectors carry no local geometry.
-    # local_k > 0 instead perturbs `local_k` coordinates of theta0 at a time, each
-    # by its own measured width: sparse because moving all 25 at once compounds 25
-    # small increases in Q (measured useful-draw rate 0.51 at k=3 against 0.08 at
-    # k=25), and per-coordinate because no single scale fits that span.
-    pop = Vector{Vector{Float64}}(undef, pop_size)
-    if local_k > 0
-        widths = _feasible_widths(theta0, spec, local_sigma_cap)
-        for j in 1:pop_size
-            theta_j = copy(theta0)
-            for k in randperm(rng, npar)[1:min(local_k, npar)]
-                theta_j[k] += local_sigma * abs(widths[k]) * randn(rng)
-            end
-            pop[j] = theta_j
-        end
-    else
-        for j in 1:pop_size
-            theta_j = Vector{Float64}(undef, npar)
-            for (k, ps) in enumerate(spec.free)
-                x_k = ps.lb + (ps.ub - ps.lb) * rand(rng)
-                x_k = clamp(x_k,
-                            ps.lb + 1e-8 * (ps.ub - ps.lb),
-                            ps.ub - 1e-8 * (ps.ub - ps.lb))
-                theta_j[k] = _to_unconstrained(x_k, ps.lb, ps.ub)
-            end
-            pop[j] = theta_j
-        end
+    # generate_population instead draws at every sparsity and allocates the slots by
+    # measured yield, returning the f and cr those same draws imply; local_k > 0 keeps
+    # the older fixed-sparsity construction for comparison.
+    # adapt_fcr decides only where f and cr come from. The generator always builds the
+    # population — its per-coordinate scale is the thing that makes the draws feasible at
+    # all — but the derived f and cr are a summary of the yield table, and a near-flat
+    # allocation summarises poorly. With the switch off the externally set values stand.
+    pop, f_gen, cr_gen, gen_table = generate_population(theta0, spec, pop_size;
+                                                       per_k = gen_per_k, sigma = local_sigma,
+                                                       cap = local_sigma_cap,
+                                                       verbose = show_gens, rng = rng)
+    adapt_fcr && ((f, cr) = (f_gen, cr_gen))
+    if show_gens
+        @printf("  [DE init]  generator: %d slots from %d draws  f=%.3f cr=%.3f (%s)\n",
+                pop_size, gen_per_k * npar, f, cr,
+                adapt_fcr ? "from yield" :
+                    @sprintf("set; yield would give f=%.3f cr=%.3f", f_gen, cr_gen))
+        flush(stdout)
     end
 
-    if local_k > 0
-        # The local population is already anchored on theta0; a cluster bank drawn
-        # over the whole box would reintroduce exactly the scale error it avoids.
-        pop[1] = copy(theta0)
-        if show_gens
-            @printf("  [DE init]  %d local members: %d coords perturbed at %.2f×width\n",
-                    pop_size, local_k, local_sigma)
-            flush(stdout)
-        end
-    elseif seed_bank === nothing
-        # No bank: warm the first member with the spec's initial point.
+    # The generated population is already anchored on theta0 at its measured local scale,
+    # so a cluster bank drawn over the whole box would reintroduce the very scale error
+    # the generator removes. It is applied only when one was supplied.
+    if seed_bank === nothing
         pop[1] = copy(theta0)
     else
         # Seed from clusters (round-robin, best-Q first); the random draws above
@@ -1083,8 +1459,12 @@ function _run_de(
     end
 
     n_evals     = Threads.Atomic{Int}(pop_size)
-    stagnation  = 0
-    actual_gens = 0
+    stagnation   = 0
+    actual_gens  = 0
+    n_reheats    = 0
+    Q_prev       = Q_best
+    reheats_done = false        # set once a reheat has to carry members forward
+    last_widths  = gen_table.widths
 
     for gen in 1:max_iter
         actual_gens = gen
@@ -1141,11 +1521,20 @@ function _run_de(
         n_imp  = n_improved[]
         n_eval = n_evals[]
 
-        if n_imp == 0
-            stagnation += 1
-        else
+        # Stagnation is measured on Q_BEST, not on the improved-member count. A member
+        # improving on its own parent is routine deep into a run — measured minimum 1 of
+        # 48 per generation over 165 generations, never 0 — so counting zero-improvement
+        # generations would never fire. What stalls is the best point.
+        #
+        # The test is strict: no threshold on the size of the improvement. The generator
+        # already sets its own scale from measured improvement, so a second tolerance
+        # here would be the same judgement applied twice.
+        if Q_best < Q_prev
             stagnation = 0
+        else
+            stagnation += 1
         end
+        Q_prev = Q_best
 
         if show_gens
             Q_finite = filter(isfinite, Q_pop)
@@ -1163,10 +1552,78 @@ function _run_de(
             flush(stdout)
         end
 
-        if stagnation >= patience
-            show_gens && @printf("  [DE]  early stop: no improvement for %d generations\n", patience)
-            flush(stdout)
-            break
+        # Stall handling. A DE population contracts as it converges, and once the
+        # spread falls below the scale on which Q still varies, every proposal is a
+        # step the surface cannot resolve. Rebuilding the population at the current
+        # best re-measures the widths there — a more curved surface yields a tighter
+        # cloud — so the scale follows the descent with no schedule to tune.
+        #
+        # The trigger needs both conditions: Q_best alone goes flat for up to 12
+        # generations mid-descent, and the improved-member rate alone dips on ordinary
+        # generations. Together they were 9 generations late on the one run traced
+        # through a genuine stall, which is the right side of the error trade — a
+        # false reheat costs one generator call and keeps the best point, while a
+        # missed stall costs every remaining generation.
+        stalled = stagnation >= reheat_flat && n_imp / pop_size < reheat_rate
+        if stalled
+            # reheats_done: the generator has already reported that its draws could not
+            # fill a population, so re-measuring the scale has nothing left to offer.
+            # This stall is convergence, and the best point is the estimate.
+            if reheats_done
+                show_gens && @printf("  [DE]  stop: converged — stalled after the final reheat, Q=%.6e\n",
+                                     Q_best)
+                flush(stdout)
+                break
+            end
+            if n_reheats >= max_reheats
+                show_gens && @printf("  [DE]  stop: %d reheats exhausted\n", max_reheats)
+                flush(stdout)
+                break
+            end
+            Q_before  = Q_best
+            n_reheats += 1
+            # The last generation is the fill source: when the fresh draws fall short,
+            # its best members are better material than duplicates of the seed, and
+            # prev_widths keeps a coordinate alive that this point cannot measure.
+            pop, f_gen, cr_gen, gen_table =
+                generate_population(theta_best, spec, pop_size;
+                                    per_k = gen_per_k, sigma = local_sigma,
+                                    cap = local_sigma_cap,
+                                    fill_from = pop, fill_Q = Q_pop,
+                                    prev_widths = last_widths,
+                                    require_improvement = true,
+                                    verbose = show_gens, rng = rng)
+            adapt_fcr && ((f, cr) = (f_gen, cr_gen))
+            last_widths = gen_table.widths
+            Q_pop = Vector{Float64}(undef, pop_size)
+            Threads.@threads for i in 1:pop_size
+                Q_pop[i] = smm_objective(pop[i], spec)
+            end
+            Threads.atomic_add!(n_evals, pop_size)
+            i_best     = argmin(Q_pop)
+            Q_best     = Q_pop[i_best]
+            theta_best = copy(pop[i_best])
+            stagnation = 0
+
+            # A BARREN reheat — zero improvements on theta_best, whatever the feasibility —
+            # is the last one. The population it built is the 50/50 random mix, so the run
+            # continues and searches it; exiting here would discard a population never
+            # tried. The next stall is convergence and the loop breaks at the top.
+            if gen_table.barren
+                reheats_done = true
+            end
+
+            if show_gens
+                @printf("  [DE reheat %d]  gen=%d  Q %.6e -> %.6e  f=%.3f cr=%.3f  k*=%d/%d  better=%d feas=%d of %d%s\n",
+                        n_reheats, gen, Q_before, Q_best, f, cr,
+                        argmax(gen_table.slots), npar,
+                        gen_table.n_better, gen_table.n_feas_total, gen_per_k * npar,
+                        gen_table.barren ?
+                            @sprintf("  BARREN → FINAL (mix %d new / %d carried)",
+                                     gen_table.n_fresh, gen_table.n_carried) :
+                            @sprintf("  (carried %d)", gen_table.n_carried))
+                flush(stdout)
+            end
         end
 
         if avg_tol > 0.0 && isfinite(Q_best) && Q_best != 0.0
@@ -1409,13 +1866,6 @@ function run_smm(
     sa_rate_tol     :: Float64 = 0.0,
     sa_rate_span    :: Int     = 0,
     sa_cooling_halflife :: Int = 0,
-    # DE initial population. de_local_k > 0 builds it by perturbing that many
-    # coordinates of the spec's initial point at a time, each scaled by its own
-    # ΔQ<1 width; 0 keeps the uniform draw over the box. Sparse because moving all
-    # coordinates at once compounds their individual increases in Q (measured
-    # useful-draw rate 0.51 at k=3 against 0.08 at k=25).
-    de_local_k      :: Int     = 0,
-    de_local_sigma  :: Float64 = 0.33,
 ) :: SMMResult
 
     r    = spec.run
@@ -1425,7 +1875,114 @@ function run_smm(
     @printf("\nStarting SMM  (%s,  %d free params)\n", method, npar)
     flush(stdout)
 
-    if method == :de
+    # SA and DE are written as stages because :sa_de runs both, and a second copy of
+    # either argument list would be a second place to update when a setting is added.
+    _sa_stage(sp, starts) = _run_sa(
+        sp;
+        starts          = starts,
+        max_iter        = r.sa_max_iter,
+        T0              = r.sa_T0,
+        step            = r.sa_step,
+        cooling_rate    = r.sa_cooling_rate,
+        cooling_exp     = r.sa_cooling_exp,
+        reheat_patience = r.sa_reheat_patience,
+        reheat_factor   = r.sa_reheat_factor,
+        max_reheats     = r.sa_max_reheats,
+        adapt_window    = r.sa_adapt_window,
+        target_fin      = r.sa_target_fin,
+        subset_k        = sa_subset_k,
+        corana_Ns       = sa_corana_Ns,
+        corana_c        = sa_corana_c,
+        step_floor_rel  = sa_step_floor_rel,
+        rate_tol        = sa_rate_tol,
+        rate_span       = sa_rate_span,
+        cooling_halflife = sa_cooling_halflife,
+        t0_rel          = r.sa_t0_rel,
+        t0_accept       = r.sa_t0_accept,
+        reheat_reset_tol = r.sa_reheat_reset_tol,
+        parallel_steps  = r.sa_parallel_steps,
+        seed            = r.sa_seed,
+        random_init     = r.sa_random_init,
+        show_trace      = r.show_trace_generations,
+        trace_stride    = r.trace_stride,
+        rng             = rng,
+    )
+
+    _de_stage(sp, bank, prev) = _run_de(
+        sp;
+        max_iter     = r.de_max_iter,
+        pop_size     = r.de_pop_size > 0 ? r.de_pop_size : 10 * npar,
+        f            = r.de_f,
+        cr           = r.de_cr,
+        patience     = r.de_patience,
+        avg_tol      = r.de_avg_tol,
+        local_sigma  = r.de_local_sigma,
+        gen_per_k    = r.de_gen_per_k,
+        adapt_fcr    = r.de_adapt_fcr,
+        reheat_flat  = r.de_reheat_flat,
+        reheat_rate  = r.de_reheat_rate,
+        max_reheats  = r.de_max_reheats,
+        seed_bank    = bank,
+        prev_optimum = prev,
+        show_members = r.show_trace_members,
+        show_gens    = r.show_trace_generations,
+        trace_stride = r.trace_stride,
+        rng          = rng,
+    )
+
+    if method == :sa_de
+        # Two stages with complementary jobs. Annealing is a global search: it accepts
+        # uphill moves and crosses the box, which is what takes Q from ~1e6 at a cold
+        # start down to the right basin. It moves few coordinates at a time, so it cannot
+        # construct the joint directions this criterion needs once inside that basin —
+        # which is where DE takes over, building its steps from differences between
+        # population members.
+        # The starting point is an incumbent, not just a place to begin. On a warm start
+        # it is a previous optimum with a known Q, and annealing is free to wander uphill
+        # from it — that is what lets it leave a basin, but it means SA can return worse
+        # than it was given, and on a short budget it may not come back. Keeping the start
+        # in contention costs one solve and makes the whole path monotone: the reported Q
+        # can never exceed the Q the run was handed.
+        θ_start = pack_theta(spec)
+        Q_start = smm_objective(θ_start, spec)
+        isfinite(Q_start) &&
+            @printf("\n[stage 0/2]  starting point Q=%.6e (kept in contention)\n", Q_start)
+
+        @printf("\n[stage 1/2]  simulated annealing — find the basin\n"); flush(stdout)
+        θ_sa, Q_sa, it_sa = _sa_stage(spec, _sa_starts_from_bank(seed_bank, prev_optimum))
+
+        if isfinite(Q_start) && !(isfinite(Q_sa) && Q_sa <= Q_start)
+            @printf("[stage 1/2]  annealing ended at Q=%s, above the start; DE continues from the start\n",
+                    isfinite(Q_sa) ? @sprintf("%.6e", Q_sa) : "Inf")
+            flush(stdout)
+            θ_sa, Q_sa = θ_start, Q_start
+        elseif !isfinite(Q_sa)
+            println("[stage 1/2]  annealing returned no feasible point; handing the original start to DE")
+            flush(stdout)
+        end
+        # DE starts where SA stopped. The spec's init is the handover: the generator
+        # measures its widths at that point, so the population is scaled to the basin SA
+        # found rather than to the original warm start. The seed bank is deliberately NOT
+        # forwarded — its members are spread over the whole box, which would reintroduce
+        # the scale error the generator exists to remove.
+        spec_de = isfinite(Q_sa) ? _spec_with_init(spec, θ_sa) : spec
+        @printf("\n[stage 2/2]  differential evolution — refine within the basin (SA gave Q=%.6e)\n",
+                Q_sa); flush(stdout)
+        θ_de, Q_de, it_de = _de_stage(spec_de, nothing, nothing)
+
+        # Report the best of the three points the run actually holds. DE returns Inf only
+        # if every member was infeasible, and the start is already known-feasible, so this
+        # cannot report worse than the run began with.
+        cands = [(Q_start, θ_start), (Q_sa, θ_sa), (Q_de, θ_de)]
+        filter!(c -> isfinite(c[1]), cands)
+        loss_opt, theta_opt = isempty(cands) ? (Inf, θ_start) : cands[argmin(first.(cands))]
+        niters    = it_sa + it_de
+        converged = isfinite(loss_opt)
+        conv_why  = isfinite(loss_opt) ? "sa+de-stop" : "infeasible"
+        @printf("\n[stages done]  start Q=%.6e → SA Q=%.6e → DE Q=%.6e   reported Q=%.6e\n",
+                Q_start, Q_sa, Q_de, loss_opt); flush(stdout)
+
+    elseif method == :de
         theta_opt, loss_opt, niters = _run_de(
             spec;
             max_iter     = r.de_max_iter,
@@ -1434,8 +1991,12 @@ function run_smm(
             cr           = r.de_cr,
             patience     = r.de_patience,
             avg_tol      = r.de_avg_tol,
-            local_k      = de_local_k,
-            local_sigma  = de_local_sigma,
+            local_sigma  = r.de_local_sigma,
+            gen_per_k    = r.de_gen_per_k,
+            adapt_fcr    = r.de_adapt_fcr,
+            reheat_flat  = r.de_reheat_flat,
+            reheat_rate  = r.de_reheat_rate,
+            max_reheats  = r.de_max_reheats,
             seed_bank    = seed_bank,
             prev_optimum = prev_optimum,
             show_members = r.show_trace_members,
@@ -1611,12 +2172,12 @@ function print_results(res::SMMResult; why::AbstractString = "")
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimates                                       ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    @printf("  %-6s  %-22s  %10s\n", "block", "parameter", "estimate")
-    @printf("  %s\n", "-"^42)
+    @printf("  %-6s  %-8s  %10s\n", "block", "param", "estimate")
+    @printf("  %s\n", "-"^30)
     for ps in res.spec.free
         key = Symbol(string(ps.block) * "_" * string(ps.name))
         val = hasproperty(res.params_opt, key) ? res.params_opt[key] : NaN
-        @printf("  %-6s  %-22s  %10.5f\n", ps.block, ps.label, val)
+        @printf("  %-6s  %-8s  %10.5f\n", ps.block, ps.name, val)
     end
     if length(res.spec.fixed) > 0
         @printf("\n  Fixed:\n")

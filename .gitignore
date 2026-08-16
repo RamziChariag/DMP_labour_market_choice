@@ -13,3 +13,10 @@ literature.zip
 /output/smm/mcmc_chain_*.jls
 /output/smm/candidates_*.jls
 !/output/smm/smm_result_*.jls   # keep: warmstart seeds
+# Bundle-migration scratch: the pre-migration copies and the neutral intermediate are
+# local safety nets for a one-off struct change, not results. The migrated bundles
+# themselves ARE tracked, and each carries provenance recording what it was rebuilt from.
+/output/smm/_migration/
+*.jls.pre_migration
+*.jls.pre_vm
+.DS_Store
