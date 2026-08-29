@@ -359,37 +359,203 @@ function _chisq_quantile(q::Float64, ν::Int)
 end
 
 """
-    converged_sequential(chain, g, burn_frac, p; rhat_max=1.01, ess_min=min_ess(p))
+    exempt_coordinates(chain, g, burn_frac; n_distinct_min=50, edge_frac_max=0.05, lb, ub)
+      -> (exempt::BitVector, n_distinct::Vector{Int}, edge_frac::Vector{Float64})
+
+Which coordinates cannot reach a mixing threshold at ANY budget, decided by
+measurement rather than by hand.
+
+Two mechanisms, each with its own test, because they fail for different reasons:
+
+  FROZEN. A coordinate the proposal never moves has no distribution to mix. It is
+  visible as a tiny number of distinct visited values — a frozen coordinate shows
+  single digits where a live one shows hundreds. `n_distinct` counts them on the
+  post-burn-in pooled draws. This is the frozen-coordinate test the diagnosis
+  discipline prescribes and it was not previously computed anywhere.
+
+  AT A BOUND. A coordinate pressed against a box edge piles up there. Under the
+  logit transform the bound is at infinity in `t`, so "at the bound" is measured
+  in CONSTRAINED units: the fraction of draws within 1% of the box width of either
+  edge. Its sd is a description of the pile-up, not a confidence half-width, so
+  requiring it to mix is requiring a quantity that does not exist.
+
+WHY EXEMPT RATHER THAN LOWER THE THRESHOLD. The old gate took `minimum(ess)` over
+all coordinates, so ONE frozen or railed coordinate held the whole run hostage: the
+test could not be satisfied at any generation count, the sequential stop never
+fired, and every run paid its full budget regardless of whether the reported
+numbers had converged. Lowering `ess_min` instead would weaken the test for the
+coordinates that DO mix, which is the opposite of what is wanted.
+
+WHAT EXEMPTION DOES NOT MEAN. An exempt coordinate is still reported, still in the
+chain, and still in every output. Exemption governs only whether it can BLOCK
+termination. It is emphatically not a freeze: nothing is held fixed, and the
+exemption is recomputed from the draws at every check, so a coordinate that starts
+moving stops being exempt. That matters — an automatic freeze would convert a loud
+diagnostic into a clean table with a spurious zero standard error, which is how a
+solver defect gets hidden rather than found.
+"""
+function exempt_coordinates(chain::AbstractArray{Float64,3}, g::Int, burn_frac::Float64;
+                            n_distinct_min::Int     = 50,
+                            edge_frac_max::Float64  = 0.05,
+                            lb::Union{Nothing,AbstractVector} = nothing,
+                            ub::Union{Nothing,AbstractVector} = nothing)
+    d, N, _ = size(chain)
+    b = clamp(floor(Int, burn_frac * g), 0, g - 1)
+    kept = g - b
+    nd   = zeros(Int, d)
+    ef   = zeros(Float64, d)
+    kept < 4 && return (falses(d), nd, ef)
+
+    for k in 1:d
+        v = vec(@view chain[k, :, b+1:g])
+        nd[k] = length(unique(v))
+        if lb !== nothing && ub !== nothing
+            # Measure pile-up in CONSTRAINED units: the box edge is at infinity in t.
+            θ = _to_constrained.(v, lb[k], ub[k])
+            w = ub[k] - lb[k]
+            ef[k] = w > 0 ? count(x -> (x - lb[k] < 0.01w) || (ub[k] - x < 0.01w), θ) / length(θ) : 0.0
+        end
+    end
+    return (BitVector(nd .< n_distinct_min .|| ef .> edge_frac_max), nd, ef)
+end
+
+"""
+    converged_sequential(chain, g, burn_frac, p; ...)
       -> (done, worst_rhat, min_ess_seen)
 
-Sequential convergence test on the filled prefix `chain[:, :, 1:g]`, re-deriving
-the burn-in from `burn_frac` at the CURRENT generation so the discarded fraction
-does not depend on when the check happens.
+PER-COORDINATE, with automatic exemptions. `min_ess_seen` is the minimum over
+NON-EXEMPT coordinates, so the returned number is the one that actually gates.
 
-Terminates on the Vats–Knudson (2021) pairing of the two diagnostics: R̂ below
-`rhat_max` for every coordinate AND per-parameter ESS above `ess_min`. Requiring
-both is the point — R̂ alone can be satisfied by chains that agree with each other
-while all mixing slowly, and ESS alone can be satisfied by one well-mixed chain
-stuck in the wrong basin. The two also respond to different levers: at a fixed
-solve budget, adding chains raises ESS but *worsens* R̂, because the individual
-chains have had fewer generations to equilibrate.
+`ess_min` defaults to 450 rather than `min_ess(p)`. 450 is
+`MCSE(q05) <= 0.10 * sd_k` — each reported interval endpoint precise to a tenth of
+the width it reports — from `MCSE(q_p) = sqrt(p(1-p))/f(F^-1(p)) * sd/sqrt(ESS)`,
+whose constant is 2.113 at p = 0.05. This is the MCSE criterion: it stops when the
+ANSWER is precise enough, not when a diagnostic is happy. `min_ess(p)` targets a
+joint-volume guarantee over all p coordinates at once, which is a far larger and
+different requirement, and is not what the reported per-coordinate intervals need.
 
-`rhat_max` defaults to 1.03 rather than the customary 1.01 because 1.01 is not
-attainable for DE-MC at these chain counts: on an isotropic Gaussian, N = 50
-reaches only 1.012 after 4000 generations. 1.03 is well inside the ≤ 1.1 of
-Gelman et al. (2004).
+Report q05/q95, not q025/q975: the constant is 2.671 at p = 0.025, and required ESS
+scales as the SQUARE of the constant, so the tighter tail costs
+(2.671/2.113)² − 1 = 59.8% more ESS for the same relative precision — 714 against
+447 at MCSE ≤ 0.10·sd. (Equivalently, q05/q95 needs 37.4% LESS; an earlier revision
+quoted that 37% figure as the *extra* cost of the tighter tail, which conflates the
+two directions and understates it.) With 28 moments the
+2.5% tail is the least trustworthy part of the estimate anyway.
 """
 function converged_sequential(chain::AbstractArray{Float64,3}, g::Int,
                               burn_frac::Float64, p::Int;
                               rhat_max::Float64 = 1.03,
-                              ess_min::Float64  = min_ess(p))
+                              ess_min::Float64  = 450.0,
+                              lb::Union{Nothing,AbstractVector} = nothing,
+                              ub::Union{Nothing,AbstractVector} = nothing)
     b = clamp(floor(Int, burn_frac * g), 0, g - 1)
     view_g = @view chain[:, :, 1:g]
     rhat, ess = split_rhat_ess(view_g, b)
-    all(isfinite, rhat) || return (false, NaN, NaN)
-    wr = maximum(rhat)
-    me = minimum(ess)
+    exempt, _, _ = exempt_coordinates(chain, g, burn_frac; lb = lb, ub = ub)
+
+    live = .!exempt
+    # Every coordinate exempt is not convergence — it means the chain is not sampling
+    # anything, which must not read as success.
+    any(live) || return (false, NaN, NaN)
+
+    rl = rhat[live]; el = ess[live]
+    (all(isfinite, rl) && all(isfinite, el)) || return (false, NaN, NaN)
+    wr = maximum(rl)
+    me = minimum(el)
     return (wr <= rhat_max && me >= ess_min, wr, me)
+end
+
+
+"""
+    accepted_moves(chain, g, burn_frac) -> Int
+
+Number of generations in the RETAINED half in which at least one chain's whole
+parameter vector changed, summed over chains. This is the accepted-move count in its
+natural unit, and it is the quantity `stop_rule` gates on.
+
+WHY THIS RATHER THAN ESS. Measured on the 18.4.1 base_fc chain (N=64, G=4000): the
+per-chain median number of distinct values is 3 for the typical coordinate, so 23 of
+23 coordinates sit below `converged_sequential`'s frozen threshold of 50 when counted
+per chain. The pooled count clears 50 only because 64 chains × ~3 values ≈ 200. An
+autocorrelation estimator applied to a series that is 99.4% duplicates returns a
+number (233 to 1400 on that chain) but it is not an effective sample size — there were
+~12 accepted moves per chain. Counting transitions directly cannot be fooled that way:
+it is the number of times the sampler actually moved.
+"""
+function accepted_moves(chain::Array{Float64,3}, g::Int, burn_frac::Float64)
+    d, N, _ = size(chain)
+    b = clamp(floor(Int, burn_frac * g), 0, g - 1)
+    g - b < 2 && return 0
+    n = 0
+    @inbounds for c in 1:N, t in (b + 2):g
+        if @views chain[:, c, t] != @views chain[:, c, t - 1]
+            n += 1
+        end
+    end
+    return n
+end
+
+
+"""
+    stop_rule(chain, g, burn_frac, d; ...) -> (stop, diagnose, moves, drift, wr, me)
+
+The sequential stop. Returns `stop` (terminate, the run has what it came for),
+`diagnose` (terminate, the run is not producing a posterior and should be looked at),
+and the four quantities the decision is made on.
+
+STOP requires all three, and the caller requires them at TWO CONSECUTIVE checks:
+  1. `moves >= moves_min` — accepted moves in the retained half. The deliverable in its
+     natural unit.
+  2. `drift_since_last < drift_flat` — the running maximum of the log-target has stopped
+     climbing. 0.5 log units is ΔQ = 1, one moment moving by one sampling sd, matching
+     `PROMOTE_MIN_DQ` and sitting inside the ±3.32 grid resolution on Q's level. Without
+     this a rule can stop mid-descent: the criterion is still being minimised, so
+     Cov(chain) would measure the trajectory rather than the curvature.
+  3. `wr <= rhat_prev` — worst R̂ over non-exempt coordinates has not increased. This
+     refuses to stop while the between-chain spread is still deteriorating. It is a
+     no-worsening test, NOT a threshold: measured on the 18.4.1 chain, worst R̂ trends
+     UPWARD with budget (3.17 at g=250 to 5.73 at g=4000) and never approaches 1.10, so
+     a threshold there is unsatisfiable at any budget and the old gate fired at 0 of 16
+     checkpoints — decorative in the strict sense that its true-stop rate was also zero.
+
+DIAGNOSE fires when windowed acceptance < `acc_floor` at two consecutive checks. An
+acceptance of 0.006 against the Roberts-Gelman-Gilks high-dimensional optimum of 0.234
+means the population is mis-scaled relative to the target; more generations cannot fix
+it and the run should not silently spend its budget. This is deliberately NOT an abort
+on drift — that inference was tried and disabled (see `MCMC_DRIFT_MAX`) because on an
+objective with unidentified directions any chain wide enough to measure a width finds
+better points, so a drift abort terminates exactly the runs that would produce a
+standard error. Low acceptance is a different signal: it says the chain is not moving
+at all.
+
+R̂ and ESS are still computed and returned so they can be reported. They are
+diagnostics of which coordinates are identified, not gates.
+"""
+function stop_rule(chain::Array{Float64,3}, g::Int, burn_frac::Float64, d::Int;
+                   moves_min::Int          = 2000,
+                   drift_flat::Float64     = 0.5,
+                   acc_floor::Float64      = 0.02,
+                   acc_window::Float64     = NaN,
+                   drift_since_last        = NaN,
+                   rhat_prev::Float64      = Inf,
+                   rhat_max::Float64       = 1.10,
+                   ess_min::Float64        = 450.0,
+                   lb::Union{Nothing,AbstractVector} = nothing,
+                   ub::Union{Nothing,AbstractVector} = nothing)
+    _, wr, me = converged_sequential(chain, g, burn_frac, d;
+                                     rhat_max = rhat_max, ess_min = ess_min,
+                                     lb = lb, ub = ub)
+    moves = accepted_moves(chain, g, burn_frac)
+
+    # A NaN on either incoming quantity means "first check, nothing to compare against",
+    # so neither branch may fire: a rule that stops on the first check has no evidence.
+    drift_ok = isfinite(drift_since_last) && drift_since_last < drift_flat
+    rhat_ok  = isfinite(wr) && wr <= rhat_prev
+    stop     = moves >= moves_min && drift_ok && rhat_ok
+
+    diagnose = isfinite(acc_window) && acc_window < acc_floor
+
+    return (stop, diagnose, moves, drift_since_last, wr, me)
 end
 
 

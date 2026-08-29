@@ -61,6 +61,24 @@ for w in "${WINDOWS[@]}"; do
     printf "  %-9s %s\n" "$w" "$([ -f "$f" ] && echo "present" || echo "absent — will start from DEFAULT_PARAMS")"
 done
 
+# Settings lifecycle. Runs before the size audit and in --verify-only, because a clone
+# that cannot deliver its own settings is broken in a way no file listing reveals: the
+# defect this catches produces numbers, writes output, and reports the configuration the
+# caller intended rather than the one the optimiser used. Non-zero here fails the gate.
+echo ""
+echo "=== settings lifecycle (code/scripts/check_forwarding.jl) ==="
+JULIA_BIN="${JULIA:-julia}"
+if command -v "$JULIA_BIN" >/dev/null 2>&1; then
+    if "$JULIA_BIN" --project=. --startup-file=no code/scripts/check_forwarding.jl; then
+        :
+    else
+        echo "  check_forwarding reported findings — see SETTINGS.md" >&2
+        missing=1
+    fi
+else
+    echo "  SKIPPED: julia not on PATH (set JULIA=/path/to/julia to include this gate)"
+fi
+
 $VERIFY_ONLY && { echo ""; echo "verify-only: skipping the size audit"; exit "$missing"; }
 
 echo ""

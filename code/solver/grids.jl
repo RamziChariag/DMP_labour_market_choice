@@ -240,6 +240,44 @@ end
 
 
 # ============================================================
+# Exact-CDF cell masses for a quality distribution on [0,1]
+#
+# Each quadrature node owns the cell between the midpoints to its
+# neighbours, with the support endpoints closing the first and last cell,
+# so the cells tile [0,1] exactly and their masses sum to 1.
+#
+# build_cell_mass_density returns γ̃_j ≡ (Γ(e_{j+1}) − Γ(e_j)) / wp_j — a
+# CELL MASS PER UNIT wp, NOT a pointwise density.  It is built this way so
+# that every ∫ g dΓ in the model, which appears as Σ_j g_j γ̃_j wp_j,
+# carries the exact cell mass: total mass is 1 by construction, and the
+# mass near the shock density's singularity at p = δ_S comes from the CDF
+# (finite and exact there) instead of from a pdf evaluated at whichever
+# node happens to sit nearest the pole.  Nodes and weights are untouched;
+# only the density they multiply changes.
+#
+# γ̃_j MUST NEVER BE READ POINTWISE.  Its error against γ(p_j) does not
+# vanish with refinement — measured RMS 1.194 at N = 60 and 1.202 at
+# N = 480 — because wp_j is a Gauss–Legendre weight, not the cell's width.
+# ============================================================
+
+function build_node_cell_edges(p::Vector{Float64})
+    N = length(p)
+    e = Vector{Float64}(undef, N + 1)
+    e[1] = 0.0;  e[N + 1] = 1.0
+    @inbounds for j in 2:N
+        e[j] = 0.5 * (p[j - 1] + p[j])
+    end
+    return e
+end
+
+function build_cell_mass_density(Γ_at, p::Vector{Float64}, wp::Vector{Float64})
+    e  = build_node_cell_edges(p)
+    Fe = Γ_at.(e)
+    return [wp[j] > 0.0 ? max(Fe[j + 1] - Fe[j], 0.0) / wp[j] : 0.0 for j in eachindex(p)]
+end
+
+
+# ============================================================
 # Soft tail-indicator weight
 #
 # Linear-in-p smoothing of 1{p ≥ p*} across the grid cell that contains

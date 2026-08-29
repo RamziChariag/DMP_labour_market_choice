@@ -76,6 +76,50 @@ struct ParamSpec
     label :: String
 end
 
+"""
+    param_symbol(ps) → String
+
+The parameter's canonical symbol, market suffix included: `μ_U` rather than the bare
+`μ` that `ps.name` carries for both markets. Taken from the tail of `ps.label`, which
+already spells each symbol the way the model notes and the paper do, so the suffix
+convention lives in one place — the label — rather than in a second table that can
+drift from it. A trailing parenthetical (units, as on the vacancy costs) is dropped.
+"""
+function param_symbol(ps::ParamSpec)
+    lab = replace(ps.label, r"\s*\([^)]*\)\s*$" => "")
+    sym = last(split(lab))
+    isempty(sym) ? string(ps.name) : String(sym)
+end
+
+"""
+    padr(s, n) → String
+
+Left-justify `s` in a field `n` columns wide, counting DISPLAY columns rather than
+bytes. Julia's `%-ns` pads to a byte count, so a name containing a multi-byte glyph
+(`a_ℓ` is three characters in five bytes) comes out short and drags every following
+column left. Every parameter table here carries such names.
+"""
+padr(s, n::Int) = (t = string(s); t * " "^max(0, n - textwidth(t)))
+
+# Fixed parameters are keyed `block_name` in the fixed NamedTuple and have no
+# ParamSpec to carry a label, so their display symbols are spelled here. The market
+# suffix follows the same convention as `param_symbol`, which reads it from a label.
+const FIXED_SYMBOLS = Dict(
+    :unsk_eta  => "η_U", :skl_eta  => "η_S",
+    :unsk_η    => "η_U", :skl_η    => "η_S",
+    :unsk_σ_w  => "σ_wU", :skl_σ_w => "σ_wS",
+    :PU        => "P_U",  :PS      => "P_S",
+    :bT        => "b_T",  :bU      => "b_U", :bS => "b_S",
+)
+
+"""
+    fixed_symbol(key) → String
+
+Display symbol for a fixed parameter. Falls back to the key itself for the genuinely
+unsuffixed ones (`r`, `ν`, `φ`), which need no market label.
+"""
+fixed_symbol(key) = get(FIXED_SYMBOLS, Symbol(key), string(key))
+
 # ============================================================
 # SMMRunParams
 # ============================================================
@@ -106,6 +150,9 @@ Base.@kwdef struct SMMRunParams
     de_pop_size  :: Int     = 0        # 0 ⇒ 10 × n_free_params
     de_f         :: Float64 = 0.65
     de_cr        :: Float64 = 0.85
+    # RETIRED v19.5.0, kept only so stored bundles stay loadable. The DE stall test is
+    # de_reheat_flat + de_reheat_rate; this field's value never reached that test. Delete
+    # it at the next struct change that migrates bundles anyway. See CHANGELOG.md.
     de_patience  :: Int     = 20
     de_avg_tol   :: Float64 = 0.0      # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 disables.
                                        # Off: across a six-configuration sweep this rule
@@ -131,13 +178,23 @@ Base.@kwdef struct SMMRunParams
     # Simulated annealing
     sa_max_iter      :: Int     = 5_000
     sa_T0            :: Float64 = 2.0
-    sa_step          :: Float64 = 0.15
+    # Proposal sd in unconstrained space.  Sized to the measured ΔQ = 1 feasible
+    # half-widths (median 3.4e-03) rather than to the ±4 box: at 0.20 the walk
+    # accepted 0 of 150 proposals at 97% feasibility, at 0.01 it accepted 7 and
+    # descended.  smm_main.jl sets this on every run (ROYSEARCH_SA_STEP); the
+    # default matters only to a bundle read outside that path.
+    sa_step          :: Float64 = 0.01
     sa_cooling_rate  :: Float64 = 1.0
     sa_cooling_exp   :: Float64 = 0.5
     sa_reheat_patience :: Int     = 200
     sa_reheat_factor   :: Float64 = 2.0
     sa_max_reheats     :: Int     = 5
     sa_adapt_window  :: Int     = 50
+    # RETIRED v19.5.0, kept only so stored bundles stay loadable. It was meant to shrink
+    # the step when feasibility fell below it, and _sa_loop never read it. The mechanism it
+    # would have counteracted was measured and is not there: at realised feasibility 0.88
+    # the walk closes 94.4% of the gap against 97.2% at full feasibility, and the adapted
+    # step is unchanged. Delete at the next bundle-migrating struct change. See CHANGELOG.md.
     sa_target_fin    :: Float64 = 0.90
     # T0 auto-calibration (used when sa_T0 <= 0).  T0 solves
     # exp(-sa_t0_rel*Q0 / T0) = sa_t0_accept: a proposal that worsens the
@@ -230,11 +287,25 @@ Base.@kwdef struct SMMRunParams
     nm_simplex_step :: Float64 = 0.2
 
     # ── Local search around incumbents ───────────────────────
-    # SA perturbs a random subset of sa_subset_k coordinates per step rather than all d:
-    # a full-dimensional move compounds many small increases in Q and is rejected.
     # The generator perturbs each chosen coordinate by de_local_sigma of its own ΔQ<1
     # width — a units-free fraction of a measured scale, not a fraction of the box.
-    sa_subset_k    :: Int     = 3
+    #
+    # sa_subset_k was REMOVED here in v19.1.0. BUNDLE STATUS AT THE TIME OF THIS EDIT:
+    # the neutral intermediates were extracted BEFORE the removal and the rebuild has run,
+    # but NOTHING IS INSTALLED YET — the .new files sit beside the originals in output/smm.
+    # base_fc and base_covid round-trip theta EXACTLY (max|dtheta| = 0.000e+00) and are the
+    # two windows to install; crisis_fc and crisis_covid do NOT (max|dtheta| = 3.34 and
+    # 4.55) because they encode a pre-P_U-normalisation 19-parameter spec and must be
+    # re-estimated rather than migrated. Do not read this comment as "the bundles on disk
+    # are current" until that install has happened.
+    # It set a fixed number of coordinates for SA to perturb per iteration; the
+    # proposal now draws its own mask from a measured p_move and takes its step scale
+    # from the measured ΔQ=1 half-widths (sa_proposal_scale, SA_SCALE_* in smm_main.jl).
+    # Removal required a migration because Serialization rebuilds a struct by field
+    # POSITION: it sat between nm_simplex_step (Float64) and de_local_sigma (Float64),
+    # so deleting an Int between two Float64s is the loud TypeError case rather than the
+    # silent shift — but only by luck of the types, which is not a reason to rely on it.
+    # See the graveyard entry in SETTINGS.md for the measurement that retired it.
     de_local_sigma :: Float64 = 0.33
 
 end
@@ -1006,29 +1077,23 @@ end
 Display the estimation problem: free parameters with bounds, fixed
 overrides, and active / skipped moments.
 """
-function print_spec(spec::SMMSpec;
-                    sa_subset_k    :: Int     = 0,
-                    sa_halflife    :: Int     = 0,
-                    sa_rate_tol    :: Float64 = 0.0,
-                    nm_rate_tol    :: Float64 = 0.0,
-                    nm_rate_span   :: Int     = 0,
-                    de_gen_per_k   :: Int     = 0,
-                    de_local_sigma :: Float64 = 0.0)
+function print_spec(spec::SMMSpec)
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimation Specification                        ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
     @printf("║  Free parameters (%d)                                ║\n",
             length(spec.free))
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    # The symbol, not the label: these tables are read against each other, and a
-    # description column wide enough for the longest label pushes the numbers out of
-    # alignment. The labels survive in the CSV writers, where width does not matter.
-    @printf("  %-6s  %-8s  %10s  %10s  %10s\n",
-            "block", "param", "lb", "ub", "init")
+    # The market-suffixed symbol, not the label: these tables are read against each
+    # other, and a description column wide enough for the longest label pushes the
+    # numbers out of alignment. The labels survive in the CSV writers, where width
+    # does not matter.
+    @printf("  %s%s%10s  %10s  %10s\n",
+            padr("block", 8), padr("param", 8), "lb", "ub", "init")
     @printf("  %s\n", "─"^50)
     for ps in spec.free
-        @printf("  %-6s  %-8s  %10.4f  %10.4f  %10.4f\n",
-                ps.block, ps.name, ps.lb, ps.ub, ps.init)
+        @printf("  %s%s%10.4f  %10.4f  %10.4f\n",
+                padr(ps.block, 8), padr(param_symbol(ps), 8), ps.lb, ps.ub, ps.init)
     end
 
     if length(spec.fixed) > 0
@@ -1037,7 +1102,7 @@ function print_spec(spec::SMMSpec;
                 length(spec.fixed))
         @printf("╠══════════════════════════════════════════════════════╣\n")
         for (k, v) in pairs(spec.fixed)
-            @printf("  %-20s = %.6f\n", k, v)
+            @printf("  %s = %.6f\n", padr(fixed_symbol(k), 20), v)
         end
     end
 
@@ -1081,30 +1146,39 @@ function print_spec(spec::SMMSpec;
             spec.run.Nx, spec.run.Np_U, spec.run.Np_S)
     @printf("  λ_w (wage-reliability calibration knob, σ_w = √((1−λ_w)·Var̂[log w])): %.4f\n",
             spec.run.λ_w)
-    @printf("  SA:  max_iter=%d  T0=%.2f  step=%.2f  cooling_rate=%.2f  cooling_exp=%.2f  reheat_patience=%d  reheat_factor=%.2f  adapt_window=%d  target_fin=%.2f\n",
+    # sa_target_fin and de_patience were printed here until v19.5.0 and neither reached a
+    # consumer that read it — a banner asserting settings nothing acted on. They survive
+    # as struct fields only so stored bundles stay loadable; see CHANGELOG.md.
+    @printf("  SA:  max_iter=%d  T0=%.2f  step=%.2f  cooling_rate=%.2f  cooling_exp=%.2f  reheat_patience=%d  reheat_factor=%.2f  adapt_window=%d\n",
             spec.run.sa_max_iter, spec.run.sa_T0, spec.run.sa_step,
             spec.run.sa_cooling_rate, spec.run.sa_cooling_exp,
             spec.run.sa_reheat_patience, spec.run.sa_reheat_factor,
-            spec.run.sa_adapt_window, spec.run.sa_target_fin)
-    @printf("  DE:   max_iter=%d  pop_size=%s  f=%.2f  cr=%.2f  patience=%d  avg_tol=%s\n",
+            spec.run.sa_adapt_window)
+    @printf("  DE:   max_iter=%d  pop_size=%s  f=%.2f  cr=%.2f  avg_tol=%s\n",
             spec.run.de_max_iter,
             spec.run.de_pop_size == 0 ? "auto" : string(spec.run.de_pop_size),
-            spec.run.de_f, spec.run.de_cr, spec.run.de_patience,
+            spec.run.de_f, spec.run.de_cr,
             spec.run.de_avg_tol > 0.0 ? @sprintf("%.1e", spec.run.de_avg_tol) : "off")
     @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e  g_tol=%.0e  no_improve=%s\n",
             spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol, spec.run.nm_g_tol,
             spec.run.nm_no_improve > 0 ? string(spec.run.nm_no_improve) : "off")
-    @printf("  SA:   %s;  cooling %s;  stop ΔQ < %s per 100 iters\n",
-            sa_subset_k > 0 ?
-                @sprintf("%d coords/iter, per-coordinate step", sa_subset_k) :
-                "all coords/iter, one shared step",
-            sa_halflife > 0 ? @sprintf("geometric, half-life %d", sa_halflife) :
-                              "logarithmic",
-            sa_rate_tol > 0 ? @sprintf("%.3g", sa_rate_tol) : "off")
-    @printf("  NM:   stop ΔQ < %s per 100 evals, sustained over %d evals\n",
-            nm_rate_tol > 0 ? @sprintf("%.3g", nm_rate_tol) : "off", nm_rate_span)
+    # REQUESTED, not effective — every line here reads spec.run, which is what the
+    # bundle records, not what the optimiser received. The two can differ: these
+    # settings reach run_smm as keyword arguments, and an omitted one takes run_smm's
+    # own default in silence. The authoritative line is [SA config], printed from
+    # inside _sa_loop off the values it actually holds; if the two disagree, believe
+    # [SA config] and fix the forwarding.
+    # The proposal itself is not reported here: it is measured at the start point, so
+    # the only honest source for it is [SA config], printed from inside the walk.
+    @printf("  SA (requested):   cooling %s;  stop ΔQ < %s per 100 iters\n",
+            spec.run.sa_halflife > 0 ?
+                @sprintf("geometric, half-life %d", spec.run.sa_halflife) : "logarithmic",
+            spec.run.sa_rate_tol > 0 ? @sprintf("%.3g", spec.run.sa_rate_tol) : "off")
+    @printf("  NM (requested):   stop ΔQ < %s per 100 evals, sustained over %d evals\n",
+            spec.run.nm_rate_tol > 0 ? @sprintf("%.3g", spec.run.nm_rate_tol) : "off",
+            spec.run.nm_rate_span)
     @printf("  DE:   population — %d draws at each k=1:%d at %.2f×measured width; slots and f,cr from yield\n",
-            de_gen_per_k, length(spec.free), de_local_sigma)
+            spec.run.de_gen_per_k, length(spec.free), spec.run.de_local_sigma)
     if spec.run.w_cond_target == 2.0
         @printf("  W:    equal weights — Diagonal(weight/m̂²) (cond(W)=%.2e)\n", cond(spec.W))
     else

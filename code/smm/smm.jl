@@ -359,36 +359,300 @@ function rate_stop!(rs::RateStop, Q_best::Float64, iter::Int)
     return rs.slow >= rs.span
 end
 
-"""
-    _step_field(step, step_vec, subset_k) -> String
+# ============================================================
+# Proposal scale from measured yield
+# ============================================================
+# Both proposals — the annealing mask and the DE population — need the same two
+# measurements at a point: how far each coordinate can move before Q rises by 1
+# (`_feasible_widths`), and how many coordinates a productive move touches. The three
+# helpers below compute them, and both proposals call these rather than carrying their
+# own copy, so the two cannot drift apart on the scale convention.
 
-The proposal-scale field of the SA trace, named for what it actually reports: one
-`step` under the isotropic proposal, a `step range` under the per-coordinate one.
+# Bisection cap for `_feasible_widths`, in transformed units, shared by both proposals so
+# the measurement means one thing. Deliberately non-binding: bisection always returns a
+# feasible step, so raising it cannot produce an infeasible width — it only limits how
+# far the widest coordinates may reach. Measured half-widths at the base_fc optimum have
+# a median of 0.021, and three coordinates (b_S, δ_S, ξ_S) sit at the cap: it binds on
+# those three and on nothing else.
+const _WIDTH_CAP = 0.20
 
-Six decimals rather than scientific notation, which is enough for the relative floor
-(`step_floor_rel · step`, 2e-5 at the defaults) and easier to compare down a column of
-trace lines. Before the first Corana update every coordinate still carries the initial
-step, so the range is degenerate and prints as a single number.
 """
-@inline function _step_field(step::Float64, step_vec::Vector{Float64}, subset_k::Int)
-    subset_k == 0 && return @sprintf("step=%.6f", step)
+    _sparsity_draws!(cand, ksrc, seed, widths, per_k, sigma, rng;
+                     match_total_displacement = false) -> (cand, ksrc)
+
+Fill `cand` with `per_k` draws at every sparsity `k = 1:d`, each chosen coordinate
+displaced by a multiple of its own measured half-width, and record in `ksrc` which
+sparsity each draw came from.
+
+`sigma` is a units-free fraction of a measured scale, not a scale itself, so the same
+value means the same thing at every point and under any weighting matrix.
+
+`match_total_displacement` decides what the draws at different `k` have in common, and
+the two callers want different things.
+
+  false  every coordinate moves by `sigma` widths, so total displacement grows as
+         `sigma·sqrt(k)`. This is what a POPULATION wants: the members must span the
+         local geometry, and a k-sparse member's spread is what the DE difference
+         vector inherits coordinate by coordinate.
+
+  true   `sigma_k = sigma/sqrt(k)`, so total width-normalised displacement is `sigma`
+         at every `k`. This is what COMPARING sparsities requires. Under the false
+         rule a draw at k = 23 moves 4.8x as far as one at k = 1, so a comparison of
+         yields across k is partly a comparison of move sizes — and since acceptance
+         and expected squared jump are both functions of `k·sigma_k^2` to second order,
+         that confound is the whole difference. Holding the product fixed removes it and
+         leaves the sparsity effect alone.
+"""
+function _sparsity_draws!(cand::Vector{Vector{Float64}}, ksrc::Vector{Int},
+                          seed::Vector{Float64}, widths::Vector{Float64},
+                          per_k::Int, sigma::Float64, rng;
+                          match_total_displacement::Bool = false)
+    d   = length(seed)
+    idx = 0
+    for k in 1:d
+        σ_k = match_total_displacement ? sigma / sqrt(k) : sigma
+        for _ in 1:per_k
+            θ = copy(seed)
+            for j in randperm(rng, d)[1:k]
+                θ[j] += σ_k * abs(widths[j]) * randn(rng)
+            end
+            idx += 1; cand[idx] = θ; ksrc[idx] = k
+        end
+    end
+    return cand, ksrc
+end
+
+"""
+    _sparsity_score(Qs, ksrc, d, Q_ref) -> (score, n_feas)
+
+Mean improvement below `Q_ref` that each sparsity delivers over its feasible draws.
+
+The score deliberately does NOT count improvements. Improvements are threshold events
+and they vanish near an optimum — exactly the state in which the measurement is most
+often taken — so a count-based rule is undefined where it is needed. When no sparsity
+improves anywhere the score falls back to ranking by mean damage, i.e. which sparsity
+does least harm, which is the only ordering left.
+"""
+function _sparsity_score(Qs::Vector{Float64}, ksrc::Vector{Int}, d::Int, Q_ref::Float64)
+    score = zeros(d); n_feas = zeros(Int, d); dmg = zeros(d)
+    for k in 1:d
+        q = [Qs[i] for i in eachindex(Qs) if ksrc[i] == k && isfinite(Qs[i])]
+        n_feas[k] = length(q)
+        isempty(q) && continue
+        score[k] = mean(max.(0.0, Q_ref .- q))
+        dmg[k]   = 1.0 / (1.0 + mean(q .- Q_ref))
+    end
+    all(score .<= 0) && (score = dmg)
+    return score, n_feas
+end
+
+"""
+    _kstar(basis, d) -> Int
+
+The sparsity a yield basis favours, as the basis-weighted mean of `k`.
+
+The mean rather than `argmax`: the yield table is routinely near-flat and ties at the
+top, where `argmax` returns the FIRST maximum — k = 1 whenever k = 1 and k = 2 tie,
+reporting a proposal that moves a single coordinate. The weighted mean uses the whole
+distribution and cannot be decided by an arbitrary tie. A basis that is everywhere
+zero carries no ranking at all, and the honest reading of that is the full dimension.
+"""
+_kstar(basis::AbstractVector, d::Int) =
+    sum(basis) > 0 ? clamp(round(Int, sum((1:d) .* basis) / sum(basis)), 1, d) : d
+
+"""
+    SAScale
+
+The annealing proposal, measured at a point rather than set: a per-coordinate step and
+the probability that any one coordinate moves. Built by `sa_proposal_scale`; runtime
+state only, never serialised.
+"""
+struct SAScale
+    step   :: Vector{Float64}   # per-coordinate proposal sd — the Corana state's seed
+    widths :: Vector{Float64}   # measured ΔQ = 1 half-widths, signed
+    p_move :: Float64           # Bernoulli mask probability, k*/d
+    k_star :: Int
+    n_meas :: Int               # coordinates whose width the bisection could measure
+    n_feas :: Int               # feasible draws in the sparsity scan
+    n_imp  :: Int               # of which improved on the seed
+    # Feasibility per sparsity, k = 1:d. Recorded because its SPREAD is the assumption
+    # p_move rests on: a saturated feasibility (measured 0.958-1.000 across k at
+    # base_fc) is what rules out adapting p_move against feasibility during the walk. A
+    # later point where this spreads out would reopen that option, and the only way to
+    # notice is to keep measuring it.
+    feas_k :: Vector{Float64}
+end
+
+"""
+    sa_proposal_scale(seed, spec; per_k, sigma, cap, step_fallback, rng, verbose) -> SAScale
+
+Measure the annealing proposal at `seed`.
+
+Two measurements, one per property the proposal needs.
+
+`step`: each coordinate's own step, `sigma` times its measured ΔQ = 1 half-width. The
+half-widths span 91x at the base_fc optimum (0.0022 to 0.20, median 0.021) and 10 of 23
+coordinates fall below the 0.01 that the retired scalar path clamped at, so a single
+scalar is not a compromise between them — it overshoots the narrow coordinates and
+freezes the wide ones simultaneously. A coordinate the bisection cannot move has no
+measured scale and takes `step_fallback`, which keeps it in the search instead of
+freezing it at zero (0 of 23 needed it here).
+
+`p_move`: `p_move_scale / d`, so the mask moves the forced coordinate plus a
+Binomial(d−1, p_move) tail — a random count, unbounded above, with a mean of
+`1 + (d−1)·p_move` ≈ 2 at the default. Dimensionless in `d` rather than an absolute
+probability, so it means the same thing when the free set changes size.
+
+WHY p_move IS PINNED HERE AND NOT ADAPTED DURING THE WALK
+
+Because nothing the walk observes identifies it. To second order the Metropolis
+exponent has mean `-(σ²/2T)·Σ h_jj` and variance `(σ²/T²)·Σ g_j²` over the moved set,
+both LINEAR in the number moved at fixed σ² — so acceptance is a function of the
+product `k·σ²` alone, and so is expected squared jump distance, `k·σ²` by construction.
+Corana already adapts the step against acceptance. Adapting `p` against acceptance too
+would be two knobs on one equation: the pair drifts anywhere along `k·σ² = const`,
+which looks like it is working while nothing pins where it lands.
+
+Feasibility is the one quantity outside that expansion, since a proposal moving k
+coordinates has k independent chances to land infeasible. It was measured here as a
+candidate signal AND FOUND SATURATED: across k = 1…23 at two displacement scales,
+P(feasible) ranges only 0.958–1.000. At this point the feasible set is not perforated
+on the scale the proposal works at, so feasibility carries no usable gradient in k
+either.
+
+WHERE THE DEFAULT COMES FROM, AND WHAT IT OVERRULED
+
+From annealing chains, not from a one-shot scan — because the two disagree and the
+chains are the object being configured. At matched displacement a single scan of
+one-shot gains from the incumbent ranks sparsity 11-12 of 23 best, with k = 1 some
+3.2-3.4 standard errors below the best. Run as actual chains at equal solve budget
+(250 iterations, 3 seeds, `output/smm/sa_proposal_arm_comparison_base_fc.csv`) the
+ordering reverses: mean ΔQ is 81.2 at a fixed k = 3, 87.8 for the mask at p = 0.52
+(the scan's own recommendation), 90.3 for the mask at this default, and 91.5 for a
+strictly single-coordinate move. The low-p mask also moves FURTHER — mean
+width-normalised path 12.4 against 9.9 — so this is not the acceptance artefact that
+a shorter proposal produces.
+
+The reason the scan misleads is that it measures the gain a proposal makes FROM THE
+INCUMBENT in one step, while a chain compounds accepted moves and lets Corana retune
+each coordinate's step against its own acceptance record. A large joint move is the
+better single bet and the worse thing to repeat. `sa_scale_per_k > 0` still runs the
+scan as a diagnostic — it is what measures the feasibility saturation above — but its
+`k*` no longer sets anything.
+
+Cost is `24·d` solves for the widths, plus `per_k·d` for the optional scan, both
+embarrassingly parallel. One measurement per chain, against a scalar step that logged
+0 acceptances in 50 iterations at full feasibility on this problem.
+"""
+function sa_proposal_scale(seed::Vector{Float64}, spec::SMMSpec;
+                          p_move_scale  :: Float64 = 1.0,
+                          per_k         :: Int     = 0,
+                          sigma         :: Float64 = 0.33,
+                          cap           :: Float64 = _WIDTH_CAP,
+                          step_fallback :: Float64 = 0.01,
+                          rng                      = Random.default_rng(),
+                          verbose       :: Bool    = true)
+    d = length(seed)
+    if verbose
+        @printf("  [SA scale]  measuring the proposal at the start: %d width solves%s\n",
+                24 * d, per_k > 0 ?
+                    @sprintf(" + %d scan draws (diagnostic)", per_k * d) : "")
+        flush(stdout)
+    end
+
+    t0     = time()
+    widths = _feasible_widths(seed, spec, cap)
+    step   = [abs(widths[j]) > 0 ? sigma * abs(widths[j]) : step_fallback for j in 1:d]
+    p_move = clamp(p_move_scale / d, 1.0 / d, 1.0)
+
+    # The sparsity scan is a DIAGNOSTIC and off by default. Its k* was measured against
+    # actual chains and lost (see above), so it no longer sets p_move; what it still
+    # measures is the feasibility spread across sparsities, which is the assumption
+    # holding p_move fixed. Worth its per_k·d solves when that assumption is in
+    # question — at a new window, or a materially different point — not on every run.
+    k_star = 0
+    n_feas = 0
+    n_imp  = 0
+    feas_k = Float64[]
+    if per_k > 0
+        # Matched total displacement: the scan compares sparsities, and at unmatched
+        # displacement a draw at k = d moves sqrt(d) times as far as one at k = 1, so
+        # the comparison would partly be reading move size back to itself.
+        cand = Vector{Vector{Float64}}(undef, per_k * d)
+        ksrc = Vector{Int}(undef, per_k * d)
+        _sparsity_draws!(cand, ksrc, seed, widths, per_k, sigma, rng;
+                         match_total_displacement = true)
+        Qs = Vector{Float64}(undef, length(cand))
+        Threads.@threads for i in eachindex(cand)
+            Qs[i] = smm_objective(cand[i], spec)
+        end
+
+        # An infeasible seed leaves no incumbent to improve on, so the worst feasible
+        # draw is the only finite reference the shortfalls can be measured against.
+        Q_seed = smm_objective(seed, spec)
+        feas   = [i for i in eachindex(Qs) if isfinite(Qs[i])]
+        Q_ref  = isfinite(Q_seed) ? Q_seed : (isempty(feas) ? Inf : maximum(Qs[feas]))
+        score, n_feas_k = _sparsity_score(Qs, ksrc, d, Q_ref)
+        k_star = _kstar(score, d)
+        n_feas = length(feas)
+        n_imp  = isfinite(Q_ref) ? count(q -> isfinite(q) && q < Q_ref, Qs) : 0
+        feas_k = n_feas_k ./ per_k
+    end
+
+    sc = SAScale(step, widths, p_move, k_star, count(!=(0.0), widths),
+                 n_feas, n_imp, feas_k)
+    if verbose
+        # Widths and steps are reported separately and labelled as such: the step is
+        # sigma times the width, so printing one under the other's name understates the
+        # measured geometry by that factor and makes the two lines uncomparable.
+        wm = [abs(w) for w in widths if abs(w) > 0]
+        @printf("  [SA scale]  %.0fs:  widths %d/%d measurable, median %.3g, range %.2g‥%.2g;  step median %.3g, range %.2g‥%.2g;  p_move=%.4f (%.1f/d, mean %.1f coords/iter)%s\n",
+                time() - t0, sc.n_meas, d,
+                isempty(wm) ? NaN : median(wm),
+                isempty(wm) ? NaN : minimum(wm), isempty(wm) ? NaN : maximum(wm),
+                median(step), minimum(step), maximum(step),
+                p_move, p_move_scale, 1 + (d - 1) * p_move,
+                per_k > 0 ?
+                    @sprintf(";  scan %d feasible %d improving, feasibility across k %.3f‥%.3f, k*=%d (diagnostic only)",
+                             n_feas, n_imp, minimum(feas_k), maximum(feas_k), k_star) : "")
+        flush(stdout)
+    end
+    return sc
+end
+
+"""
+    _step_field(step_vec) -> String
+
+The proposal-scale field of the SA trace. Six decimals rather than scientific notation:
+enough to show the relative floor and easier to compare down a column of trace lines.
+Before the first Corana update every coordinate still carries its seeded step, so the
+range is only degenerate when every measured width was equal — it never is.
+"""
+@inline function _step_field(step_vec::Vector{Float64})
     lo, hi = extrema(step_vec)
     lo == hi ? @sprintf("step range=%.6f", lo) :
                @sprintf("step range=%.6f‥%.6f", lo, hi)
 end
 
 """
-    _sample_subset!(buf, k, d, rng) -> view of k distinct indices
+    _moved_field(n_moved) -> String
 
-Partial Fisher-Yates on a persistent buffer: draws `k` distinct coordinates out of
-`d` without allocating, which matters because this runs once per SA iteration.
+The REALISED moved-coordinate distribution, from the histogram the loop accumulates:
+mean and range of the number of coordinates each proposal actually perturbed. Reported
+instead of the nominal `p_move` because the mask makes that count a random variable —
+printing the parameter would restate the configuration, not the behaviour, and a mask
+that never realises its nominal mean is exactly the failure this line has to show.
+
+`n_moved` is offset by one: `n_moved[m + 1]` counts iterations that moved `m`
+coordinates.
 """
-@inline function _sample_subset!(buf::Vector{Int}, k::Int, d::Int, rng)
-    for i in 1:k
-        j = rand(rng, i:d)
-        buf[i], buf[j] = buf[j], buf[i]
-    end
-    return view(buf, 1:k)
+function _moved_field(n_moved::Vector{Int})
+    n = sum(n_moved)
+    n == 0 && return "—"
+    lo = findfirst(>(0), n_moved) - 1
+    hi = findlast(>(0), n_moved) - 1
+    μ  = sum((m - 1) * n_moved[m] for m in eachindex(n_moved)) / n
+    @sprintf("%.1f[%d‥%d]", μ, lo, hi)
 end
 
 """
@@ -410,8 +674,10 @@ function _sa_loop(
     reheat_factor    :: Float64 = 2.0,
     max_reheats      :: Int     = 5,
     adapt_window     :: Int     = 50,
-    target_fin       :: Float64 = 0.90,
-    subset_k         :: Int     = 0,
+    # The measured proposal (per-coordinate step and p_move). Nothing means measure it
+    # here at the start point; `_run_sa` measures once and passes the same scale to
+    # every chain so the warm-up chains are comparable.
+    scale            :: Union{Nothing,SAScale} = nothing,
     corana_Ns        :: Int     = 20,
     corana_c         :: Float64 = 2.0,
     step_floor_rel   :: Float64 = 1e-4,
@@ -423,6 +689,9 @@ function _sa_loop(
     reheat_reset_tol :: Float64 = 0.25,
     show_trace       :: Bool    = true,
     trace_stride     :: Int     = 100,
+    # Written at every reheat so a killed run resumes from the incumbent instead of
+    # from the stale bundle it started from. Empty disables checkpointing.
+    checkpoint_path  :: String  = "",
     rng                         = Random.default_rng(),
 )
     theta      = copy(theta_start)
@@ -467,20 +736,35 @@ function _sa_loop(
     win_fin = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
     win_acc = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
 
-    # Per-coordinate step vector (Corana, Marchesi, Martini & Ridella 1987).  Each
-    # coordinate carries its own step, adapted from its own acceptance rate, so the
-    # 1789x span of feasible half-widths is discovered by the run rather than
-    # supplied to it.  The floor is relative to the initial step: an absolute floor
-    # is what pins the narrow coordinates, since one value cannot be small enough
-    # for a_ℓ and large enough for σ_S at the same time.
+    # Per-coordinate proposal state. The step vector is SEEDED from the measured ΔQ = 1
+    # half-widths, not from a scalar: those widths span two orders of magnitude here
+    # (0.0022 to 0.20 at the base_fc optimum, 91x), and 10 of 23 coordinates sit below
+    # the 0.01 an old scalar floor imposed, so a shared step overshoots the narrow
+    # coordinates and freezes the wide ones at the same time. Corana adaptation (Corana,
+    # Marchesi, Martini & Ridella 1987) then steers each coordinate from its own
+    # acceptance record, so the measurement sets where the search starts and the run
+    # refines it from there.
+    #
+    # Each coordinate's floor and ceiling are its own: the floor relative to its seeded
+    # step, the ceiling at its measured width. One absolute pair cannot be small enough
+    # for a_ℓ and large enough for σ_S simultaneously, which is what pinned the narrow
+    # coordinates before.
     d_free     = length(theta)
-    step_vec   = fill(step, d_free)
-    step_floor = step_floor_rel * step
-    subset_idx = collect(1:d_free)
+    sc         = scale === nothing ?
+                 sa_proposal_scale(collect(float.(theta)), spec;
+                                   step_fallback = step, rng = rng,
+                                   verbose = show_trace) : scale
+    step_vec   = copy(sc.step)
+    step_seed  = copy(sc.step)
+    step_ceil  = [abs(sc.widths[j]) > 0 ? abs(sc.widths[j]) : step for j in 1:d_free]
+    p_move     = sc.p_move
+    moved_idx  = Int[]                # this iteration's moved coordinates, reused
     n_prop     = zeros(Int, d_free)   # proposals per coordinate since the last update
     n_acc_j    = zeros(Int, d_free)   # of which accepted
-    corana_win = corana_Ns * max(subset_k, 1)   # iterations to give each coordinate
-                                                # corana_Ns outcomes on average
+    n_moved    = zeros(Int, d_free + 1)  # realised moved-count histogram, offset by one
+    # Iterations to give each coordinate corana_Ns outcomes on average. A coordinate is
+    # drawn with probability p_move by the mask, plus 1/d as the forced index.
+    corana_win = max(1, ceil(Int, corana_Ns / (p_move + (1 - p_move) / d_free)))
     rate_stop  = RateStop(rate_tol, rate_span)
     win_idx = 0
 
@@ -488,9 +772,25 @@ function _sa_loop(
 
     if show_trace
         n_corners_init = _count_corners(theta_best, spec)
+        # Printed from INSIDE the optimiser, off the values it actually holds, not from
+        # what the caller computed. print_spec takes its SA settings as its own kwargs,
+        # so between v18.4.0 and v19.0.1 it reported subset_k = 3 and a 5000-iteration
+        # cooling half-life on runs where run_smm had received neither and was using its
+        # own defaults of 0 — a settings block asserting a configuration the optimiser was
+        # not running. A print sourced from the caller cannot detect that; one sourced here
+        # cannot miss it. Every proposal setting that governs the walk appears on this
+        # line, which is why p_move and its provenance are on it too.
+        @printf("  [SA config]  mask p_move=%.4f (mean %.1f of %d coords/iter, Bernoulli + 1 forced);  per-coordinate step from measured widths, %d/%d measurable, Corana Ns=%d every %d iters;  cooling %s;  early stop %s\n",
+                p_move, 1 + (d_free - 1) * p_move, d_free, sc.n_meas, d_free,
+                corana_Ns, corana_win,
+                cooling_halflife > 0 ?
+                    @sprintf("geometric, half-life %d", cooling_halflife) :
+                    "logarithmic (spends its descent in the first ~100 iters)",
+                rate_tol > 0 ? @sprintf("ΔQ < %.3g per 100 iters over %d",
+                                        rate_tol, rate_span) : "off")
         @printf("  [SA init]  Q0 = %s  T0=%.4f  %s  corners=%d/%d%s\n",
                 isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (rejected start)",
-                T0, _step_field(step, step_vec, subset_k),
+                T0, _step_field(step_vec),
                 n_corners_init, length(spec.free), _corner_tags(theta_best, spec))
         # A rejected start abandons the seed and restarts from the first accepted
         # proposal, so the run is no longer the warm start it reports being.  The
@@ -527,25 +827,32 @@ function _sa_loop(
             T_reheat * (_COOL_NUM / log1p(cooling_rate * t_local))^cooling_exp
         T_current = max(T_current, 1e-8)
 
-        # Proposal.  With subset_k = 0 this is the isotropic scalar move; with
-        # subset_k > 0 it perturbs a random subset of that size, each coordinate by
-        # its OWN adapted step.  The subset is what the model needs — coordinates
-        # that are individually infeasible can be jointly feasible, so a strictly
-        # one-at-a-time sweep cannot reach some improving points — while the
-        # per-coordinate scale is what makes any of it acceptable: the feasible
-        # half-widths span three orders of magnitude, so a single scalar either
-        # overshoots the narrow coordinates or freezes the wide ones.
+        # Proposal: an independent Bernoulli(p_move) draw per coordinate plus one forced
+        # index, each moved coordinate by its OWN adapted step. This is DE's crossover
+        # mask (_run_de, below) with the difference vector replaced by a per-coordinate
+        # Gaussian, and it is that shape for the same reason: the number of coordinates
+        # moving is Binomial(d, p_move) conditioned to be at least one — random and
+        # unbounded above, with a mean of p_move·d that the yield scan sets. A fixed count
+        # is a restriction the surface does not justify; moving all d at once compounds d
+        # independent chances of overshooting at a scale no single coordinate wants.
+        #
+        # The forced index is what makes the mask a proposal rather than sometimes a
+        # no-op: at p_move = 0.52 and d = 23 an all-zero mask is rare, but a proposal
+        # identical to the incumbent would be accepted and counted, inflating the
+        # acceptance rate with iterations that moved nothing.
         theta_prop = copy(theta)
-        if subset_k > 0
-            moved = _sample_subset!(subset_idx, min(subset_k, d_free), d_free, rng)
-            for j in moved
-                theta_prop[j] += step_vec[j] * randn(rng)
-                n_prop[j] += 1
-            end
-        else
-            moved = 1:0
-            theta_prop .+= step .* randn(rng, d_free)
+        empty!(moved_idx)
+        for j in 1:d_free
+            rand(rng) < p_move && push!(moved_idx, j)
         end
+        j_force = rand(rng, 1:d_free)
+        (j_force in moved_idx) || push!(moved_idx, j_force)
+        moved = moved_idx
+        for j in moved
+            theta_prop[j] += step_vec[j] * randn(rng)
+            n_prop[j] += 1
+        end
+        n_moved[length(moved) + 1] += 1
         Q_prop = smm_objective(theta_prop, spec)
 
         is_fin = isfinite(Q_prop)
@@ -582,35 +889,25 @@ function _sa_loop(
             steps_since_improvement += 1
         end
 
+        # Trailing acceptance and feasibility, for the trace only. There is no scalar
+        # step left for them to steer: adaptation is per coordinate, below.
         if adapt_window > 0
             win_idx          = mod1(win_idx + 1, adapt_window)
             win_fin[win_idx] = is_fin
             win_acc[win_idx] = is_fin && accept
-
-            # Scalar adaptation drives the isotropic proposal only.  Under
-            # subset_k > 0 the step vector is adapted per coordinate below instead,
-            # on its own schedule, and this scalar is left untouched.
-            if subset_k == 0 && t >= adapt_window && t % adapt_window == 0
-                fin_rate = mean(win_fin)
-                acc_rate = mean(win_acc)
-
-                if fin_rate < target_fin * 0.90
-                    step *= 0.85
-                elseif acc_rate < 0.15
-                    step *= 0.85
-                elseif acc_rate > 0.35
-                    step *= 1.10
-                end
-                step = clamp(step, 0.01, 2.0)
-            end
         end
 
         # Corana step-vector update.  Each coordinate is steered toward a 0.4-0.6
         # acceptance rate by its own record: too many accepts means the step is
         # small enough to be wasteful, too few means it overshoots that
-        # coordinate's feasible width.  Coordinates the subset never drew are left
+        # coordinate's feasible width.  Coordinates the mask never drew are left
         # alone rather than adapted on no evidence.
-        if subset_k > 0 && t % corana_win == 0
+        #
+        # The clamp is per coordinate — floor at step_floor_rel of that coordinate's own
+        # seeded step, ceiling at its measured ΔQ = 1 width. A step beyond the width is
+        # by construction a move the objective cannot absorb, so the ceiling is the
+        # measurement rather than a tuning constant.
+        if t % corana_win == 0
             for j in 1:d_free
                 n_prop[j] == 0 && continue
                 p = n_acc_j[j] / n_prop[j]
@@ -619,7 +916,8 @@ function _sa_loop(
                 elseif p < 0.4
                     step_vec[j] /= 1 + corana_c * (0.4 - p) / 0.4
                 end
-                step_vec[j] = clamp(step_vec[j], step_floor, 2.0)
+                step_vec[j] = clamp(step_vec[j], step_floor_rel * step_seed[j],
+                                    step_ceil[j])
             end
             fill!(n_prop, 0)
             fill!(n_acc_j, 0)
@@ -657,7 +955,27 @@ function _sa_loop(
            (max_reheats == 0 || n_reheats < max_reheats)
 
             n_reheats += 1
+            # Checkpoint BEFORE raising T. The incumbent is what a resume wants; the
+            # reheat is about to move the walk away from it.
+            write_checkpoint(checkpoint_path, theta_best, Q_best, spec;
+                             tag = @sprintf("SA reheat %d, iter %d", n_reheats, t))
             T_before   = T_current
+            # reheat_cap ceilings the temperature a reheat may reach. The multiplicative
+            # rule is unbounded above, and that is measured to be fatal once T0 is
+            # calibrated correctly: at T0 = 2.76 with factor 2 and five reheats, T reaches
+            # 88 against a plateau of 3.32, almost every uphill move is accepted, and the
+            # walk closes 0% of the gap at every barrier height tested. Capping at T0
+            # makes a reheat UN-COOL — return to the start temperature — rather than
+            # overheat past it, which is the only reheat design that beat no reheat at all
+            # (66.7% vs 56.7% closed at the deepest barrier tested).
+            #
+            # NOT IMPLEMENTED YET, DELIBERATELY. The cap must land in the SAME change that
+            # recalibrates T0 against the plateau, never before it: under the shipped
+            # T0 = 0.060 the reheats are the ONLY source of warmth (with them the walk
+            # closes 31.7% at B = 0.5, without them 0.0%), so a cap at 0.060 would remove
+            # that warmth and make the optimiser strictly worse. Adding it now as an inert
+            # keyword would thread a fourth argument through three _sa_loop call sites for
+            # no usable behaviour, which is how the forwarding bugs got in.
             T_current  = T_current * reheat_factor
             T_reheat   = T_current
             t_local    = 0
@@ -689,10 +1007,11 @@ function _sa_loop(
             w_acc = adapt_window > 0 && t >= adapt_window ? mean(win_acc) : n_acc / t
             w_fin = adapt_window > 0 && t >= adapt_window ? mean(win_fin) : n_fin / t
             n_corners = _count_corners(theta_best, spec)
-            @printf("  [SA iter=%5d]  curr=%-14s  best=%.6e  T=%.4f  %s  acc=%.2f  fin=%.2f  corners=%d/%d%s  reheats=%d\n",
+            @printf("  [SA iter=%5d]  curr=%-14s  best=%.6e  T=%.4f  %s  moved=%s  acc=%.2f  fin=%.2f  corners=%d/%d%s  reheats=%d\n",
                     t,
                     isfinite(Q) ? @sprintf("%.6e", Q) : "Inf",
-                    Q_best, T_current, _step_field(step, step_vec, subset_k),
+                    Q_best, T_current, _step_field(step_vec),
+                    _moved_field(n_moved),
                     w_acc, w_fin,
                     n_corners, length(spec.free), _corner_tags(theta_best, spec),
                     n_reheats)
@@ -702,8 +1021,9 @@ function _sa_loop(
 
     if show_trace
         n_corners_done = _count_corners(theta_best, spec)
-        @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  corners=%d/%d%s  reheats=%d\n",
+        @printf("  [SA done]  Q_best=%.6e  accepted %d/%d  finite %d/%d  moved=%s  corners=%d/%d%s  reheats=%d\n",
                 Q_best, n_acc, actual_iters, n_fin, actual_iters,
+                _moved_field(n_moved),
                 n_corners_done, length(spec.free), _corner_tags(theta_best, spec),
                 n_reheats)
         flush(stdout)
@@ -748,8 +1068,9 @@ function _run_sa(
     reheat_factor    :: Float64 = 2.0,
     max_reheats      :: Int     = 5,
     adapt_window     :: Int     = 50,
-    target_fin       :: Float64 = 0.90,
-    subset_k         :: Int     = 0,
+    scale_p_move     :: Float64 = 1.0,
+    scale_per_k      :: Int     = 0,
+    scale_sigma      :: Float64 = 0.33,
     corana_Ns        :: Int     = 20,
     corana_c         :: Float64 = 2.0,
     step_floor_rel   :: Float64 = 1e-4,
@@ -764,6 +1085,9 @@ function _run_sa(
     random_init      :: Bool    = false,
     show_trace       :: Bool    = true,
     trace_stride     :: Int     = 100,
+    # Written at every reheat so a killed run resumes from the incumbent instead of
+    # from the stale bundle it started from. Empty disables checkpointing.
+    checkpoint_path  :: String  = "",
     rng                         = Random.default_rng(),
 )
     # Assemble the start set.
@@ -773,6 +1097,17 @@ function _run_sa(
         [random_init ? _random_theta(spec, rng) : pack_theta(spec)]
     end
 
+    # The proposal is measured ONCE, at the first start, and handed to every chain. Two
+    # reasons. It costs 24·d + scale_per_k·d solves, which is a warm-up chain's whole
+    # budget; and the multistart prunes on Q_best across chains, so chains proposing at
+    # different measured scales would not be comparable — the pruning would partly rank
+    # the measurements rather than the basins.
+    scale = sa_proposal_scale(collect(float.(start_set[1])), spec;
+                              p_move_scale = scale_p_move,
+                              per_k = scale_per_k, sigma = scale_sigma,
+                              step_fallback = step,
+                              rng = rng, verbose = show_trace)
+
     # Single start → original single-chain behaviour.
     if length(start_set) <= 1
         return _sa_loop(spec, start_set[1];
@@ -780,7 +1115,7 @@ function _run_sa(
                         cooling_rate = cooling_rate, cooling_exp = cooling_exp,
                         reheat_patience = reheat_patience, reheat_factor = reheat_factor,
                         max_reheats = max_reheats, adapt_window = adapt_window,
-                        target_fin = target_fin, subset_k = subset_k,
+                        scale = scale, checkpoint_path = checkpoint_path,
                         corana_Ns = corana_Ns, corana_c = corana_c,
                         step_floor_rel = step_floor_rel,
                         rate_tol = rate_tol, rate_span = rate_span,
@@ -816,13 +1151,18 @@ function _run_sa(
                              cooling_rate = cooling_rate, cooling_exp = cooling_exp,
                              reheat_patience = reheat_patience, reheat_factor = reheat_factor,
                              max_reheats = max_reheats, adapt_window = adapt_window,
-                             target_fin = target_fin, subset_k = subset_k,
+                             scale = scale,
+                             # Warm-up chains deliberately do NOT checkpoint. They are
+                             # short exploratory runs from dispersed starts, so their best
+                             # point is routinely worse than the incumbent the bundle
+                             # already holds — writing it would demote the warm start.
+                             checkpoint_path = "",
                              corana_Ns = corana_Ns, corana_c = corana_c,
                              step_floor_rel = step_floor_rel,
                              rate_tol = rate_tol, rate_span = rate_span,
                              cooling_halflife = cooling_halflife,
                              t0_rel = t0_rel, t0_accept = t0_accept,
-                        reheat_reset_tol = reheat_reset_tol,
+                             reheat_reset_tol = reheat_reset_tol,
                              show_trace = false,
                              trace_stride = trace_stride, rng = rng_j)
         chain_theta[j] = tb
@@ -852,14 +1192,14 @@ function _run_sa(
                              cooling_rate = cooling_rate, cooling_exp = cooling_exp,
                              reheat_patience = reheat_patience, reheat_factor = reheat_factor,
                              max_reheats = max_reheats, adapt_window = adapt_window,
-                             target_fin = target_fin, subset_k = subset_k,
+                             scale = scale, checkpoint_path = checkpoint_path,
                              corana_Ns = corana_Ns, corana_c = corana_c,
                              step_floor_rel = step_floor_rel,
                              rate_tol = rate_tol, rate_span = rate_span,
                              cooling_halflife = cooling_halflife,
-                        t0_rel = t0_rel, t0_accept = t0_accept,
-                        reheat_reset_tol = reheat_reset_tol,
-                        show_trace = show_trace,
+                             t0_rel = t0_rel, t0_accept = t0_accept,
+                             reheat_reset_tol = reheat_reset_tol,
+                             show_trace = show_trace,
                              trace_stride = trace_stride, rng = Random.Xoshiro(UInt64(seed)))
 
     if chain_Q[jbest] <= qb
@@ -1048,17 +1388,12 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
     end
 
     # Draw per_k candidates at each sparsity, then evaluate the whole block at once so
-    # the solves thread over the full set rather than per k.
+    # the solves thread over the full set rather than per k. The draw is the same helper
+    # the annealing scale uses, so the two proposals cannot disagree on what `sigma`
+    # means.
     cand = Vector{Vector{Float64}}(undef, per_k * npar)
     ksrc = Vector{Int}(undef, per_k * npar)
-    idx  = 0
-    for k in 1:npar, _ in 1:per_k
-        θ = copy(seed)
-        for j in randperm(rng, npar)[1:k]
-            θ[j] += sigma * abs(widths[j]) * randn(rng)
-        end
-        idx += 1; cand[idx] = θ; ksrc[idx] = k
-    end
+    _sparsity_draws!(cand, ksrc, seed, widths, per_k, sigma, rng)
     t1 = time()
     Qs = Vector{Float64}(undef, length(cand))
     Threads.@threads for i in eachindex(cand)
@@ -1125,15 +1460,7 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
     pool     = Set(require_improvement ? imp_idx : feas_idx)
     barren   = require_improvement && isempty(imp_idx)
 
-    score = zeros(npar); n_feas = zeros(Int, npar); dmg = zeros(npar)
-    for k in 1:npar
-        q = [Qs[i] for i in eachindex(Qs) if ksrc[i] == k && isfinite(Qs[i])]
-        n_feas[k] = length(q)
-        isempty(q) && continue
-        score[k] = mean(max.(0.0, Q_ref .- q))
-        dmg[k]   = 1.0 / (1.0 + mean(q .- Q_ref))
-    end
-    all(score .<= 0) && (score = dmg)            # no k improves: rank by least damage
+    score, n_feas = _sparsity_score(Qs, ksrc, npar, Q_ref)
 
     # Each fallback covers the case the one before it cannot. A non-finite or all-zero
     # weight has to be caught explicitly rather than by `all(w .<= 0)`: NaN <= 0 is false,
@@ -1251,16 +1578,10 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
     end
     pop[1] = copy(seed)
 
-    # cr: the sparsity the allocation favours, as a fraction of the free count. The
-    # summary is the slot-weighted mean k rather than argmax(taken): the allocation is
-    # routinely near-flat across sparsities and ties at the top, where argmax returns the
-    # FIRST maximum — k=1 whenever k=1 and k=2 tie, giving cr = 1/n_free and a proposal
-    # that moves a single coordinate. The weighted mean uses the whole distribution and
-    # cannot be decided by an arbitrary tie.
-    # On a barren call `taken` describes a random shuffle of half a population, not a
-    # yield-driven allocation, so summarising it would report a sparsity nothing measured.
-    # The weight vector is still the honest statement of which sparsities the draws
-    # favoured, so cr comes from that instead.
+    # cr: the sparsity the allocation favours, as a fraction of the free count, summarised
+    # by `_kstar` — the same statistic the annealing mask reads its p_move off, so the two
+    # proposals report sparsity on one convention.
+    #
     # cr summarises which sparsity is PAYING, and it is read off `score` — the mean
     # improvement each sparsity delivered across all its draws. Two alternatives were
     # measured on simulated yields and both are worse.
@@ -1273,10 +1594,10 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
     #
     # The allocation weight `w` is score·k/n_free, so it counts the k-preference twice —
     # once in the score and once in the multiplier — and reads high throughout. It is
-    # still the only signal left on a barren call, where every score is zero.
-    basis  = barren ? w : score
-    k_star = sum(basis) > 0 ?
-             max(1, round(Int, sum(collect(1:npar) .* basis) / sum(basis))) : npar
+    # still the only signal left on a barren call, where every score is zero: on such a
+    # call `taken` describes a random shuffle of half a population rather than a
+    # yield-driven allocation, so summarising it would report a sparsity nothing measured.
+    k_star = _kstar(barren ? w : score, npar)
     cr_out = clamp(k_star / npar, 1.0 / npar, 1.0)
 
     # f: match the DE step to the displacement just measured as productive. Coordinates
@@ -1346,7 +1667,6 @@ function _run_de(
     pop_size     :: Int     = 0,
     f            :: Float64 = 0.65,
     cr           :: Float64 = 0.85,
-    patience     :: Int     = 20,
     avg_tol      :: Float64 = 0.01,
     local_sigma  :: Float64 = 0.33,   # perturbation as a fraction of each coordinate's
                                       # own ΔQ<1 width
@@ -1363,6 +1683,9 @@ function _run_de(
     show_members :: Bool    = false,
     show_gens    :: Bool    = true,
     trace_stride :: Int     = 10,
+    # Written at every reheat so a killed run resumes from the incumbent instead of
+    # from the stale bundle it started from. Empty disables checkpointing.
+    checkpoint_path :: String = "",
     rng                     = Random.default_rng(),
 )
     npar     = length(spec.free)
@@ -1379,8 +1702,7 @@ function _run_de(
     # measured feasible half-widths run from 6e-5 to 1e-1 — so essentially every
     # member is infeasible and the difference vectors carry no local geometry.
     # generate_population instead draws at every sparsity and allocates the slots by
-    # measured yield, returning the f and cr those same draws imply; local_k > 0 keeps
-    # the older fixed-sparsity construction for comparison.
+    # measured yield, returning the f and cr those same draws imply.
     # adapt_fcr decides only where f and cr come from. The generator always builds the
     # population — its per-coordinate scale is the thing that makes the draws feasible at
     # all — but the derived f and cr are a summary of the yield table, and a near-flat
@@ -1614,6 +1936,8 @@ function _run_de(
             end
 
             if show_gens
+                write_checkpoint(checkpoint_path, theta_best, Q_best, spec;
+                                 tag = @sprintf("DE reheat %d, gen %d", n_reheats, gen))
                 @printf("  [DE reheat %d]  gen=%d  Q %.6e -> %.6e  f=%.3f cr=%.3f  k*=%d/%d  better=%d feas=%d of %d%s\n",
                         n_reheats, gen, Q_before, Q_best, f, cr,
                         argmax(gen_table.slots), npar,
@@ -1754,8 +2078,17 @@ under ΔQ<1, with vertex Q running to 2.5e4 in the first case and staying inside
 Embarrassingly parallel: d·nbisect solves once, against the thousands a bad simplex
 wastes on uninformative vertices.
 """
+# The contour the population's step scale is measured against: how far a coordinate
+# can move before Q rises by `dq`. ABSOLUTE, not a fraction of Q, because Q's level
+# here is dominated by moments the model cannot fit — a relative target would track
+# that irreducible floor rather than local curvature. 1.0 sits just above the
+# measured evaluation noise floor (0.59), so a step at this contour does damage the
+# objective can actually resolve. Settable to experiment:
+const _WIDTH_DQ = Ref(env_setting(:WIDTH_DQ, 1.0))
+
 function _feasible_widths(θ::AbstractVector, spec::SMMSpec, cap::Float64;
-                          nbisect::Int = 12, dq::Float64 = 1.0)
+                          nbisect::Int = 12,
+                          dq::Float64 = _WIDTH_DQ[])
     d  = length(θ)
     Q0 = smm_objective(collect(float.(θ)), spec)
     w  = zeros(d)
@@ -1805,6 +2138,11 @@ function run_smm(
     method       :: Symbol = :de,
     seed_bank    :: Union{Nothing,SeedBank}        = nothing,
     prev_optimum :: Union{Nothing,Vector{Float64}} = nothing,
+    # Reheat checkpoints are written here, at every SA and DE reheat. smm_main passes
+    # the window's own bundle path — exactly where INIT_MODE=:warmstart reads — so a
+    # killed run resumes from its own incumbent rather than from the stale bundle it
+    # started from. Empty disables checkpointing.
+    checkpoint_path :: String = "",
     rng                  = Random.default_rng(),
     # Rate-based Nelder-Mead stop. Keyword arguments rather than SMMRunParams fields:
     # Julia's serialiser reads structs positionally by field COUNT, so adding a field
@@ -1844,15 +2182,23 @@ function run_smm(
     # matters only under a pure feasibility test, where coordinates stay finite out to
     # ±4 and the cap alone keeps vertices near the seed.
     nm_simplex_step :: Float64 = 0.2,
-    # Simulated-annealing proposal. subset_k = 0 keeps the isotropic scalar move;
-    # subset_k > 0 perturbs that many random coordinates per iteration, each by its own
-    # Corana-adapted step. Both cost one solve per iteration — the subset changes which
-    # coordinates move, not how many solves it takes. The subset (rather than one
-    # coordinate at a time) is what the model needs: coordinates that are individually
-    # infeasible can be jointly feasible, so a strict sweep cannot reach some improving
-    # points. corana_Ns is the outcomes-per-coordinate the step update waits for; below
-    # ~10 the estimated acceptance rate is too noisy to steer it.
-    sa_subset_k     :: Int     = 0,
+    # Simulated-annealing proposal. Mirrors DE's crossover: an independent
+    # Bernoulli(p_move) draw per coordinate plus one forced index, so the number of
+    # coordinates moving is Binomial(d, p_move) conditioned to be at least one — random
+    # and unbounded above, with a measured mean. Every proposal costs one solve however
+    # many coordinates it touches.
+    #
+    # p_move and the per-coordinate step are BOTH measured at the start point by
+    # `sa_proposal_scale`, off a sparsity scan at the measured ΔQ = 1 half-widths: no
+    # fixed coordinate count and no scalar step to set. These two knobs configure that
+    # measurement and mirror the DE generator's own pair (de_gen_per_k, de_local_sigma);
+    # the bisection cap is not a third, since both proposals share `_WIDTH_CAP`.
+    #
+    # corana_Ns is the outcomes-per-coordinate the step update waits for; below ~10 the
+    # estimated acceptance rate is too noisy to steer it.
+    sa_scale_p_move :: Float64 = 1.0,
+    sa_scale_per_k  :: Int     = 0,
+    sa_scale_sigma  :: Float64 = 0.33,
     sa_corana_Ns    :: Int     = 20,
     sa_corana_c     :: Float64 = 2.0,
     sa_step_floor_rel :: Float64 = 1e-4,
@@ -1860,12 +2206,16 @@ function run_smm(
     # above and sharing its implementation (RateStop): stop when the incumbent
     # improves at less than sa_rate_tol per 100 iterations, sustained over
     # sa_rate_span PRODUCTIVE iterations, with flat stretches pausing rather than
-    # counting. sa_cooling_halflife > 0 replaces the logarithmic schedule with
+    # counting. sa_halflife > 0 replaces the logarithmic schedule with
     # T = T0·2^(−t/H): the logarithmic one spends its whole descent in the first
     # hundred iterations, leaving the rest of the budget effectively greedy.
+    #
+    # These three names match SMMRunParams' fields exactly, and must keep matching:
+    # check_forwarding.jl pairs caller to callee BY NAME, so a keyword argument spelled
+    # differently from the field feeding it is a forwarding gap the check cannot see.
     sa_rate_tol     :: Float64 = 0.0,
     sa_rate_span    :: Int     = 0,
-    sa_cooling_halflife :: Int = 0,
+    sa_halflife     :: Int     = 0,
 ) :: SMMResult
 
     r    = spec.run
@@ -1889,14 +2239,15 @@ function run_smm(
         reheat_factor   = r.sa_reheat_factor,
         max_reheats     = r.sa_max_reheats,
         adapt_window    = r.sa_adapt_window,
-        target_fin      = r.sa_target_fin,
-        subset_k        = sa_subset_k,
+        scale_p_move    = sa_scale_p_move,
+        scale_per_k     = sa_scale_per_k,
+        scale_sigma     = sa_scale_sigma,
         corana_Ns       = sa_corana_Ns,
         corana_c        = sa_corana_c,
         step_floor_rel  = sa_step_floor_rel,
         rate_tol        = sa_rate_tol,
         rate_span       = sa_rate_span,
-        cooling_halflife = sa_cooling_halflife,
+        cooling_halflife = sa_halflife,
         t0_rel          = r.sa_t0_rel,
         t0_accept       = r.sa_t0_accept,
         reheat_reset_tol = r.sa_reheat_reset_tol,
@@ -1905,6 +2256,7 @@ function run_smm(
         random_init     = r.sa_random_init,
         show_trace      = r.show_trace_generations,
         trace_stride    = r.trace_stride,
+        checkpoint_path = checkpoint_path,
         rng             = rng,
     )
 
@@ -1914,7 +2266,6 @@ function run_smm(
         pop_size     = r.de_pop_size > 0 ? r.de_pop_size : 10 * npar,
         f            = r.de_f,
         cr           = r.de_cr,
-        patience     = r.de_patience,
         avg_tol      = r.de_avg_tol,
         local_sigma  = r.de_local_sigma,
         gen_per_k    = r.de_gen_per_k,
@@ -1927,6 +2278,7 @@ function run_smm(
         show_members = r.show_trace_members,
         show_gens    = r.show_trace_generations,
         trace_stride = r.trace_stride,
+        checkpoint_path = checkpoint_path,
         rng          = rng,
     )
 
@@ -1945,10 +2297,8 @@ function run_smm(
         # can never exceed the Q the run was handed.
         θ_start = pack_theta(spec)
         Q_start = smm_objective(θ_start, spec)
-        isfinite(Q_start) &&
-            @printf("\n[stage 0/2]  starting point Q=%.6e (kept in contention)\n", Q_start)
 
-        @printf("\n[stage 1/2]  simulated annealing — find the basin\n"); flush(stdout)
+        @printf("\n[stage 1/2]  simulated annealing\n"); flush(stdout)
         θ_sa, Q_sa, it_sa = _sa_stage(spec, _sa_starts_from_bank(seed_bank, prev_optimum))
 
         if isfinite(Q_start) && !(isfinite(Q_sa) && Q_sa <= Q_start)
@@ -1966,7 +2316,7 @@ function run_smm(
         # forwarded — its members are spread over the whole box, which would reintroduce
         # the scale error the generator exists to remove.
         spec_de = isfinite(Q_sa) ? _spec_with_init(spec, θ_sa) : spec
-        @printf("\n[stage 2/2]  differential evolution — refine within the basin (SA gave Q=%.6e)\n",
+        @printf("\n[stage 2/2]  differential evolution  (SA gave Q=%.6e)\n",
                 Q_sa); flush(stdout)
         θ_de, Q_de, it_de = _de_stage(spec_de, nothing, nothing)
 
@@ -1989,7 +2339,6 @@ function run_smm(
             pop_size     = r.de_pop_size > 0 ? r.de_pop_size : 10 * npar,
             f            = r.de_f,
             cr           = r.de_cr,
-            patience     = r.de_patience,
             avg_tol      = r.de_avg_tol,
             local_sigma  = r.de_local_sigma,
             gen_per_k    = r.de_gen_per_k,
@@ -2002,6 +2351,7 @@ function run_smm(
             show_members = r.show_trace_members,
             show_gens    = r.show_trace_generations,
             trace_stride = r.trace_stride,
+            checkpoint_path = checkpoint_path,
             rng          = rng,
         )
         converged = isfinite(loss_opt)
@@ -2021,14 +2371,15 @@ function run_smm(
             reheat_factor   = r.sa_reheat_factor,
             max_reheats     = r.sa_max_reheats,
             adapt_window    = r.sa_adapt_window,
-            target_fin      = r.sa_target_fin,
-            subset_k        = sa_subset_k,
-            corana_Ns       = sa_corana_Ns,
+            scale_p_move    = sa_scale_p_move,
+            scale_per_k     = sa_scale_per_k,
+            scale_sigma     = sa_scale_sigma,
+                corana_Ns       = sa_corana_Ns,
             corana_c        = sa_corana_c,
             step_floor_rel  = sa_step_floor_rel,
             rate_tol        = sa_rate_tol,
             rate_span       = sa_rate_span,
-            cooling_halflife = sa_cooling_halflife,
+            cooling_halflife = sa_halflife,
             t0_rel          = r.sa_t0_rel,
             t0_accept       = r.sa_t0_accept,
             reheat_reset_tol = r.sa_reheat_reset_tol,
@@ -2172,17 +2523,17 @@ function print_results(res::SMMResult; why::AbstractString = "")
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimates                                       ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    @printf("  %-6s  %-8s  %10s\n", "block", "param", "estimate")
-    @printf("  %s\n", "-"^30)
+    @printf("  %s%s%12s\n", padr("block", 8), padr("param", 8), "estimate")
+    @printf("  %s\n", "─"^30)
     for ps in res.spec.free
         key = Symbol(string(ps.block) * "_" * string(ps.name))
         val = hasproperty(res.params_opt, key) ? res.params_opt[key] : NaN
-        @printf("  %-6s  %-8s  %10.5f\n", ps.block, ps.name, val)
+        @printf("  %s%s%12.5f\n", padr(ps.block, 8), padr(param_symbol(ps), 8), val)
     end
     if length(res.spec.fixed) > 0
         @printf("\n  Fixed:\n")
         for (k, v) in pairs(res.spec.fixed)
-            @printf("    %-24s  %10.5f\n", k, v)
+            @printf("    %s%10.5f\n", padr(fixed_symbol(k), 26), v)
         end
     end
     # The reason is passed in rather than stored on SMMResult: adding a field would
@@ -2196,17 +2547,54 @@ function print_results(res::SMMResult; why::AbstractString = "")
 end
 
 
+"""
+    write_checkpoint(path, θ, Q, spec; tag)
+
+Serialise the incumbent to `path` so a killed run resumes from it instead of from
+the stale bundle it started from. Called at every reheat, SA and DE.
+
+Written to a temp file and renamed: `rename` is atomic on the same filesystem, so a
+kill during the write leaves the previous checkpoint intact rather than a truncated
+file at the path warmstart reads.
+
+Carries `result` + `spec` + `provenance` — the fields the warm-start reader touches.
+It deliberately does NOT carry `sim`, so it is a resume artifact and not a
+substitute for the end-of-run bundle that plots and MCMC consume.
+"""
+function write_checkpoint(path::String, θ::AbstractVector, Q::Float64,
+                          spec::SMMSpec; tag::String = "")
+    isempty(path) && return
+    try
+        cp_, up_, sp_ = unpack_θ(collect(float.(θ)), spec)
+        res = SMMResult(collect(float.(θ)), _params_to_namedtuple(cp_, up_, sp_, spec),
+                        Q, false, 0, spec)
+        tmp = path * ".tmp"
+        mkpath(dirname(path))
+        open(tmp, "w") do io
+            serialize(io, (result = res, spec = spec, checkpoint = true, tag = tag))
+        end
+        mv(tmp, path; force = true)
+        @printf("  [checkpoint]  %s  Q=%.6e -> %s\n", tag, Q, basename(path))
+        flush(stdout)
+    catch e
+        @warn "checkpoint failed (run continues)" tag exception=e
+    end
+end
+
 function save_results(res::SMMResult, path::String)
     open(path, "w") do io
-        println(io, "block,name,label,estimate,lb,ub,fixed")
+        # `symbol` is the market-suffixed display name (β_S rather than the bare β that
+        # `name` carries for both markets), appended so tables and plots can label rows
+        # without re-deriving the suffix. Existing columns keep their names and order.
+        println(io, "block,name,label,estimate,lb,ub,fixed,symbol")
         for ps in res.spec.free
             key = Symbol(string(ps.block) * "_" * string(ps.name))
             val = hasproperty(res.params_opt, key) ? res.params_opt[key] : NaN
-            @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,false\n",
-                    ps.block, ps.name, ps.label, val, ps.lb, ps.ub)
+            @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,false,%s\n",
+                    ps.block, ps.name, ps.label, val, ps.lb, ps.ub, param_symbol(ps))
         end
         for (k, v) in pairs(res.spec.fixed)
-            @printf(io, "fixed,%s,%s,%.8f,,,true\n", k, k, v)
+            @printf(io, "fixed,%s,%s,%.8f,,,true,%s\n", k, k, v, fixed_symbol(k))
         end
         @printf(io, "\n# Q = %.10e\n", res.loss_opt)
         @printf(io, "# converged = %s\n", res.converged)

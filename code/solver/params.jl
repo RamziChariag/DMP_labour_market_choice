@@ -20,6 +20,25 @@
 
 
 # ============================================================
+# Solver relaxation knobs held outside SimParams
+#
+# Free-entry under-relaxation on θ_S: the skilled tightness is updated to
+# w·θ_new + (1−w)·θ_old inside solve_skilled_block!.  Damping the cutoffs
+# alone (damp_pstar_S) leaves the θ_S update raw, and the raw free-entry map
+# overshoots enough to lose otherwise feasible parameter draws: at w = 0.9 it
+# recovers 15 of the 25 residual failures, loses none of 96 feasible controls,
+# and moves Q by at most 6.5e-07 relative over those controls (1.2e-10 at
+# θ̂ itself).  w = 0.9 is LMR's own value (params.f90:275).
+#
+# This is a module-level Ref rather than a SimParams field on purpose: Julia's
+# serialiser reads structs positionally by field count, so adding a field would
+# make every SMMResult bundle already on disk unreadable.
+# ============================================================
+
+const DAMP_THETA_S = Ref(0.9)
+
+
+# ============================================================
 # Structs
 # ============================================================
 
@@ -141,11 +160,17 @@ end
 
 
 Base.@kwdef struct SkilledPrecomp
+    # The two γ vectors are EXACT-CDF CELL MASSES PER UNIT wp, not pointwise
+    # densities: γ_j ≡ (Γ(e_{j+1}) − Γ(e_j)) / wp_j over node j's cell (built by
+    # build_cell_mass_density in grids.jl).  Every dΓ integral in the solver
+    # appears as γ_j · wp_j and so carries the exact cell mass.  Reading either
+    # vector pointwise is an error whose size does not shrink with the grid.
+    #
     # OFFER distribution Γ_o = Beta(a_Γ, b_Γ) on [0,1].  Governs every fresh
     # meeting: hiring out of unemployment, on-the-job-search poaching
     # destinations, and the free-entry expected firm value.
     Γvals        :: Vector{Float64}    # offer CDF Γ_o(p) on skilled p-grid
-    γvals        :: Vector{Float64}    # offer density γ_o(p) on skilled p-grid
+    γvals        :: Vector{Float64}    # offer cell mass per unit wp
     tail_weights :: Vector{Float64}    # quadrature tail weights for offer Γ-integrals
 
     # SHOCK distribution Γ_s(x) = Γ_o(x/δ) on [0,δ].  Governs the λ_S redraw of
@@ -153,7 +178,7 @@ Base.@kwdef struct SkilledPrecomp
     # arrays exactly; δ < 1 compresses redraws toward lower quality, so a shock
     # can land below the reservation cutoff (reviving endogenous separation).
     Γs_vals        :: Vector{Float64}  # shock CDF Γ_s(p) on skilled p-grid
-    γs_vals        :: Vector{Float64}  # shock density γ_s(p) on skilled p-grid
+    γs_vals        :: Vector{Float64}  # shock cell mass per unit wp
     tail_weights_s :: Vector{Float64}  # quadrature tail weights for shock Γ-integrals
 end
 

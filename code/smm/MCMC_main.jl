@@ -58,6 +58,7 @@ include(joinpath(SOLVER_DIR, "unskilled.jl"))
 include(joinpath(SOLVER_DIR, "skilled.jl"))
 include(joinpath(SOLVER_DIR, "solver.jl"))
 include(joinpath(SOLVER_DIR, "equilibrium.jl"))
+include(joinpath(SMM_DIR, "settings.jl"))
 include(joinpath(SMM_DIR, "moments.jl"))
 include(joinpath(SMM_DIR, "smm_params.jl"))
 include(joinpath(SMM_DIR, "smm.jl"))
@@ -70,15 +71,13 @@ println("done.")
 # ========================================================================
 # CONFIG
 # ========================================================================
-# Batch overrides: defaults below are the single-run configuration; run_all.jl sets
-# ROYSEARCH_* environment variables so a batch needs no edit to this file.
-_env_sym(key, d::Symbol)  = haskey(ENV, key) ? Symbol(ENV[key])        : d
-_env_f64(key, d::Float64) = haskey(ENV, key) ? parse(Float64, ENV[key]) : d
-_env_int(key, d::Int)     = haskey(ENV, key) ? parse(Int, ENV[key])     : d
-_env_bool(key, d::Bool)   = haskey(ENV, key) ? parse(Bool, ENV[key])    : d
+# Batch overrides: defaults below are the single-run configuration; a batch sets
+# ROYSEARCH_* environment variables so it needs no edit to this file. `env_setting`
+# (settings.jl) reads them and records each resolution for the [env] block below.
+assert_no_legacy_env()
 
-WINDOW        = _env_sym("ROYSEARCH_WINDOW", :base_fc)   # window to compute SEs for
-W_COND_TARGET = _env_f64("ROYSEARCH_W_COND_TARGET", 0.0)  # 0.0 = diagonal-σ, 2.0 = equal weights.
+WINDOW        = env_setting(:WINDOW, :base_fc)            # window to compute SEs for
+W_COND_TARGET = env_setting(:W_COND_TARGET, 0.0)          # 0.0 = diagonal-σ, 2.0 = equal weights.
                                   # Selects BOTH the estimation bundle to load and
                                   # the weighting the chain targets — same meaning
                                   # and same admissible values as in smm_main.jl.
@@ -86,14 +85,14 @@ W_COND_TARGET = _env_f64("ROYSEARCH_W_COND_TARGET", 0.0)  # 0.0 = diagonal-σ, 2
                                   # bundle, so there is no SKIP_MOMENTS here.
 
 # DE-MC controls (see smm/demc.jl). N = 0 ⇒ 2·d chains.
-MCMC_N           = _env_int("ROYSEARCH_MCMC_N", 64)  # 2·d is ter Braak's minimum; LMR run 95
+MCMC_N           = env_setting(:MCMC_N, 64)  # 2·d is ter Braak's minimum; LMR run 95
                                    # chains for 16 parameters (5.9 per dimension) on an
                                    # MPI cluster with one rank per chain. On 10 cores the
                                    # binding constraint is total solves, and measurement
                                    # shows ESS depends on N·gens rather than on the split,
                                    # so fewer chains × more generations is preferred: at a
                                    # fixed budget that is what improves R̂.
-MCMC_GENS        = _env_int("ROYSEARCH_MCMC_GENS", 4000)  # budget cap ≈ 128k solves ≈ 6.5 SMM runs, the point at
+MCMC_GENS        = env_setting(:MCMC_GENS, 4000)  # budget cap ≈ 128k solves ≈ 6.5 SMM runs, the point at
                                    # which the gates below are first met at d = 25 (measured:
                                    # R̂ 1.070, ESS 342; at 2 SMM runs it is R̂ 1.25, ESS 133).
                                    # LMR run 10,000
@@ -111,22 +110,52 @@ MCMC_BURN        = 0.5
 # at CR=0.75 the off-ridge component is 0.51 of the along-ridge one, at 0.95 it is 0.15,
 # at 1.0 exactly zero. But each coordinate perturbed crosses its own grid boundaries and
 # adds its own jump, so ΔQ rises with the count — measured 0.77 at one coordinate
-# against 3.69 at all 24, same total step length. 0.95 sits where the rotation is small
-# and the jump floor has not yet bitten; the base_fc run attains acceptance 0.202 there,
-# which is 99% of the ESJD optimum. γ compensates for the realised mask count
-# (2.38/√(2δ·n_updated)), so CR redistributes a fixed total step rather than resizing it.
-MCMC_CR          = _env_f64("ROYSEARCH_MCMC_CR", 0.25)
-MCMC_DELTA       = _env_int("ROYSEARCH_MCMC_DELTA", 1)
+# against 3.69 at all 24, same total step length.
+#
+# The value is 0.95 as of v19.4.0, and the argument above is not the reason. A
+# candidate-by-candidate trace (23,424 proposals, base_fc, 2026-08-27) resolved the two
+# effects against each other on the criterion's OWN metric. Writing
+# κ = −Δlogπ / (½‖step‖²) with the step measured in the target's conditional scales,
+# κ = 1 means the step costs exactly what its length predicts:
+#
+#     coords moved      1       4       8      11
+#     median κ      1.307   1.171   0.938   0.781
+#     alignment     0.125   0.513   0.601   0.686
+#
+# Moving MORE coordinates is CHEAPER per unit length, because the step then points along
+# the ridge the population has learned rather than into a coordinate subspace. The gap
+# survives stratification on step length (ratio 1.19–1.62 within all four quartiles), so
+# it is not a length confound, and it is monotone on ranks (Spearman ρ(nmask, −κ) =
+# +0.094, ρ(alignment, −κ) = +0.175; Pearson is near zero only because κ is heavy-tailed,
+# sd 7.0 against a median of 1.11). The jump-floor effect the paragraph above describes is
+# real but smaller than the rotation it trades against.
+#
+# Not 1.0: that removes the mask entirely, and with it the chain's only route into a
+# single coordinate — the one move type whose acceptance the trace measures at 0.260
+# against 0.024 at eleven coordinates.
+#
+# γ compensates for the realised mask count (2.38/√(2δ·n_updated)), so CR redistributes a
+# fixed total step rather than resizing it: the step NORM is invariant to CR (n cancels
+# against E‖diff‖²). CR is a direction knob, never a step-size knob.
+MCMC_CR          = env_setting(:MCMC_CR, 0.95)
+MCMC_DELTA       = env_setting(:MCMC_DELTA, 1)
 # b_mult scales the difference vector ELEMENTWISE, so its off-ridge contribution is
 # b_mult·γ·‖diff‖ — proportional to the population spread, and therefore driven by the
 # WIDEST coordinate. b_S's width is ~124 in t, giving ‖diff‖ ≈ 177 at stationarity and
 # an off-ridge excursion of 0.61 against a measured tolerance of 1e-3. LMR use 1e-2
 # (mpi_mcmc_mod.f90:580) with no coordinate remotely that wide. Lower this if acceptance
 # decays as the population spreads, which is the signature of this term.
-MCMC_B_MULT      = _env_f64("ROYSEARCH_MCMC_B_MULT", 1e-5)
+#
+# DELIBERATELY NOT MATCHED TO LMR, and this is the one shock setting where matching them
+# would be wrong. b_add is already at their 1e-4. b_mult stays 1000x below their 1e-2
+# because the argument above is about ‖diff‖, which depends on the WIDEST coordinate's
+# width in t — and b_S's ~124 has no counterpart in their parametrisation. Raising it to
+# 1e-2 is the first thing to try if acceptance is adequate but the chain under-explores;
+# it is the last thing to try if acceptance decays with the spread.
+MCMC_B_MULT      = env_setting(:MCMC_B_MULT, 1e-5)
 # b_add is an absolute isotropic shock and does not scale with the spread. At 1e-4 it is
 # 0.1x the off-ridge tolerance, and it is the only mover in generation 1 under :at_seed.
-MCMC_B_ADD       = _env_f64("ROYSEARCH_MCMC_B_ADD", 1e-4)
+MCMC_B_ADD       = env_setting(:MCMC_B_ADD, 1e-4)
 
 # How the initial population is built. DE-MC's step size IS the population spread, so
 # this choice sets the proposal scale for the whole run and cannot be recovered from
@@ -160,14 +189,74 @@ MCMC_OUTLIER_IQR = 2.0             # Replace a chain scoring more than this many
 # only points the solver converges on, shrinking the radius until enough survive, and
 # reports the radius it settled on — a small one is itself the finding that the basin
 # is narrow.
-MCMC_INIT        = :at_seed
-MCMC_INIT_SCREEN = 0               # candidates for :screen (0 → 20·N)
+#
+# :at_seed, and the argument above is NOT the reason to prefer :screen — it was written
+# before any measurement and overstates the case. LMR run this same DE-MC sampler with
+# every chain started at the seed (mpi_mcmc_mod.f90:268,
+# `one_population_kn = spread(initial_theta, 2, N)`) and publish standard errors from it,
+# so a collapsed start is demonstrably workable and is not what breaks a run here.
+#
+# What DOES break a run from :at_seed is a seed that is not the mode OF THE SAMPLED
+# TARGET. logπ = −Q/2 + logjac_box, so the mode of logπ is not argmin Q: the Jacobian
+# term rewards coordinates for leaving the saturated tails. A chain seeded at argmin Q
+# therefore starts off-mode and must walk, the population acquires the spread of that
+# walk rather than the target's local scale, and acceptance collapses. That is a
+# property of the SEED, not of :at_seed. LMR do not have it because their target is
+# −Q/2 with no Jacobian, so their Nelder-Mead optimum IS their target's mode.
+#
+# The fix therefore belongs at the seed or in the target, not here. See
+# MCMC_LOGJAC_PRIOR below.
+#
+# THE PRIOR CONVENTION. :flat_t reproduces LMR's target; :flat_theta was the default
+# through v19.3.0.
+#
+#   :flat_theta   logπ = −Q/2 + logjac_box(t)   — a flat prior on θ, expressed in t.
+#   :flat_t       logπ = −Q/2                   — a flat prior on t, the unconstrained
+#                                                 coordinate. LMR's convention
+#                                                 (mpi_mcmc_mod.f90; their prior is a
+#                                                 flat box on t at ±20).
+#
+# WHY THE CHOICE MATTERS HERE, measured 2026-08-27 at the v19.1.0 base_fc optimum
+# (Q = 726.71). At an argmin of Q, dQ/dt = 0, so under :flat_theta the target's gradient
+# at the seed is exactly dlogjac/dt = 1 − 2σ(t), component by component, with no solves
+# required. That gradient is NOT zero: ‖dlogπ/dt‖ = 2.8821 over the 23 free coordinates,
+# median |component| 0.537, and the two at-bound parameters are the two largest
+# (b_S: +1.0000, the maximum the derivative can take; δ_S: −0.9860). So under
+# :flat_theta the seed is not a stationary point of the sampled target, MCMC_INIT =
+# :at_seed starts every chain off-mode, and the population acquires the spread of the
+# walk to the mode rather than the target's local scale — which is what collapses
+# acceptance. The live v19.2.0 run confirmed the prediction: max logπ climbed +5.49 over
+# generations 250→500, 23% of the 23.7-log-unit pure-Jacobian headroom.
+#
+# Under :flat_t the same gradient is −0.5·dQ/dt, which is zero at argmin Q BY
+# DEFINITION. The seed becomes exactly stationary and :at_seed is correct by
+# construction — which is why LMR can seed all 95 chains at a Nelder-Mead optimum
+# (mpi_mcmc_mod.f90:268) and publish standard errors from it.
+#
+# WHAT IT COSTS, and this is not a free choice. A flat prior on t is proportional to
+# 1/|dθ/dt| in θ units, so it puts MORE mass near the box edges. Reweighting the
+# measured 1-D b_S profile from :flat_theta to :flat_t moves its marginal from
+# mean 9.20e-04, sd 5.58e-04, q95 1.86e-03 to mean 2.21e-06, sd 4.50e-05, q95 at the
+# grid edge — i.e. b_S's interval becomes degenerate on its bound. LMR do not hit this
+# because their b is genuinely interior (their printed sd of 0.032 forces a mean above
+# 0.001025 on (0,1)), so their criterion has curvature there; ours is flat over
+# [0, 2e-3]. Same prior, different criterion.
+#
+# So the two conventions trade acceptance against the bounded coordinates' intervals,
+# and neither dominates. Both are bounded and continuous on Θ, which is what
+# Chernozhukov-Hong Assumption 4 requires; the theory does not privilege either. Report
+# which one produced a given table.
+MCMC_PRIOR       = env_setting(:MCMC_PRIOR, :flat_t)
+MCMC_INIT        = env_setting(:MCMC_INIT, :at_seed)
+MCMC_INIT_SCREEN = env_setting(:MCMC_INIT_SCREEN, 0)  # candidates for :screen (0 → 20·N)
 MCMC_PARALLEL    = true           # thread population over chains (see demc.jl header)
 MCMC_SEED        = 20260624
-MCMC_PRINT_EVERY = 250            # generations between progress lines. The acc/fin
-                                  # figures on each line average over exactly this
-                                  # window, so a very short stride makes them noisy
-                                  # (with N chains the finest resolution is 1/N).
+                                  # generations between progress lines. acc, dlp and esjd
+                                  # each average over exactly this window, so a very short
+                                  # stride makes them noisy (with N chains the finest
+                                  # acceptance resolution is 1/N). Env-readable so a smoke
+                                  # test can see more than one line without a source edit.
+MCMC_PRINT_EVERY = env_setting(:MCMC_PRINT_EVERY, 250)
 
 # Fixed budget: MCMC_GENS generations, no sequential stop. Sequential termination
 # assumes a unimodal target the chain can become stationary on; where the objective is
@@ -176,7 +265,43 @@ MCMC_PRINT_EVERY = 250            # generations between progress lines. The acc/
 # failure. R̂ and ESS are still computed and printed per parameter, as diagnostics of
 # which coordinates are identified rather than as a gate. LMR's package contains no
 # convergence test at all. Set MCMC_CHECK_EVERY > 0 to restore the sequential stop.
-MCMC_CHECK_EVERY = 0
+MCMC_CHECK_EVERY = env_setting(:MCMC_CHECK_EVERY, 250)  # generations between sequential stop checks; 0 disables
+#
+# THE SEQUENTIAL STOP, as of v19.3.0. MCMC_RHAT_MAX and MCMC_ESS_MIN below are now
+# REPORTED rather than gated on. Measured on the 18.4.1 base_fc chain (N=64, G=4000,
+# 16 checkpoints): the old gate — worst R̂ ≤ 1.10 AND min ESS ≥ 450 over non-exempt
+# coordinates — fired at 0 of 16. Its false-stop rate was zero and so was its TRUE-stop
+# rate: it could not terminate a run, so every run paid the full MCMC_GENS. Two reasons,
+# both measured:
+#   worst R̂ TRENDS UPWARD with budget (3.17 at g=250 to 5.73 at g=4000, whole series in
+#     [3.17, 5.73], never near 1.10), so no threshold there is satisfiable at any budget;
+#   min ESS is an autocorrelation estimator applied to a series that is 99.4% duplicates
+#     — ~750 accepted moves over 64 chains is ~12 per chain — so the number it returns
+#     (233 to 1400) is not an effective sample size.
+# The replacement gates on accepted moves (the deliverable in its natural unit), on the
+# running maximum of the log-target having stopped climbing (so a run cannot stop
+# mid-descent, where Cov(chain) would measure the trajectory rather than the curvature),
+# and on worst R̂ not having increased (a no-worsening test, not a threshold). All three
+# are required at TWO CONSECUTIVE checks. See stop_rule in mcmc_diagnostics.jl.
+# Accepted moves required in the retained half. Sized on the deliverable: Cov(chain) is
+# a d-dimensional covariance and the usual band for a stable one is 10d–100d independent
+# draws, so 100·d is the ceiling worth asking for.
+#
+# It was 5000, justified in this comment as "217·d, near the top of that band". That
+# arithmetic was wrong — 100·d is 2300, so 5000 sat 2.2× ABOVE the band — and the two
+# base_fc runs of 2026-08-27/28 show what it cost: the retained-half count plateaus near
+# 1000 (43·d, comfortably inside the band) at 975, 995, 1014, 975 across four consecutive
+# checks. The gate was therefore rejecting an adequate sample, and no run could stop on
+# it. That is the same defect as the R̂/ESS gate this rule was written to replace,
+# reintroduced by an unreachable threshold of my own.
+MCMC_MOVES_MIN   = env_setting(:MCMC_MOVES_MIN, 2300)   # 100·d at d = 23
+# DRIFT_FLAT in log units. Under MCMC_PRIOR = :flat_t, logπ = −Q/2 exactly, so a climb of
+# L log units IS ΔQ = 2L — and paired ΔQ only clears the grids' disagreement above
+# |ΔQ| ≈ 2. So 1.0 asks the run to certify the smallest difference the criterion can
+# actually resolve. It was 0.5, anchored on PROMOTE_MIN_DQ, which was the wrong anchor:
+# that constant governs whether to overwrite a bundle, not what the objective can resolve.
+MCMC_DRIFT_FLAT  = env_setting(:MCMC_DRIFT_FLAT, 1.0)   # log units; 1.0 ⇒ ΔQ = 2
+MCMC_ACC_FLOOR   = env_setting(:MCMC_ACC_FLOOR, 0.02)   # abort-and-diagnose below this, two checks running
 MCMC_RHAT_MAX    = 1.10            # Gelman et al. (2004) accept ≤1.1. Tighter values are
                                    # out of reach for DE-MC inside this budget: measured on
                                    # an isotropic Gaussian at d = 25 (the easiest target
@@ -201,35 +326,83 @@ MCMC_DRIFT_MAX   = 0.0             # was 25.0: abort if the running max climbs t
 # θ̂ the paper reports while the run that measures its uncertainty is still going. The
 # best visited point is serialised into the chain bundle as theta_best/params_best
 # either way, so nothing is lost; set ROYSEARCH_MCMC_CHECKPOINT=true to promote.
-MCMC_CHECKPOINT  = _env_bool("ROYSEARCH_MCMC_CHECKPOINT", false)  # Write each new best point to the
+MCMC_CHECKPOINT  = env_setting(:MCMC_CHECKPOINT, true)  # Write each new best point to the
                                    # warm-start bundle as the chain finds it, not only at the end.
                                    # Raising MCMC_DRIFT_MAX makes a run long enough that reaching
                                    # its own end stops being guaranteed; this keeps the best point
                                    # on disk however the run ends.
-PROMOTE_MIN_DQ   = 1e-4             # Improvement required to overwrite the bundle: one moment
-                                   # moving by one sampling standard error. Below it the gain sits
-                                   # inside the noise the moments themselves carry.
-MCMC_JAC_ONLY    = _env_bool("ROYSEARCH_JAC_ONLY", true)  # Skip the chain: estimate Ĵ = Ĝ'WĜ from a local
+                                   # Improvement required to overwrite the bundle. Anchored on what
+                                   # the criterion can RESOLVE, not on what it can represent: the
+                                   # grid half-range at the reached point is ±3.32 in Q and paired
+                                   # differences clear the discretisation above |ΔQ| ≈ 2, which is
+                                   # the same quantity MCMC_DRIFT_FLAT = 1.0 log units encodes.
+                                   #
+                                   # It was 1e-4, reasoned from one moment moving by one sampling
+                                   # standard error. That is the resolution of the MOMENTS, not of
+                                   # the objective they enter, and at 1e-4 a live chain promotes on
+                                   # essentially every generation: the base_fc run at CR = 0.95
+                                   # recorded ΔQ = 0.13, 0.05, 0.07 at generations 1, 2 and 5, each
+                                   # 500–1300× the threshold and none of them distinguishable from
+                                   # zero. That is 4000 full bundle serialisations and 4000 log
+                                   # lines bought for nothing.
+                                   #
+                                   # The checkpoint exists so an interrupted run leaves the best
+                                   # REAL point on disk. An unresolvable improvement is not one.
+PROMOTE_MIN_DQ   = 2.0
+MCMC_JAC_ONLY    = env_setting(:MCMC_JAC_ONLY, false)  # Skip the chain: estimate Ĵ = Ĝ'WĜ from a local
                                    # design around the seed (≈10·d solves) instead of from
                                    # Cov(chain) (N·gens solves). CH Theorem 4 admits either.
                                    # The trade is that the reported quantile columns need the
                                    # chain, so they are omitted in this mode.
-MCMC_ESS_MIN     = 250.0           # What the REPORTED numbers need, not the joint-volume
-                                   # floor. The table carries se and a sandwich built from
-                                   # Cov(chain): at ESS 250 a standard error has relative
-                                   # MC error 4.5%, i.e. two stable significant figures.
-                                   # minESS(25) at ε = 0.20 is ≈540 and at ε = 0.10 ≈2159;
-                                   # those size the posterior-mean confidence VOLUME and
-                                   # cost 600k–1.6M solves. Set 0.0 to use minESS instead.
+MCMC_ESS_MIN     = env_setting(:MCMC_ESS_MIN, 450.0)
+                                   # What the REPORTED numbers need, not the joint-volume
+                                   # floor. minESS(25) at ε = 0.20 is ≈540 and at ε = 0.10
+                                   # ≈2159; those size the posterior-mean confidence VOLUME
+                                   # and cost 600k–1.6M solves. Set 0.0 to use minESS.
+                                   #
+                                   # RAISED 250 → 450 in v19.2.0, because what is reported
+                                   # changed. 250 was sized for a STANDARD ERROR: at ESS 250
+                                   # an se has relative MC error 4.5%, two stable figures,
+                                   # and that reasoning is still correct for an se. But with
+                                   # diagonal W the chain's se is not a valid CI half-width
+                                   # (Chernozhukov–Hong Thm 3 needs W = Ω⁻¹; mcmc_diagnostics
+                                   # states outright that diagonal W fails it), so the
+                                   # deliverable is the QUANTILE PAIR, and a quantile is
+                                   # dearer than an sd. From MCSE(q_p) =
+                                   # √(p(1−p))/f(F⁻¹(p)) · sd/√ESS, whose constant is 2.113
+                                   # at p = 0.05, ESS 450 is exactly MCSE(q05) ≤ 0.10·sd:
+                                   # each interval endpoint precise to a tenth of the width
+                                   # it reports.
+                                   #
+                                   # Report q05/q95, not q025/q975. The constant is 2.671 at
+                                   # p = 0.025, and required ESS scales as the SQUARE of the
+                                   # constant, so the tighter tail costs
+                                   # (2.671/2.113)² − 1 = 59.8% more ESS for the same
+                                   # relative precision — 714 against 447 at MCSE ≤ 0.10·sd.
+                                   # (An earlier revision of this comment said 37%, which is
+                                   # neither the squared ratio nor the unsquared 26.4%; it
+                                   # understated the cost of the design choice it was cited
+                                   # to justify.) With 28 moments and 23 free parameters the
+                                   # 2.5% tail is also the least trustworthy part of the
+                                   # estimate, so the cheaper pair is the better report.
+                                   #
+                                   # This is affordable only because the gate is now
+                                   # PER-COORDINATE with automatic exemptions
+                                   # (exempt_coordinates, mcmc_diagnostics.jl). Under the old
+                                   # minimum(ess) gate, raising the threshold would have made
+                                   # an already-unsatisfiable test more unsatisfiable: one
+                                   # frozen or railed coordinate held the run hostage, the
+                                   # sequential stop never fired, and every run paid its full
+                                   # MCMC_GENS budget whatever the reported numbers had done.
 # Screen preconditioning (v17.2). The :screen radius is per coordinate, set to a
 # fraction of each parameter's own posterior width in UNCONSTRAINED units. Err narrow:
 # DE-MC contracts a too-narrow population readily but cannot contract a too-wide one,
 # so the failure is asymmetric and the safe side is inside the target.
-MCMC_SCREEN_FRAC  = _env_f64("ROYSEARCH_SCREEN_FRAC", 0.3)   # start at 0.3·sd and grow
-MCMC_SCREEN_CAP   = _env_f64("ROYSEARCH_SCREEN_CAP", 1.0)    # required: b_S's width is
+MCMC_SCREEN_FRAC  = env_setting(:MCMC_SCREEN_FRAC, 0.3)   # start at 0.3·sd and grow
+MCMC_SCREEN_CAP   = env_setting(:MCMC_SCREEN_CAP, 1.0)    # required: b_S's width is
                                   # 124 in t, and the logit clamp saturates near ±18.42,
                                   # so an uncapped scale there draws saturated corners.
-MCMC_SCREEN_FLOOR = _env_f64("ROYSEARCH_SCREEN_FLOOR", 1e-3) # guard a zero/absent width
+MCMC_SCREEN_FLOOR = env_setting(:MCMC_SCREEN_FLOOR, 1e-3) # guard a zero/absent width
 MCMC_JAC_DRAWS   = 600            # thinned retained draws re-solved to store the
                                   # moment vector, from which Ĝ is regressed
 
@@ -240,7 +413,8 @@ _w_suffix(ct::Float64) = ct == 0.0 ? "_diagonalW" :
                          error("W_COND_TARGET must be 0.0 (diagonal-σ) or 2.0 (equal weights); got $ct.")
 W_SUFFIX = _w_suffix(W_COND_TARGET)
 
-@printf("Window: %s   weighting: %s\n", WINDOW, W_SUFFIX); flush(stdout)
+@printf("Window: %s   weighting: %s\n", WINDOW, W_SUFFIX)
+print_env_settings()
 
 # ========================================================================
 # 1. Load the SMM optimum (point estimate + spec) to seed the chain
@@ -286,16 +460,32 @@ K, d     = length(MOM_KEYS), length(spec.free)
 σ̂ = W_COND_TARGET == 0.0 ? [1.0 / sqrt(spec.W[i, i]) for i in 1:K] : fill(NaN, K)
 
 # ========================================================================
-# 3. Log quasi-posterior.  −½·g'Wg plus the box log-Jacobian, without which the
-#    density induced on θ has poles at the bounds and no stationary
-#    distribution (logjac_box, smm_params.jl). Infeasible θ → Inf → −Inf → the
-#    proposal is rejected.
+# 3. Log quasi-posterior, −½·g'Wg plus a prior term set by MCMC_PRIOR (see the
+#    block above for the measurement that motivates the switch and what each
+#    convention costs). Infeasible θ → Inf → −Inf → the proposal is rejected.
+#
+#    ONE FUNCTION, not two, and the flag is read once into a Bool rather than
+#    per call: a closure that branched on a Symbol 256,000 times would put a
+#    dynamic dispatch inside the hot loop for a decision that cannot change
+#    mid-run.
 # ========================================================================
+const _USE_LOGJAC = (MCMC_PRIOR === :flat_theta)
+MCMC_PRIOR in (:flat_theta, :flat_t) ||
+    error("MCMC_PRIOR = $(MCMC_PRIOR) is not recognised; use :flat_theta or :flat_t.")
+
 function logposterior(θ)
     Q = smm_objective(θ, spec)
     isfinite(Q) || return -Inf
-    return -0.5 * Q + logjac_box(collect(float.(θ)), spec.free)
+    return _USE_LOGJAC ? -0.5 * Q + logjac_box(collect(float.(θ)), spec.free) :
+                         -0.5 * Q
 end
+
+# The inverse map, used wherever a stored logπ has to be turned back into a Q. Keeping
+# it beside logposterior is deliberate: these two must agree, and a Q recovered under
+# the wrong convention is off by logjac(θ) — 46 units at the current seed, which would
+# silently corrupt every checkpoint and every drift split.
+_Q_from_lp(θ, lp) = _USE_LOGJAC ?
+    -2.0 * (lp - logjac_box(collect(float.(θ)), spec.free)) : -2.0 * lp
 
 # ========================================================================
 # 4. Run DE-MC
@@ -332,7 +522,10 @@ Callers guarantee `Q_new < Q_old`.
 """
 function promote!(θ::Vector{Float64}, Q_new::Float64, Q_old::Float64; label::String)
     backup_jls = replace(seed_jls, r"\.jls$" => @sprintf("_backup_Q%.6f.jls", Q_seed))
-    if !_backed_up[]
+    # The backup is taken once, from the original seed, so this also marks the first
+    # promotion — which is the only one whose paths are worth printing.
+    first_write = !_backed_up[]
+    if first_write
         cp(seed_jls, backup_jls; force = true)
         _backed_up[] = true
     end
@@ -343,8 +536,14 @@ function promote!(θ::Vector{Float64}, Q_new::Float64, Q_old::Float64; label::St
                                           Q_new, false, 0, spec),
                        spec = spec))
     end
-    @printf("\n  %s: Q %.6e → %.6e (ΔQ=%.2f)\n", label, Q_old, Q_new, Q_old - Q_new)
-    @printf("    backed up  %s\n    overwrote  %s\n", basename(backup_jls), seed_jls)
+    # One line per promotion. The backup filename and the destination path are the same
+    # on every call — the backup is taken once, from the seed — so repeating them turns a
+    # frequent event into four lines of identical boilerplate. They are printed once, on
+    # the first promotion, where they are news.
+    if first_write
+        @printf("  checkpointing to %s, backup %s\n", basename(seed_jls), basename(backup_jls))
+    end
+    @printf("  %s: Q %.6f → %.6f (ΔQ=%.4f)\n", label, Q_old, Q_new, Q_old - Q_new)
     return nothing
 end
 
@@ -356,7 +555,7 @@ end
 # re-solved, so the callback costs nothing.
 
 function checkpoint_best(θ, lp, g)
-    Q = -2.0 * (lp - logjac_box(collect(float.(θ)), spec.free))
+    Q = _Q_from_lp(θ, lp)
     Q < Q_ckpt[] - PROMOTE_MIN_DQ || return nothing
     promote!(collect(float.(θ)), Q, Q_ckpt[]; label = @sprintf("CHECKPOINT g=%d", g))
     Q_ckpt[] = Q
@@ -469,6 +668,15 @@ res = MCMC_JAC_ONLY ?
                on_best = MCMC_CHECKPOINT ? checkpoint_best : nothing,
                check_every = MCMC_CHECK_EVERY, rhat_max = MCMC_RHAT_MAX,
                ess_min = MCMC_ESS_MIN, drift_max = MCMC_DRIFT_MAX,
+               # The sequential stop. rhat_max/ess_min above are now REPORTED, not gated
+               # on. Forwarded explicitly: the four SA settings that were computed here
+               # and never passed cost four versions of silently-defaulted behaviour, and
+               # check_forwarding.jl exists because of it.
+               moves_min = MCMC_MOVES_MIN, drift_flat = MCMC_DRIFT_FLAT,
+               acc_floor = MCMC_ACC_FLOOR,
+               # For the convergence gate's at-a-bound exemption test, which has to
+               # measure pile-up in constrained units.
+               lb = [ps.lb for ps in spec.free], ub = [ps.ub for ps in spec.free],
                rng = MersenneTwister(MCMC_SEED))
 
 # ========================================================================
@@ -554,7 +762,15 @@ println("╠══════════════════════�
 @printf("  gens=%d/%d %s  burn=%d  kept=%d  accept=%.3f\n",
         res.gens, res.gens_requested,
         MCMC_JAC_ONLY                        ? "(chain skipped: JAC_ONLY)"    :
-        res.aborted                          ? "(ABORTED: seed drift)"        :
+        # abort_why distinguishes the two abort paths, which call for opposite fixes:
+        # :drift means re-seed from theta_best, :acceptance means rescale the proposal.
+        # hasproperty keeps results produced before v19.5.0 readable.
+        res.aborted                          ?
+            (hasproperty(res, :abort_why) ?
+                 (res.abort_why === :acceptance ? "(ABORTED: acceptance floor)" :
+                  res.abort_why === :drift      ? "(ABORTED: seed drift)"       :
+                                                  "(ABORTED)") :
+                 "(ABORTED)")                                                  :
         res.gens < res.gens_requested        ? "(criteria met, stopped early)" :
         MCMC_CHECK_EVERY > 0                 ? "(BUDGET EXHAUSTED — criteria not met)" :
                                                "(no stopping test)",
@@ -562,9 +778,13 @@ println("╠══════════════════════�
 # Attribute the climb rather than assert a cause: −½ΔQ indicts the point estimate,
 # Δlogjac only says the seed sat near a rail (the Jacobian term is unbounded below).
 Q_best  = smm_objective(res.theta_best, spec)
-dQ, dlj = drift_components(Q_seed, Q_best,
-                           logjac_box(θ0, spec.free),
-                           logjac_box(collect(res.theta_best), spec.free))
+# Under :flat_t there is no Jacobian in the target, so the whole drift is ΔQ by
+# construction and the split has only one live component. Passing equal log-Jacobians
+# rather than skipping the call keeps one code path and makes dlj print as exactly 0.
+_lj0, _lj1 = _USE_LOGJAC ?
+    (logjac_box(θ0, spec.free), logjac_box(collect(res.theta_best), spec.free)) :
+    (0.0, 0.0)
+dQ, dlj = drift_components(Q_seed, Q_best, _lj0, _lj1)
 @printf("  seed drift=%+.1f (abort >%.1f) = %+.1f from Q (ΔQ=%+.4g) %+.1f from log|dθ/dt|\n",
         res.drift, MCMC_DRIFT_MAX, dQ, Q_best - Q_seed, dlj)
 # The drift split decides what to do next, so say it rather than leave the reader to
@@ -590,7 +810,9 @@ end
         logposterior(θ0), maximum(res.lp), MCMC_RHAT_MAX,
         MCMC_ESS_MIN > 0 ? MCMC_ESS_MIN : min_ess(d),
         MCMC_ESS_MIN > 0 ? "" : @sprintf(" (minESS, d=%d)", d))
-@printf("  target: −½·g'Wg + log|dθ/dt|   (log-Jacobian ON)\n")
+@printf("  target: %s   (MCMC_PRIOR = :%s)\n",
+        _USE_LOGJAC ? "−½·g'Wg + log|dθ/dt|" : "−½·g'Wg",
+        MCMC_PRIOR)
 R2f = filter(isfinite, R2)
 @printf("  Ĝ: %d×%d from %d draws, moment R² min=%.3f median=%.3f\n",
         K, d, size(Msel, 2), minimum(R2f), median(R2f))
@@ -604,18 +826,25 @@ println("╠══════════════════════�
 # which the header already states. |t| is the reportability screen; the flag column
 # marks a parameter the theory cannot cover — at a box edge, or with R̂ over the gate.
 if chain_ok
-    println("  block   param     post.mean  se(chain)     |t|      θ̂      R̂    ESS  edge%")
-    println("  ──────────────────────────────────────────────────────────────────────────────────────────────────")
+    # The rule is built from the header's own display width rather than a hardcoded
+    # dash count, so the two cannot drift apart when a column is added or renamed.
+    hdr = "  block   param     post.mean  se(chain)     |t|       θ̂      R̂   ESS edge%"
+    println(hdr)
+    println("  ", "─"^(textwidth(hdr) - 2))
 else
-    println("  block   param     estimate    se(J⁻¹)   se(bound)     |t|")
-    println("  ──────────────────────────────────────────────────────────────────────────────")
+    hdr = "  block   param     estimate    se(J⁻¹)   se(bound)     |t|"
+    println(hdr)
+    println("  ", "─"^(textwidth(hdr) - 2))
 end
 mkpath(SMM_OUT_DIR)
 out_csv = joinpath(SMM_OUT_DIR, "mcmc_results_$(WINDOW)$(W_SUFFIX).csv")
 open(out_csv, "w") do io
     # The first 14 columns keep their names and order so existing readers still parse;
     # se_chain is appended rather than inserted.
-    println(io, "block,name,label,point_estimate,post_mean,se_curvature,se_bound,q025,q500,q975,rhat,ess,edge_frac,spread_growth,se_chain")
+    # `symbol` is the market-suffixed display name (β_S rather than the bare β that
+    # `name` carries for both markets), appended so tables and plots can label rows
+    # without re-deriving the suffix. Existing columns keep their names and order.
+    println(io, "block,name,label,point_estimate,post_mean,se_curvature,se_bound,q025,q500,q975,rhat,ess,edge_frac,spread_growth,se_chain,symbol")
     for (k, ps) in enumerate(spec.free)
         # Quantiles and the posterior mean require a stationary chain; without one
         # the se columns still stand (they come from Ĵ), so those are reported and
@@ -639,18 +868,20 @@ open(out_csv, "w") do io
         flag   = edge > 0.01 ? " edge" :
                  (chain_ok && rhat[k] > MCMC_RHAT_MAX) ? " R̂" : ""
         if chain_ok
-            @printf("  %-7s %-8s %10.5f %10.5f %7.2f %8.5f %6.3f %6.0f %5.1f%s\n",
-                    ps.block, ps.name, pmean, se_chain[k], tstat, pe,
+            @printf("  %s%s%10.5f %10.5f %7.2f %8.5f %6.3f %6.0f %5.1f%s\n",
+                    padr(ps.block, 8), padr(param_symbol(ps), 9),
+                    pmean, se_chain[k], tstat, pe,
                     rhat[k], ess[k], 100edge, flag)
         else
-            @printf("  %-7s %-8s %9.5f %10.5f %11.5f %7.2f%s\n",
-                    ps.block, ps.name, pe, se_curv[k], se_bnd[k], tstat, flag)
+            @printf("  %s%s%9.5f %10.5f %11.5f %7.2f%s\n",
+                    padr(ps.block, 8), padr(param_symbol(ps), 9),
+                    pe, se_curv[k], se_bnd[k], tstat, flag)
         end
-        @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f,%.1f,%.6f,%.6f,%.8f\n",
+        @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f,%.1f,%.6f,%.6f,%.8f,%s\n",
                 ps.block, ps.name, ps.label, pe, pmean,
                 se_curv[k], se_bnd[k],
                 q(0.025), q(0.500), q(0.975),
-                rhat[k], ess[k], edge, sgrow[k], se_chain[k])
+                rhat[k], ess[k], edge, sgrow[k], se_chain[k], param_symbol(ps))
     end
 end
 println("╚══════════════════════════════════════════════════════╝")
@@ -676,12 +907,32 @@ if chain_ok
     @printf("  se(chain) is the finding rather than a failure. edge%%: draws within 1%% of a\n")
     @printf("  box edge — no interval is valid there, by any route.\n")
 else
-    @printf("\n  No chain ran, so no posterior SD exists: both columns differentiate Q, and Q is\n")
-    @printf("  only piecewise smooth (the cutoff softening in grids.jl is C⁰, not C¹), so read\n")
-    @printf("  them as indicative. se(J⁻¹) assumes W = Ω⁻¹, i.e. uncorrelated moment errors;\n")
-    @printf("  se(bound) is sharp over all Ω but attained at a different rank-one adversarial\n")
-    @printf("  Ω per parameter, so the column is not jointly attainable. For reportable\n")
-    @printf("  standard errors run with ROYSEARCH_JAC_ONLY=false.\n")
+    # Two ways to land here and they are not the same fact. Under JAC_ONLY no chain was
+    # started. After an abort a chain ran — sometimes for thousands of generations — and
+    # its draws exist; they are simply not a stationary sample. Reporting the second as
+    # "no chain ran" tells the reader their run produced nothing, when in this project
+    # such a run produced ΔQ = 200 and the point that every later estimate started from.
+    if MCMC_JAC_ONLY
+        @printf("\n  No chain ran (MCMC_JAC_ONLY), so there is no posterior SD.\n")
+    else
+        @printf("\n  The chain ran %d generations and ABORTED, so its %d draws are a record of\n",
+                res.gens, n_kept)
+        @printf("  where it went, not a stationary sample: no posterior SD can be read off\n")
+        @printf("  them. theta_best is in the bundle and is the run's deliverable.\n")
+    end
+    @printf("  Both columns below differentiate Q, and Q is only piecewise smooth (the cutoff\n")
+    @printf("  softening in grids.jl is C⁰, not C¹), so read them as indicative. se(J⁻¹)\n")
+    @printf("  assumes W = Ω⁻¹, i.e. uncorrelated moment errors; se(bound) is sharp over all Ω\n")
+    @printf("  but attained at a different rank-one adversarial Ω per parameter, so the column\n")
+    @printf("  is not jointly attainable.\n")
+    # The remedy differs by branch, and pointing an aborted run at JAC_ONLY=false is
+    # advice it has already followed.
+    if MCMC_JAC_ONLY
+        @printf("  For reportable standard errors run with ROYSEARCH_MCMC_JAC_ONLY=false.\n")
+    else
+        @printf("  For reportable standard errors re-seed from theta_best and run again: a chain\n")
+        @printf("  started at a point it cannot improve on has no drift to abort on.\n")
+    end
 end
 
 # ========================================================================
@@ -723,6 +974,18 @@ open(chain_jls, "w") do io
                    window     = WINDOW,
                    w_cond_target = W_COND_TARGET,
                    seed_jls   = seed_jls,
+                   # The spec is what makes theta_best USABLE rather than merely recorded.
+                   # smm_objective(theta, spec) needs the whole object — fixed parameters,
+                   # moment targets, sim settings, grids, W — and free/labels/lb/ub above
+                   # are not a substitute for any of it. Without this field the chain's
+                   # best visited point cannot be re-evaluated, re-solved for moments, or
+                   # warm-started from, which is the entire reason the chain is run: it
+                   # reaches points the optimiser cannot, and a point that cannot be
+                   # re-evaluated is not a result. Written for every chain bundle,
+                   # independent of MCMC_CHECKPOINT — that flag governs whether the
+                   # ESTIMATION's bundle is overwritten, a separate decision from whether
+                   # this bundle is self-contained.
+                   spec       = spec,
                    provenance = run_provenance(window = WINDOW, w_suffix = W_SUFFIX,
                                                version = ROYSEARCH_VERSION)))
 end

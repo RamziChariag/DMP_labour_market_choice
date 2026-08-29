@@ -23,7 +23,7 @@ const R = find_repo_root()
 for f in ("grids", "params", "unskilled", "skilled", "solver", "equilibrium")
     include(joinpath(R, "code", "solver", f * ".jl"))
 end
-for f in ("moments", "smm_params", "smm")
+for f in ("settings", "moments", "smm_params", "smm")
     include(joinpath(R, "code", "smm", f * ".jl"))
 end
 

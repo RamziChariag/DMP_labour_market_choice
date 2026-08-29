@@ -45,6 +45,7 @@ const ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 for f in ("grids", "params", "unskilled", "skilled", "solver", "equilibrium")
     include(joinpath(ROOT, "code", "solver", f * ".jl"))
 end
+include(joinpath(ROOT, "code", "smm", "settings.jl"))
 include(joinpath(ROOT, "code", "smm", "moments.jl"))
 include(joinpath(ROOT, "code", "smm", "smm_params.jl"))
 include(joinpath(ROOT, "code", "smm", "smm.jl"))

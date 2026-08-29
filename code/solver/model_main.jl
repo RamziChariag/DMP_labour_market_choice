@@ -72,6 +72,7 @@ println("done."); flush(stdout)
 # (same include set and order as the sensitivity notebook; candidates.jl is
 # deliberately not included).
 print("Loading SMM modules... "); flush(stdout)
+include(joinpath(SMM_DIR, "settings.jl"))
 include(joinpath(SMM_DIR, "moments.jl"))
 include(joinpath(SMM_DIR, "smm_params.jl"))   # ParamSpec, SMMSpec, run params
 include(joinpath(SMM_DIR, "smm.jl"))          # SMMResult, _load_smm_bundle

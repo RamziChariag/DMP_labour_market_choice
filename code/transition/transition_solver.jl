@@ -343,6 +343,13 @@ function _forward_skilled_pdist!(path::TransitionPath, model::Model,
                 cum_e += e_old * sg.wp[jp]
                 continue
             end
+            # pre.γvals is a cell mass per unit wp, not a pointwise density
+            # (grids.jl), so the inflow terms must be read the way every other
+            # dΓ term in the model is: as γ·wp, the mass of node jp's cell.
+            # e_S is likewise a per-unit-wp density — every consumer of
+            # path.eS weights it by sg.wp — so dividing the cell mass back by
+            # wp keeps both sides of the balance in the same units and makes
+            # ∫ (inflow) dp exactly f_S·u_S, as the stationary solve has it.
             γj = pre.γvals[jp];  Γj = pre.Γvals[jp]
             inflow_u = fS * γj * uS_frac
             inflow_λ = λS * γj * cum_e

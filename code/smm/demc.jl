@@ -120,6 +120,22 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
                   outlier_iqr::Float64 = 2.0,
                   check_every::Int = 0, rhat_max::Float64 = 1.03,
                   ess_min::Float64 = 0.0, drift_max::Float64 = 0.0,
+                  # Sequential stop (stop_rule, mcmc_diagnostics.jl). rhat_max and ess_min
+                  # above are now REPORTED rather than gated on: the stop gates on accepted
+                  # moves, drift-flatness and non-worsening R̂. Defaults reproduce the
+                  # documented rule; a caller passing moves_min = typemax(Int) disables the
+                  # stop without disabling the acceptance-floor diagnosis.
+                  moves_min::Int      = 2000,
+                  drift_flat::Float64 = 0.5,
+                  acc_floor::Float64  = 0.02,
+                  # Box bounds, for the AT-A-BOUND half of the convergence gate's exemption
+                  # test. Pile-up must be measured in CONSTRAINED units because the logit
+                  # transform puts each bound at infinity in t, where no threshold detects
+                  # it. Optional: with lb/ub omitted the gate still applies its FROZEN test
+                  # (distinct visited values), so a caller that cannot supply them degrades
+                  # to a weaker exemption rather than to a wrong one.
+                  lb::Union{Nothing,AbstractVector} = nothing,
+                  ub::Union{Nothing,AbstractVector} = nothing,
                   on_best = nothing)
 
     # print_every ≤ 0 means "final line only" rather than a modulo by zero.
@@ -271,10 +287,15 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     θ_best     = copy(θ0f)                    # argmax of logπ seen so far
     lp_best    = lp_seed
     aborted    = false
+    # Which abort fired. Two paths set `aborted`, and they mean opposite things: :drift
+    # says the chain found a better point than the seed, :acceptance says the proposal is
+    # mis-scaled. Reporting one as the other sends the reader after the wrong fix.
+    abort_why  = :none
 
-    chain = Array{Float64}(undef, d, N, gens)
-    cand  = Matrix{Float64}(undef, d, N)
-    lpc   = Vector{Float64}(undef, N)
+    chain  = Array{Float64}(undef, d, N, gens)
+    cand   = Matrix{Float64}(undef, d, N)
+    lpc    = Vector{Float64}(undef, N)
+    pop_sd = Vector{Float64}(undef, d)      # per-generation ESJD yardstick
     nacc  = 0
     # Windowed counters, reset at each print. A cumulative acceptance rate hides
     # the current one once the early generations are averaged in, and `nfin`
@@ -283,6 +304,36 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     wacc  = 0
     wfin  = 0
     wprop = 0
+    # Proposal economics, windowed alongside the counters above. Acceptance says how
+    # often a proposal lands; these say WHY it does or does not, which is what a tuning
+    # decision needs.
+    #
+    #   wdlp   the Δlogπ of every feasible proposal. Its MEDIAN is the step-scale
+    #          diagnostic: a well-scaled d-dimensional proposal sits at −1 to −3, which
+    #          is what yields acceptance ≈ 0.234. A median near −20 means the median
+    #          proposal is rejected with probability 1 − 2e−9 and the whole acceptance
+    #          rate is riding a thin tail — invisible in the acceptance number itself.
+    #   wesjd  expected squared jump distance, in the POPULATION's own metric (each
+    #          coordinate standardised by its current population sd, so the measure is
+    #          scale-free and computable at runtime without knowing the target). ESJD,
+    #          not acceptance, is the mixing criterion: a shorter step that raises
+    #          acceptance while lowering ESJD is moving less, not mixing better.
+    wdlp  = Float64[]
+    wesjd = 0.0
+    # Check-window counters, reset at each CHECK rather than at each print. The two
+    # strides are independent (print_every 250, check_every 250 today but not by
+    # construction), so the stop rule cannot read the print counters: a print between
+    # checks would zero them and the acceptance the rule sees would cover the wrong
+    # window. Separate counters make the rule's window exactly check-to-check.
+    wacc_chk  = 0
+    wprop_chk = 0
+    # Two-consecutive-check state. NaN/false means "nothing to compare against yet", so
+    # neither the stop nor the diagnosis can fire on the first check — one check is a
+    # reading, two is evidence.
+    lp_best_prev = NaN
+    rhat_prev    = Inf
+    stop_armed   = false
+    diag_armed   = false
     # Per-chain log-posterior history, for the stuck-chain score. LMR average over the
     # last half of a 500-draw ring buffer; 250 is that window, capped so a short run
     # still scores over something.
@@ -317,13 +368,33 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
 
         _eval_population!(lpc, logπ, cand, N, parallel)
 
+        # Population sd per coordinate, this generation, as the metric for ESJD. Taken
+        # BEFORE the accept loop so every jump in this generation is measured against one
+        # fixed yardstick rather than one that shifts as chains update.
+        #
+        # Floored at b_add because that is the smallest displacement the proposal can
+        # produce: a coordinate whose population sd is below it has not separated from the
+        # seed, and standardising by that sd divides a real step by floating-point noise.
+        # Unfloored, an :at_seed start reports esjd ≈ 5e23 in its first generations —
+        # cancellation in std() over N nearly identical members, not a large jump.
+        sd_floor = max(b_add, eps())
+        @inbounds for k in 1:d
+            pop_sd[k] = max(std(@view Xc[k, :]), sd_floor)
+        end
+
         for c in 1:N
-            wprop += 1
+            wprop += 1; wprop_chk += 1
             isfinite(lpc[c]) && (wfin += 1)
+            isfinite(lpc[c]) && push!(wdlp, lpc[c] - lp[c])
             if log(rand(rng)) < lpc[c] - lp[c]           # α = exp(Δ log-posterior)
+                jd = 0.0
+                @inbounds for k in 1:d
+                    jd += ((cand[k, c] - X[k, c]) / pop_sd[k])^2
+                end
+                wesjd += jd
                 @views X[:, c] .= cand[:, c]
                 lp[c] = lpc[c]
-                nacc += 1; wacc += 1
+                nacc += 1; wacc += 1; wacc_chk += 1
             end
             chain_lp[c, g] = lp[c]
         end
@@ -367,21 +438,38 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
         end
 
         if verbose && (g % print_every == 0 || g == gens)
-            # Acceptance alone cannot say whether the run is producing a posterior: it
-            # falls as the population leaves a collapsed start whether or not the chain
-            # is mixing. Worst R̂ and min ESS across coordinates are what decide the
-            # deliverable, so they belong on every progress line rather than only in the
-            # final table. Reuses converged_sequential (the check_every stopping rule) so
-            # the numbers printed here and the ones that stop the run are the same object.
+            # Acceptance alone cannot say whether the run is producing a posterior, nor
+            # what to change if it is not. Four numbers answer four distinct questions:
+            #
+            #   acc   is the chain moving at all
+            #   dlp   the MEDIAN feasible proposal's Δlogπ — is the step the right SIZE?
+            #         −1 to −3 is well scaled; −20 means the median proposal is hopeless
+            #         and acceptance is riding a tail. This is the tuning number.
+            #   esjd  expected squared jump per proposal in population-sd units — is the
+            #         chain COVERING ground? Read together with dlp: acceptance rising
+            #         while esjd falls is a shorter step moving less, not better mixing.
+            #   R̂/ESS the deliverable itself, over non-exempt coordinates.
+            #
+            # `fin` appears only when it drops below 0.95. At the measured 0.98 it is
+            # noise on every line; below that it is the difference between a proposal
+            # rejected for being uphill and one rejected because the solve failed, which
+            # call for opposite fixes. Cumulative acceptance is dropped outright — it
+            # averages in the collapsed :at_seed start forever, so it falls monotonically
+            # whatever the chain is doing.
             _, wr, me = converged_sequential(chain, g, burn_frac, d;
-                                             rhat_max = rhat_max, ess_min = ess_target)
-            @printf("[demc] gen %5d/%d  acc=%.3f  fin=%.2f  max logπ=%.6e  (cum acc=%.3f)  \
-                     worst R̂=%s  min ESS=%s\n",
-                    g, gens, wacc / max(wprop, 1), wfin / max(wprop, 1),
-                    maximum(lp), nacc / (g * N),
+                                             rhat_max = rhat_max, ess_min = ess_target,
+                                             lb = lb, ub = ub)
+            fin_frac = wfin / max(wprop, 1)
+            @printf("[demc] gen %5d/%d  acc=%.3f  dlp=%s  esjd=%.3f  max logπ=%.6e  \
+                     R̂=%s  ESS=%s%s\n",
+                    g, gens, wacc / max(wprop, 1),
+                    isempty(wdlp) ? "n/a" : @sprintf("%+.2f", median(wdlp)),
+                    wesjd / max(wprop, 1), maximum(lp),
                     isfinite(wr) ? @sprintf("%.3f", wr) : "n/a",
-                    isfinite(me) ? @sprintf("%.0f", me) : "n/a"); flush(stdout)
+                    isfinite(me) ? @sprintf("%.0f", me) : "n/a",
+                    fin_frac < 0.95 ? @sprintf("  fin=%.2f", fin_frac) : ""); flush(stdout)
             wacc = 0; wfin = 0; wprop = 0
+            empty!(wdlp); wesjd = 0.0
         end
 
         if check_every > 0 && g >= check_every && g % check_every == 0 && g < gens
@@ -396,16 +484,64 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                     println("       the local-design Ĵ = Ĝ'WĜ route needs no chain either way.")
                     flush(stdout)
                 end
-                g_final = g; aborted = true
+                g_final = g; aborted = true; abort_why = :drift
                 break
             end
-            done, wr, me = converged_sequential(chain, g, burn_frac, d;
-                                                rhat_max = rhat_max,
-                                                ess_min  = ess_target)
+            # The stop gates on accepted moves, drift-flatness and non-worsening R̂ —
+            # not on an R̂ threshold. Measured on the 18.4.1 base_fc chain, the old
+            # threshold gate fired at 0 of 16 checkpoints (true-stop rate zero as well
+            # as false-stop rate zero), because worst R̂ trends UPWARD with budget while
+            # accepted moves stay flat. R̂ and ESS are still computed and printed.
+            # Both conditions require TWO CONSECUTIVE checks: one check is a reading,
+            # two is evidence.
+            drift_since_last = isnan(lp_best_prev) ? NaN : lp_best - lp_best_prev
+            acc_window = wprop_chk > 0 ? wacc_chk / wprop_chk : NaN
+            done1, diag1, moves, _, wr, me =
+                stop_rule(chain, g, burn_frac, d;
+                          moves_min = moves_min, drift_flat = drift_flat,
+                          acc_floor = acc_floor, acc_window = acc_window,
+                          drift_since_last = drift_since_last, rhat_prev = rhat_prev,
+                          rhat_max = rhat_max, ess_min = ess_target, lb = lb, ub = ub)
+            done = done1 && stop_armed
+            diagnose = diag1 && diag_armed
+            stop_armed = done1; diag_armed = diag1
+            lp_best_prev = lp_best; rhat_prev = isfinite(wr) ? wr : rhat_prev
+            wacc_chk = 0; wprop_chk = 0
+
             if verbose
-                @printf("[demc] check g=%d  worst R̂=%.4f (≤%.3f)  min ESS=%.0f (≥%.0f)  %s\n",
-                        g, wr, rhat_max, me, ess_target,
-                        done ? "→ converged, stopping" : "continuing"); flush(stdout)
+                # Only the quantities the stop actually GATES on, each beside its
+                # threshold so a reader can see which one is binding. R̂ and ESS are on
+                # every generation line already and are reported, not gated, so they are
+                # not repeated here.
+                # The FIRST check has no previous reading to difference against, so the
+                # gated quantity is genuinely undefined there and printed "n/a" — one
+                # check is a reading, two is evidence. But "n/a" alone left the first
+                # check line carrying no information at all, which reads like a defect.
+                # Print the cumulative drift from the seed beside it: that IS defined at
+                # the first check, it is the quantity the run is descending on, and its
+                # size tells the reader immediately whether the chain is sampling near
+                # the seed or still travelling away from it.
+                @printf("[demc] check g=%d  moves=%d/%d  Δmax logπ=%s/%.2f  (cum %+.3f)  → %s\n",
+                        g, moves, moves_min,
+                        isfinite(drift_since_last) ? @sprintf("%+.3f", drift_since_last) :
+                            "n/a (first check)",
+                        drift_flat, lp_best - lp_seed,
+                        done ? "STOPPING" : (diagnose ? "ACCEPTANCE FLOOR" : "continuing"))
+                flush(stdout)
+            end
+            if diagnose
+                if verbose
+                    @printf("[demc] ABORT g=%d  windowed acceptance %.4f < %.3f at two \
+                             consecutive checks.\n", g, acc_window, acc_floor)
+                    println("       The population is mis-scaled relative to the target: at this")
+                    println("       acceptance the chain is not moving, and more generations cannot")
+                    println("       fix it. RGG's high-dimensional optimum is 0.234. Check the start")
+                    println("       (MCMC_INIT = :screen reports the radius it settled on) before")
+                    println("       spending the rest of the budget.")
+                    flush(stdout)
+                end
+                g_final = g; aborted = true; abort_why = :acceptance
+                break
             end
             if done
                 g_final = g
@@ -423,6 +559,6 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     return (; draws, chain, accept = nacc / (g_final * N), lp, N,
               gens = g_final, gens_requested = gens, burn,
               lp_seed, lp_best, theta_best = θ_best,
-              drift = lp_best - lp_seed, aborted,
+              drift = lp_best - lp_seed, aborted, abort_why,
               n_replaced, last_replace)
 end

@@ -123,6 +123,7 @@ include(joinpath(SOLVER_DIR, "equilibrium.jl"))
 println("done."); flush(stdout)
 
 print("Loading SMM modules... "); flush(stdout)
+include(joinpath(SMM_DIR, "settings.jl"))
 include(joinpath(SMM_DIR, "moments.jl"))
 include(joinpath(SMM_DIR, "smm_params.jl"))
 include(joinpath(SMM_DIR, "smm.jl"))
