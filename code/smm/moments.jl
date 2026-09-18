@@ -14,8 +14,8 @@
 # training_share target (data pipeline v17.0):
 #   The CPS SCHLCOLL universe expanded in Jan 2013 (16–24 → 16–54), so the
 #   raw CPS training_share level is not comparable across the FC and COVID
-#   window pairs and is NOT used. The target comes from NSC directly:
-#       target  =  f · NSC_IPEDS_enr_w / CPS_pop_w,     f = 0.7813
+#   window pairs and is NOT used. The target is read directly:
+#       target  =  4-year undergraduate enrolment_w / CPS_pop_w
 #   where f is the completers' share of the enrolment stock (the model's
 #   trainee state has no dropout exit). Its variance is the across-Fall-year
 #   dispersion of that series. Both are written by the data pipeline into
@@ -31,13 +31,19 @@
 
 
 # ============================================================
-# Moment names (canonical order — 28 moments)
+# Moment names (canonical order — 35 moments)
 #
 # Identical ordering to data_processing/setup.jl. The cross-market
 # overlap pair (overlap_UgtS, overlap_SltU) and the skilled long-term-
 # unemployment share (ltu_share_S) are appended at the END so the
 # moment indices line up with the data-side moment vector.
 # ============================================================
+
+# The unemployment-duration profile is derived from the solver's threshold list so
+# the model counterparts and these names cannot drift apart; the data-side copy in
+# code/data_and_descriptives/setup.jl is the one to edit if the thresholds change.
+const DURATION_MOMENT_NAMES =
+    [Symbol("usurv$(Int(t))_$(m)") for m in ("U", "S") for t in DURATION_THRESHOLDS_WK]
 
 const MOMENT_NAMES = [
     :ur_total, :ur_U, :ur_S,
@@ -46,21 +52,27 @@ const MOMENT_NAMES = [
     :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S,
     :ee_rate_S,
     :mean_wage_U, :mean_wage_S,
-    :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S, :p75_wage_U, :p75_wage_S,
+    :p10_wage_U, :p10_wage_S, :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
+    :p75_wage_U, :p75_wage_S, :p90_wage_U, :p90_wage_S,
     :wage_premium, :theta_U, :theta_S,
     :overlap_UgtS, :overlap_SltU, :ltu_share_S,
     :wchg_rate_U, :wchg_rate_S,
     :ee_step_S,
+    DURATION_MOMENT_NAMES...,
 ]
 
-@assert length(MOMENT_NAMES) == 31 "Expected 31 moments, got $(length(MOMENT_NAMES))"
+const N_MOMENTS_BASE = 35
+
+@assert length(MOMENT_NAMES) == N_MOMENTS_BASE + length(DURATION_MOMENT_NAMES) """
+Expected $(N_MOMENTS_BASE + length(DURATION_MOMENT_NAMES)) moments, \
+got $(length(MOMENT_NAMES))"""
 
 
 """
     load_training_share_scale(; window, derived_dir)
 
 REMOVED in v17.0. The training_share target no longer carries a κ_w level
-adjustment: it is taken from NSC directly (see the header). This stub remains
+adjustment: it is read directly (see the header). This stub remains
 so that any caller still expecting the old behaviour fails immediately and
 visibly, rather than silently defaulting to κ = 1.0 and producing an estimate
 against a target that is not the one the data pipeline shipped.
@@ -70,7 +82,7 @@ function load_training_share_scale(; window::Symbol, derived_dir::String) :: Flo
     load_training_share_scale was removed in v17.0.
 
     training_share is no longer κ-scaled. moments_$(window).csv already holds
-    the NSC target and sampling_var_$(window).csv its across-Fall-year variance;
+    the enrolment target and sampling_var_$(window).csv its across-Fall-year variance;
     read them directly. A stale derived/training_share_scale.csv may still be on
     disk from an earlier pipeline run — it is not an input to anything and can
     be deleted.
@@ -85,10 +97,9 @@ Return the empirical moment targets used in SMM estimation.  Each
 field is a (value, weight) tuple.  Reads from
 `moments_{window}.csv` produced by the data pipeline.
 
-The training_share row already reflects the NSC IPEDS-Universe
-level: the κ_w adjustment is applied upstream in the data pipeline
-(Stage 7), so this returns the moments exactly as written to
-`moments_{window}.csv` with no further rescaling.
+The training_share row already carries its level from the enrolment target,
+written in Stage 9 of the data pipeline, so this returns the moments exactly as
+they appear in `moments_{window}.csv` with no further rescaling.
 
 Moment list
   Labour-market stocks (5)
@@ -100,10 +111,11 @@ Moment list
   Transition rates (5)
     jfr_U, sep_rate_U, jfr_S, sep_rate_S, ee_rate_S
 
-  Wages (9)
+  Wages (13)
     mean_wage_U, mean_wage_S,
-    p25_wage_U, p25_wage_S, p50_wage_U, p50_wage_S,
-    p75_wage_U, p75_wage_S,
+    p10_wage_U, p10_wage_S, p25_wage_U, p25_wage_S,
+    p50_wage_U, p50_wage_S, p75_wage_U, p75_wage_S,
+    p90_wage_U, p90_wage_S,
     wage_premium
 
   Tightness (2)
@@ -117,7 +129,7 @@ function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
     isfile(moments_file) || error("Moments file not found: $moments_file — run the data pipeline first.")
     raw = _read_moments_csv(moments_file)
 
-    # training_share already carries the NSC κ_w level adjustment, applied
+    # training_share already carries its level from the enrolment target, applied
     # upstream in the data pipeline (Stage 7). Return the moments as read.
     return raw
 end
@@ -210,9 +222,9 @@ end
     load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String) → Vector{Float64}
 
 Read `sigma_{window}.csv` and return the vector of standard errors
-(square root of the diagonal). The training_share entry already
-carries the κ_w level adjustment (applied in the data pipeline,
-Stage 8), so the returned σ refers to the κ-rescaled data target.
+(square root of the diagonal). The training_share entry is the
+enrolment target's own across-Fall-year dispersion, written by the
+data pipeline, so the returned σ refers to the shipped data target.
 """
 function load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String)
     sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
@@ -239,7 +251,7 @@ SMM estimation.
                                 the base_fc row; the COVID pair
                                 (base_covid, crisis_covid) uses the
                                 base_covid row.
-  φ   from phi_calibration.csv training completion rate (NSC/IPEDS,
+  φ   from phi_calibration.csv training completion rate (nominal four-year programme,
                                 pooled across Fall semesters)
 
 `window` controls which ν is returned. Crisis windows are mapped to
@@ -389,15 +401,15 @@ dummy grid.
 # Observed log wage = structural log wage + N(0, σ_w²).  Effects on moments:
 #   mean : unchanged          variance : structural + σ_w²
 #   third central moment : unchanged (symmetric error)
-#   p25 / p50 / p75 : quantiles of the σ_w-convolved log-wage distribution.
+#   p10 … p90 : quantiles of the σ_w-convolved log-wage distribution.
 # Input (wmid, dens, bw) is the LEVEL-wage density from the equilibrium;
-# returns (mean_log, var_log, cm3_log, p25_log, p50_log, p75_log).
+# returns (mean_log, var_log, cm3_log, p10_log, p25_log, p50_log, p75_log, p90_log).
 function _logwage_moments(wmid::AbstractVector, dens::AbstractVector,
                           bw::Real, σ_w::Real)
     logw = log.(max.(wmid, 1e-14))
     mass = dens .* bw
     M    = sum(mass)
-    M < 1e-12 && return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    M < 1e-12 && return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     mass = mass ./ M
     μ    = sum(logw .* mass)
     dev  = logw .- μ
@@ -415,15 +427,19 @@ function _logwage_moments(wmid::AbstractVector, dens::AbstractVector,
         end
         lo  = minimum(logw) - 8.0 * σ_w
         hi  = maximum(logw) + 8.0 * σ_w
+        p10 = _invert_cdf(Fcdf, 0.10, lo, hi)
         p25 = _invert_cdf(Fcdf, 0.25, lo, hi)
         p50 = _invert_cdf(Fcdf, 0.50, lo, hi)
         p75 = _invert_cdf(Fcdf, 0.75, lo, hi)
+        p90 = _invert_cdf(Fcdf, 0.90, lo, hi)
     else
+        p10 = _disc_pctile(logw, mass, 0.10)
         p25 = _disc_pctile(logw, mass, 0.25)
         p50 = _disc_pctile(logw, mass, 0.50)
         p75 = _disc_pctile(logw, mass, 0.75)
+        p90 = _disc_pctile(logw, mass, 0.90)
     end
-    return (μ, var, cm3, p25, p50, p75)
+    return (μ, var, cm3, p10, p25, p50, p75, p90)
 end
 
 # Bisection inverse of a monotone-increasing CDF F on [lo, hi].
@@ -519,7 +535,7 @@ function model_moments(obj)
     ee_step_S = hasproperty(obj, :ee_step_S) ? obj.ee_step_S : 0.0
 
     # Wages — all moments on LOG wages, with lognormal measurement error σ_w.
-    # "mean_wage_*", "emp_var_*", "emp_cm3_*", "p25/p50_wage_*" now hold the
+    # "mean_wage_*", "emp_var_*", "emp_cm3_*", "p10…p90_wage_*" now hold the
     # corresponding LOG-wage objects (mean/var/3rd-moment/quantiles of log w);
     # the DATA side must compute these on log(wage_norm) to match.
     wmid   = obj.wmid
@@ -528,21 +544,27 @@ function model_moments(obj)
     bw     = length(wmid) >= 2 ? wmid[2] - wmid[1] : 1.0
 
     if _has_eU
-        (mean_log_wage_U, emp_var_U, emp_cm3_U, p25_wage_U, p50_wage_U, p75_wage_U) =
+        (mean_log_wage_U, emp_var_U, emp_cm3_U,
+         p10_wage_U, p25_wage_U, p50_wage_U, p75_wage_U, p90_wage_U) =
             _logwage_moments(wmid, dens_U, bw, σ_wU)
         mean_wage_U = mean_log_wage_U
     else
         mean_wage_U = 0.0; mean_log_wage_U = 0.0
-        emp_var_U = 0.0; emp_cm3_U = 0.0; p25_wage_U = 0.0; p50_wage_U = 0.0; p75_wage_U = 0.0
+        emp_var_U = 0.0; emp_cm3_U = 0.0
+        p10_wage_U = 0.0; p25_wage_U = 0.0; p50_wage_U = 0.0
+        p75_wage_U = 0.0; p90_wage_U = 0.0
     end
 
     if _has_eS
-        (mean_log_wage_S, emp_var_S, emp_cm3_S, p25_wage_S, p50_wage_S, p75_wage_S) =
+        (mean_log_wage_S, emp_var_S, emp_cm3_S,
+         p10_wage_S, p25_wage_S, p50_wage_S, p75_wage_S, p90_wage_S) =
             _logwage_moments(wmid, dens_S, bw, σ_wS)
         mean_wage_S = mean_log_wage_S
     else
         mean_wage_S = 0.0; mean_log_wage_S = 0.0
-        emp_var_S = 0.0; emp_cm3_S = 0.0; p25_wage_S = 0.0; p50_wage_S = 0.0; p75_wage_S = 0.0
+        emp_var_S = 0.0; emp_cm3_S = 0.0
+        p10_wage_S = 0.0; p25_wage_S = 0.0; p50_wage_S = 0.0
+        p75_wage_S = 0.0; p90_wage_S = 0.0
     end
 
     wage_premium = (_has_eU && _has_eS) ?
@@ -571,6 +593,18 @@ function model_moments(obj)
     # read it through here. Absent or empty skilled segment ⇒ 0.
     ltu_share_S = (hasproperty(obj, :ltu_share_S) && _has_eS) ? obj.ltu_share_S : 0.0
 
+    # Duration profile: the solver returns one survivor vector per market, ordered
+    # as DURATION_THRESHOLDS_WK. hasproperty keeps this readable against equilibrium
+    # objects produced before v21.2.0, which carry ltu_share_S but no survivor vectors.
+    _usurv = (fld, has_seg) -> begin
+        (hasproperty(obj, fld) && has_seg) ? collect(getproperty(obj, fld)) :
+            fill(0.0, length(DURATION_THRESHOLDS_WK))
+    end
+    _usurv_U = _usurv(:usurv_U, _has_eU)
+    _usurv_S = _usurv(:usurv_S, _has_eS)
+    _duration_vals = NamedTuple{Tuple(DURATION_MOMENT_NAMES)}(
+        Tuple(vcat(_usurv_U, _usurv_S)))
+
     # Tightness
     _THETA_CAP = 1e14
     theta_U = _has_eU ? obj.thetaU : _THETA_CAP
@@ -598,12 +632,16 @@ function model_moments(obj)
 
         mean_wage_U   = mean_wage_U,
         mean_wage_S   = mean_wage_S,
+        p10_wage_U    = p10_wage_U,
+        p10_wage_S    = p10_wage_S,
         p25_wage_U    = p25_wage_U,
         p25_wage_S    = p25_wage_S,
         p50_wage_U    = p50_wage_U,
         p50_wage_S    = p50_wage_S,
         p75_wage_U    = p75_wage_U,
         p75_wage_S    = p75_wage_S,
+        p90_wage_U    = p90_wage_U,
+        p90_wage_S    = p90_wage_S,
         wage_premium  = wage_premium,
 
         theta_U       = theta_U,
@@ -612,5 +650,7 @@ function model_moments(obj)
         overlap_UgtS  = overlap_UgtS,
         overlap_SltU  = overlap_SltU,
         ltu_share_S   = ltu_share_S,
+
+        _duration_vals...,
     )
 end

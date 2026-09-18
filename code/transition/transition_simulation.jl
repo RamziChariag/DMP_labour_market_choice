@@ -83,7 +83,7 @@ function run_transition_simulation(
     N_steps :: Int  = 240,
     tol     :: Real = 1e-4,
     maxit   :: Int  = 200,
-    damp    :: Real = 0.3,
+    damp    :: Real = TransitionParams().damp,
 )
     w_suffix = _ts_w_suffix(Float64(w_cond_target))
 
@@ -101,8 +101,8 @@ function run_transition_simulation(
         error("Unknown scenario: $scenario. Must be :fc or :covid.")
     end
 
-    base_jls   = joinpath(SMM_OUT_DIR, "smm_result_$(base_window)$(w_suffix).jls")
-    crisis_jls = joinpath(SMM_OUT_DIR, "smm_result_$(crisis_window)$(w_suffix).jls")
+    base_jls   = estimate_path(base_window, w_suffix)
+    crisis_jls = estimate_path(crisis_window, w_suffix)
     @printf("  Baseline file:  %s\n", base_jls)
     @printf("  Crisis file:    %s\n\n", crisis_jls)
     flush(stdout)

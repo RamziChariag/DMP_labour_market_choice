@@ -148,7 +148,11 @@ Base.@kwdef struct SkilledParams
                            # copy of the offer.  δ = 1 ⇒ redraw ≡ fresh offer (single-distribution
                            # limit, recovering the pre-refinement model exactly).
 
-    ξ   :: Float64 = 0.0   # exogenous skilled separation hazard ξ_S (0 ⇒ recovers the no-ξ model)
+    ξ   :: Float64 = 0.0   # exogenous skilled separation hazard ξ_S (0 ⇒ recovers the no-ξ model).
+                           # Both blocks carry an exogenous hazard, but they are identified
+                           # differently: p*_S = 0 at every ability, so skilled separation is
+                           # essentially all ξ_S, while p*_U is interior, so ξ_U competes with a
+                           # live endogenous margin (Model Notes §sep_asymmetry).
     σ_w :: Float64 = 0.0   # log-wage measurement-error SD (σ_wS); 0 ⇒ no measurement error
 end
 

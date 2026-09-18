@@ -25,7 +25,7 @@ the caller cannot detect one.
 > A settings value that is computed and then not forwarded is a **silent defect**.
 > Defaults on keyword arguments are what make it silent.
 
-Two consequences, both enforced by `code/scripts/check_forwarding.jl`:
+Two consequences, both enforced by `code/gates/check_forwarding.jl`:
 
 - Caller and callee must spell a setting **identically**, allowing only the subsystem
   prefix the codebase already uses (`sa_max_iter` → `_run_sa`'s `max_iter`). The check
@@ -58,7 +58,7 @@ when they disagree, which is what makes place 2 a gate rather than a comment.
 **Place 3 has a hard constraint.** Julia's serialiser reads structs positionally by field
 count, so *adding a field to `SMMRunParams` makes every `.jls` bundle already on disk
 unreadable* — verified, not assumed. A new setting that must persist therefore forces a
-bundle migration in the same pass (`code/scripts/migrate_bundles.jl`); one that need not
+bundle migration in the same pass (`code/tools/migrate_bundles.jl`); one that need not
 persist travels as a keyword argument on `run_smm` instead. `sa_subset_k`, `sa_halflife`,
 `sa_rate_tol` and `sa_rate_span` are keyword arguments for exactly this reason, which is
 also why they were forwardable-and-not-forwarded in the first place.
@@ -71,7 +71,7 @@ also why they were forwardable-and-not-forwarded in the first place.
 3. Give the consumer a keyword argument **spelled the same** (subsystem prefix aside).
 4. Forward it at every call site, explicitly.
 5. Make sure it appears in a print sourced from inside the consumer, not from the caller.
-6. Run `bash code/scripts/check_repo.sh`. A new setting is not done until this is green.
+6. Run `bash code/gates/check_repo.sh`. A new setting is not done until this is green.
 
 ## Where a default should be removed
 
@@ -111,7 +111,7 @@ re-answers a year later.
    replaced it, and the evidence that retired it. Record the measurement, not the verdict.
 2. **Trace.** Find every mention — the `env_setting` call, the registry row, the struct
    field, the keyword argument, every call site, the prints, the launchers in
-   `code/scripts/*.sh`, and the smoke tests. `grep -rn` for both the ASCII and Unicode
+   `code/ops/*.sh`, and the smoke tests. `grep -rn` for both the ASCII and Unicode
    spellings where the key map applies.
 3. **Eliminate.** Delete the switch and its plumbing in one pass. If it was an
    `SMMRunParams` field, the bundle-compatibility constraint above applies in reverse —
@@ -125,7 +125,7 @@ or note in circulation could still carry the old name — not at the next releas
 
 ## The release gate
 
-Run before assigning a version number. `bash code/scripts/check_repo.sh` covers the
+Run before assigning a version number. `bash code/gates/check_repo.sh` covers the
 settings half; the rest is the versioning gate in full.
 
 1. Every changed file parses (`Meta.parseall`, walking for `:error` / `:incomplete`).
@@ -142,7 +142,7 @@ settings half; the rest is the versioning gate in full.
    deliberately unread (signature compatibility) says so in a comment beside it.
 5. The changed path runs against real data, writing to a scratch directory.
 6. Both version constants agree (`code/smm/version.jl` and
-   `code/data_processing/data_processing_main.jl:56`).
+   `code/data_and_descriptives/data_processing_main.jl:56`).
 7. Old serialised bundles still load, or were migrated in the same pass.
 8. `VERSION_NOTES.md` records the settings added, retired or re-defaulted.
 

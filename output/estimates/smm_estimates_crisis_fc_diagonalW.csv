@@ -1,0 +1,37 @@
+block,name,label,estimate,lb,ub,fixed,symbol
+common,c,training cost coeff c,10.91612142,0.00000000,15.00000000,false,c
+common,A,aggregate production scale A,7.62514533,3.00000000,13.00000000,false,A
+skl,PS,skilled productivity P_S,2.42113529,0.00001600,3.25792800,false,P_S
+unsk,α_U,unskilled damage shape α_U,3.42030411,0.20000000,6.00000000,false,α_U
+skl,a_Γ,skilled offer shape a_Γ,0.44919672,0.10000000,12.00000000,false,a_Γ
+skl,b_Γ,skilled offer shape b_Γ,0.44356346,0.10000000,10.00000000,false,b_Γ
+skl,δ,shock/offer support ratio δ_S,0.88977618,0.05000000,1.00000000,false,δ_S
+unsk,μ,unskilled matching eff μ_U,0.44944554,0.00010000,2.00000000,false,μ_U
+skl,μ,skilled matching eff μ_S,0.25379460,0.00010000,2.00000000,false,μ_S
+unsk,β,unskilled bargaining β_U,0.77465529,0.00100000,0.90000000,false,β_U
+skl,β,skilled bargaining β_S,0.31162669,0.00010000,0.90000000,false,β_S
+unsk,λ,unskilled damage rate λ_U,0.12102816,0.00010000,0.55000000,false,λ_U
+skl,λ,skilled quality shock λ_S,0.09217353,0.00010000,0.50000000,false,λ_S
+unsk,k,unskilled vacancy cost k_U (months of avg U output),1.11332886,0.00050000,12.00000000,false,k_U
+skl,k,skilled vacancy cost k_S (months of avg S output),4.87504540,0.00050000,12.00000000,false,k_S
+skl,σ,OJS flow cost σ_S,0.16997208,0.00000000,0.24434500,false,σ_S
+unsk,ξ,unskilled exogenous separation ξ_U,0.00404111,0.00000000,0.02000000,false,ξ_U
+skl,ξ,skilled exogenous separation ξ_S,0.00658412,0.00000000,0.02000000,false,ξ_S
+fixed,r,r,0.00416667,,,true,r
+fixed,ν,ν,0.00323032,,,true,ν
+fixed,φ,φ,0.02083333,,,true,φ
+fixed,a_ℓ,a_ℓ,1.06267793,,,true,a_ℓ
+fixed,b_ℓ,b_ℓ,2.42148244,,,true,b_ℓ
+fixed,ρ_x,ρ_x,-0.81442854,,,true,ρ_x
+fixed,bS,bS,0.00003802,,,true,b_S
+fixed,bT,bT,0.00000000,,,true,b_T
+fixed,bU,bU,0.06590261,,,true,b_U
+fixed,unsk_η,unsk_η,0.50000000,,,true,η_U
+fixed,skl_η,skl_η,0.50000000,,,true,η_S
+fixed,PU,PU,1.00000000,,,true,P_U
+fixed,unsk_σ_w,unsk_σ_w,0.25333048,,,true,σ_wU
+fixed,skl_σ_w,skl_σ_w,0.23484970,,,true,σ_wS
+
+# Q = 7.1320756604e+02
+# converged = true
+# iterations = 154

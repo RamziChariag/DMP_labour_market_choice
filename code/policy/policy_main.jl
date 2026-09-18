@@ -90,11 +90,15 @@ println("done."); flush(stdout)
 # ═══════════════════════════════════════════════════════════
 
 const POLICY_DIR   = @__DIR__
-const SOLVER_DIR   = joinpath(POLICY_DIR, "..", "solver")
-const SMM_DIR      = joinpath(POLICY_DIR, "..", "smm")
-const PROJECT_ROOT = joinpath(POLICY_DIR, "..", "..")
-const OUTPUT_DIR   = joinpath(PROJECT_ROOT, "output")
-const SMM_OUT_DIR  = joinpath(OUTPUT_DIR, "smm")
+const CODE_ROOT    = normpath(joinpath(POLICY_DIR, ".."))
+const SOLVER_DIR   = joinpath(CODE_ROOT, "solver")
+const SMM_DIR      = joinpath(CODE_ROOT, "smm")
+const PT_DIR       = joinpath(CODE_ROOT, "plots_and_tables")
+# paths.jl is the sole definition of PROJECT_ROOT, OUTPUT_DIR and the out_*()
+# accessors. Declared in seven files before v19.6.0, two of them behind
+# !@isdefined guards, so the effective value depended on include order.
+include(joinpath(CODE_ROOT, "paths.jl"))
+const SMM_OUT_DIR  = out_estimates()
 const PLOTS_DIR    = joinpath(OUTPUT_DIR, "plots")
 const TABLES_DIR   = joinpath(OUTPUT_DIR, "tables")
 
@@ -129,7 +133,7 @@ println("done."); flush(stdout)
 print("Loading policy modules... "); flush(stdout)
 include(joinpath(POLICY_DIR, "policy_params.jl"))
 include(joinpath(POLICY_DIR, "policy_solver.jl"))
-include(joinpath(POLICY_DIR, "policy_plots.jl"))
+include(joinpath(PT_DIR, "policy.jl"))
 println("done."); flush(stdout)
 
 @printf("Threads available: %d\n\n", Threads.nthreads())
@@ -148,7 +152,7 @@ end
 
 const W_SUFFIX = _w_suffix(W_COND_TARGET)
 
-baseline_jls = joinpath(SMM_OUT_DIR, "smm_result_$(BASELINE_WINDOW)$(W_SUFFIX).jls")
+baseline_jls = estimate_path(BASELINE_WINDOW, W_SUFFIX)
 
 @printf("  Baseline window:  %s\n", BASELINE_WINDOW)
 @printf("  W suffix:         %s\n", W_SUFFIX)

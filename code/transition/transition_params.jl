@@ -15,9 +15,18 @@
 # per-aS (the p-dynamics read only aS — notes §386).  The path therefore
 # stores:
 #   · 1D value paths        (Nx × Nt)          indexed by aU or aS
-#   · skilled surfaces      (Nx × NpS × Nt)    indexed by (aS, p)
+#   · match surplus surfaces (Nx × Np × Nt)    indexed by (own ability, p)
 #   · 2D segment masses     (Nx × Nx × Nt)     indexed by (aU, aS)
 #   · per-aS employment     (Nx × NpS × Nt)    indexed by (aS, p)
+#
+# SURPLUSES, NOT WORKER/FIRM VALUES.  The path carries the RAW match surpluses
+# — before the soft reservation weight and before the positive part — because
+# they are what the backward recursion needs: the raw surplus is the object
+# whose time derivative the HJB prices, and its zero crossing IS the
+# reservation cutoff.  Nash splitting recovers everything a consumer wants
+# (J = (1−β)·ω·smooth_pos(S), E = U + β·ω·smooth_pos(S)), so storing
+# E_S^0/E_S^1/J_S^0/J_S^1 as well would be four arrays holding one object's
+# transforms — and the ω-weighted forms cannot be inverted where ω = 0.
 ############################################################
 
 # ──────────────────────────────────────────────────────────
@@ -35,7 +44,11 @@ Controls the backward–forward iteration for transition dynamics.
 - `dt`      : step size = T_max / N_steps  (computed)
 - `tol`     : convergence tolerance on the tightness paths (sup-norm)
 - `maxit`   : maximum backward–forward iterations
-- `damp`    : dampening on the tightness update ∈ (0, 1]
+- `damp`    : dampening on the tightness update ∈ (0, 1].  The skilled
+              free-entry map is the binding one, and it is well inside its
+              stability region: base_fc → crisis_fc converges in 16 iterations at
+              0.50, 20 at 0.40, 28 at 0.30 and 54 at 0.15, with base_covid →
+              crisis_covid 13/16/22/41 over the same ladder.
 - `verbose` : print iteration info
 """
 mutable struct TransitionParams
@@ -85,15 +98,15 @@ mutable struct TransitionPath
     T_val     :: Matrix{Float64}      # (Nx,Nt) T(aS): value of training
     Jfrontier :: Matrix{Float64}      # (Nx,Nt) J_U(aU,1)
     pstar_U   :: Matrix{Float64}      # (Nx,Nt) p*_U(aU)
+    SU        :: Array{Float64,3}     # (Nx,NpU,Nt) raw S_U(aU,p)
 
-    # Skilled value paths (indexed by aS)
-    US      :: Matrix{Float64}        # (Nx,Nt) U_S(aS)
+    # Skilled value paths (indexed by aS, except US1 indexed by aU)
+    US      :: Matrix{Float64}        # (Nx,Nt) U_S^(0)(aS): stay-skilled value
+    US1     :: Matrix{Float64}        # (Nx,Nt) U_S^(1)(aU): cross-to-unskilled value
     pstar_S :: Matrix{Float64}        # (Nx,Nt) p*_S(aS)
     poj     :: Matrix{Float64}        # (Nx,Nt) p^oj_S(aS)
-    E0 :: Array{Float64,3}            # (Nx,NpS,Nt) E_S^0(aS,p)
-    E1 :: Array{Float64,3}            # (Nx,NpS,Nt) E_S^1(aS,p)
-    J0 :: Array{Float64,3}            # (Nx,NpS,Nt) J_S^0(aS,p)
-    J1 :: Array{Float64,3}            # (Nx,NpS,Nt) J_S^1(aS,p)
+    S0      :: Array{Float64,3}       # (Nx,NpS,Nt) raw S_S^0(aS,p), no OJS
+    S1      :: Array{Float64,3}       # (Nx,NpS,Nt) raw S_S^1(aS,p), with OJS
 
     # Two-dimensional segment masses on the (aU,aS) copula grid
     uU :: Array{Float64,3}            # (Nx,Nx,Nt) untrained unemployed
@@ -102,8 +115,19 @@ mutable struct TransitionPath
     mS :: Array{Float64,3}            # (Nx,Nx,Nt) trained-segment mass
     τT :: Array{Float64,3}            # (Nx,Nx,Nt) training policy indicator
 
-    # Per-aS skilled employment p-composition (for wages and OJS seekers)
-    eS :: Array{Float64,3}            # (Nx,NpS,Nt) e_S(aS,p)
+    # Pre-switch (date-0) state: the initial condition of the forward pass.
+    # The training frontier reallocates the unemployed it encloses, so the
+    # forward pass needs both the policy one date BEFORE the one it steps and a
+    # clean copy of the inherited stocks to restart date 1 from on every outer
+    # iteration — reallocating date 1 in place would compound across them.
+    τT0 :: Matrix{Float64}            # (Nx,Nx) z₀ training policy
+    uU0 :: Matrix{Float64}            # (Nx,Nx) z₀ untrained unemployed
+    tU0 :: Matrix{Float64}            # (Nx,Nx) z₀ in training
+
+    # Per-aS skilled employment p-composition (for wages and OJS seekers).
+    # UNIT density of a d = 0 type, the convention `SkilledCache.e_frac` uses;
+    # aggregates scale it by the non-draining column mass.
+    eS :: Array{Float64,3}            # (Nx,NpS,Nt) ê_S(aS,p)
 end
 
 """
@@ -114,6 +138,7 @@ Allocate a zero-initialised path sized to `model`'s grids and `tp`'s horizon.
 function allocate_path(model::Model, tp::TransitionParams)
     Nt  = tp.N_steps + 1
     Nx  = length(model.grids.x)
+    NpU = length(model.unsk_grids.p)
     NpS = length(model.skl_grids.p)
     tgrid = collect(range(0.0, tp.T_max; length = Nt))
 
@@ -123,10 +148,11 @@ function allocate_path(model::Model, tp::TransitionParams)
     return TransitionPath(
         tgrid,
         zeros(Float64, Nt), zeros(Float64, Nt),
+        z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z3(Nx, NpU, Nt),
         z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt),
-        z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt),
-        z3(Nx, NpS, Nt), z3(Nx, NpS, Nt), z3(Nx, NpS, Nt), z3(Nx, NpS, Nt),
+        z3(Nx, NpS, Nt), z3(Nx, NpS, Nt),
         z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt),
+        z2(Nx, Nx), z2(Nx, Nx), z2(Nx, Nx),
         z3(Nx, NpS, Nt),
     )
 end
@@ -177,4 +203,25 @@ struct TransitionResult
     x  :: Vector{Float64}      # ability nodes
     p  :: Vector{Float64}      # skilled match-quality nodes
     wp :: Vector{Float64}      # skilled match-quality weights
+
+    # Transition diagnostics.  Appended after the grids rather than grouped with
+    # the aggregate series above: Julia deserialises structs POSITIONALLY, so a
+    # field inserted mid-struct silently shifts every later value in a stored
+    # bundle, while one appended at the end raises EOFError instead.
+    #
+    # `frontier_floor` locates the TRAINING frontier F_τ: the lowest point of the
+    # line, the aS at which the least unskilled-able worker is indifferent to
+    # training.  The other three are the CROSS-MARKET frontier F_d, kept apart
+    # because a zero in one says nothing about the others:
+    #   d_region  ∬ d ℓ      — is the active side of F_d a non-empty region?
+    #   d_mass    ∬ d m_S    — does any trained mass sit on it?
+    #   d_flow    f_U ∬ d u_S — does anyone actually cross?
+    # The flow is identically zero at both stationary endpoints by self-selection
+    # (notes, prop:ss-crossflow) and positive only while the frontier is in
+    # motion, so reading it alone cannot tell an inert solver from a channel that
+    # is directionally unable to fire on this pair.
+    frontier_floor :: Vector{Float64}
+    d_region       :: Vector{Float64}
+    d_mass         :: Vector{Float64}
+    d_flow         :: Vector{Float64}
 end

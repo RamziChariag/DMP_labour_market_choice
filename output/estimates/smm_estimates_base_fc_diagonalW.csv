@@ -1,0 +1,37 @@
+block,name,label,estimate,lb,ub,fixed,symbol
+common,a_ℓ,worker type shape a_ℓ,1.05868083,0.10000000,8.00000000,false,a_ℓ
+common,b_ℓ,worker type shape b_ℓ,2.41892185,0.05000000,4.00000000,false,b_ℓ
+common,ρ_x,ability correlation ρ_x,-0.81300712,-1.00000000,-0.10000000,false,ρ_x
+common,c,training cost coeff c,11.07088508,0.00000000,15.00000000,false,c
+common,A,aggregate production scale A,7.64339608,3.00000000,13.00000000,false,A
+unsk,bU,unskilled outside flow b_U,0.06608778,0.00000000,0.40724100,false,b_U
+skl,bS,skilled outside flow b_S,0.00003273,0.00000000,0.32579300,false,b_S
+skl,PS,skilled productivity P_S,2.13558805,0.00001600,3.25792800,false,P_S
+unsk,α_U,unskilled damage shape α_U,4.11574628,0.20000000,6.00000000,false,α_U
+skl,a_Γ,skilled offer shape a_Γ,0.37080507,0.10000000,12.00000000,false,a_Γ
+skl,b_Γ,skilled offer shape b_Γ,0.32163374,0.10000000,10.00000000,false,b_Γ
+skl,δ,shock/offer support ratio δ_S,0.87323828,0.05000000,1.00000000,false,δ_S
+unsk,μ,unskilled matching eff μ_U,0.44469236,0.00010000,2.00000000,false,μ_U
+skl,μ,skilled matching eff μ_S,0.25591316,0.00010000,2.00000000,false,μ_S
+unsk,β,unskilled bargaining β_U,0.67748368,0.00100000,0.90000000,false,β_U
+skl,β,skilled bargaining β_S,0.31826891,0.00010000,0.90000000,false,β_S
+unsk,λ,unskilled damage rate λ_U,0.16259516,0.00010000,0.55000000,false,λ_U
+skl,λ,skilled quality shock λ_S,0.13269930,0.00010000,0.50000000,false,λ_S
+unsk,k,unskilled vacancy cost k_U (months of avg U output),0.75099089,0.00050000,12.00000000,false,k_U
+skl,k,skilled vacancy cost k_S (months of avg S output),2.77013251,0.00050000,12.00000000,false,k_S
+skl,σ,OJS flow cost σ_S,0.17008130,0.00000000,0.24434500,false,σ_S
+unsk,ξ,unskilled exogenous separation ξ_U,0.00343484,0.00000000,0.02000000,false,ξ_U
+skl,ξ,skilled exogenous separation ξ_S,0.00511851,0.00000000,0.02000000,false,ξ_S
+fixed,r,r,0.00416667,,,true,r
+fixed,ν,ν,0.00323032,,,true,ν
+fixed,φ,φ,0.02083333,,,true,φ
+fixed,bT,bT,0.00000000,,,true,b_T
+fixed,unsk_η,unsk_η,0.50000000,,,true,η_U
+fixed,skl_η,skl_η,0.50000000,,,true,η_S
+fixed,PU,PU,1.00000000,,,true,P_U
+fixed,unsk_σ_w,unsk_σ_w,0.25549225,,,true,σ_wU
+fixed,skl_σ_w,skl_σ_w,0.23267843,,,true,σ_wS
+
+# Q = 1.0742245415e+03
+# converged = true
+# iterations = 42

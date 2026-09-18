@@ -161,9 +161,11 @@ function smm_objective(
     Np_U  :: Int = spec.run.Np_U,
     Np_S  :: Int = spec.run.Np_S,
     moments_out :: Union{Nothing,AbstractVector{Float64}} = nothing,
+    constrained :: Bool = false,
 ) :: Float64
 
-    cp, up, sp = unpack_θ(θ_unc, spec)
+    # constrained = true: θ_unc is θ itself, not the unconstrained t. See unpack_θ.
+    cp, up, sp = unpack_θ(θ_unc, spec; constrained = constrained)
 
     local model, solve_result
     try
@@ -192,10 +194,13 @@ function smm_objective(
 
     # Reject a degenerate training margin: with the whole ability grid on one
     # side of the frontier (nobody trains, or everybody trains) training_share
-    # carries no identifying variation.  The frontier τ(a_U,a_S) is a 2D
-    # indicator, so the interior is checked directly.
+    # carries no identifying variation.  The frontier τ(a_U,a_S) is a 2D field of
+    # population fractions, so the interior is checked to a tolerance: exact
+    # equality would essentially never hold once a boundary cell carries a
+    # fraction, and the everybody-trains corner this guard exists to catch would
+    # stop being rejected.  The test reduces to the old one on 0/1 values.
     τv = vec(obj_eq.τ_mat)
-    if all(iszero, τv) || all(isone, τv)
+    if maximum(τv) <= 1e-10 || minimum(τv) >= 1.0 - 1e-10
         return Inf
     end
 
@@ -2144,6 +2149,34 @@ function run_smm(
     # started from. Empty disables checkpointing.
     checkpoint_path :: String = "",
     rng                  = Random.default_rng(),
+    # Gradient-based polish (method = :lbfgs or :bfgs). All three default to the previous
+    # behaviour, so every existing call is unaffected.
+    #
+    #   theta_start  start point for the Optim branch. Needed because that branch begins at
+    #                pack_theta(spec), while prev_optimum only seeds the DE population and
+    #                the SA starts — so a polish stage had no way to start at the point it
+    #                is polishing except by rebuilding the spec, and rebuilding it means a
+    #                θ→t→θ round trip whose rounding this codebase has already been bitten
+    #                by (check_tau_margin.jl documents a 1e-15 round trip flipping a cell).
+    #   fd_step      central-difference step for the gradient, in t units. MEASURED rather
+    #                than conventional: at v23.0.0 every one of the 23 columns is stable to
+    #                4–5 significant figures for h ∈ [3e-7, 3e-6], and several break by
+    #                h = 1e-4, where λ_S's derivative changes sign. Optim's own default is
+    #                cbrt(eps) ≈ 6e-6, just outside the verified band.
+    #   max_iter     iteration cap for the Optim branch; 0 keeps r.nm_max_iter. An LBFGS
+    #                iteration is not an evaluation — it costs 2d solves for the gradient
+    #                plus a line search — so the Nelder-Mead cap is the wrong scale.
+    #   g_tol        positive value switches the Optim branch to a GRADIENT-NORM stop:
+    #                g_abstol = g_tol, with the function and step tolerances and the rate
+    #                callback all disabled. That combination is the point of a polish —
+    #                the target is a stationary point, not a small step — and the
+    #                Nelder-Mead tolerances are actively wrong for it: measured, they
+    #                halted LBFGS after ONE iteration having recovered ΔQ = 0.005 while
+    #                max|dQ/dt| was still ~806. 0 keeps the Nelder-Mead rules.
+    theta_start  :: Union{Nothing,Vector{Float64}} = nothing,
+    fd_step      :: Float64 = 1e-6,
+    max_iter     :: Int     = 0,
+    g_tol        :: Float64 = 0.0,
     # Rate-based Nelder-Mead stop. Keyword arguments rather than SMMRunParams fields:
     # Julia's serialiser reads structs positionally by field COUNT, so adding a field
     # to SMMRunParams makes every bundle already on disk unreadable — verified, not
@@ -2302,9 +2335,22 @@ function run_smm(
         θ_sa, Q_sa, it_sa = _sa_stage(spec, _sa_starts_from_bank(seed_bank, prev_optimum))
 
         if isfinite(Q_start) && !(isfinite(Q_sa) && Q_sa <= Q_start)
-            @printf("[stage 1/2]  annealing ended at Q=%s, above the start; DE continues from the start\n",
-                    isfinite(Q_sa) ? @sprintf("%.6e", Q_sa) : "Inf")
-            flush(stdout)
+            # The REVERT is unconditional — it is what makes the path monotone. Only the
+            # MESSAGE is gated, and on the objective's own determinism floor.
+            #
+            # Q_start and Q_sa are two SEPARATE evaluations, and when SA accepts nothing they
+            # are two evaluations of the SAME θ. Repeats at identical θ agree only to about
+            # 12 ulp — measured 2026-08-26: sd 1.90e-12, range 3.98e-12 over four repeats,
+            # from non-associativity in the threaded reductions. So this comparison is a coin
+            # flip on a warm start with no accepted moves, and the line appeared in one of two
+            # otherwise-identical reference runs. Reverting to θ_start is then a no-op and
+            # harmless; claiming "above the start" over a few ulp is not, because a log that
+            # asserts something it cannot know is worse than a log that says nothing.
+            if !isfinite(Q_sa) || (Q_sa - Q_start) > 1e-9
+                @printf("[stage 1/2]  annealing ended at Q=%s, above the start; DE continues from the start\n",
+                        isfinite(Q_sa) ? @sprintf("%.6e", Q_sa) : "Inf")
+                flush(stdout)
+            end
             θ_sa, Q_sa = θ_start, Q_start
         elseif !isfinite(Q_sa)
             println("[stage 1/2]  annealing returned no feasible point; handing the original start to DE")
@@ -2358,43 +2404,28 @@ function run_smm(
         conv_why  = isfinite(loss_opt) ? "de-stop" : "infeasible"
 
     elseif method == :sa
-        sa_starts = _sa_starts_from_bank(seed_bank, prev_optimum)
-        theta_opt, loss_opt, niters = _run_sa(
-            spec;
-            starts          = sa_starts,
-            max_iter        = r.sa_max_iter,
-            T0              = r.sa_T0,
-            step            = r.sa_step,
-            cooling_rate    = r.sa_cooling_rate,
-            cooling_exp     = r.sa_cooling_exp,
-            reheat_patience = r.sa_reheat_patience,
-            reheat_factor   = r.sa_reheat_factor,
-            max_reheats     = r.sa_max_reheats,
-            adapt_window    = r.sa_adapt_window,
-            scale_p_move    = sa_scale_p_move,
-            scale_per_k     = sa_scale_per_k,
-            scale_sigma     = sa_scale_sigma,
-                corana_Ns       = sa_corana_Ns,
-            corana_c        = sa_corana_c,
-            step_floor_rel  = sa_step_floor_rel,
-            rate_tol        = sa_rate_tol,
-            rate_span       = sa_rate_span,
-            cooling_halflife = sa_halflife,
-            t0_rel          = r.sa_t0_rel,
-            t0_accept       = r.sa_t0_accept,
-            reheat_reset_tol = r.sa_reheat_reset_tol,
-            parallel_steps  = r.sa_parallel_steps,
-            seed            = r.sa_seed,
-            random_init     = r.sa_random_init,
-            show_trace      = r.show_trace_generations,
-            trace_stride    = r.trace_stride,
-            rng             = rng,
-        )
+        # THE SAME CALL :sa_de's first stage makes — not a copy of its argument list.
+        #
+        # Until v19.7.0 this branch held its own 28-keyword copy, and the copy had drifted:
+        # it omitted checkpoint_path. run_smm accepted the argument and this branch dropped
+        # it, so _sa_loop took the "" default and wrote nothing. The checkpoint fires at
+        # every reheat (smm.jl:960) — the events a long anneal is made of — so an :sa run
+        # serialised only at the very end and a kill lost the point. Invisible while :sa_de
+        # was the shipped method, because that branch forwarded it.
+        #
+        # The comment above _sa_stage already predicted this: "a second copy of either
+        # argument list would be a second place to update when a setting is added." The
+        # duplicate is gone rather than repaired, so :sa and :sa_de's first stage cannot
+        # diverge again — they are one call site, and a new SA setting reaches both or
+        # neither. check_forwarding passed throughout, because it checks that a setting
+        # arrives at run_smm, not that every branch hands it on.
+        theta_opt, loss_opt, niters =
+            _sa_stage(spec, _sa_starts_from_bank(seed_bank, prev_optimum))
         converged = isfinite(loss_opt)
         conv_why  = isfinite(loss_opt) ? "sa-stop" : "infeasible"
 
     elseif method in (:neldermead, :lbfgs, :bfgs)
-        theta0        = pack_theta(spec)
+        theta0        = theta_start === nothing ? pack_theta(spec) : copy(theta_start)
         iter_count    = Ref(0)
         best_loss     = Ref(Inf)
         best_theta    = Ref(copy(theta0))   # incumbent (best) point, for corner reporting
@@ -2470,15 +2501,93 @@ function run_smm(
                           Optim.NelderMead(initial_simplex =
                               FeasibleSimplexer(spec, nm_simplex_step)) :
                           Optim.NelderMead()) :
-                     (method == :lbfgs)      ? Optim.LBFGS()      : Optim.BFGS()
+                     # BackTracking rather than Optim's default HagerZhang, for two
+                     # independent reasons. Cost: HagerZhang re-evaluates the GRADIENT at
+                     # each trial step, and a gradient here is 2d = 46 solves, while
+                     # BackTracking needs only the objective — one solve per trial. And
+                     # correctness: with the pinned Optim/LineSearches pair, HagerZhang's
+                     # ϕdϕ destructures value_gradient!(df, x) as a 2-tuple while Optim's
+                     # ManifoldObjective returns the value alone, so that path raises a
+                     # BoundsError before the first iteration completes. BackTracking uses
+                     # ϕ and the directional derivative at 0 only, and never touches it.
+                     (method == :lbfgs) ?
+                       Optim.LBFGS(linesearch = Optim.LineSearches.BackTracking()) :
+                       Optim.BFGS(linesearch  = Optim.LineSearches.BackTracking())
 
-        options   = Optim.Options(iterations = r.nm_max_iter,
-                                  f_reltol      = r.nm_f_tol,
-                                  x_abstol      = r.nm_x_tol,
-                                  g_abstol      = r.nm_g_tol,
-                                  callback      = nm_stop_cb,
+        # A positive g_tol means "stop on the gradient", so the function tolerance, the step
+        # tolerance and the rate callback are all switched off: each of them stops on a small
+        # MOVE, and near a stationary point the moves are small while the gradient may not be.
+        options   = Optim.Options(iterations = (max_iter > 0 ? max_iter : r.nm_max_iter),
+                                  f_reltol      = (g_tol > 0 ? 0.0 : r.nm_f_tol),
+                                  x_abstol      = (g_tol > 0 ? 0.0 : r.nm_x_tol),
+                                  g_abstol      = (g_tol > 0 ? g_tol : r.nm_g_tol),
+                                  callback      = (g_tol > 0 ? nothing : nm_stop_cb),
                                   show_trace = false)
-        result    = Optim.optimize(obj_traced, theta0, opt_method, options)
+
+        # Nelder-Mead needs no gradient. LBFGS and BFGS do, and left to itself Optim would
+        # finite-difference one at its own default step — see fd_step above for why that
+        # step is a measured property of this criterion rather than a free choice.
+        #
+        # The gradient calls smm_objective directly instead of obj_traced so that its 2d
+        # evaluations per iteration do not inflate the evaluation counter, which is the unit
+        # the rate stop is defined in: at d = 23 a single iteration would otherwise consume
+        # half of a 100-evaluation window and the rule would fire on arithmetic rather than
+        # on stalling. The line search still runs through obj_traced, so the incumbent and
+        # the corner reporting stay correct.
+        result = if method === :neldermead
+            Optim.optimize(obj_traced, theta0, opt_method, options)
+        else
+            # One line per LBFGS iteration, printed from inside the gradient because that is
+            # where the gradient exists — no extra solves. The first call is at theta_start,
+            # so the first line is the baseline the polish has to reduce, and the last line
+            # is the answer to whether a stationary point was reached. ‖g‖∞ is the quantity
+            # g_tol is compared against; ‖g‖₂ is reported beside it because a single large
+            # component and a broadly large gradient call for different reads.
+            grad_calls = Ref(0)
+            function polish_grad!(Gv, t)
+                q0 = smm_objective(t, spec)
+                n_onesided = 0
+                n_dead     = 0
+                @inbounds for k in eachindex(t)
+                    tp = copy(t);  tp[k] += fd_step
+                    tm = copy(t);  tm[k] -= fd_step
+                    qp = smm_objective(tp, spec)
+                    qm = smm_objective(tm, spec)
+                    # One-sided where a side is infeasible, which is the only option for a
+                    # coordinate resting on a bound; zero where neither side solves, so the
+                    # step carries no descent claim it cannot support. Both fallbacks are
+                    # COUNTED and reported: a one-sided difference across a discontinuity
+                    # divides a jump by fd_step and returns a huge component, which then
+                    # enters LBFGS's curvature memory and corrupts every later direction.
+                    Gv[k] = if isfinite(qp) && isfinite(qm)
+                        (qp - qm) / (2 * fd_step)
+                    elseif isfinite(qp) && isfinite(q0)
+                        n_onesided += 1
+                        (qp - q0) / fd_step
+                    elseif isfinite(qm) && isfinite(q0)
+                        n_onesided += 1
+                        (q0 - qm) / fd_step
+                    else
+                        n_dead += 1
+                        0.0
+                    end
+                end
+                grad_calls[] += 1
+                kmax = argmax(abs.(Gv))
+                gmax = abs(Gv[kmax])
+                @printf("  [%s grad %4d]  ‖g‖∞=%.4e (%s)  ‖g‖₂=%.4e  Q=%s%s%s%s\n",
+                        method, grad_calls[], gmax,
+                        first(param_symbol(spec.free[kmax]), 6),
+                        sqrt(sum(abs2, Gv)),
+                        isfinite(q0) ? @sprintf("%.6f", q0) : "Inf",
+                        n_onesided > 0 ? @sprintf("  1sided=%d", n_onesided) : "",
+                        n_dead     > 0 ? @sprintf("  dead=%d", n_dead)       : "",
+                        (g_tol > 0 && gmax <= g_tol) ? "   ← below g_tol" : "")
+                flush(stdout)
+                return nothing
+            end
+            Optim.optimize(obj_traced, polish_grad!, theta0, opt_method, options)
+        end
         theta_opt = Optim.minimizer(result)
         loss_opt  = smm_objective(theta_opt, spec)
         # Either deliberate early stop counts as a valid finish, mirroring the SA
@@ -2523,17 +2632,23 @@ function print_results(res::SMMResult; why::AbstractString = "")
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimates                                       ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    @printf("  %s%s%12s\n", padr("block", 8), padr("param", 8), "estimate")
-    @printf("  %s\n", "─"^30)
+    # Column widths are set so 2 + 12 + 20 + 20 = 54, the frame's interior width: the
+    # estimate column right-aligns flush with the frame's right edge and the rule spans the
+    # table exactly. @printf needs literal widths, so the rule's sum below is the one place
+    # the three are written together — change a column and change it there too.
+    @printf("  %s%s%20s\n", padr("block", 12), padr("param", 20), "estimate")
+    @printf("  %s\n", "─"^(12 + 20 + 20))
     for ps in res.spec.free
         key = Symbol(string(ps.block) * "_" * string(ps.name))
         val = hasproperty(res.params_opt, key) ? res.params_opt[key] : NaN
-        @printf("  %s%s%12.5f\n", padr(ps.block, 8), padr(param_symbol(ps), 8), val)
+        @printf("  %s%s%20.5f\n", padr(ps.block, 12), padr(param_symbol(ps), 20), val)
     end
     if length(res.spec.fixed) > 0
         @printf("\n  Fixed:\n")
         for (k, v) in pairs(res.spec.fixed)
-            @printf("    %s%10.5f\n", padr(fixed_symbol(k), 26), v)
+            # 4 + 30 + 20 = 54 as well, so the fixed values right-align on the same edge as
+            # the estimates above them despite the deeper indent.
+            @printf("    %s%20.5f\n", padr(fixed_symbol(k), 30), v)
         end
     end
     # The reason is passed in rather than stored on SMMResult: adding a field would
@@ -2568,12 +2683,12 @@ function write_checkpoint(path::String, θ::AbstractVector, Q::Float64,
         cp_, up_, sp_ = unpack_θ(collect(float.(θ)), spec)
         res = SMMResult(collect(float.(θ)), _params_to_namedtuple(cp_, up_, sp_, spec),
                         Q, false, 0, spec)
-        tmp = path * ".tmp"
-        mkpath(dirname(path))
-        open(tmp, "w") do io
-            serialize(io, (result = res, spec = spec, checkpoint = true, tag = tag))
-        end
-        mv(tmp, path; force = true)
+        # Via write_bundle since v19.6.0: one shape for every writer, and the atomic
+        # temp-then-mv it does is the same one this function used to do inline. The
+        # `checkpoint = true` flag is gone — `stage = :smm_checkpoint` says it, and says
+        # WHICH kind of checkpoint, which the boolean could not.
+        write_bundle(path; result = res, spec = spec, stage = :smm_checkpoint,
+                     provenance = provenance_from_path(path), tag = tag)
         @printf("  [checkpoint]  %s  Q=%.6e -> %s\n", tag, Q, basename(path))
         flush(stdout)
     catch e

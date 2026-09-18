@@ -81,6 +81,25 @@ function build_ability_grid(N::Int, a::Float64, b::Float64)
 end
 
 
+"""
+    node_midpoint_intervals(x) -> (xlo, xhi)
+
+The interval each ability node represents: the midpoints to its neighbours,
+clipped to the grid's own support at the ends.  Both continuous frontiers on the
+ability grid — the training frontier τ_T and the cross-market drain d — express a
+cell's covered fraction against these intervals, so they share one definition.
+"""
+function node_midpoint_intervals(x::AbstractVector{Float64})
+    N   = length(x)
+    xlo = Vector{Float64}(undef, N);  xhi = Vector{Float64}(undef, N)
+    @inbounds for j in 1:N
+        xlo[j] = j == 1 ? x[1] : 0.5 * (x[j - 1] + x[j])
+        xhi[j] = j == N ? x[N] : 0.5 * (x[j] + x[j + 1])
+    end
+    return xlo, xhi
+end
+
+
 # ============================================================
 # Skill copula
 #
@@ -319,13 +338,17 @@ end
 
 
 # ============================================================
-# Cutoff index helper
+# Cutoff helpers
 # ============================================================
 
 """
     pcut_index(pgrid, pstar) -> j
 
 First index `j` such that `pgrid[j] >= pstar`. Returns `Np` if none.
+
+For a LOOP BOUND only. To read a CDF at the cutoff use `cdf_at_cutoff`: a
+cutoff does not sit on a node, and `Γ(pgrid[pcut_index(pgrid, p*)])` is the
+CDF at the first node above it, which silently relocates the cutoff.
 """
 @inline function pcut_index(pgrid::Vector{Float64}, pstar::Float64)
     Np = length(pgrid)
@@ -333,6 +356,33 @@ First index `j` such that `pgrid[j] >= pstar`. Returns `Np` if none.
         pgrid[j] >= pstar && return j
     end
     return Np
+end
+
+"""
+    cdf_at_cutoff(γcells, pgrid, wp, cutoff) -> Γ(cutoff)
+
+CDF of a cell-mass density at an off-node cutoff: the mass of the cells lying
+below `cutoff`, the straddling cell entering at its covered fraction.  This is
+the only correct way to read `Γvals`/`Γs_vals` at a reservation or OJS cutoff,
+and the integration convention `solve_stationary_skilled!` already uses — a
+`γ·wp` sum under the soft coverage weight.
+
+Written as the mass BELOW the cutoff rather than as `1 − ∫ω dΓ` so that a DEAD
+margin is exactly zero unconditionally: at `cutoff = 0` every coverage weight
+is exactly 0, so the sum is 0.0 whatever the cell masses total, while the
+complement form is exactly 0 only where they total exactly 1.0 in floating
+point.  A margin the model says is dead must not carry a rounding residual —
+it is multiplied by `λ_S` and reported as an endogenous separation hazard.
+"""
+@inline function cdf_at_cutoff(γcells::AbstractVector{Float64}, pgrid::Vector{Float64},
+                               wp::Vector{Float64}, cutoff::Float64)
+    Np   = length(pgrid)
+    mass = 0.0
+    @inbounds for j in 1:Np
+        ω = _soft_oj_weight(pgrid[j], cutoff, pgrid, j, Np)
+        ω > 0.0 && (mass += ω * γcells[j] * wp[j])
+    end
+    return mass
 end
 
 

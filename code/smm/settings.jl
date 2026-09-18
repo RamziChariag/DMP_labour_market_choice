@@ -85,6 +85,14 @@ const SETTINGS_REGISTRY = [
                 "move size, as a fraction of Q, that T0 keeps live; also start-dependent"),
     SettingDecl(:SA_HALFLIFE,    "smm.jl:_sa_loop", :live,
                 "geometric cooling half-life; 0 selects the logarithmic branch instead"),
+    SettingDecl(:SMM_POLISH, "smm_main.jl:§9", :live,
+                "run an LBFGS polish from the annealed point; SA stops on a criterion rule and leaves the gradient large, which invalidates J⁻¹"),
+    SettingDecl(:SMM_POLISH_FD_STEP, "smm.jl:run_smm", :live,
+                "central-difference step for the polish gradient, in t units. Measured: every column is stable over h ∈ [3e-7, 3e-6] and several break by 1e-4"),
+    SettingDecl(:SMM_POLISH_G_TOL, "smm.jl:run_smm", :live,
+                "gradient ∞-norm at which the polish stops; a positive value also disables the function/step tolerances and the rate callback, which stop on a small move rather than a small gradient"),
+    SettingDecl(:SMM_POLISH_MAX_ITER, "smm.jl:run_smm", :live,
+                "LBFGS iteration cap; each iteration costs 2d gradient solves plus a line search, so this is not an evaluation count"),
     SettingDecl(:SA_SCALE_P_MOVE,  "smm.jl:sa_proposal_scale", :live,
                 "mask density in units of 1/d: the proposal moves one forced coordinate "
                 * "plus a Binomial(d−1, p) tail, mean ≈ 2 of 23 at 1.0. No fixed count "
@@ -154,7 +162,7 @@ const SETTINGS_REGISTRY = [
                 "the ΔQ contour every measured step scale is taken against; absolute "
                 * "in Q units, just above the measured evaluation-noise floor"),
 
-    # ── MCMC_main.jl: DE-MC standard errors ────────────────────────────────
+    # ── MCMC_main.jl: DE-MC ────────────────────────────────────────────────
     SettingDecl(:MCMC_N,          "demc.jl:run_demc", :live, "chains; 0 ⇒ 2·d"),
     SettingDecl(:MCMC_GENS,       "demc.jl:run_demc", :live, "generation budget"),
     SettingDecl(:MCMC_CR,         "demc.jl:run_demc", :live, "per-coordinate perturbation probability"),
@@ -163,12 +171,35 @@ const SETTINGS_REGISTRY = [
     SettingDecl(:MCMC_B_ADD,      "demc.jl:run_demc", :live, "additive isotropic jitter"),
     # Was read via env_setting with no registry row — caught by check_forwarding.jl when
     # the stop rule was added, not by the change that introduced it. The audit works.
+    SettingDecl(:MCMC_OUTLIER_BURN_ONLY, "demc.jl:run_demc", :live,
+                "false = LMR timing (replacement every generation, mpi_mcmc_mod.f90:421-427); " *
+                "true = burn-in only, which keeps the retained sample reversible"),
+    SettingDecl(:MCMC_BURN,       "demc.jl:run_demc", :live,
+                "burn-in fraction; 0.9 matches LMR's 'last 1000 of 10,000' (Appendix C p.86)"),
     SettingDecl(:MCMC_PRIOR,      "MCMC_main.jl:logposterior", :live,
                 ":flat_t (LMR's target, −Q/2) or :flat_theta (−Q/2 + logjac_box); changes the sampled density, so a table must say which"),
+    SettingDecl(:MCMC_WIDTHS_CSV, "MCMC_main.jl:init widths", :live,
+                "path to the criterion-width table for MCMC_INIT = :widths; empty means the default name for this window. Produced by code/tools/width_audit.jl. UNREACHABLE in v20.0.0: MCMC_INIT = :widths requires MCMC_SPACE = :theta, which is disabled"),
+    SettingDecl(:MCMC_SPACE,      "MCMC_main.jl:logposterior", :live,
+                ":t (the only working value, and the shipped default) samples the logistic preimage and is the v20.x estimand. :theta would sample the natural parameter with the economic box enforced by prior rejection, but is DISABLED by a guard: the proposal has no per-coordinate scale in θ and the constrained-vector flag reaches only logposterior, so it runs and reports nonsense. Selects the ESTIMAND, not just the numerics — a table must say which"),
+    SettingDecl(:MCMC_T_BOX,      "MCMC_main.jl:logposterior", :live,
+                "half-width of the prior box on t; 20.0 matches LMR (main_mpi.f90:146-147). Q is asymptotically flat in every coordinate, so this is what makes the target proper — Inf gives the improper target used before v20.0.0"),
     SettingDecl(:MCMC_PRINT_EVERY, "demc.jl:run_demc", :live,
                 "generations between progress lines; the acc/dlp/esjd averaging window"),
     SettingDecl(:MCMC_CHECK_EVERY, "demc.jl:run_demc", :live,
                 "generations between sequential stop checks; 0 disables the stop entirely"),
+    SettingDecl(:MCMC_INIT_DISPERSE, "demc.jl:run_demc", :live,
+                "multiplier on the criterion widths at init; >1 is required for the convergence gate to have power"),
+    SettingDecl(:MCMC_GAMMA_ADAPT,  "demc.jl:run_demc", :live,
+                "adapt the DE scale toward the acceptance optimum; false restores ter Braak's fixed gamma"),
+    SettingDecl(:MCMC_GAMMA_TARGET, "demc.jl:run_demc", :live,
+                "acceptance the adaptation drives toward (Roberts-Gelman-Gilks 0.234)"),
+    SettingDecl(:MCMC_GAMMA_ETA,    "demc.jl:run_demc", :live,
+                "Robbins-Monro step for the gamma adaptation; the realised step is eta/sqrt(k)"),
+    SettingDecl(:MCMC_GAMMA_EVERY,  "demc.jl:run_demc", :live,
+                "generations between gamma adaptations; 0 disables it"),
+    SettingDecl(:MCMC_MCSE_TARGET, "mcmc_diagnostics.jl:stop_rule", :live,
+                "MCSE(mean)/sd(pooled) below which the reported mean and sd are accurate enough to stop; the accuracy gate as of v21.0.0"),
     SettingDecl(:MCMC_MOVES_MIN,  "mcmc_diagnostics.jl:stop_rule", :live,
                 "accepted moves in the retained half required to stop; the gated quantity as of v19.3.0"),
     SettingDecl(:MCMC_DRIFT_FLAT, "mcmc_diagnostics.jl:stop_rule", :live,
@@ -184,6 +215,16 @@ const SETTINGS_REGISTRY = [
                 "promote each new best point to the warm-start bundle during the run"),
     SettingDecl(:MCMC_JAC_ONLY,   "MCMC_main.jl:top level", :live,
                 "skip the chain and take Ĵ = Ĝ'WĜ from a local design"),
+    SettingDecl(:MCMC_JAC_ALLOW_GAPS, "MCMC_main.jl:top level", :live,
+                "report CONDITIONAL standard errors on the measured subspace when :fd cannot \
+                 measure every column, instead of raising; off by default because a conditional \
+                 column is not comparable to an unconditional one"),
+    SettingDecl(:MCMC_JAC_METHOD, "MCMC_main.jl:top level", :live,
+                ":fd (shipped) builds Ĝ by per-coordinate central differences with the step set \
+                 from the moments' own response and refined by Richardson; :design fits a least \
+                 squares plane on a cloud of radius rel_step·(ub−lb), which makes the derivative \
+                 depend on the search box and measured a median moment R² of 0.771 at the \
+                 shipped radius"),
     # :live as of v19.3.0 — the shipped MCMC_INIT is :screen, so all three are read.
     # They were :inert only because the default was :at_seed.
     SettingDecl(:MCMC_INIT,         "demc.jl:run_demc", :live,
@@ -196,6 +237,13 @@ const SETTINGS_REGISTRY = [
                 "radius cap in width units; required because b_S's width is enormous in t"),
     SettingDecl(:MCMC_SCREEN_FLOOR, "MCMC_main.jl:_screen_scale", :live,
                 "guards a zero or absent curvature width"),
+    # Note built with `*` rather than a backslash continuation: check_structure.jl's string
+    # tracker resets at each newline, so a multi-line literal inside a call leaves its
+    # closing paren uncounted and the whole file then reads as unbalanced.
+    SettingDecl(:CORNER_PARAMS,     "MCMC_main.jl:top level", :live,
+                "parameters DECLARED to sit at a corner, chosen by hand as SKIP_MOMENTS is; " *
+                "a label only — it fills the results CSV's corner_declared column and changes " *
+                "no other value, so the shipped empty default leaves the file byte-identical"),
 ]
 
 """
@@ -228,6 +276,10 @@ const LEGACY_ENV_KEYS = Dict(
 const _ENV_LOG = Vector{NamedTuple{(:key, :value, :from_env),Tuple{String,Any,Bool}}}()
 
 _env_parse(::Type{Symbol},  s::AbstractString) = Symbol(s)
+# A set-valued setting, comma-separated: ROYSEARCH_CORNER_PARAMS="b_S,alpha_U". Entries are
+# trimmed and empties dropped, so "" and "a, ,b" both behave as a reader would expect.
+_env_parse(::Type{Vector{Symbol}}, s::AbstractString) =
+    Symbol[Symbol(t) for t in strip.(split(s, ',')) if !isempty(t)]
 _env_parse(::Type{Bool},    s::AbstractString) = parse(Bool, s)
 _env_parse(::Type{Float64}, s::AbstractString) = parse(Float64, s)
 _env_parse(::Type{Int},     s::AbstractString) = parse(Int, s)

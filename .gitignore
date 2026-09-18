@@ -1,22 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# THE RULE, as of v19.6.0: track what something else needs in order to RUN, plus the
+# provenance record of a result. Everything derived stays out.
+#
+#   output/estimates/   TRACKED   the bundles and their CSV siblings. Hours of compute,
+#                                 not regenerable, and read by every downstream script.
+#   output/logs/        TRACKED   nothing needs a log to run, but a log is the only record
+#                                 of what a run did, and a bundle without its log is a
+#                                 parameter vector with no history. Same commit as the
+#                                 bundle it describes.
+#   output/transition/  TRACKED   read by plots_and_tables/transition.jl.
+#   output/chains/      ignored   draw arrays. Once the standard errors are sealed into the
+#                                 estimate bundle nothing needs them for a TABLE — but as of
+#                                 v19.8.0 they also carry chain_lp and the accepted/replaced
+#                                 masks, which are what lets the estimator be changed later
+#                                 without re-running. ~200 MB at N=95, gens=10 000. Keep the
+#                                 file; it is the run, not a derivative of it.
+#   output/plots/       ignored   derived, in full.
+#   output/tables/      ignored   derived, in full.
+#
+# A NOTE ON RULES THAT NEVER BIT. Before v19.6.0 four paths carried ignore rules, or were
+# assumed ignored, and were tracked anyway — a rule cannot untrack a path already in the
+# index. code/notebooks (37 files), code/single_run_plots_all (20), output/tables (9) and
+# output/plots (191). The `git rm --cached` in the v19.6.0 restructure is what made them
+# effective.
+# ─────────────────────────────────────────────────────────────────────────────
+
 /extra documents/
 /literature/
 /data/raw/
 /data/derived/*.arrow
 /latex/
 literature.zip
-/code/roysearch_v*/          # 209 tracked files, ~115 MB
+
+/code/roysearch_v*/
 /code/roysearch_v*.zip
-/code/notebooks/             # 38 tracked files, ~78 MB, none over 50 MB
-*.jld2                       # 88 MB transition output
-/output/figures/
+/code/notebooks/
+/code/single_run_plots_all/
+/code/.vscode/
+/code/.ipynb_checkpoints/
+
+/output/plots/
 /output/tables/
-/output/smm/mcmc_chain_*.jls
-/output/smm/candidates_*.jls
-!/output/smm/smm_result_*.jls   # keep: warmstart seeds
-# Bundle-migration scratch: the pre-migration copies and the neutral intermediate are
-# local safety nets for a one-off struct change, not results. The migrated bundles
-# themselves ARE tracked, and each carries provenance recording what it was rebuilt from.
-/output/smm/_migration/
-*.jls.pre_migration
-*.jls.pre_vm
+/output/chains/
+
+# Migration staging. migrate_bundles.jl and the v19.6.0 relocation stage here, at the repo
+# root and OUTSIDE output/, and remove it on success: a migration that succeeds leaves
+# nothing, one that fails leaves everything. The rules that used to hide migration traces
+# inside output/smm/ (_migration/, *.jls.pre_migration, *.jls.pre_vm) are gone with the
+# directory — a trace that has to be hidden is a trace that should not have been written.
+/.migration/
+
 .DS_Store

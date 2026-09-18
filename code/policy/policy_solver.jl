@@ -43,7 +43,7 @@ function _extract_policy_result(
     # Unskilled
     wU_num = 0.0;  wU_den = 0.0
     pgU = obj.pgU;  wpU = obj.wpU
-    for ix in 1:Nx, jp in 1:length(pgU)
+    for ix in 1:Nx, jp in eachindex(pgU)
         e_ij = obj.eU_surface[ix, jp]
         w_ij = obj.wU_surface[ix, jp]
         if !isnan(w_ij) && e_ij > 1e-16
@@ -63,11 +63,17 @@ function _extract_policy_result(
             e_ij = obj.eS_mat[ix, jp]
             e_ij <= 1e-16 && continue
             m = e_ij * wx[ix] * wpS[jp]
-            w_ij = pg[jp] < poj_ix ?
-                   obj.wS1_surface[ix, jp] : obj.wS0_surface[ix, jp]
-            if !isnan(w_ij)
-                wS_num += m * w_ij
-                wS_den += m
+            # Same OJS split as the moment layer: the covered fraction of the cell sits on
+            # the poached-worker surface wS1 and the rest on wS0.
+            s_ij = _soft_oj_weight(pg[jp], poj_ix, pg, jp, NpS)
+            w1 = obj.wS1_surface[ix, jp];  w0 = obj.wS0_surface[ix, jp]
+            if s_ij > 0.0 && !isnan(w1)
+                wS_num += s_ij * m * w1
+                wS_den += s_ij * m
+            end
+            if s_ij < 1.0 && !isnan(w0)
+                wS_num += (1.0 - s_ij) * m * w0
+                wS_den += (1.0 - s_ij) * m
             end
         end
     end

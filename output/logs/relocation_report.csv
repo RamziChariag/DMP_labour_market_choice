@@ -1,0 +1,5 @@
+window,status,stage,Q_stored,Q_resolved,verified
+base_fc,relocated,smm_checkpoint,497.7865944635291,497.78659446352884,true
+crisis_fc,unreadable,—,NaN,NaN,false
+base_covid,relocated,superseded,Inf,Inf,false
+crisis_covid,unreadable,—,NaN,NaN,false

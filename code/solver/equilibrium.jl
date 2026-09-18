@@ -9,14 +9,25 @@
 # Dimensionality.  Value/surplus/wage surfaces are 1D in own ability
 # (unskilled in aU, skilled in aS) × the p-grid, exactly as solved.
 # Stationary densities are 2D on the (aU,aS) copula grid.  The skilled
-# employed density factors as e_S(aU,aS,p) = ê(aS,p) · m_S(aU,aS) on the
-# d = 0 region (notes §472–483); marginal aggregates use the copula
-# weights W2 and the ability marginals wa_U, wa_S.
+# employed density factors as e_S(aU,aS,p) = ê(aS,p) · m_S(aU,aS) over the
+# non-draining fraction 1−d of each cell (notes §472–483); marginal
+# aggregates use the copula weights W2 and the marginals wa_U, wa_S.
 ############################################################
 
 """
     compute_equilibrium_objects(model) → NamedTuple
 """
+# Unemployment-duration thresholds, in WEEKS, at which the survivor is reported.
+# These mirror DURATION_THRESHOLDS_WK in code/data_and_descriptives/setup.jl, which
+# is canonical because the data pipeline runs standalone; code/smm/moments.jl derives
+# its moment names from THIS constant, so a change here propagates to the SMM layer
+# automatically and only the data-side copy needs editing by hand.
+# Each threshold sits one week above a CPS duration heap (4/13/26/52) so a threshold
+# never splits a heap — the convention ltu_share_S already followed with 27.
+const DURATION_THRESHOLDS_WK = [5.0, 14.0, 27.0, 53.0]
+
+const _WEEKS_TO_MONTHS = 12.0 / 52.0
+
 function compute_equilibrium_objects(model::Model)
     cp = model.common;  uc = model.unsk_cache;  sc = model.skl_cache
     up = model.unsk_par;  sp = model.skl_par;  pre = model.skl_pre
@@ -44,15 +55,23 @@ function compute_equilibrium_objects(model::Model)
     mU_mat = max.(W2 .- mS_mat, 0.0)                   # untrained-segment mass
     eU_mat = max.(mU_mat .- uU .- tU, 0.0)             # unskilled employed mass
 
-    # Skilled unemployed / employed reconstructed from per-aS unit shapes:
-    #   d = 0:  u_S = û(aS) m_S,  e_S(p) = ê(aS,p) m_S
-    #   d = 1:  u_S = m_S,        e_S ≡ 0 (these seek in the U-market)
-    uS_mat = similar(mS_mat)
+    # Skilled unemployed / employed reconstructed from per-aS unit shapes, with the
+    # cell SPLIT by the drain fraction rather than assigned wholly to one branch:
+    #   the d part:    u_S = m_S,        e_S ≡ 0 (these seek in the U-market)
+    #   the 1−d part:  u_S = û(aS) m_S,  e_S(p) = ê(aS,p) m_S
+    # Thresholding at 0.5 here would discard the fractional boundary node and put
+    # the step function back, whatever the producer does upstream.  The two pieces
+    # are kept apart because the flow rates below apply a different exit hazard to
+    # each — a crosser leaves at f_U, a stayer at κ_S(1−Γ_o(p*_S)).
+    uS_drain = similar(mS_mat)                         # crossers: all of the sub-mass
+    uS_stay  = similar(mS_mat)                         # stayers: unemployed share only
     @inbounds for j in 1:Nx, i in 1:Nx
-        uS_mat[i, j] = d_mat[i, j] > 0.5 ? mS_mat[i, j] : sc.u_frac[j] * mS_mat[i, j]
+        uS_drain[i, j] = d_mat[i, j] * mS_mat[i, j]
+        uS_stay[i, j]  = (1.0 - d_mat[i, j]) * sc.u_frac[j] * mS_mat[i, j]
     end
-    # eS on (aS,p) aggregated over aU (only d=0 mass carries employment):
-    mcol0  = [sum((1.0 .- d_mat[:, j]) .* mS_mat[:, j]) for j in 1:Nx]   # d=0 column mass by aS
+    uS_mat = uS_drain .+ uS_stay
+    # eS on (aS,p) aggregated over aU (only non-draining mass carries employment):
+    mcol0  = [sum((1.0 .- d_mat[:, j]) .* mS_mat[:, j]) for j in 1:Nx]   # by aS
     eS_pS  = [sc.e_frac[j, jp] * mcol0[j] for j in 1:Nx, jp in 1:NpS]    # (aS, p) employed density
     eS_totS = [dot(eS_pS[j, :], wpS) for j in 1:Nx]                      # employed mass per aS
 
@@ -122,7 +141,10 @@ function compute_equilibrium_objects(model::Model)
             acc += Smax_surface[j, jp] * wΓ[jp];  tailS[j, jp] = acc
         end
     end
-    I_full = [tailS[j, pcut_index(pg, clamp01(pstar_S[j]))] for j in 1:Nx]
+    # Read from one cell BELOW the reservation node: S^max carries the soft
+    # coverage weight, so the cell straddling p*_S contributes its covered
+    # fraction.  Same index skilled_inner_loop! forms I_S at.
+    I_full = [tailS[j, max(pcut_index(pg, clamp01(pstar_S[j])) - 1, 1)] for j in 1:Nx]
 
     # w_U(aU,p) = β_U A P_U aU p + (1−β_U)(r+ν) U^search(aU)
     wU_surface = fill(NaN, Nx, NpU)
@@ -175,16 +197,26 @@ function compute_equilibrium_objects(model::Model)
         w = wU_surface[i, jp];  e = eU_surface[i, jp]
         (!isnan(w) && e > 1e-16) && (push!(wages_U, w);  push!(mass_U, e))
     end
-    # Skilled: employed density eS_pS[j,·] is per-aS mass; split by OJS cutoff.
+    # Skilled: employed density eS_pS[j,·] is per-aS mass, split between the poached-worker
+    # surface wS1 and the non-searching surface wS0 by the OJS covered fraction s_j — the
+    # same weight the stationary solve applies to the poaching margin (skilled.jl).  A cell
+    # straddling p^oj contributes to BOTH surfaces in proportion, so every wage moment is a
+    # continuous function of the cutoff; the hard 1{p < p^oj} this replaces moved a whole
+    # node's mass across at once.  Both surfaces are written under the same p*_S test above,
+    # so their NaN patterns coincide and the split conserves the cell's mass exactly.
     for j in 1:Nx
         poj_j = clamp01(poj[j])
         for jp in 1:NpS
             e = eS_pS[j, jp];  e <= 1e-16 && continue
-            m = e * wpS[jp]
-            if pg[jp] < poj_j
-                w = wS1_surface[j, jp];  !isnan(w) && (push!(wages_S1, w);  push!(mass_S1, m))
-            else
-                w = wS0_surface[j, jp];  !isnan(w) && (push!(wages_S0, w);  push!(mass_S0, m))
+            m   = e * wpS[jp]
+            s_j = _soft_oj_weight(pg[jp], poj_j, pg, jp, NpS)
+            if s_j > 0.0
+                w = wS1_surface[j, jp]
+                !isnan(w) && (push!(wages_S1, w);  push!(mass_S1, s_j * m))
+            end
+            if s_j < 1.0
+                w = wS0_surface[j, jp]
+                !isnan(w) && (push!(wages_S0, w);  push!(mass_S0, (1.0 - s_j) * m))
             end
         end
     end
@@ -223,15 +255,23 @@ function compute_equilibrium_objects(model::Model)
     # Reservation-cutoff CDFs: the OFFER CDF governs job-finding/acceptance
     # (fresh meetings), the SHOCK CDF governs endogenous separation (a λ_S
     # redraw landing below p*_S).  They coincide at δ = 1.
-    Γo_pstarS = [pre.Γvals[pcut_index(pg, clamp01(pstar_S[j]))]   for j in 1:Nx]
-    Γs_pstarS = [pre.Γs_vals[pcut_index(pg, clamp01(pstar_S[j]))] for j in 1:Nx]
+    #
+    # Both integrate the cell masses at the cutoff — the convention
+    # solve_stationary_skilled! uses — so a rate moment is read off the same
+    # margin as the stationary distribution it is weighted by.  Where p*_S = 0
+    # the endogenous skilled margin is dead and both CDFs are exactly 0.
+    Γo_pstarS = [cdf_at_cutoff(pre.γvals,   pg, wpS, clamp01(pstar_S[j])) for j in 1:Nx]
+    Γs_pstarS = [cdf_at_cutoff(pre.γs_vals, pg, wpS, clamp01(pstar_S[j])) for j in 1:Nx]
 
     # Skilled job-finding, averaged over the skilled-unemployed composition:
-    # d=0 accept S-offers at κ_S(1−Γ_o(p*_S)); d=1 accept U-offers at f_U.
+    # stayers accept S-offers at κ_S(1−Γ_o(p*_S)); crossers accept U-offers at f_U.
+    # Both masses come from the split above, so the composition stays a partition of
+    # uS_mat at a fractional drain (re-deriving one of them as d·uS_mat would double
+    # the drain and break the identity).
     accept_S = 1.0 .- Γo_pstarS
-    uS_colmass = [sum(uS_mat[:, j]) for j in 1:Nx]                 # by aS
-    uS_d1mass  = [sum(d_mat[:, j] .* uS_mat[:, j]) for j in 1:Nx]
-    uS_d0mass  = uS_colmass .- uS_d1mass
+    uS_d1mass  = [sum(uS_drain[:, j]) for j in 1:Nx]               # by aS
+    uS_d0mass  = [sum(uS_stay[:, j])  for j in 1:Nx]
+    uS_colmass = uS_d0mass .+ uS_d1mass
     uS_mass    = sum(uS_colmass)
     if uS_mass > 1e-14
         hire_S = κS * dot(accept_S, uS_d0mass)
@@ -263,8 +303,9 @@ function compute_equilibrium_objects(model::Model)
     wchg_by_aS  = λS .* (1.0 .- Γs_pstarS)
     wchg_rate_S = dot(wchg_by_aS, eS_totS) / max(agg_eS, 1e-14)
 
-    # Skilled E-to-E rate and EE-move wage step. OJS-searchers (p < p^oj) poach
-    # at κ_S(1−Γ(p^oj)); ee_rate_S is that flow over the employed-skilled mass.
+    # Skilled E-to-E rate and EE-move wage step. Each cell's OJS-searching fraction
+    # s(p) poaches at κ_S(1−Γ_o(p)); ee_rate_S is that flow over the employed-skilled
+    # mass.
     # ee_step_S is the mass-weighted mean LOG-wage jump of the very same poaching
     # flow (identifies β_S — the proportional step is a fraction of the surplus
     # gain, LMR/CPVR). A mover at (aS, p) sits on the poached-worker surface wS1
@@ -279,7 +320,7 @@ function compute_equilibrium_objects(model::Model)
     ee_mass = 0.0;  ee_flow = 0.0
     ee_step_flow = 0.0;  ee_step_massw = 0.0
     for j in 1:Nx
-        poj_j = clamp01(poj[j]);  Gamma_poj = pre.Γvals[pcut_index(pg, poj_j)]
+        poj_j = clamp01(poj[j])
 
         # Reverse-cumulative offer-weighted wS1 wage from each rung upward, so the
         # expected post-move wage at floor jp is post_sw[jp] / post_w[jp] (offer-
@@ -298,16 +339,23 @@ function compute_equilibrium_objects(model::Model)
         for jp in 1:NpS
             e_ij = eS_pS[j, jp] * wpS[jp]
             ee_mass += e_ij
-            if pg[jp] < poj_j
-                flow_ij = e_ij * κS * (1.0 - Gamma_poj)
-                ee_flow += flow_ij
-                w_pre = wS1_surface[j, jp]
-                if !isnan(w_pre) && w_pre > 0.0 && post_w[jp] > 0.0
-                    w_post = post_sw[jp] / post_w[jp]
-                    if w_post > 0.0
-                        ee_step_flow  += flow_ij * (log(w_post) - log(w_pre))
-                        ee_step_massw += flow_ij
-                    end
+            # p^oj is the PARTICIPATION margin — whether this quality searches on the
+            # job at all — and s_j is its covered fraction on the straddling cell.  The
+            # MOVE requires an offer above her own quality, so the flow reads
+            # κ_S(1−Γ_o(p_j)) at her own node, where the offer CDF is tabulated exactly
+            # and where solve_stationary_skilled! applies the same hazard to the same
+            # mass.  Reading it at the cutoff instead charged a worker deep below p^oj
+            # the marginal searcher's moving rate.
+            s_j = _soft_oj_weight(pg[jp], poj_j, pg, jp, NpS)
+            s_j <= 0.0 && continue
+            flow_ij = s_j * e_ij * κS * (1.0 - pre.Γvals[jp])
+            ee_flow += flow_ij
+            w_pre = wS1_surface[j, jp]
+            if !isnan(w_pre) && w_pre > 0.0 && post_w[jp] > 0.0
+                w_post = post_sw[jp] / post_w[jp]
+                if w_post > 0.0
+                    ee_step_flow  += flow_ij * (log(w_post) - log(w_pre))
+                    ee_step_massw += flow_ij
                 end
             end
         end
@@ -315,19 +363,38 @@ function compute_equilibrium_objects(model::Model)
     ee_rate_S = ee_mass > 1e-14 ? ee_flow / ee_mass : 0.0
     ee_step_S = ee_step_massw > 1e-14 ? ee_step_flow / ee_step_massw : 0.0
 
-    # ── Skilled long-term-unemployment share (survival past a* ≈ 6.23mo) ──
-    # The exit hazard must match the one used for f_S above: a d=0 searcher
+    # ── Unemployment-duration survivors ───────────────────────────────────
+    # Survival of an ONGOING unemployment spell past t months, per market, as a
+    # mixture of exponential exit hazards over that market's unemployed stock.
+    #
+    # Skilled.  The exit hazard must match the one used for f_S above: a stayer
     # leaves skilled unemployment by accepting a fresh skilled OFFER at
-    # κ_S(1−Γ_o(p*_S)), while a d=1 searcher has crossed and leaves by taking an
-    # UNSKILLED job at f_U.  Both also exit demographically at ν.  Applying the
-    # d=0 hazard to the whole stock (as before) understated the crossers' exit
-    # rate and therefore overstated their survival past a*.
-    a_star    = 27.0 * 12.0 / 52.0
-    δS_unemp0 = κS .* (1.0 .- Γo_pstarS) .+ ν      # d=0: exit via a fresh OFFER acceptance
-    δS_unemp1 = f_U + ν                            # d=1: exit via an UNSKILLED job
-    ltu_share_S = uS_mass > 1e-14 ?
-        (dot(uS_d0mass, exp.(-δS_unemp0 .* a_star)) +
-         sum(uS_d1mass) * exp(-δS_unemp1 * a_star)) / uS_mass : 0.0
+    # κ_S(1−Γ_o(p*_S)), while a crosser leaves by taking an UNSKILLED job at f_U.
+    # Both also exit demographically at ν.  Applying the stayer hazard to the whole
+    # stock understated the crossers' exit rate and overstated their survival.
+    δS_unemp0 = κS .* (1.0 .- Γo_pstarS) .+ ν      # stayer: fresh OFFER acceptance
+    δS_unemp1 = f_U + ν                            # crosser: an UNSKILLED job
+    _surv_S = t -> uS_mass > 1e-14 ?
+        (dot(uS_d0mass, exp.(-δS_unemp0 .* t)) +
+         sum(uS_d1mass) * exp(-δS_unemp1 * t)) / uS_mass : 0.0
+
+    # Unskilled.  A searcher leaves at f_U — the same f_hire that
+    # solve_stationary_unskilled! applies — while a worker at the participation
+    # corner (p*_U = 1) is never hired and leaves only at ν.  That corner is the
+    # model's own discouragement margin, so the unskilled survivor carries a
+    # floor at the non-searching mass share, which the skilled one does not.
+    uU_by_a  = vec(sum(uU, dims = 2))
+    uU_mass  = sum(uU_by_a)
+    δU_unemp = [clamp01(pstar_U[i]) < 1.0 - 1e-10 ? f_U + ν : ν
+                for i in eachindex(uU_by_a)]
+    _surv_U = t -> uU_mass > 1e-14 ?
+        dot(uU_by_a, exp.(-δU_unemp .* t)) / uU_mass : 0.0
+
+    usurv_S = [_surv_S(wk * _WEEKS_TO_MONTHS) for wk in DURATION_THRESHOLDS_WK]
+    usurv_U = [_surv_U(wk * _WEEKS_TO_MONTHS) for wk in DURATION_THRESHOLDS_WK]
+    # Kept as its own field and evaluated through the same function, so it stays
+    # correct even if 27 weeks is later dropped from the threshold list.
+    ltu_share_S = _surv_S(27.0 * _WEEKS_TO_MONTHS)
 
     return (
         xg = xg, Fell = Fell, pgU = pgU, pg = pg, waU = waU, waS = waS, W2 = W2,
@@ -358,6 +425,9 @@ function compute_equilibrium_objects(model::Model)
         ee_rate_S = ee_rate_S, ee_step_S = ee_step_S,
         wchg_rate_U = wchg_rate_U, wchg_rate_S = wchg_rate_S,
         ltu_share_S = ltu_share_S,
+        # Survivors at DURATION_THRESHOLDS_WK, indexed in the same order.
+        # Additive: ltu_share_S above is unchanged, so existing consumers are unaffected.
+        usurv_S = usurv_S, usurv_U = usurv_U,
         σ_wU = up.σ_w, σ_wS = sp.σ_w,
     )
 end

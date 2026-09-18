@@ -18,9 +18,13 @@ flush(stdout)
 
 # Paths
 const SOLVER_DIR   = @__DIR__
-const SMM_DIR      = joinpath(SOLVER_DIR, "..", "smm")
-const PROJECT_ROOT = joinpath(SOLVER_DIR, "..", "..")
-const OUTPUT_DIR   = joinpath(PROJECT_ROOT, "output")
+const CODE_ROOT    = normpath(joinpath(SOLVER_DIR, ".."))
+const SMM_DIR      = joinpath(CODE_ROOT, "smm")
+const PT_DIR       = joinpath(CODE_ROOT, "plots_and_tables")
+# paths.jl is the sole definition of PROJECT_ROOT, OUTPUT_DIR and the out_*()
+# accessors. Declared in seven files before v19.6.0, two of them behind
+# !@isdefined guards, so the effective value depended on include order.
+include(joinpath(CODE_ROOT, "paths.jl"))
 const PLOTS_ROOT   = joinpath(OUTPUT_DIR, "plots")
 
 # ── Moment-table / run-settings switch ──────────────────────────────────────
@@ -29,8 +33,7 @@ const PLOTS_ROOT   = joinpath(OUTPUT_DIR, "plots")
 # window, otherwise the table compares apples to oranges.
 const MOMENT_WINDOW = :base_covid     # :base_fc | :crisis_fc | :base_covid | :crisis_covid
 const W_SUFFIX      = "_equalW"
-const SMM_BUNDLE    = joinpath(OUTPUT_DIR, "smm",
-                               "smm_result_$(MOMENT_WINDOW)$(W_SUFFIX).jls")
+const SMM_BUNDLE    = estimate_path(MOMENT_WINDOW, W_SUFFIX)
 
 # Packages
 print("Loading packages... "); flush(stdout)
@@ -81,7 +84,7 @@ println("done."); flush(stdout)
 # Plotting library
 print("Loading plotting modules... "); flush(stdout)
 
-include(joinpath(SOLVER_DIR, "single_run_plots.jl"))
+include(joinpath(PT_DIR, "model.jl"))
 
 println("done."); flush(stdout)
 @printf("Threads available: %d\n\n", Threads.nthreads())
@@ -168,7 +171,10 @@ sim_fallback = SimParams(
     verbose_stride     = 10,
 )
 
-const PLOTS_DIR = joinpath(PLOTS_ROOT, "standalone_default")
+# :manual, not a window. standalone_default/ and single_run/ were one thing under two
+# names; out_plots(:manual) is the single home, and out_tables(:manual) is an error
+# because a solve at arbitrary parameters produces figures, never a paper table.
+const PLOTS_DIR = out_plots(:manual)
 
 println("Parameters:")
 @printf("  CommonParams:    r=%.5f   ν=%.5f   φ=%.5f\n",

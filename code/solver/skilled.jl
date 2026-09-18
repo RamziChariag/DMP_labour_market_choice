@@ -9,26 +9,27 @@
 # branches (notes eq:dpolicy):
 #   U_S^(0)(aS) = (b_S + κ_S β_S I_S(aS)) / (r + ν)          stay skilled
 #   U_S^(1)(aU) = (b_S + f_U E_U(aU,1)) / (r + ν + f_U)      cross to U
-#   d(aU,aS)    = 1{ U_S^(1)(aU) > U_S^(0)(aS) }             (2D)
-# The employed surplus uses U_S^(0)(aS) as the outside option: on the
-# d = 0 region (where all employed mass lives) this IS the skilled
-# unemployment value, and d = 1 cells carry no employed mass, so their
-# 1D-in-aS surplus is never read by the distribution.
+#   d(aU,aS)    = fraction of cell (aU,aS) with U_S^(1)(aU) > U_S^(0)(aS)
+# The employed surplus uses U_S^(0)(aS) as the outside option: the
+# non-draining fraction 1−d, which carries all the employed mass, has
+# exactly this unemployment value, and the draining fraction d carries
+# none, so its 1D-in-aS surplus is never read by the distribution.
 #
 # Stationary composition factors.  The p-dynamics read only aS, and the
 # flow balance is linear-homogeneous in a type's trained mass, so the
 # split into unemployed/employed is a per-aS UNIT shape scaled by the 2D
 # trained mass m_S(aU,aS):
-#   d = 0:  u_S = û(aS) m_S,  e_S(p) = ê(aS,p) m_S
-#   d = 1:  u_S = m_S,        e_S ≡ 0        (these seek in U, not S)
+#   the 1−d part:  u_S = û(aS) m_S,  e_S(p) = ê(aS,p) m_S
+#   the d part:    u_S = m_S,        e_S ≡ 0     (these seek in U, not S)
 # where m_S(aU,aS) = φ t(aU,aS) / (ν + d f_U) is supplied by the global
 # loop.  Free-entry aggregation reduces to a 1D sum over aS weighted by
-# the d = 0 column masses of m_S.
+# the non-draining column masses (1−d)·m_S.
 #
 # Functions
 #   build_skilled_precomp        Γ CDFs + cell masses + tail weights
 #   find_cutoff_from_j0          zero-crossing of S^max(aS,·)
 #   find_poj_from_diff_grid      zero-crossing of S^1 − S^0
+#   drain_fraction!              covered fraction of the drain margin
 #   skilled_inner_loop!          iterate (U0, U1, S^0, S^1, d)
 #   solve_stationary_skilled!    per-aS unit shapes (û, ê)
 #   compute_Jbar_skilled         expected firm value for free entry
@@ -124,6 +125,86 @@ function find_poj_from_diff_grid(pgrid::Vector{Float64}, diff::AbstractVector{Fl
         end
     end
     return 1.0
+end
+
+
+# ---------------------------------------------------------------------------
+# Cross-market drain d(aU,aS): the POPULATION FRACTION of cell (aU,aS) that
+# abandons skill and searches in the unskilled market, from U_S^(1)(aU) >
+# U_S^(0)(aS) (notes eq:dpolicy).
+#
+# U_S^(1) reads only aU and U_S^(0) only aS, and U_S^(0) is increasing in aS, so
+# for each aU the drain set is a LOWER interval in aS with a single crossing
+# aS*(aU) solving U_S^(0)(aS*) = U_S^(1)(aU).  A hard 0/1 at the nodes made every
+# aggregate that reads d a step function of the skilled parameters: a change too
+# small to move aS* past a node flipped no cell, so the non-draining column
+# masses and the augmented seeker pool were bit-identical and ∂m/∂θ was exactly
+# zero — the same defect the training frontier carried before v22.0.0.
+#
+# d is now the fraction of node j's midpoint interval lying BELOW aS*, which is
+# continuous and piecewise-linear in aS* and therefore in the parameters.  It
+# agrees with the indicator on every cell the crossing does not cut and replaces
+# the cut cell's 0/1 by its covered fraction — one cell per aU row.
+#
+# At the base_fc estimate this changes no moment, because the crossing sits 16 to
+# 36 aS-nodes BELOW the training frontier in every row where both cut, so the 120
+# cells it makes fractional hold exactly zero trained mass (v26.0.0 changelog).
+# The margin is continuous where it was not; whether it binds is a property of the
+# parameter point, not of this code.
+#
+# Monotonicity of U_S^(0) is the maintained property (verified: 119/119
+# increments at the base_fc estimate, the smallest 1.07e2).  Where it fails the
+# crossing is not unique, so that case keeps the hard indicator rather than
+# interpolating a crossing that means nothing.
+# ---------------------------------------------------------------------------
+function drain_fraction!(d::AbstractMatrix{Float64},
+                         U1::AbstractVector{Float64},
+                         U0::AbstractVector{Float64},
+                         x::AbstractVector{Float64})
+    Nx = length(x)
+    xlo, xhi = node_midpoint_intervals(x)
+
+    U0_monotone = true
+    @inbounds for j in 2:Nx
+        if U0[j] < U0[j - 1]
+            U0_monotone = false
+            break
+        end
+    end
+
+    @threads for i in 1:Nx
+        @inbounds begin
+            u1 = U1[i]                                      # aU = x[i]
+            if !U0_monotone
+                for j in 1:Nx
+                    d[i, j] = (u1 > U0[j]) ? 1.0 : 0.0
+                end
+            elseif U0[1] >= u1                              # nobody at this aU crosses
+                for j in 1:Nx
+                    d[i, j] = 0.0
+                end
+            elseif U0[Nx] < u1                              # everybody at this aU crosses
+                for j in 1:Nx
+                    d[i, j] = 1.0
+                end
+            else
+                j0 = 2
+                while j0 < Nx && U0[j0] < u1
+                    j0 += 1
+                end
+                dU = U0[j0] - U0[j0 - 1]
+                aS = dU > 0.0 ?
+                     x[j0 - 1] + (u1 - U0[j0 - 1]) * (x[j0] - x[j0 - 1]) / dU :
+                     x[j0]
+                for j in 1:Nx
+                    w = xhi[j] - xlo[j]
+                    d[i, j] = w > 0.0 ? clamp((aS - xlo[j]) / w, 0.0, 1.0) :
+                                        (x[j] < aS ? 1.0 : 0.0)
+                end
+            end
+        end
+    end
+    return d
 end
 
 
@@ -240,15 +321,9 @@ function skilled_inner_loop!(model::Model; fU::Float64, EU1::AbstractVector{Floa
         end
     end
 
-    # Directed-search policy d(aU,aS) = 1{U1(aU) > U0(aS)} and U_S = max.
-    @threads for j in 1:Nx                         # aS column
-        @inbounds begin
-            U0j = sc.U0[j]
-            for i in 1:Nx                          # aU row
-                sc.d[i, j] = (sc.U1[i] > U0j) ? 1.0 : 0.0
-            end
-            sc.U[j] = U0j                          # employed outside option (1D in aS)
-        end
+    drain_fraction!(sc.d, sc.U1, sc.U0, gp.x)
+    @inbounds for j in 1:Nx
+        sc.U[j] = sc.U0[j]                         # employed outside option (1D in aS)
     end
 
     return (f = f, status = status, converged = (status === :converged), iters = n_inner)
@@ -285,7 +360,7 @@ function solve_stationary_skilled!(model::Model)
 
             for j in j0_soft:Np
                 pj  = sg.p[j];  wpj = sg.wp[j]
-                γoj = pre.γvals[j];   Γoj = pre.Γvals[j]    # offer: hire + poaching inflow, poaching outflow
+                γoj = pre.γvals[j]                          # offer: hire + poaching inflow
                 γsj = pre.γs_vals[j]                        # shock: λ_S redraw in/outflow
                 ω_j = _soft_weight(pj, pstar, sg.p, j, Np)
                 ω_arr[j] = ω_j
@@ -296,7 +371,16 @@ function solve_stationary_skilled!(model::Model)
                 # density (the −λ·γ outflow from the α-basis and the +λ·γ inflow to
                 # the β-basis are the same redraw event, so they must share γ_s and
                 # net to zero mass at δ = 1).
-                a_j = ν + λ + ξ + s_j * f * (1.0 - Γoj)
+                # A poached worker must draw a cell STRICTLY ABOVE her own: the
+                # poaching inflow to a cell comes from the searchers below it
+                # (CumAlpha/CumBeta are accumulated after cell j is priced), so the
+                # offsetting outflow is the offer mass above cell j — tail_weights
+                # shifted by one.  With it, ∫inflow = ∫outflow exactly and û is the
+                # u_S balance's own ratio; the continuous CDF Γ_o(p_j) left û 0.65%
+                # above that ratio, and tail_weights[j] counts the source cell in
+                # both directions and is 1.39% off.
+                acc_mass = j < Np ? pre.tail_weights[j + 1] : 0.0
+                a_j = ν + λ + ξ + s_j * f * acc_mass
                 num_α = (f * γoj - λ * γsj) + f * γoj * CumAlpha   # unit-mass forcing: κ û γ term
                 num_β = (λ * γsj) * 1.0     + f * γoj * CumBeta    # m_S = 1 in the unit problem
                 if a_j < 1e-14
@@ -329,11 +413,12 @@ end
 
 
 # ---------------------------------------------------------------------------
-# d = 0 column mass of the trained population
+# Non-draining column mass of the trained population
 #   mcol0[j] = Σ_i (1 − d[i,j]) m_S[i,j]
-# The 2D→1D reduction that makes free-entry aggregation O(N²).
+# The 2D→1D reduction that makes free-entry aggregation O(N²).  Linear in d, so
+# a fractional drain splits each cell's mass rather than assigning it wholly.
 # ---------------------------------------------------------------------------
-function dzero_column_mass(sc::SkilledCache, Nx::Int)
+function nondrain_column_mass(sc::SkilledCache, Nx::Int)
     mcol0 = zeros(Float64, Nx)
     @inbounds for j in 1:Nx, i in 1:Nx
         mcol0[j] += (1.0 - sc.d[i, j]) * sc.m_S[i, j]
@@ -345,7 +430,7 @@ end
 # ---------------------------------------------------------------------------
 # Expected firm value seen by a randomly arriving skilled vacancy.
 #
-# Seekers are d = 0 unemployed (mass û(aS) mcol0[aS]) and employed
+# Seekers are non-draining unemployed (mass û(aS) mcol0[aS]) and employed
 # searchers s*(aS,p) with density ê(aS,p) mcol0[aS].  Firm value tails
 # are 1D in aS; the aU-dependence is entirely in mcol0.
 #
@@ -365,12 +450,19 @@ end
 # 94.3% (n = 192 paired directions per radius, 2304 solves, McNemar
 # p = 3.9e-45).  An exact version would weight by the cell's MASS fraction
 # under dΓ rather than by its length fraction.
+#
+# The RESERVATION margin enters through the index the firm-value tail is read
+# at.  J^0/J^1 already carry the reservation coverage weight ω, so the tail is
+# read from one cell BELOW the cutoff node — j0_soft, the index
+# skilled_inner_loop! and solve_stationary_skilled! both use — or the cell
+# straddling p*_S is dropped from free entry while the block that priced it
+# keeps it.
 # ---------------------------------------------------------------------------
 function compute_Jbar_skilled(model::Model)
     gp = model.grids;  sg = model.skl_grids;  pre = model.skl_pre;  sc = model.skl_cache
     Nx = length(gp.x);  Np = length(sg.p)
     wΓ = pre.γvals .* sg.wp
-    mcol0 = dzero_column_mass(sc, Nx)
+    mcol0 = nondrain_column_mass(sc, Nx)
 
     num_tls = zeros(Float64, Threads.nthreads())
     den_tls = zeros(Float64, Threads.nthreads())
@@ -380,9 +472,9 @@ function compute_Jbar_skilled(model::Model)
         @inbounds begin
             mk = mcol0[k]
             mk <= 0.0 && continue
-            pstar = clamp01(sc.pstar[k])
-            poj   = clamp01(sc.poj[k])
-            j0    = pcut_index(sg.p, pstar)
+            pstar   = clamp01(sc.pstar[k])
+            poj     = clamp01(sc.poj[k])
+            j0_soft = max(pcut_index(sg.p, pstar) - 1, 1)
 
             tailJ = zeros(Float64, Np)
             acc = 0.0
@@ -392,13 +484,16 @@ function compute_Jbar_skilled(model::Model)
                 tailJ[j] = acc
             end
 
+            # An unemployed seeker is priced over every acceptable destination; an
+            # employed one only over destinations above her own quality, which the
+            # reservation floor still binds from below.
             seeker_e = 0.0
-            num_k    = sc.u_frac[k] * tailJ[j0]
+            num_k    = sc.u_frac[k] * tailJ[j0_soft]
             for j in 1:Np
                 s_j = _soft_oj_weight(sg.p[j], poj, sg.p, j, Np)
                 s_j <= 0.0 && continue
                 seeker_e += s_j * sc.e_frac[k, j] * sg.wp[j]
-                num_k    += s_j * sc.e_frac[k, j] * sg.wp[j] * tailJ[max(j, j0)]
+                num_k    += s_j * sc.e_frac[k, j] * sg.wp[j] * tailJ[max(j, j0_soft)]
             end
             den_tls[tid] += mk * (sc.u_frac[k] + seeker_e)
             num_tls[tid] += mk * num_k
@@ -408,20 +503,18 @@ function compute_Jbar_skilled(model::Model)
     num = sum(num_tls);  den = max(sum(den_tls), 1e-14)
 
     # Early-iteration fallback: before m_S has settled, weight the firm-value
-    # tails by the d = 0 marginal ℓ so free entry gets a non-trivial signal.
+    # tails by the non-draining marginal ℓ so free entry gets a non-trivial signal.
     if num < 1e-12
         num = 0.0;  den = 0.0
-        colmass = vec(sum(gp.copula.W2, dims = 1))         # aS marginal
         for k in 1:Nx
-            frac0 = 0.0
+            ell = 0.0
             for i in 1:Nx
-                frac0 += (1.0 - sc.d[i, k]) * gp.copula.W2[i, k]
+                ell += (1.0 - sc.d[i, k]) * gp.copula.W2[i, k]
             end
-            ell = frac0
-            j0  = pcut_index(sg.p, clamp01(sc.pstar[k]))
-            poj = clamp01(sc.poj[k])
+            j0_soft = max(pcut_index(sg.p, clamp01(sc.pstar[k])) - 1, 1)
+            poj     = clamp01(sc.poj[k])
             acc = 0.0
-            for j in Np:-1:j0
+            for j in Np:-1:j0_soft
                 s_j = _soft_oj_weight(sg.p[j], poj, sg.p, j, Np)
                 acc += (s_j * sc.J1[k, j] + (1.0 - s_j) * sc.J0[k, j]) * wΓ[j]
             end

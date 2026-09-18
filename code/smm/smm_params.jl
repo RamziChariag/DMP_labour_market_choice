@@ -45,9 +45,9 @@
 # Note on ξ_U / ξ_S: each of UnskilledParams / SkilledParams carries an
 # exogenous-separation field ξ, defaulting to 0.0. Total separation into
 # unemployment is ξ_U + λ_U · G(p*_U) (unskilled) and ξ_S + λ_S · Γ(p*_S)
-# (skilled). Pinning a ξ to 0 (FIX_PARAMS :unsk_xi / :skl_xi => 0.0, or
-# dropping it from the free list) recovers the purely-endogenous variant
-# for that sector exactly.
+# (skilled) — see Model Notes §sep_asymmetry. Pinning a ξ to 0 (FIX_PARAMS
+# :unsk_xi / :skl_xi => 0.0, or dropping it from the free list) recovers the
+# purely-endogenous variant for that sector exactly.
 ############################################################
 
 # ============================================================
@@ -314,8 +314,19 @@ end
 # RunProvenance — where a serialised bundle came from
 # ============================================================
 
-"""Current bundle-format version. Bump only on a shape change; see `RunProvenance`."""
-const BUNDLE_SCHEMA = 1
+"""
+Current bundle-format version. Bump only on a shape change; see `RunProvenance` and
+`bundle.jl`.
+
+2 (v19.6.0): one shape for every writer, with a CONSTANT field set —
+`schema, stage, result, spec, provenance, sim, se, se_source, mcmc, tag` — where absent
+information is `nothing` rather than an absent field. Written by `write_bundle` only;
+normalised on read by `read_bundle`, which infers `stage` for a schema-1 file.
+
+1: four writers, four different field sets, and whichever touched a window last decided
+what its file contained.
+"""
+const BUNDLE_SCHEMA = 2
 
 """
     RunProvenance
@@ -614,7 +625,12 @@ function default_free_params() :: Vector{ParamSpec}
  
         # Institutional flow values (stored by consuming block).
         ParamSpec(:unsk,   :bU,         0.000000,   0.407241,   0.0624763281, "unskilled outside flow b_U"),
-        ParamSpec(:unsk,   :bT,         0.000000,   1.140275,   2.6500, "training flow b_T"),
+        # init was 2.6500 — OUTSIDE this parameter's own box [0, 1.140275], so the shipped
+        # start was inadmissible and whatever the box map returned for it was arbitrary.
+        # Set to the box midpoint, which is the only defensible choice absent evidence:
+        # b_T is estimated at 0 on base_fc, i.e. also at its floor, so a low start would
+        # beg the question and a high one is unsupported.
+        ParamSpec(:unsk,   :bT,         0.000000,   1.140275,   0.5701, "training flow b_T"),
         ParamSpec(:skl,    :bS,         0.000000,   0.325793,   0.0009379460, "skilled outside flow b_S"),
  
         # Productivity levels.  Under pure-Roy production is linear in own
@@ -648,15 +664,13 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:unsk,   :k,          0.0005,  12.0000,   1.2422995320, "unskilled vacancy cost k_U (months of avg U output)"),
         ParamSpec(:skl,    :k,          0.0005,  12.0000,   2.1924463263, "skilled vacancy cost k_S (months of avg S output)"),
  
-        # Skilled block — OJS cost, exogenous separation, offer/shock support ratio.
-        # δ_S compresses the λ_S-shock redraw onto [0,δ_S]; it carries endogenous
-        # separation and the EE ladder (both dead at δ_S = 1, the single-distribution
-        # limit).  ξ_S is the exogenous baseline hazard; (ξ_S, δ_S, λ_S) jointly
-        # split sep_rate_S / ee_rate_S into baseline and endogenous margins.
-        # Exogenous separation baseline ξ_U — a quality-independent hazard on
-        # top of the endogenous margin λ_U·G(p*).  Mirrors the skilled ξ_S
-        # below (same bounds); gives sep_rate_U a live lever when p*_U → 0
-        # collapses the endogenous part.
+        # OJS cost and the two exogenous separation baselines.  δ_S compresses the
+        # λ_S-shock redraw onto [0,δ_S]; it carries endogenous separation and the EE
+        # ladder (both dead at δ_S = 1, the single-distribution limit).  Each ξ_j is a
+        # quality-independent hazard on top of the endogenous margin λ_j·G_j(p*_j):
+        # (ξ_S, δ_S, λ_S) jointly split sep_rate_S / ee_rate_S into baseline and
+        # endogenous margins, and ξ_U gives sep_rate_U a lever the endogenous part
+        # alone cannot reach.  Same box for both sectors.
         ParamSpec(:skl,    :σ,          0.000000,   0.244345,   0.1570873133, "OJS flow cost σ_S"),
         ParamSpec(:unsk,   :ξ,          0.0000,   0.0200,   0.0063398088, "unskilled exogenous separation ξ_U"),
         ParamSpec(:skl,    :ξ,          0.0000,   0.0200,   0.0055193416, "skilled exogenous separation ξ_S"),
@@ -781,10 +795,11 @@ const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:unsk,   :α_U) => :alpha_U, (:skl,    :a_Γ)  => :a_Gam,  (:skl,    :b_Γ) => :b_Gam,
     (:unsk,   :μ)   => :unsk_mu, (:unsk,   :η)    => :unsk_eta, (:unsk,  :k)   => :unsk_k,
     (:unsk,   :β)   => :unsk_bet, (:unsk,  :λ)   => :unsk_lam,  (:unsk, :σ_w)  => :unsk_sigw,
+    (:unsk,   :ξ)   => :unsk_xi,
     (:skl,    :μ)   => :skl_mu,  (:skl,    :η)    => :skl_eta,  (:skl,   :k)   => :skl_k,
     (:skl,    :β)   => :skl_bet, (:skl,    :λ)   => :skl_lam,
     (:skl,    :σ)   => :skl_sig, (:skl,    :σ_w)  => :skl_sigw,
-    (:unsk,   :ξ)   => :unsk_xi, (:skl,    :ξ)   => :skl_xi,  (:skl,    :δ)    => :skl_delta,
+    (:skl,    :ξ)   => :skl_xi,  (:skl,    :δ)    => :skl_delta,
 )
 
 # ASCII key (FIX_PARAMS convention) → unicode fixed-NamedTuple key.
@@ -949,20 +964,39 @@ in `UnskilledParams`; PS, bS, a_Γ and b_Γ live in `SkilledParams`.
 """
 function unpack_θ(
     θ_unc :: AbstractVector{Float64},
-    spec  :: SMMSpec
+    spec  :: SMMSpec;
+    constrained :: Bool = false
 )
     # 1. Constrained free values (keyed by bare name)
+    #
+    # `constrained = true` says the caller passed θ itself rather than the unconstrained t,
+    # so the box map is skipped. This exists for MCMC_SPACE = :theta (v21.0.0), which samples
+    # the natural parameter directly. It is NOT equivalent to mapping θ→t→θ around the
+    # existing path: logit((θ-lb)/(ub-lb)) underflows for a θ within ~1e-300 of a bound and
+    # the round trip returns the bound exactly, destroying precision in precisely the
+    # coordinates that motivated the change. Skipping the map keeps θ bit-exact.
     free_vals = Dict{Symbol, Float64}()
     for (i, ps) in enumerate(spec.free)
-        free_vals[ps.name] = _to_constrained(θ_unc[i], ps.lb, ps.ub)
+        free_vals[ps.name] = constrained ? θ_unc[i] :
+                             _to_constrained(θ_unc[i], ps.lb, ps.ub)
     end
 
     # 2. Merge helper.  Fixed takes priority, then free, then default.
     #    Supports block-qualified fixed keys (e.g. :unsk_μ, :skl_μ).
+    #
+    # `free_vals` is keyed by bare name, so for a name carried by BOTH blocks it holds
+    # whichever block's spec came last and is meaningless for the other — step 3 below is
+    # the authority for those. A shared name must therefore not fall through to it here:
+    # a spec that frees one block's copy while leaving the other neither free nor pinned
+    # would otherwise read the wrong block's value silently. That state is what
+    # assert_all_params_accounted rejects, and it arises in practice when a stored bundle
+    # was written under a version whose free set differed (a 20-free v28.0.0 bundle frees
+    # skl:ξ and knows nothing of unsk:ξ, which would have taken ξ_S as ξ_U).
     function _get(name::Symbol, block::Symbol, default::Float64) :: Float64
         qualified = Symbol(string(block) * "_" * string(name))
         haskey(spec.fixed, qualified)   && return Float64(spec.fixed[qualified])
         haskey(spec.fixed, name)        && return Float64(spec.fixed[name])
+        name in _SHARED_PARAM_NAMES     && return default
         haskey(free_vals, name)         && return free_vals[name]
         return default
     end
@@ -1011,11 +1045,11 @@ function unpack_θ(
         σ_w      = _get(:σ_w,      :skl, 0.0),
     )
 
-    # 3. Disambiguate the SHARED field names (μ, η, k, β, λ, and σ) across the
-    #    unskilled and skilled blocks: free_vals is keyed by bare name, so the
-    #    first pass cannot tell :unsk_μ from :skl_μ.  The eight block-unique
-    #    names are already correct above and are carried through unchanged by
-    #    seeding the dicts with the full first-pass structs.
+    # 3. Disambiguate the field names carried by BOTH blocks (μ, η, k, β, λ, σ_w):
+    #    free_vals is keyed by bare name, so the first pass cannot tell :unsk_μ
+    #    from :skl_μ.  The block-unique names are already correct above and are
+    #    carried through unchanged by seeding the dicts with the full first-pass
+    #    structs.
     up_fields = Dict{Symbol,Float64}(
         :μ => up.μ, :η => up.η, :k => up.k, :β => up.β, :λ => up.λ,
         :PU => up.PU, :bU => up.bU, :bT => up.bT, :α_U => up.α_U,
@@ -1134,7 +1168,7 @@ function print_spec(spec::SMMSpec)
 
     if !isempty(skipped_moments)
         @printf("\n╠══════════════════════════════════════════════════════╣\n")
-        @printf("║  Skipped moments (%2d, weight = 0)                   ║\n", length(skipped_moments))
+        @printf("║  Skipped moments (%2d, weight = 0)                    ║\n", length(skipped_moments))
         @printf("╠══════════════════════════════════════════════════════╣\n")
         @printf("  %-22s  %10s\n", "moment", "target")
         @printf("  %s\n", "─"^34)

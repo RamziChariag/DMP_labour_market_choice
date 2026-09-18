@@ -54,10 +54,11 @@ flush(stdout)
 # Paths
 const SMM_DIR      = @__DIR__
 const SOLVER_DIR   = joinpath(SMM_DIR, "..", "solver")
-const PROJECT_ROOT = joinpath(SMM_DIR, "..", "..")
-const OUTPUT_DIR   = joinpath(PROJECT_ROOT, "output")
-const TABLES_DIR   = joinpath(OUTPUT_DIR, "tables")
-const SMM_OUT_DIR  = joinpath(OUTPUT_DIR, "smm")
+# paths.jl is the sole definition of PROJECT_ROOT, OUTPUT_DIR and every out_*()
+# accessor. Before v19.6.0 these three were declared here AND in six other files, two
+# of which guarded them with !@isdefined, so their effective value depended on include
+# order — the same defect class as a setting computed in one place and read in another.
+include(joinpath(SMM_DIR, "..", "paths.jl"))
 
 # Packages
 print("Loading packages... "); flush(stdout)
@@ -107,6 +108,7 @@ print("Loading SMM modules... "); flush(stdout)
 include(joinpath(SMM_DIR, "settings.jl"))
 include(joinpath(SMM_DIR, "moments.jl"))
 include(joinpath(SMM_DIR, "smm_params.jl"))
+include(joinpath(SMM_DIR, "bundle.jl"))
 include(joinpath(SMM_DIR, "smm.jl"))
 include(joinpath(SMM_DIR, "candidates.jl"))
 
@@ -188,13 +190,14 @@ const _PAIR_BASELINE = Dict(
 # redundant (wage_premium ≡ mean_wage_S − mean_wage_U). Both remain in
 # MOMENT_NAMES and the data pipeline.
 #
-# Valid names (31 moments in MOMENT_NAMES order):
+# Valid names (35 moments in MOMENT_NAMES order):
 #   :ur_total, :ur_U, :ur_S, :skilled_share, :training_share,
 #   :emp_var_U, :emp_cm3_U, :emp_var_S, :emp_cm3_S,
 #   :jfr_U, :sep_rate_U, :jfr_S, :sep_rate_S,
 #   :ee_rate_S,
 #   :mean_wage_U, :mean_wage_S,
-#   :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S, :p75_wage_U, :p75_wage_S,
+#   :p10_wage_U, :p10_wage_S, :p25_wage_U, :p25_wage_S, :p50_wage_U, :p50_wage_S,
+#   :p75_wage_U, :p75_wage_S, :p90_wage_U, :p90_wage_S,
 #   :wage_premium, :theta_U, :theta_S,
 #   :overlap_UgtS, :overlap_SltU, :ltu_share_S,
 #   :wchg_rate_U, :wchg_rate_S, :ee_step_S
@@ -209,6 +212,22 @@ SKIP_MOMENTS = Symbol[
     # the pipeline (target + sampling variance) but given zero objective weight.
     :ee_step_S,
     :wage_premium,  # redundant with mean_wage_S − mean_wage_U
+    # ltu_share_S is exactly usurv27_S, which is now in the moment set, so giving both
+    # objective weight would count the same restriction twice. It stays computed —
+    # the solver still returns it and every table still reads it — but carries no
+    # weight. Held out rather than deleted so serialised bundles and the plotting
+    # scripts keep working.
+    :ltu_share_S,
+    # The UNSKILLED duration points are held out because they measure an exit concept
+    # the model does not implement. A CPS spell ends on ANY exit, including to NILF; the
+    # model's unemployed leave only by hiring or at ν, and ν is floored at the
+    # demographic life-table rate (0.00323/month) because the measured NET labour-force
+    # outflow is negative in all four windows. The gross unemployed→NILF flow is 44–55×
+    # larger. The unskilled data force a withdrawal hazard of at least 0.015–0.065/month
+    # (their first-segment hazard exceeds jfr_U, which a declining hazard cannot do); the
+    # skilled data force none, which is why the skilled points stay active. Computed and
+    # reported either way — reinstate these once the model has a withdrawal margin.
+    :usurv5_U, :usurv14_U, :usurv27_U, :usurv53_U,
 ]
 
 # ── Per-window objective holdouts ───────────────────────────────────────────
@@ -239,13 +258,14 @@ flush(stdout)
 #   skl:     :skl_mu   :skl_eta   :skl_k   :skl_bet
 #            :skl_lam  :skl_sig   :skl_sigw  :skl_xi  :skl_delta
 #   (:unsk_sigw / :skl_sigw = wage measurement-error SD σ_wU / σ_wS)
-#   (:skl_delta = offer/shock support ratio δ_S; :skl_xi = exogenous separation ξ_S)
+#   (:skl_delta = offer/shock support ratio δ_S; :unsk_xi / :skl_xi = exogenous
+#    separation ξ_U / ξ_S)
 # ============================================================
 FIX_PARAMS = Dict{Symbol,Float64}(
      :unsk_eta => 0.50000,
-    # :unsk_bet => 0.18800,
+     #:unsk_bet => 0.50000,
      :skl_eta  => 0.50000,
-    # :skl_bet  => 0.27200,
+     #:skl_bet  => 0.50000,
      :bT       => 0.00000,
      :PU       => 1.00000,
 )
@@ -364,7 +384,13 @@ moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
 # unchanged today while crisis_covid (with SIPP) uses the moment — no name is
 # hardcoded into SKIP_MOMENTS, so each moment activates automatically once its
 # data appears.
-_nan_targets = Symbol[k for k in keys(moments) if !isfinite(moments[k].value)]
+# Iterating MOMENT_NAMES rather than keys(moments) so a name that is ABSENT from the
+# moments CSV holds out too, not just one present with a NaN value. Absence is the
+# normal state for a moment added to MOMENT_NAMES before the data pipeline has been
+# re-run to produce it, and the auto-activation described above only delivers on its
+# promise if that case behaves like NaN instead of failing downstream.
+_nan_targets = Symbol[k for k in MOMENT_NAMES
+                      if !(k in keys(moments)) || !isfinite(moments[k].value)]
 
 # Per-window holdouts (WINDOW_SKIP_MOMENTS above): a FINITE moment whose data
 # construction is unreliable in this window is dropped from the objective here.
@@ -373,7 +399,7 @@ _nan_targets = Symbol[k for k in keys(moments) if !isfinite(moments[k].value)]
 _window_skip = get(WINDOW_SKIP_MOMENTS, WINDOW, Symbol[])
 ACTIVE_SKIP_MOMENTS = sort(unique(vcat(SKIP_MOMENTS, _nan_targets, _window_skip)))
 if !isempty(_nan_targets)
-    @printf("Auto-skipping %d moment(s) with NaN target in %s: %s\n",
+    @printf("Auto-skipping %d moment(s) with a missing or NaN target in %s: %s\n",
             length(_nan_targets), WINDOW, join(string.(_nan_targets), ", "))
     flush(stdout)
 end
@@ -459,8 +485,7 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     #   crisis_fc    ← base_fc
     #   crisis_covid ← base_covid
     baseline_window = _PAIR_BASELINE[WINDOW]
-    baseline_jls = joinpath(SMM_OUT_DIR,
-                            "smm_result_$(baseline_window)$(W_SUFFIX).jls")
+    baseline_jls = estimate_path(baseline_window, W_SUFFIX)
     @printf("\nCrisis window detected — loading baseline (%s) from:\n  %s\n",
             baseline_window, baseline_jls)
     flush(stdout)
@@ -548,6 +573,15 @@ if WINDOW in (:crisis_fc, :crisis_covid)
     @printf("  Regime-specific parameters FREE (%d params); init from %s\n",
             length(free_params),
             INIT_MODE == :warmstart ? "baseline optimum" : "DEFAULT_PARAMS")
+    # This branch seeds by READING FIELDS off the decoded baseline structs, so unlike the
+    # warm-start branch every parameter "matches" whether or not the baseline estimated it:
+    # a field the baseline spec never freed still decodes, to unpack_θ's default. ξ_U is
+    # called out because it is the one that changed status in v29.0.0 — a baseline written
+    # before the restoration hands over ξ_U = 0 here and says nothing about it.
+    @printf("  Regime init: read %d fields from the baseline; ξ_U = %.10g (%s)\n",
+            length(free_params), up_base.ξ,
+            any(ps -> ps.block === :unsk && ps.name === :ξ, baseline_spec.free) ?
+                "estimated by the baseline" : "NOT in the baseline's free set — unpack_θ default")
     flush(stdout)
 
 else
@@ -568,7 +602,7 @@ else
 
     free_params = default_free_params()
 
-    _warmstart_jls = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
+    _warmstart_jls = estimate_path(WINDOW, W_SUFFIX)
 
     if INIT_MODE == :warmstart && isfile(_warmstart_jls)
         println("\n  INIT_MODE = :warmstart — loading prior parameter values from:")
@@ -608,7 +642,7 @@ else
                         # edge, so the seed is no longer the point that scored the
                         # prior Q — this is how a bound change turns a warm start
                         # into a cold one without any message.
-                        init_val == raw || push!(_ws_clamped, String(ps.name))
+                        init_val == raw || push!(_ws_clamped, "$(ps.block):$(ps.name)")
                         ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
                     end
                     for ps in free_params
@@ -618,7 +652,10 @@ else
                         n_matched, length(free_params))
                 # Names present in the prior run but absent here (or the reverse)
                 # silently fall back to ParamSpec defaults, so they are listed.
-                _ws_unmatched = [String(ps.name) for ps in free_params
+                # Block-qualified: μ, η, k, β, λ, ξ and σ_w each exist in BOTH blocks, so a
+                # bare name here is unreadable — it was a bare "ξ" that hid unsk:ξ falling
+                # back to its default after the v29.0.0 restoration.
+                _ws_unmatched = ["$(ps.block):$(ps.name)" for ps in free_params
                                  if !haskey(_ws_vals, (ps.block, ps.name))]
                 isempty(_ws_unmatched) ||
                     @printf("    Unmatched (kept at spec default): %s\n",
@@ -713,14 +750,14 @@ run_params = SMMRunParams(
     # Nx     : worker-type grid (Gauss-Legendre nodes on [0,1])
     # Np_U   : unskilled match-quality grid
     # Np_S   : skilled match-quality grid
-    Nx      = 120,
-    Np_U    = 120,
-    Np_S    = 120,
+    Nx      = 160,
+    Np_U    = 160,
+    Np_S    = 180,
 
     # ── Candidate-generation layer (used when INIT_MODE = :clusters) ──
-    cand_Nx          = 40,
-    cand_Np_U        = 40,
-    cand_Np_S        = 40,
+    cand_Nx          = 120,
+    cand_Np_U        = 120,
+    cand_Np_S        = 160,
     cand_n_sample    = 2048,
     cand_seed        = 42,
     cand_min_cluster = 5,      # min number of candidates per cluster (hclust leaf)
@@ -734,7 +771,7 @@ run_params = SMMRunParams(
     λ_w = LAMBDA_W,
 
     # ── Simulated annealing ──────────────────────────────────
-    sa_max_iter        = env_setting(:SA_MAX_ITER, 30_000),   # max SA iterations
+    sa_max_iter        = env_setting(:SA_MAX_ITER, 5_000),   # max SA iterations
     sa_T0              = 0.0,     # ≤0 ⇒ auto-calibrate: T0 solves
                                   # exp(−sa_t0_rel·Q0 / T0) = sa_t0_accept
     sa_step            = env_setting(:SA_STEP, 0.01),
@@ -747,7 +784,7 @@ run_params = SMMRunParams(
     sa_t0_rel          = env_setting(:SA_T0_REL, 1e-4),
                                   # move size, as a fraction of Q, that T0 keeps live;
                                   # 0.05 on a COLD start (see the note above)
-    sa_cooling_rate    = 1.0,     # logarithmic-schedule knobs, used only when
+    sa_cooling_rate    = 1.5,     # logarithmic-schedule knobs, used only when
     sa_cooling_exp     = 2.0,     # sa_halflife = 0 selects that branch
     sa_reheat_patience = 400,     # steps without improvement before a reheat, 0 to disable reheats
     sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
@@ -877,7 +914,7 @@ run_params = SMMRunParams(
     # the walk ends 2.66 above its best, inside one plateau cell. The gap-closing loss
     # is measured on a surrogate whose FLOOR IS the plateau, so it cannot represent
     # sub-plateau refinement and therefore cannot price what settling buys.
-    sa_halflife     = env_setting(:SA_HALFLIFE, 15_000),   # = sa_max_iter ÷ 2
+    sa_halflife     = env_setting(:SA_HALFLIFE, 2_000),   # = sa_max_iter ÷ 2
     nm_rate_tol     = env_setting(:NM_RATE_TOL, 0.05),
     nm_rate_span    = env_setting(:NM_RATE_SPAN, 300),
     nm_simplex_step = env_setting(:NM_SIMPLEX_STEP, 0.2),
@@ -990,6 +1027,30 @@ const SA_SCALE_P_MOVE = env_setting(:SA_SCALE_P_MOVE, 1.0)
 const SA_SCALE_PER_K  = env_setting(:SA_SCALE_PER_K, 0)
 const SA_SCALE_SIGMA  = env_setting(:SA_SCALE_SIGMA, 0.33)
 
+# ── LBFGS polish (§9) ──────────────────────────────────────────────────────
+# Annealing stops on a criterion-decrease rule, so it leaves the gradient large: measured
+# at v23.0.0 on base_fc, ‖dQ/dt‖ = 1206 at an SA optimum, with A at +806 and λ_S at −389.
+# That is not only a worse point than necessary — it invalidates the standard error, since
+# J⁻¹ = (G'WG)⁻¹ is a curvature AT a stationary point and carries no interpretation where
+# the gradient is that size.
+#
+# The stage is only viable from v23.0.0 on. While the training frontier was a 0/1 indicator
+# the criterion was a step function in the margin parameters: every derivative was exactly
+# zero over a neighbourhood (c had to move 0.026% of its value before a single grid cell
+# flipped), so no gradient method could move at all, and Nelder-Mead was measured closing
+# 0% of the gap. Both facts changed when the frontier became continuous.
+#
+# FD_STEP is measured, not conventional — see run_smm's fd_step. MAX_ITER counts LBFGS
+# iterations, each costing 2d + line-search solves, so ~200 is hours not minutes.
+const SMM_POLISH          = env_setting(:SMM_POLISH, true)
+const SMM_POLISH_FD_STEP  = env_setting(:SMM_POLISH_FD_STEP, 1e-6)
+const SMM_POLISH_MAX_ITER = env_setting(:SMM_POLISH_MAX_ITER, 200)
+# Stop on the gradient's ∞-norm, which is what a stationary point means. max|dQ/dt|
+# was 806 at the v23.0.0 annealed point, so 1.0 asks for three orders of magnitude.
+# Failing to reach it is safe: the iteration cap stops the run and the better of the
+# two points is kept either way.
+const SMM_POLISH_G_TOL    = env_setting(:SMM_POLISH_G_TOL, 1.0)
+
 # ============================================================
 # 8. Build SMM spec
 # ============================================================
@@ -1028,7 +1089,7 @@ seed_bank    = nothing
 prev_optimum = nothing
 
 if INIT_MODE == :clusters
-    cand_path = joinpath(SMM_OUT_DIR, "candidates_$(WINDOW)$(W_SUFFIX).jls")
+    cand_path = joinpath(out_estimates(), "candidates_$(WINDOW)$(W_SUFFIX).jls")
     seed_bank = load_or_generate_candidates(spec, cand_path;
                                             window      = WINDOW,
                                             force_regen = run_params.clusters_force_regen,
@@ -1082,7 +1143,7 @@ if INIT_MODE == :clusters
     # Optional guaranteed previous optimum.  Valid only if its free-parameter
     # (block, name) sequence AND fixed-parameter values match the current spec.
     if run_params.include_prev_optimum
-        _opt_jls = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
+        _opt_jls = estimate_path(WINDOW, W_SUFFIX)
         _opt = _load_smm_bundle(_opt_jls; delete_on_fail=false, label="previous optimum")
         if !isnothing(_opt)
             _o_free = [(ps.block, ps.name) for ps in _opt.spec.free]
@@ -1137,33 +1198,61 @@ println("Starting SMM optimisation..."); flush(stdout)
 # matches its run_params field exactly so check_forwarding.jl can pair them, and the
 # authoritative record of what SA received is the [SA config] line printed from inside
 # _sa_loop — not this call, and not print_spec.
-res = run_smm(spec; method = :sa_de, seed_bank = seed_bank, prev_optimum = prev_optimum,
+res = run_smm(spec; method = :sa, seed_bank = seed_bank, prev_optimum = prev_optimum,
               sa_scale_p_move = SA_SCALE_P_MOVE,
               sa_scale_per_k  = SA_SCALE_PER_K,
               sa_scale_sigma  = SA_SCALE_SIGMA,
               sa_halflife  = run_params.sa_halflife,
               sa_rate_tol  = run_params.sa_rate_tol,
               sa_rate_span = run_params.sa_rate_span,
-              checkpoint_path = joinpath(SMM_OUT_DIR,
-                                         "smm_result_$(WINDOW)$(W_SUFFIX).jls"))
+              checkpoint_path = estimate_path(WINDOW, W_SUFFIX))
+
+# Gradient polish from the annealed point. Whichever of the two has the lower Q is kept:
+# LBFGS descends monotonically in exact arithmetic, but the gradient here is a finite
+# difference on a criterion with residual roughness, so a run that wanders is a possible
+# outcome and must not overwrite a good point silently.
+if SMM_POLISH
+    @printf("\nPolishing with LBFGS from the annealed point (Q = %.6f, fd_step = %.1e)...\n",
+            res.loss_opt, SMM_POLISH_FD_STEP)
+    flush(stdout)
+    res_polish = run_smm(spec; method = :lbfgs,
+                         theta_start = copy(res.theta_opt),
+                         fd_step     = SMM_POLISH_FD_STEP,
+                         max_iter    = SMM_POLISH_MAX_ITER,
+                         g_tol       = SMM_POLISH_G_TOL)
+    if isfinite(res_polish.loss_opt) && res_polish.loss_opt < res.loss_opt
+        @printf("  polish ACCEPTED:  Q %.6f → %.6f   (ΔQ = %.6f)\n",
+                res.loss_opt, res_polish.loss_opt, res.loss_opt - res_polish.loss_opt)
+        res = res_polish
+    else
+        @printf("  polish REJECTED:  Q %.6f is not below %.6f — keeping the annealed point\n",
+                res_polish.loss_opt, res.loss_opt)
+    end
+    flush(stdout)
+end
 
 results = res
 
 # ============================================================
 # 10. Save results  
 # ============================================================
-mkpath(TABLES_DIR)
-mkpath(SMM_OUT_DIR)
+out_estimates()   # ensures the directory exists
 
-save_results(results, joinpath(TABLES_DIR, "smm_estimates_$(WINDOW)$(W_SUFFIX).csv"))
+# The CSV is a machine artifact and lives beside the bundle it describes. tables/ holds
+# .tex only, so a table directory can be deleted and regenerated without thinking.
+save_results(results, joinpath(out_estimates(),
+                               "smm_estimates_$(WINDOW)$(W_SUFFIX).csv"))
 
 # The .jls bundle is consumed by solver/plots.jl, the transition entry point
 # (transition/transition_main.jl), and MCMC standard errors (smm/MCMC_main.jl).
-smm_jls_path = joinpath(SMM_OUT_DIR, "smm_result_$(WINDOW)$(W_SUFFIX).jls")
+smm_jls_path = estimate_path(WINDOW, W_SUFFIX)
 prov = run_provenance(window = WINDOW, w_suffix = W_SUFFIX, version = ROYSEARCH_VERSION)
-open(smm_jls_path, "w") do io
-    serialize(io, (result = results, spec = spec, sim = sim_smm, provenance = prov))
-end
+# stage = :smm marks a FINISHED optimiser run, which is what distinguishes this file from
+# the :smm_checkpoint the same path receives at every reheat. Without the marker a consumer
+# cannot tell "the run stopped here" from "the run had reached here", and only the first is
+# an estimate. No standard errors: smm_main does not compute any.
+write_bundle(smm_jls_path; result = results, spec = spec, stage = :smm,
+             provenance = prov, sim = sim_smm)
 @printf("Serialized SMM result → %s\n", smm_jls_path)
 @printf("  provenance: schema %d, v%s, %s%s, git %s, host %s\n",
         prov.schema, prov.version, prov.window, prov.w_suffix,

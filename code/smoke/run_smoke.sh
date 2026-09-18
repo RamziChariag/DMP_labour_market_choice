@@ -4,7 +4,7 @@
 #   ./run_smoke.sh warmstart|clusters|guard
 #
 # Run from anywhere; paths resolve relative to this script.  Requires
-# data/derived/ and the paired baseline bundle in output/smm/.
+# data/derived/ and the paired baseline bundle in output/estimates/.
 set -euo pipefail
 cd "$(dirname "$0")"
 

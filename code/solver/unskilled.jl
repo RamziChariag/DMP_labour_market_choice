@@ -63,8 +63,11 @@ end
 # with the scalar tail integral I = ∫_{p*}^1 S dG solved analytically.
 # The exogenous separation ξ_U enters only the base rate: the worker's
 # +ξ_U U^search continuation and the firm's asset extinction combine to
-# −ξ_U S, which nets into the base, so the −(r+ν)U^search numerator (and
-# hence the reservation p*) is invariant to ξ_U (mirror skilled.jl ϱ_S).
+# −ξ_U S, which nets into the base (mirror skilled.jl ϱ_S).  The reservation
+# FORMULA in update_pstar_from_surplus! is therefore unchanged by ξ_U — no ξ
+# appears in it — but p* itself is not: it reads the tail integral I, which is
+# computed off this denominator.  Measured at the Q = 488 base_fc point,
+# ξ_U 0 → 0.00634 moves median p*_U from 0.4228 to 0.4582.
 # Soft thresholding around p* keeps S(·) continuous in p*.
 #
 # `PUeff` is the effective productivity A P_U aU already carrying exp(A)
@@ -180,15 +183,70 @@ function unskilled_inner_loop!(model::Model; US_in::AbstractVector{Float64})
         end
     end
 
-    # Training frontier τ(aU,aS) = 1{−c(aS) + T(aS) ≥ U^search(aU)}
+    # Training frontier τ(aU,aS): the POPULATION FRACTION of cell (aU,aS) that trains,
+    # from Utr(aS) = −c(aS) + T(aS) ≥ U^search(aU).
     # (2D; no d-gate — b_T discipline is by comparative advantage).
     # c(aS) is a psychological cost in fixed utility units — NOT scaled by A —
     # so the training margin shifts with the wage level rather than being scale-invariant.
-    @threads for j in 1:Nx
+    #
+    # Utr depends only on aS and U^search only on aU, and Utr is increasing in aS, so for
+    # each aU the training set is an upper interval in aS with a single crossing aS*(aU)
+    # solving Utr(aS*) = U^search(aU).  A hard 0/1 at the nodes made every composition
+    # aggregate a STEP FUNCTION of θ: a change in θ too small to move aS* past a node
+    # flipped no cell, so Σ τ·W2 was bit-identical and ∂m/∂θ was exactly zero for every
+    # moment.  Measured at v22.0.0: c had to move 0.026% of its value before one of 14400
+    # cells flipped, and Q then jumped by 0.18 — one cell is 0.18 sampling standard errors.
+    # τ is now the fraction of node j's midpoint interval lying above aS*, which is
+    # continuous and piecewise-linear in aS* and therefore in θ, and reduces to the old
+    # indicator whenever aS* sits on a node.
+    Utr = similar(uc.Usearch)
+    @inbounds for j in 1:Nx
+        Utr[j] = -training_cost(gp.x[j], cp.c) + uc.T[j]
+    end
+
+    xlo, xhi = node_midpoint_intervals(gp.x)
+
+    # Monotonicity of Utr is the maintained property (verified: 119/119 increments at the
+    # base_fc estimate).  Where it fails the crossing is not unique, so that case keeps the
+    # hard indicator rather than interpolating a crossing that means nothing — which
+    # confines the change to the boundary node exactly when the property holds.
+    Utr_monotone = true
+    @inbounds for j in 2:Nx
+        if Utr[j] < Utr[j - 1]
+            Utr_monotone = false
+            break
+        end
+    end
+
+    @threads for i in 1:Nx
         @inbounds begin
-            Utr_j = -training_cost(gp.x[j], cp.c) + uc.T[j]   # depends on aS = x[j]
-            for i in 1:Nx
-                uc.τT[i, j] = (Utr_j >= uc.Usearch[i]) ? 1.0 : 0.0      # aU = x[i]
+            us = uc.Usearch[i]                                  # aU = x[i]
+            if !Utr_monotone
+                for j in 1:Nx
+                    uc.τT[i, j] = (Utr[j] >= us) ? 1.0 : 0.0
+                end
+            elseif Utr[Nx] < us                                 # nobody at this aU trains
+                for j in 1:Nx
+                    uc.τT[i, j] = 0.0
+                end
+            elseif Utr[1] >= us                                 # everybody at this aU trains
+                for j in 1:Nx
+                    uc.τT[i, j] = 1.0
+                end
+            else
+                j0 = 2
+                while j0 < Nx && Utr[j0] < us
+                    j0 += 1
+                end
+                dU  = Utr[j0] - Utr[j0 - 1]
+                aS  = dU > 0.0 ?
+                      gp.x[j0 - 1] + (us - Utr[j0 - 1]) * (gp.x[j0] - gp.x[j0 - 1]) / dU :
+                      gp.x[j0]
+                for j in 1:Nx
+                    w = xhi[j] - xlo[j]
+                    uc.τT[i, j] = w > 0.0 ? clamp((xhi[j] - aS) / w, 0.0, 1.0) :
+                                            (gp.x[j] >= aS ? 1.0 : 0.0)
+                end
             end
         end
     end
@@ -224,13 +282,13 @@ function solve_stationary_unskilled!(
         denom  = f_hire + δ + ν
         usurv  = denom > 0.0 ? (δ + ν) / denom : 0.0
         for j in 1:Nx                             # aS index
-            if τ[i, j] > 0.5
-                u_out[i, j] = 0.0
-                t_out[i, j] = ν * W2[i, j] / (φ + ν)
-            else
-                u_out[i, j] = W2[i, j] * usurv
-                t_out[i, j] = 0.0
-            end
+            # τ is the population fraction of the cell that trains, so the cell's weight
+            # splits between the two branches rather than being assigned wholly to one.
+            # Thresholding at 0.5 here would discard the fractional boundary node and put
+            # the step function back, whatever the frontier does upstream.
+            τij = clamp(τ[i, j], 0.0, 1.0)
+            u_out[i, j] = W2[i, j] * usurv * (1.0 - τij)
+            t_out[i, j] = ν * W2[i, j] / (φ + ν) * τij
         end
     end
     return nothing

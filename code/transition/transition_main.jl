@@ -31,9 +31,12 @@
 const SCENARIOS = [:fc, :covid]
 
 # Weight-matrix mode used when the SMM results were estimated — must match
-# the W_COND_TARGET set in smm/smm_main.jl.
+# the W_COND_TARGET set in smm/smm_main.jl, whose default is 0.0 and under
+# which every shipped estimate bundle was produced.  A mismatch is not a
+# silent one: estimate_path() names a file that is not on disk and the run
+# stops at the first load.
 #   0.0 → "_diagonalW"   1.0 → "_compressedW"   2.0 → "_equalW"   >2.0 → "_fullW"
-const W_COND_TARGET = 2.0
+const W_COND_TARGET = 0.0
 
 # Simulation switch
 #   true  → always (re)run the transition simulation for every SCENARIO
@@ -56,7 +59,7 @@ const TR_T_MAX   = 120.0   # model months (10 years)
 const TR_N_STEPS = 240     # half-month steps
 const TR_TOL     = 1e-4
 const TR_MAXIT   = 200
-const TR_DAMP    = 0.3
+const TR_DAMP    = 0.3   # matches the TransitionParams default; see its docstring
 
 # ═══════════════════════════════════════════════════════════
 # 2. PACKAGES
@@ -88,12 +91,16 @@ println("done."); flush(stdout)
 # 3. PATHS  (single source of truth — sub-scripts re-use these)
 # ═══════════════════════════════════════════════════════════
 const TRANSITION_DIR = @__DIR__
-const PROJECT_ROOT   = joinpath(TRANSITION_DIR, "..", "..")
-const SOLVER_DIR     = joinpath(TRANSITION_DIR, "..", "solver")
-const SMM_DIR        = joinpath(TRANSITION_DIR, "..", "smm")
-const OUTPUT_DIR     = joinpath(PROJECT_ROOT, "output")
-const SMM_OUT_DIR    = joinpath(OUTPUT_DIR, "smm")
-const TRANS_OUT_DIR  = joinpath(OUTPUT_DIR, "transition")
+const CODE_ROOT      = normpath(joinpath(TRANSITION_DIR, ".."))
+const SOLVER_DIR     = joinpath(CODE_ROOT, "solver")
+const SMM_DIR        = joinpath(CODE_ROOT, "smm")
+const PT_DIR         = joinpath(CODE_ROOT, "plots_and_tables")
+# paths.jl is the sole definition of PROJECT_ROOT, OUTPUT_DIR and the out_*()
+# accessors. Declared in seven files before v19.6.0, two of them behind
+# !@isdefined guards, so the effective value depended on include order.
+include(joinpath(CODE_ROOT, "paths.jl"))
+const SMM_OUT_DIR    = out_estimates()
+const TRANS_OUT_DIR  = out_transition()
 const PLOTS_DIR      = joinpath(OUTPUT_DIR, "plots")
 const TABLES_DIR     = joinpath(OUTPUT_DIR, "tables")
 const DERIVED_DIR    = joinpath(PROJECT_ROOT, "data", "derived")
@@ -131,6 +138,7 @@ println("done."); flush(stdout)
 
 print("Loading transition modules... "); flush(stdout)
 include(joinpath(TRANSITION_DIR, "transition_params.jl"))
+include(joinpath(TRANSITION_DIR, "transition_values.jl"))
 include(joinpath(TRANSITION_DIR, "transition_solver.jl"))
 println("done."); flush(stdout)
 
@@ -139,8 +147,8 @@ println("done."); flush(stdout)
 # ═══════════════════════════════════════════════════════════
 print("Loading simulation / panel / table sub-scripts... "); flush(stdout)
 include(joinpath(TRANSITION_DIR, "transition_simulation.jl"))
-include(joinpath(TRANSITION_DIR, "transition_panel.jl"))
-include(joinpath(TRANSITION_DIR, "plots_and_tables.jl"))
+include(joinpath(PT_DIR, "transition_panel.jl"))
+include(joinpath(PT_DIR, "transition.jl"))
 println("done."); flush(stdout)
 
 # ═══════════════════════════════════════════════════════════

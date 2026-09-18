@@ -158,12 +158,14 @@ function solve_model!(model::Model)::SolveResult
         sc.m_S = mS_new
         mS_cur = mS_new
 
-        # G. Refresh the cross-market contribution for the next pass.
-        #    u_S(aU,aS) = û(aS) m_S(aU,aS) on d=0 cells, = m_S on d=1 cells.
+        # G. Refresh the cross-market contribution for the next pass.  Only the
+        #    draining fraction seeks in the U-market, and all of its mass is
+        #    unemployed there, so the carry is d·m_S.  Thresholding d at 0.5 to
+        #    pick a branch would discard the fractional boundary node and put the
+        #    step function back, whatever the producer does upstream.
         @inbounds for j in 1:Nx, i in 1:Nx
             dij = clamp(sc.d[i, j], 0.0, 1.0)
-            uS_ij = dij > 0.5 ? mS_new[i, j] : sc.u_frac[j] * mS_new[i, j]
-            uc.duS_carry[i, j] = max(dij * uS_ij, 0.0)
+            uc.duS_carry[i, j] = max(dij * mS_new[i, j], 0.0)
         end
 
         dU = supnorm(US_new, US_old)

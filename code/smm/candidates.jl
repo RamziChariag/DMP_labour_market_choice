@@ -89,7 +89,7 @@ function _hclust_labels(X::AbstractMatrix{Float64}, min_cluster::Int)
     @inbounds for i in 1:m
         for j in i+1:m
             s = 0.0
-            for k in 1:size(X, 1)
+            for k in axes(X, 1)
                 s += (X[k, i] - X[k, j])^2
             end
             dij = sqrt(s)
