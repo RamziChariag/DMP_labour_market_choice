@@ -8,4 +8,4 @@
 # disagree with another.
 ############################################################
 
-const ROYSEARCH_VERSION = "35.1.0"
+const ROYSEARCH_VERSION = "38.3.0"

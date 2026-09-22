@@ -35,6 +35,676 @@ measurement was, not just the verdict.
 
 ---
 
+## v38.3.0 — 2026-09-22
+
+**MINOR: the SMM header stops reporting parameter counts, which were duplicated and wrong.**
+House rule applied: a print says a thing once. The spec tables a few lines below list every
+free and fixed parameter with its bounds and value, so the counts above them were the same
+information in a worse form — and, because they were taken at the wrong point in the
+pipeline, a *different* number.
+
+Removed:
+
+- `smm_main.jl` — `Fixed params: N | Free params: N`. `free_params` there is the CANDIDATE
+  list, before `build_smm_spec` drops whatever `FIX_PARAMS` and the external calibration pin,
+  so it read **29** against the spec table's **23**.
+- `smm_main.jl` — `FIX_PARAMS pinned (N): ...`. The same parameters appear in the spec's Fixed
+  table with their values.
+- `smm_params.jl` — `SMMSpec: fixed override dropped free params: ...`. Same information
+  again, and it printed the ASCII `name` field, which duplicates across markets — the line
+  read `bT, PU, η, η, σ_w, σ_w`, two of each, which looks like a defect and is not one.
+- `smm_main.jl` — `Baseline mode: all structural + regime params are FREE (N total)` no longer
+  carries a count. It was the same pre-pin 29, and the sentence asserted that all of them are
+  free, which is false whenever `FIX_PARAMS` is non-empty. It now states what the list is:
+  candidates for the free set.
+
+**Still there, and not changed here:** the warm-start line reads
+`matched 23 / 29 parameters from prior run` with
+`Unmatched (kept at spec default): unsk:bT, unsk:PU, unsk:η, skl:η, unsk:σ_w, skl:σ_w`. The
+ratio is genuinely informative — it says how much of the free set the prior bundle supplied —
+but the denominator is the same pre-pin 29, and **"kept at spec default" is wrong for those
+six**: they are pinned by `FIX_PARAMS` or set by the calibration, not left at a spec default.
+Left alone because the line carries real information and rewording it is a judgement about
+what the author wants it to say.
+
+**A worked acceptance example, at the restored `base_fc` point, 23 free parameters.** One
+chain position and one DE-MC proposal built as `demc.jl` builds it, at two population
+spreads. `logπ = −Q/2 + Σ log|dθ_k/dt_k|`, and acceptance is `min(1, exp(Δlogπ))`.
+
+| | largest step in t | Q | −Q/2 | log&#124;jac&#124; | logπ | Δlogπ | α |
+|---|---|---|---|---|---|---|---|
+| current position | — | 1071.079481 | −535.539741 | −42.872103 | −578.411843 | — | — |
+| proposal, spread 2e-3 | 1.92e-03 | 1071.943589 | −535.971794 | −42.871717 | −578.843511 | −0.431668 | **0.649** |
+| proposal, spread 2e-2 | 1.90e-02 | 1356.853909 | −678.426954 | −42.866498 | −721.293452 | −142.881609 | **0.000** |
+
+Both moved 18 of 23 coordinates at `γ = 0.2805`. **The Jacobian term is negligible** — 0.09%
+and 0.004% of `|Δlogπ|` — so in practice the only thing that moves the log-posterior is the
+weighted moment misfit. A 9.9x larger step raises `ΔQ` by **331x** (0.864 to 285.8), an
+implied `ΔQ ∝ step^2.53` on these two points, and `α = exp(−ΔQ/2)` turns that into 0.649
+against zero.
+
+`Q` is additive over moments, so `ΔQ` attributes exactly. At the well-scaled step the five
+largest contributions are `ur_S` −3.87, `usurv27_S` +2.89, `usurv53_S` +2.05, `p50_wage_S`
++1.74, `usurv5_S` −1.46 — **each several times the +0.864 total**, so the moments largely
+cancel. At the oversized step `theta_U` alone contributes +183.55 of +285.77.
+
+**What this implies for the aborted run.** The restored point is well behaved at the right
+step: `α = 0.649` at a spread of 2e-3 is if anything slightly too high. Taking the
+Roberts-Gelman-Gilks 0.234 optimum, which needs `ΔQ = 2.905`, the two-point exponent puts the
+target spread at **3.2e-03**. The aborted run was at 2.06e-02 by generation 250 — **6.4x too
+wide** — implying `MCMC_GAMMA_SCALE ≈ 0.16`.
+
+**Known gaps.**
+
+- The exponent is fitted on two points and the target spread inherits that. It is a starting
+  value for a short run, not a calibration.
+- Still no run with `MCMC_GAMMA_SCALE < 1.0`.
+- The two proposals share a seed and a mask, so they differ only in spread; they are one
+  comparison, not a distribution over proposals.
+
+---
+
+## v38.2.0 — 2026-09-22
+
+**MINOR: the periodic block prints only what a decision is taken on, and `sprd` names the
+widest coordinate.** Prompted by a real run: the 4,000-generation `base_fc` attempt was
+aborted at generation 750 and the console could not answer the one question being asked of
+it.
+
+**Dropped from the periodic block:** the running mean and best-point parameter VECTORS. At
+d = 23 those were two unlabelled 23-number rows per block, in two different spaces, that no
+decision is taken on — and the estimator writes the same quantities to
+`mcmc_results_<window><suffix>.csv` with labels, quantiles and standard errors. The
+`mean (θ)` / `mean (t)` pair went with them; the distinction it recorded (their print
+averages raw stored values, the paper's estimator averages constrained draws) is settled in
+the estimator itself and documented at `MCMC_main.jl`. **Kept:** the five-way accept/reject
+breakdown, which cannot be recovered afterwards and is the reason to watch a live run.
+
+**The header now reads `gen N, last K generations`** rather than LMR's literal `LOOP N`. The
+label was copied from `mpi_mcmc_mod.f90` for fidelity, but every other line in this log
+counts generations, and two names for one quantity is a defect whatever its provenance.
+
+**`sprd` now reports the widest coordinate by name**, e.g.
+`sprd=3.33e-02 (widest b_S 9.62e-02)`. The average alone was actively misleading, and the
+run that prompted this shows why: at generation 500 the per-coordinate population sd ranged
+over a factor of **30**, from `A` at 3.21e-03 to `b_S` at 9.62e-02. `run_demc` takes a new
+`labels` keyword for this, defaulting to `nothing` and falling back to the coordinate index.
+The v38.1.0 entry named this limitation as a known gap; it took one run to bite.
+
+**Fixed: the outlier count in the block was two different quantities under one label.**
+`n_replaced` counts chains; `count(replaced[:, lo:g])` counts chain-GENERATION cells, and a
+replacement marks the replaced chain's whole trailing window — so the window figure exceeded
+the run figure (5 against 1 in a 14-chain test). The window now counts distinct chains.
+
+**What the aborted run established, from its own snapshot.** The population was **not frozen**
+— `moved` read 120/120 at generations 250 and 500 and 112/120 at 750. It was **diffusing**:
+
+| gen | acc | moved | sprd | dlp | esjd | max logπ |
+|---|---|---|---|---|---|---|
+| 250 | 0.181 | 120/120 | 2.06e-02 | −4.37 | 1.347 | −537.66 |
+| 500 | 0.026 | 120/120 | 3.33e-02 | −22.53 | 0.123 | −535.36 |
+| 750 | 0.016 | 112/120 | 4.53e-02 | −41.80 | 0.077 | −534.83 |
+
+`sprd` rising monotonically with no sign of levelling, the median proposal's `Δlogπ` at −41.8
+(acceptance probability e^−41.8, so the realised 0.016 is carried entirely by a tail), `esjd`
+down 17-fold, and `max logπ` still IMPROVING — the chain was still descending, not sampling.
+
+**The per-coordinate spread identifies which directions are diffusing, and they are the
+directions the identification work already flagged.** Growth from generation 1 to 500, sd in
+t-space: `b_S` 1960x, `δ_S` 1650x, `ξ_U` 1130x, `σ_S` 1003x, `α_U` 898x, `b_Γ` 886x, `ρ_x`
+885x, `β_U` 817x — against `A` 61x and `c` 71x at the other end. The population expands where
+the criterion is flat and stays tight where it is not.
+
+**The consequence is a limit on the chain route itself, and it belongs on the record.** The
+widest coordinate sat at 0.48% of the ±20 prior box after 500 generations and was still
+growing. `logposterior` already documents why there is nothing to stop it — Q agrees to ten
+significant figures between t₀+40 and t₀+80, and the half-line `t_bS ≤ t₀−5` is within 0.004
+of the optimum — so in those directions the quasi-posterior is the PRIOR BOX, and a posterior
+sd computed there measures `MCMC_T_BOX`, not the data. That is the mirror image of the
+`pinv` failure the chain was adopted to escape: fake certainty there, fake uncertainty here.
+**The chain reports non-identification honestly as a wide interval, but the width is a
+modelling choice, not an estimate.**
+
+**Known gaps.**
+
+- Still no run with `MCMC_GAMMA_SCALE < 1.0`. The aborted run's numbers imply a step of
+  0.248·√2·4.53e-02 ≈ 1.6e-02 against a usable 1e-03, but the equilibrium spread is an
+  outcome of the recursion rather than a fixed multiple of the step, so the required value
+  cannot be read off directly.
+- Lowering the scale addresses MIXING, not identification. A well-mixed chain would give
+  genuine posterior sds for the coordinates the criterion actually constrains and box-width
+  intervals for the rest; nothing here makes the second group reportable.
+- The abort at 750 means no window has a v38 chain estimate.
+
+---
+
+## v38.1.0 — 2026-09-21
+
+**MINOR: `moved` and `sprd` on the live `[demc]` progress line.** Two diagnostics, no
+behaviour change, no new setting, nothing gated on either. They exist so a run that is going
+nowhere can be recognised from the console rather than from the bundle afterwards.
+
+- **`moved=n/N`** — how many chains accepted at least one move in the print window. `acc` is
+  a rate over proposals and cannot separate "every chain crawling" from "a few alive and the
+  rest frozen", and those call for opposite responses: the second is what the outlier rule
+  exists to repair. On the 2026-08-31 run, 47 of 95 chains made no move at all in the
+  retained window while `acc` read 0.008 — only this number shows that.
+- **`sprd`** — mean per-coordinate population sd, the quantity the DE step is built from.
+  Rising means the population is still finding its scale; flat means it has settled, and
+  whether it settled somewhere usable is the whole question. `spread_growth` already existed
+  but is computed at `MCMC_main.jl:1331`, i.e. only after the run, so the diagnostic was
+  invisible while it mattered.
+
+**The calibration that makes `sprd` readable.** The proposal step is
+`γ·(X_r1 − X_r2)`, and with `γ = 2.38/sqrt(2·δ·n_masked) ≈ 0.29` at `δ = 2` and ~17 of 23
+coordinates masked in, the per-coordinate step sd is about **0.41·sprd**. Against the
+v37.3.0 perturbation scan — a step of 1e-3 accepted 45% of the time, 1e-2 accepted 4e-06 of
+the time — that puts the usable band at **`sprd` ≈ 2-3e-3** and the dead zone at
+**`sprd` ≳ 1e-2**.
+
+A 14-chain, 24-generation smoke run at the restored `base_fc` point confirms the whole
+picture is coherent, and shows the inflation phase doing exactly what it should:
+
+```
+gen  6/24  acc=0.726  moved=14/14  sprd=2.11e-04  dlp=-0.01  esjd=10.683
+gen 12/24  acc=0.786  moved=14/14  sprd=6.41e-04  dlp=-0.08  esjd=12.486
+gen 18/24  acc=0.631  moved=14/14  sprd=8.76e-04  dlp=-0.16  esjd=3.897
+gen 24/24  acc=0.595  moved=14/14  sprd=1.25e-03  dlp=-0.36  esjd=4.453
+```
+
+`sprd` climbing, `acc` falling from 1, `dlp` growing more negative, every chain moving. At
+`sprd = 1.25e-03` the implied step is 5.1e-04 and the observed `acc = 0.595`, which is where
+the scan puts it — so the scan, the calibration and the sampler agree.
+
+**Known gaps.**
+
+- 24 generations is the inflation phase and says nothing about where the spread settles. It
+  establishes that the diagnostics are correct and the run starts healthy, not that it stays
+  healthy.
+- `sprd` averages over coordinates, so it cannot show a population that is wide in the flat
+  directions and collapsed in the sharp ones. The per-coordinate version of that is
+  `spread_growth` in the results CSV, still end-of-run only.
+
+---
+
+## v38.0.0 — 2026-09-21
+
+**MAJOR: the v36 specification is reverted. Two distinct per-market flow values and both
+bargaining weights free, exactly as before v36.** `common.b` and the `b(x) = b*x*exp(A)`
+loading are gone; `up.bU`, `up.bT` and `sp.bS` are back as flat scalars added to the value
+functions, `beta_U` is free again, and the free set returns to 23.
+
+**This is a file-level revert, not a rewrite.** The solver and SMM spec files were restored
+verbatim from commit `645c3e0` ("all 23 params free, huge standard errors"), which is the
+pre-v36 state: `code/solver/{params,unskilled,skilled,equilibrium,model_main}.jl`,
+`code/smm/{smm_params,smm_main,settings}.jl`, `code/transition/transition_values.jl`,
+`code/plots_and_tables/transition.jl`, `code/tools/{migrate_bundles,width_audit}.jl`.
+**`code/mcmc/` was deliberately NOT reverted**, so v37.1-37.3 (the LMR-faithful defaults, the
+LMR print block, `outcome`, `on_dump`, `MCMC_GAMMA_SCALE`, the theta-space posterior mean)
+survive intact. Two spec-independent fixes were re-applied by hand after the checkout,
+because the revert swept them away with the files they lived in:
+
+- `migrate_bundles.jl` defines `const WINDOWS`, which `paths.jl:48` owns, so the tool will
+  not load at all. Its own selection is `MIG_WINDOWS`, defaulting to the `paths.jl` list.
+- the `MCMC_LMR_PRINT` and `MCMC_GAMMA_SCALE` rows in `SETTINGS_REGISTRY`, which describe
+  settings consumed in `code/mcmc/` and are unrelated to the specification.
+
+**ACCEPTANCE TEST: the restored bundle reproduces its stored objective to 2.96e-12.**
+`output/estimates/estimate_base_fc_diagonalW.jls` was restored from the same commit —
+provenance version 35.1.0, stage `smm`, 23 free parameters, `loss_opt = 1074.224541` — and
+re-evaluating `smm_objective` at its `theta_opt` under the reverted code returns
+**1074.224541**. Same model, same criterion, same value: the revert is exact, and no
+translation or migration was needed anywhere.
+
+The free set reads `A P_S a_Gamma a_ell b_S b_U b_Gamma b_ell c k_S k_U alpha_U beta_S beta_U
+delta_S lambda_S lambda_U mu_S mu_U xi_S xi_U rho_x sigma_S`, with `bT = 0.0` among the fixed
+entries.
+
+**`b_T` returns as a fixed-at-zero entry, which is what it always was.** The v36 purge removed
+a `ParamSpec` that `FIX_PARAMS` already pinned at zero, so the training value function at
+`645c3e0` is `(0 + phi*U_S)/(r+phi+nu)` — numerically identical to the v36 form that dropped
+the term. Reverting therefore resurrects a dead entry, not a live parameter, and the model is
+unchanged by its presence.
+
+**Why the reversion is justified, since v36.0.0 argued the other way.** The v36 restrictions
+were imposed to rescue the DERIVATIVE-based standard errors: freeing `beta_U` put it entirely
+in the discarded subspace of the truncated `pinv` (retained-variance fraction 0.0000 while
+reporting `|t| = 13.3`) and inflated the measured derivative noise floor 16x. Both harms are
+properties of `se_bound = f(Ghat, Jhat^-1)`. With the chain as the estimator there is no
+`Ghat`, no `pinv` and no noise floor, so the justification does not survive the change of
+estimator. Under chain-based standard errors an unidentified coordinate reports a WIDE
+posterior SD, which is the honest result, rather than a spuriously tight `se_bound`.
+
+A second v36-era claim also falls: that the free-parameter count and the acceptance collapse
+were the same problem. The v37.3.0 scan settles it — at a correct step, moving 20 coordinates
+instead of 1 costs a factor of 1.9 in acceptance, so 23 coordinates is nearly free.
+
+**Notes.** No revert was required. The v36 notes were delivered as artifacts and never
+installed into `latex/`, so `latex/roysearch_model_notes.tex` and `latex/data_and_moments.tex`
+still carry `b_T`, `b_U` and `b_S` and contain no v36 language. They are, however, OLDER than
+the copies the author pasted on 2026-09-20 — `data_and_moments.tex` by about 17,000
+characters — so the repository copies are not the working versions.
+
+**Comparability.** Every `Q` under v35.1.0 and earlier is directly comparable again, which is
+the point of a verbatim revert. The v36 and v37 `Q` values are not comparable to these, and
+the v37 `base_fc` bundle that the restored file replaced is the only record of that
+specification's estimate; it is preserved in the git object store at the prior working-tree
+state and in `.migration/` as the version-neutral intermediates.
+
+**Known gaps.**
+
+- No window has been re-estimated under v38. The restored `base_fc` point is the v35.1.0
+  estimate, which is where the `se_bound` work started and is a seed, not a new result.
+- `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` remains an obsolete `SETTINGS_REGISTRY` row, pre-existing
+  and untouched.
+
+---
+
+## v37.3.0 — 2026-09-21
+
+**MINOR: the DE scale is a settable constant, and the acceptance collapse now has a measured
+cause.** `MCMC_GAMMA_SCALE` (new, default 1.0 = ter Braak's and LMR's value) multiplies
+2.38/sqrt(2*delta*n_masked). One constant, no feedback loop; `MCMC_GAMMA_ADAPT` reaches the
+same place adaptively and stays off by default.
+
+**The measurement that motivates it.** A perturbation scan at the v37 `base_fc` point, 150
+solves, asking directly what step the Metropolis rule will accept (alpha = min(1, exp(-dQ/2))):
+
+| coordinates moved | step 1e-4 | 1e-3 | 1e-2 |
+|---|---|---|---|
+| 1 | 0.998 | 0.886 | 0.799 |
+| 5 | 0.997 | 0.739 | 0.266 |
+| 20 | 0.961 | **0.455** | **4.1e-06** |
+
+Three things follow, and two of them retract earlier claims in this file.
+
+- **The posterior is not a spike, and seeding at the optimiser's point is not the problem.**
+  Moving all 20 coordinates by 1e-3 is accepted 45.5% of the time — above the
+  Roberts-Gelman-Gilks optimum of 0.234. A well-scaled chain would mix here. At 1e-4 the
+  median dQ is NEGATIVE at k = 5 and k = 10, so theta_hat is not a local minimum at the
+  solver's own resolution, which is the arithmetic behind "the optimiser keeps wiggling".
+- **The usable step is ~1e-3 and the population settles near 1e-2** (measured: spread grew
+  4.5e-04 to 1.03e-02 over 60 generations, still rising). The standard gamma therefore
+  overshoots the band by roughly a factor of 4 on this model. That, not the start and not the
+  dimension, is the collapse.
+- **`MCMC_CR` is NOT the fix, and the claim that it was is withdrawn.** At the right step,
+  going from 1 to 20 coordinates costs a factor of 1.9 in acceptance; at the wrong step it
+  costs a factor of 194,285. The coordinate count only matters once the step is already too
+  large. **The corollary is that the free-parameter count is nearly free**: 23 coordinates
+  instead of 20 is worth a few percent of acceptance at a correct step, so "the spec choice
+  and the acceptance problem are the same choice" was wrong and is withdrawn.
+
+**Two claims about LMR corrected, from their own files.**
+
+- **They seed at their published estimate.** `estimation_ed1_no_growth/data/starting_val.raw`
+  holds 16 unconstrained values; pushed through their own transforms
+  (`read_MCMC_chain.m:65-79`) all **14 comparable entries reproduce Table 5 to every digit
+  the paper prints** (max |diff| 4.3e-04): eta 0.650, s 0.332, xi 0.011, delta 0.017, b 0.122,
+  c 2.344, A 6.964, alpha 0.607, rho 0.938, beta 0.188, sigma^2 0.006, and both Beta shapes.
+  So the shipped configuration starts the chain AT the answer. Seeding from an optimiser
+  output is their practice too, and "LMR hand-calibrated a cold start" is withdrawn.
+- **Their objective is not smoother than ours.** Earlier entries lean on a contrast between
+  their smooth simulated criterion and our C0-kinked one. Simulated moments under common
+  random numbers are piecewise CONSTANT in theta wherever a simulated agent's discrete choice
+  flips, which is rougher than a kink, and the scan above shows our own criterion is locally
+  very well behaved (alpha = 0.998 at a 1e-4 step). The contrast does not support the weight
+  put on it.
+
+**Known gaps.**
+
+- No value below 1.0 has been RUN. The scan says where the step should land; it does not
+  establish that a fixed lower gamma holds the population there, because the equilibrium
+  spread is an outcome of the whole recursion. A short two-arm comparison at 1.0 against
+  ~0.3 is the test.
+- The scan omits the log-Jacobian term of logpi, which is second order in the step at an
+  interior point but not zero.
+
+---
+
+## v37.2.0 — 2026-09-21
+
+**MINOR: `MCMC_main.jl` now runs the LMR-faithful chain by default.** No script, no
+environment block — `julia --project=. -t 10 code/mcmc/MCMC_main.jl` is the run. The
+`run_lmr_chain.sh` launcher added in v37.1.0 is **removed**; a launcher that duplicates the
+defaults is a second place to keep them correct.
+
+**Defaults changed.** Each comment was rewritten where the old justification argued for the
+old value; the accreted budget block above `MCMC_N` was rewritten whole rather than patched.
+
+| setting | was | now | why |
+|---|---|---|---|
+| `MCMC_N` | 95 | **120** | 6.0 chains per free parameter at d = 20, against LMR's 6.25 at d = 16 |
+| `MCMC_GENS` | 10 000 | **4 000** | ~48 h at the measured 43 s/generation; theirs is 94 h |
+| `MCMC_BURN` | 0.9 | **0.75** | their retained quantity is the last **1 000 generations**, absolute; 0.9 of 4 000 keeps 400 |
+| `MCMC_JAC_ONLY` | true | **false** | the chain is the estimator now, not the local design |
+| `MCMC_GAMMA_ADAPT` | true | **false** | no step-size brake in their sampler |
+| `MCMC_GAMMA_EVERY` | 25 | **0** | same |
+| `MCMC_CHECK_EVERY` | 250 | **0** | they compute no R̂, no ESS, no MCSE anywhere |
+| `MCMC_LMR_PRINT` | 0 | **500** | their `stat_display_rate` |
+
+`MCMC_ACC_FLOOR`, `MCMC_MOVES_MIN`, `MCMC_DRIFT_FLAT` and `MCMC_MCSE_TARGET` keep their own
+justified values and are **inert** while `MCMC_CHECK_EVERY = 0`, because they are that stop's
+thresholds rather than independent checks. One switch turns the stop off and each threshold
+keeps its reasoning for when it is back on. Reverting `MCMC_ACC_FLOOR` to 0 would discard the
+argument recorded at its declaration — that it ends a dead ten-hour run at the first check —
+and that argument is still right; it is simply not this estimator's to apply, since a chain
+whose acceptance is falling is not yet a chain that has failed.
+
+**`on_dump`, a new `run_demc` callback, closes a real exposure this change opens.** With no
+abort, a run ends when the operator ends it, and `MCMC_CHECKPOINT` saves the best POINT and
+never the draws — so a hand-stopped run would have left nothing the estimator can read. The
+existing `snapshot_chain` is now called periodically at the `lmr_print` cadence, which is
+LMR's own structure: their `if (op%dump_chain)` sits inside the `stat_display_rate` block
+(`mpi_mcmc_mod.f90:459-468`), so a printed block and the draws behind it always correspond.
+Suppressed at `g == gens`, where the caller writes its own snapshot.
+
+**What the August chain says about this estimator, measured from the bundle.** These are the
+numbers the settings above have to survive, and they are not reassuring:
+
+| | |
+|---|---|
+| accepted moves, whole run | **5 768** of 95 000 proposals (6.07%) |
+| accepted moves, **retained window** | **77** of 9 500 (0.81%) |
+| per chain in the retained window | **0.81** (min 0, median 1, max 4) |
+| chains that never moved in the retained window | **47 of 95** |
+| distinct values per coordinate, pooled retained sample | **157** of 9 500 draws (1.65%) |
+
+and the moves are front-loaded exactly as the author observed: 3 621 in generations 1–100,
+decaying monotonically to 77 in 901–1 000. **So the retained window is the part of that run
+with the fewest moves, not the most.** Burn-in discards the early generations because they
+depend on the start; that logic presupposes stationarity, and a chain still descending has
+not reached it. The consequence is visible in the reported table: `se_chain` of 3.2e-04 on
+`a_ℓ` with `|t| = 4230`, and 1e-05 on `b_ℓ` with `|t| = 4.8e+05`. **Those are the spread of a
+frozen population, not a posterior standard deviation.** Near-zero acceptance in the
+retained window manufactures precisely the spurious precision the `se_bound` work was trying
+to avoid, by a different route.
+
+**Known gaps.**
+
+- **Nothing here makes the chain stay alive.** It records LMR's acceptance breakdown so the
+  failure is visible — a high strong-accept share means the chain is still climbing — and
+  dumps the draws so a hand-stop is recoverable. Neither keeps acceptance up. On the
+  evidence above, the LMR-exact configuration applied to this model produces a frozen
+  population, and the knob that addresses it within their own parameterisation is `MCMC_CR`:
+  at 0.75 each proposal perturbs ~15 of 20 coordinates and all must be jointly acceptable,
+  so acceptance falls geometrically in the number moved. Lowering it trades per-coordinate
+  mixing for far more accepted moves. **Untested here.**
+- The `check_structure.jl` net-depth finding on `demc.jl` grows again for the same reason as
+  in v37.1.0: the gate counts every `for` as a block opener and comprehensions have no `end`.
+  Julia's parser accepts the file.
+- `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` remains an obsolete registry row, pre-existing.
+
+---
+
+## v37.1.0 — 2026-09-21
+
+**MINOR: an LMR-faithful chain can now be launched from one script, and it reports what LMR
+report.** Nothing about the model, the moments or the objective changed; stored bundles load
+unchanged and every `Q` stays comparable.
+
+**Why this exists.** The reported standard errors come from `Ĵ = Ĝ'WĜ`, a numerical
+derivative of a criterion with C⁰ kinks from the grid cutoff softening, and the derivative is
+the weakest link: `cond(Ĵ) = 6.35e+11`, `σ_min` below the measured derivative noise floor,
+and one coordinate's finite-difference step capped at 1.6e-04 of its box by the distance to a
+bound. Lise, Meghir and Robin (2016, RED) footnote 21 hit the same wall and resolved it by
+abandoning the derivative: *"Because of the lack of precision in the numerical approximation
+of the gradient G(θ) … we report the variance of the MC chain."* Their estimator needs no
+derivative at all, and Appendix C states it exactly:
+
+> "In practice, we simulate 100 chains in parallel, each of length 10,000, and use the last
+> 1000 elements (pooled over the 100 chains) to obtain parameter estimates and the standard
+> errors."
+
+**`run_lmr_chain.sh`** (new, repo root) is the one named entry point for that run. It hard-sets
+every setting rather than reading the ambient environment, so the configuration is
+reproducible from the file alone; `--smoke` is the single documented exception, running 12
+chains × 10 generations to exercise the whole path.
+
+*What it switches OFF.* Every mechanism this codebase added after a run of ours misbehaved,
+because none has a counterpart in LMR's sampler and with them on the estimator is not theirs:
+`MCMC_GAMMA_ADAPT`, `MCMC_GAMMA_EVERY`, `MCMC_ACC_FLOOR`, `MCMC_CHECK_EVERY`,
+`MCMC_MCSE_TARGET`, `MCMC_MOVES_MIN`, and `MCMC_JAC_ONLY`.
+
+*What was already faithful and is left alone.* `MCMC_CR = 0.75`, `MCMC_DELTA = 2`,
+`MCMC_B_MULT = 1e-2`, `MCMC_B_ADD = 1e-4`, `MCMC_T_BOX = 20.0`, the mode jump every 10th
+generation, `MCMC_OUTLIER_IQR = 2.0` running throughout, and `MCMC_INIT = :at_seed` — which
+already places every chain at exactly the seed with zero spread, citing
+`mpi_mcmc_mod.f90:268`. `MCMC_INIT_DISPERSE` is not in that code path and never was.
+
+*Burn.* 0.75 at 4,000 generations, which retains the **last 1,000 generations** — LMR's
+absolute quantity, not the 0.9 fraction. 0.9 would keep 400, a quarter of their pooled
+sample.
+
+**`MCMC_LMR_PRINT`** (new setting, default 0 = off; registered, forwarded, consumed in
+`demc.jl:run_demc`) emits their periodic block, `mpi_mcmc_mod.f90:429-455`: the loop header,
+the mean estimate, the max estimate, the posterior spread, and the five-way accept/reject
+breakdown. It is **additive** — the existing `[demc]` line stays, because it carries the
+median proposal's `Δlogπ` and ESJD, the two step-size numbers their block omits.
+
+*One difference is printed rather than silently absorbed.* Their mean-estimate line averages
+the raw stored values, which under `MCMC_SPACE = :t` is a `t`-space mean; the paper's
+estimator is the mean of the constrained draws. Both are printed, labelled `mean (θ)` and
+`mean (t)`.
+
+**`run_demc` now returns `outcome`**, an `Int8` N×G matrix carrying LMR's five-way code
+(3 strong accept / 2 equal / 1 weak accept / 0 weak reject / −1 no prior mass). `accepted`
+says whether a move happened; this says which kind. The distinction is load-bearing: a high
+strong-accept share means the chain is climbing, so it is still descending rather than
+sampling. Measured at 12 chains × 10 generations from the v37 `base_fc` seed, generation 5
+reported **0.417 strong / 0.567 weak accept / 0.017 weak reject**.
+
+**One inconsistency fixed in the reported estimator.** `post_mean` was the transform of the
+`t`-space mean while `se_chain` was the SD of the θ-draws, so the pair were moments of two
+different samples and the code claimed an equivalence with LMR it did not deliver. The mean
+now maps each draw to θ first, matching both `se_chain` and `read_MCMC_chain.m:65-79`. A
+`θ̄_bnd` fallback keeps the old `t`-space mean for the post-mean *bundle* only, because the
+θ-space mean has been observed infeasible on one base point; the `isfinite(Q̄)` gate chooses,
+and the console names which was used. **Measured Jensen gap on the 2026-08-31 chain: median
+0.009 reported SD, max 0.13 on `b_S`, zero coordinates above 1 SD** — so the pair is now
+internally consistent and no reported number moves.
+
+**Cost, measured rather than extrapolated.** 33.94 s per generation at `N = 95` on 10
+threads, timed through `run_demc` itself so it includes the real threading — candidates are
+spread *across* threads, which amortises to 0.357 s per evaluation, not the 1.84 s a single
+10-threaded solve takes. At `N = 120`: ~43 s/generation, so 4,000 generations is ~48 h on 10
+threads. One full LMR run of 10,000 is 94 h.
+
+**Known gaps.**
+
+- **Nothing here says the chain will stabilise.** The longest test run is 60 generations, at
+  which acceptance was 0.35 — still above the Roberts-Gelman-Gilks optimum of 0.234 — with
+  the population spread still growing (4.5e-04 → 1.03e-02, a 157× inflation from the
+  zero-spread start). Whether it settles near 0.234 or falls through to 0.02 as the
+  2026-08-31 run did is **not established**. The diagnostic that separates the two is
+  `spread_growth`, already computed at `MCMC_main.jl:1324` and emitted in the results CSV —
+  not `accept`, which falls in a healthy run too.
+- One explanation was tested and **refuted**: that the population expands along the flat
+  directions and so poisons the single DE-MC step vector for the sharp ones. Holding `α_U`,
+  and then `α_U + a_Γ + A`, at the seed left the acceptance decay identical (final block
+  0.350, 0.350, 0.367) and spread growth non-monotone in `d` (157×, 113×, 158×). Do not
+  revive it.
+- `check_structure.jl` reports `demc.jl` at net depth 11 against 5 before this change. The
+  gate's counter treats every `for` as a block opener, and comprehensions and generator
+  expressions use `for` with no `end`; the block added here contains six. Julia's own
+  `Meta.parseall` accepts both versions, and the gate already flagged seven files that all
+  parse. The counter is the defect, not the files, and it is left for its own pass.
+- `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` remains an obsolete `SETTINGS_REGISTRY` row with no
+  reader, pre-existing and untouched here.
+
+---
+
+## v37.0.0 — 2026-09-21
+
+**MAJOR: `b` is pinned at zero, and a railed coordinate is now detected rather than left to
+be noticed.** `b` free lands on its own floor, and a coordinate on a rail does not merely
+lack an interval of its own — it caps its own finite-difference step and so corrupts the `Ĵ`
+that every other coordinate's interval is read off.
+
+**Comparability.** The v36.0.0 `base_fc` estimate (`Q = 1183.127505`, 21 free) is superseded:
+the next run estimates 20 parameters with `b ≡ 0`. Nothing else about the model changed, so
+`Q` values remain on the same scale and are comparable as fits of nested specifications — v37
+is v36 with one coordinate restricted, and the restriction is at the boundary the free
+estimate chose anyway.
+
+**What changed.**
+
+*`FIX_PARAMS` gains `:b => 0.00000`* (`smm_main.jl:270`). Free set on a baseline window
+21 → 20.
+
+*A measured rail test* (`MCMC_main.jl`). `_rail_frac(θ, lb, ub)` and `RAIL_TOL = 1e-3` next to
+`_abs_t`; a new `rail_frac` column on `mcmc_results_<window><suffix>.csv`; a ` RAIL` flag
+ahead of ` edge` and ` R̂` in the console table; and a block after the table that names every
+railed coordinate and says what to do about it. The two columns that were supposed to cover
+this do not: `corner_declared` is a manual label read off the `CORNER_PARAMS` setting
+(`MCMC_main.jl:678`, and its own print says "a label only"), and `edge_frac` is a chain
+statistic, so it is `NaN` on the `JAC_ONLY` path — which is the path this project reports
+from. The footer no longer tells the reader to consult `edge_frac` there.
+
+**Measured, not asserted.** All at the v36.0.0 `base_fc` point, `Ĝ` from the adaptive FD,
+244 solves, 21 of 21 columns central.
+
+- `b = 0.00022052` on a `[0, 1.4]` box: **1.57e-04 of box width from the floor**, the only
+  coordinate under `1e-3`. Nothing in the v36 output said so — `corner_declared = 0` because
+  `b` is not in `CORNER_PARAMS`, and `edge_frac` was blank.
+- That rail is why the run reported `b 0.25` as the one coordinate outside the FD target band.
+  `mcmc_diagnostics.jl:33` sets `edge = 0.999·min(θ̂−lb, ub−θ̂)` and line 302 caps
+  `h_hi = min(0.25·w, edge)`, so `b`'s derivative is measured across **1/6355 of its box**.
+  It is not that `b` fails to move the moments: at 2% of box width `‖Δm/σ̂‖ = 17.4`, at 10%
+  it is 88.3, and at 50% it is 1534. The response is there; the room to measure it is not.
+- Dropping `b`'s column: `cond(Ĵ)` 6.353e11 → 2.266e11, `σ_min` 0.0207 → 0.0347, margin over
+  the noise floor 0.36 → 0.60, and coordinates with retained variance above 0.99 **4 → 8**.
+  The gainers are the skilled block — `σ_S` 0.318→0.9999, `b_Γ` 0.337→0.997, `k_S`
+  0.416→0.9998, `β_S` 0.529→0.994, `a_Γ` 0.246→0.881, `δ_S` 0.279→0.865, `a_ℓ` 0.272→0.783.
+  Two lose: `k_U` 0.369→0.006 and `α_U` 0.024→0.000, which now carry the flat direction
+  alone. Their `se_bound` falls to 0.104 and 0.697 respectively and **must not be reported** —
+  that is the spurious-precision pattern, a near-zero interval on a coordinate with no
+  retained variance.
+- v36.0.0 was not the failure it looked like. Reportable coordinates at `|t|(bound) ≥ 2` went
+  **5 of 23 under v35.1.0 to 9 of 21 under v36.0.0**, with none lost: `A` 0.22→4.90
+  (`se_bound` 34.97→1.62), `λ_U` 0.13→39.28 (1.273→0.0038), `ξ_U` 0.00→5.96 (1.272→0.0026),
+  `ρ_x` 1.68→2.43.
+- The `:b => 0.0` spec builds, pins, and evaluates: free set 20, `b` absent from the free set,
+  `0.00000000` reaching the solver, `assert_all_params_accounted` clean, finite `Q`.
+
+**Settings.** `FIX_PARAMS` gains `:b`. No registry setting added or retired, so
+`check_forwarding` is unaffected. `RAIL_TOL` is a module constant, not an env setting — it is
+a reporting threshold, not a knob a run should vary.
+
+**Known gaps.**
+
+- **Three more coordinates are pressing bounds and only one of them looks economic.** `δ_S`
+  0.997604 on `[0.05, 1.0]` is 2.5e-03 of box width from the **ceiling**, and `δ_S = 1` is the
+  single-distribution limit where a shocked match redraws a fresh offer — so that one is the
+  data speaking. But `b_ℓ` 3.976461 on `[0.05, 4.0]` is 5.95e-03 from its ceiling and `P_S`
+  3.214928 on `[1.6e-05, 3.257928]` is 1.32e-02 from its, and those read as boxes that are too
+  tight rather than as corners. Whether to widen them is not settled here. In all, **13 of 21
+  coordinates** have their FD window capped by a bound rather than by the 0.25 ceiling.
+- No re-estimation has been run with `b` pinned, so the 4 → 8 figure is the geometry at the
+  v36 point with a column removed, not the geometry at the v37 argmin.
+- The rail summary block reads `θ0` through the same `_draw_to_θ` idiom the CSV writer uses
+  two lines above it, and was verified against the writer's own output rather than by running
+  `MCMC_main.jl` end to end.
+- Two b's was considered and rejected on measurement, not taste: under v35.1.0 `b_S = 0.00003`
+  on `[0, 0.325793]` was **also** on its floor (9.2e-05 of box width) with `|t| = 0.00`, and
+  `b_U` was interior with `|t| = 0.03`. Going back buys two contaminated columns where there
+  is now one, and the earlier scenario sweep already found the single shared `b` gave the
+  tightest `se_bound` of the configurations tried (0.2951 against 0.3783 for `b_S` free).
+
+---
+
+## v36.0.0 — 2026-09-20
+
+**MAJOR: one non-employment flow value, loading on ability, replaces `b_U`, `b_S` and `b_T`;
+`β_U` is fixed at the symmetric Nash split.** A parameter was removed, two were merged and
+redefined, and the training value function lost a term — every stored estimate is an estimate
+of a different model.
+
+**Comparability.** None. Every `Q` under v35 and earlier is an objective value of the old
+specification and cannot be compared with a v36 `Q`. **The four stored bundles in
+`output/estimates/` are NOT migrated and must not be.** `migrate_bundles.jl` exists to carry a
+bundle across a *struct* change while holding the model fixed, and its acceptance test is that
+the rebuilt bundle reproduces its stored `Q`; a respecification cannot satisfy that test by
+construction. `extract` was run before the struct edit and the four version-neutral
+intermediates are in `.migration/` with the `Q` values they carried — `base_fc` 1074.224541,
+`crisis_fc` 713.207566, `base_covid` 2834.373205, `crisis_covid` 1816.503262. They are the
+readable record of the v35 point and the source of the v36 seed; `rebuild` was deliberately not
+run.
+
+**What changed.**
+
+*Model.* The flow payoff of a worker searching in market `j` is now `b(x) = b·x·exp(A)`, where
+`x` is her aptitude in the market she is searching: `a_U` when searching unskilled — including
+a skilled-unemployed worker who has crossed over — and `a_S` when searching skilled. One
+parameter `b` in `CommonParams` (`params.jl:66`) replaces `up.bU` and `sp.bS`. The asymmetry the
+data show is now produced rather than estimated: skilled searchers have higher `a_S` and draw a
+larger flow without a second parameter. The replacement rate is `b(x)/π_j(x,p) = b/(P_j·p)`,
+independent of ability and falling in match quality, so benefits track earnings *capacity* and
+not realised earnings — what a base-period formula does. This is **not** a capped schedule; a
+cap would make the rate fall in ability, and it does not.
+
+*`b_T` purged.* Training carries no flow payoff: `(r+φ+ν)T(a_S) = φ U_S(a_S)`
+(`unskilled.jl:145`, `transition_values.jl`). The parameter, its `ParamSpec`, its `FIX_PARAMS`
+pin and its key-map entries are gone.
+
+*`β_U` fixed* at 0.50000 in `FIX_PARAMS` (`smm_main.jl:266`) — the symmetric Nash split, which
+is also the Hosios value at `η_U = 0.5`. `β_S` remains free. Free set on a baseline window:
+23 → 21.
+
+*Policy levers.* `UnskilledParams.b_mult` and `SkilledParams.b_mult`, default 1.0, never
+estimated. With a single common `b` a market-targeted benefit reform is otherwise
+inexpressible; these keep the three one-sided policy experiments available as perturbations of
+a symmetric baseline rather than as separate parameters.
+
+*Tooling.* `migrate_bundles.jl` defined `const WINDOWS`, which `paths.jl:48` has since claimed;
+the tool would not load. Its own selection is now `MIG_WINDOWS` and defaults to `paths.jl`'s
+list, so the window set has one home.
+
+**Measured, not asserted.**
+
+- Structs after the edit: `CommonParams` 9 fields (`b` appended last), `UnskilledParams` 10
+  (`bU`, `bT` removed, `b_mult` appended), `SkilledParams` 13 (`bS` removed, `b_mult`
+  appended). The removals were the hazard the migration existed for: `bU`/`bT`/`bS` are
+  `Float64` and so are the fields that follow them, so an unmigrated bundle would have loaded
+  **silently** with `α_U`, `ξ`, `σ_w`, `a_Γ`, `b_Γ` all shifted one slot.
+- Solve at the translated `base_fc` point, grids 160/160/180 from the bundle's own
+  `SMMRunParams`: converged on all three loops, `θ_U` 1.338301, `θ_S` 0.909368, `u_U` 0.031569,
+  `u_S` 0.009902. `U^search` and `U_S^(0)` are both monotone increasing in ability, which they
+  could not be before — `b` entered as a constant.
+- Seed translation, `base_fc`: `b = b_U/E_ℓ[a] = 0.06608778/0.304428 = 0.21708812`, so the
+  *average* flow is unchanged and the unskilled market starts near where it was. At that seed
+  `Q = 25348.13` against 1074.22 under v35 — the point is not an optimum of the new model and
+  re-estimation is required.
+- **`β_U` earns its pin.** Adaptive-FD Jacobian at the same seed, 262 and 250 solves. Free:
+  retained-variance fraction above 0.99 for 4 of 22 parameters, derivative noise floor 1.237,
+  `σ_min/floor` 0.01. Fixed: 6 of 21 above 0.99, floor 0.07869, margin 0.18. Seven parameters
+  move from below 0.10 retained to above 0.85 — `a_Γ` 0.0015→0.9963, `P_S` 0.0005→0.9949,
+  `b_Γ` 0.0020→0.9863, `k_S` 0.0004→0.9851, `β_S` 0.0001→0.9774, `σ_S` 0.0096→0.9589,
+  `δ_S` 0.0010→0.8814. Free `β_U` has retained fraction **0.0000** with `se_bound` 0.0509 and
+  `|t|` 13.3 — the spurious-precision failure mode exactly: a parameter lying entirely in the
+  discarded subspace reported as sharply estimated.
+- Gates: `check_dead_settings` PASS. `check_forwarding` and `check_structure` report the same
+  findings as the committed tree and none of them names a file changed here.
+
+**Settings.** No setting added or retired. `FIX_PARAMS` gains `:unsk_bet => 0.50000` and loses
+`:bT => 0.00000`; `DEFAULT_PARAMS` loses `:bU`, `:bT`, `:bS` and gains `:b => 0.20144823`
+(`0.06247633 / E_ℓ[a]` at that block's own shapes, `0.31013591`).
+
+**Known gaps.**
+
+- **`code/policy/` is dead and was left dead.** It is not a casualty of this change: it
+  references a type `RegimeParams` that is defined nowhere in the repository and calls
+  `solve_model` with five positional arguments against the one method that takes four. It
+  could not load before this version either. Reviving it means rebuilding it against the
+  current `solve_model` signature; the `b_mult` fields are there for when that happens.
+- No window has been re-estimated under v36, so there is no v36 estimate of `b` and no
+  statement here about whether the standard errors improve at a genuine optimum. The
+  `β_U` measurement above is at the translated seed, which is far from one, and the geometry
+  at the argmin may differ.
+- The `|t|` column of that measurement is uninformative at a non-optimum and was not used to
+  draw the conclusion; the retained-variance fraction was.
+
+---
+
 ## v35.1.0 — 2026-09-17
 
 **MINOR: the adaptive-FD Jacobian handles a convergent domain that is not an interval around

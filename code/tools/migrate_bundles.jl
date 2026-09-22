@@ -63,11 +63,12 @@ const MODE = isempty(ARGS) ? "" : ARGS[1]
 
 # The bundles to carry across: one canonical estimate per window at the settled
 # weighting. Chains and seed banks are regenerable and deliberately excluded.
-# Which bundles to act on. Defaults to all four; pass names after the mode to restrict,
-# e.g. `migrate_bundles.jl rebuild base_fc base_covid`. All-or-nothing install applies to
-# whatever set is named, so a partial run installs only if every bundle in it passes.
-const ALL_WINDOWS = ["base_fc", "crisis_fc", "base_covid", "crisis_covid"]
-const WINDOWS     = length(ARGS) > 1 ? ARGS[2:end] : ALL_WINDOWS
+# Which bundles to act on. Defaults to every window paths.jl knows about; pass names after
+# the mode to restrict, e.g. `migrate_bundles.jl rebuild base_fc base_covid`. All-or-nothing
+# install applies to whatever set is named, so a partial run installs only if every bundle in
+# it passes.  Named MIG_WINDOWS because paths.jl already owns the constant WINDOWS, and the
+# window list has one home.
+const MIG_WINDOWS = length(ARGS) > 1 ? ARGS[2:end] : collect(WINDOWS)
 const W_SUFFIX = "_diagonalW"
 
 bundle_path(w) = estimate_path(w, W_SUFFIX)
@@ -106,7 +107,7 @@ end
 if MODE == "extract"
     mkpath(MID)
     n_ok = Ref(0)
-    for w in WINDOWS
+    for w in MIG_WINDOWS
         p = bundle_path(w)
         if !isfile(p)
             @printf("  %-14s no bundle at %s\n", w, p)
@@ -120,7 +121,7 @@ if MODE == "extract"
                 w, b.result.loss_opt, length(b.spec.free), basename(mid_path(w)))
         n_ok[] += 1
     end
-    @printf("\nextracted %d of %d bundles to %s\n", n_ok[], length(WINDOWS), MID)
+    @printf("\nextracted %d of %d bundles to %s\n", n_ok[], length(MIG_WINDOWS), MID)
     println("Now edit the structs, then run: migrate_bundles.jl rebuild")
 
 # ── rebuild ──────────────────────────────────────────────────────────────────────
@@ -222,7 +223,7 @@ elseif MODE == "rebuild"
     end
 
     n_ok = Ref(0)
-    for w in WINDOWS
+    for w in MIG_WINDOWS
         mp = mid_path(w)
         if !isfile(mp)
             @printf("  %-14s no intermediate — run `extract` on the OLD code first\n", w)
@@ -286,8 +287,8 @@ elseif MODE == "rebuild"
         ok && (n_ok[] += 1)
     end
 
-    if n_ok[] == length(WINDOWS)
-        for w in WINDOWS
+    if n_ok[] == length(MIG_WINDOWS)
+        for w in MIG_WINDOWS
             p = bundle_path(w)
             isfile(p) && mv(p, p * ".pre_migration"; force = true)
             mv(p * ".new", p; force = true)
@@ -296,7 +297,7 @@ elseif MODE == "rebuild"
         println("Confirm with: migrate_bundles.jl verify")
     else
         @printf("\n%d of %d reproduced their Q. NOTHING INSTALLED — the .new files are\n",
-                n_ok[], length(WINDOWS))
+                n_ok[], length(MIG_WINDOWS))
         println("left beside the originals for inspection.")
         exit(1)
     end
@@ -304,7 +305,7 @@ elseif MODE == "rebuild"
 # ── verify ───────────────────────────────────────────────────────────────────────
 elseif MODE == "verify"
 
-    for w in WINDOWS
+    for w in MIG_WINDOWS
         p = bundle_path(w)
         if !isfile(p); @printf("  %-14s MISSING\n", w); continue; end
         b = deserialize(p)

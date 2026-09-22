@@ -144,6 +144,20 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
                   parallel::Bool = true,
                   rng::AbstractRNG = MersenneTwister(20260624),
                   verbose::Bool = true, print_every::Int = 250,
+                  # Generations between LMR-format blocks (their stat_display_rate = 500).
+                  # 0 disables it, which is the default so existing runs print as before.
+                  lmr_print::Int = 0,
+                  # Fixed multiplier on the DE scale 2.38/√(2δn). 1.0 is ter Braak's and
+                  # LMR's. gamma_adapt, if on, adapts away from this starting value.
+                  gamma_scale0::Float64 = 1.0,
+                  # Display labels, used only to name the widest coordinate on the progress
+                  # line. Falls back to the coordinate index when absent.
+                  labels::Union{Nothing,Vector{String}} = nothing,
+                  # Called with (chain, chain_lp, accepted, replaced, g) at the lmr_print
+                  # cadence — LMR's own structure, where `if (op%dump_chain)` sits inside the
+                  # stat_display_rate block (mpi_mcmc_mod.f90:459-468). One cadence for both,
+                  # so a printed block and the draws behind it always correspond.
+                  on_dump::Union{Nothing,Function} = nothing,
                   outlier_iqr::Float64 = 2.0,
                   # false = LMR: mpi_mcmc_mod.f90:421-427 runs every generation, ungated.
                   # true  = confine to burn-in, keeping the retained sample reversible.
@@ -451,7 +465,13 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     # window. Separate counters make the rule's window exactly check-to-check.
     # The adaptive DE scale and its own acceptance window, kept separate from the stop's so
     # the two cadences cannot interfere.
-    gamma_scale = 1.0
+    # Multiplies ter Braak's 2.38/√(2δn). 1.0 is his value and LMR's; it is a TUNING
+    # constant, not a derived one, and on this model it is measurably too large — a
+    # perturbation scan at the v37 base_fc point puts mean acceptance at 0.455 for a
+    # per-coordinate step of 1e-3 across all 20 coordinates and 4e-06 at 1e-2, while the
+    # population's own spread equilibrates near 1e-2. Lowering this is the one-constant way
+    # to land the step in the usable band; gamma_adapt does the same thing with feedback.
+    gamma_scale = gamma_scale0
     n_adapt     = 0
     wacc_ad     = 0
     # Feasible candidates in the adaptation window — the brake's denominator. See the update
@@ -485,6 +505,10 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     #             after the fact — n_replaced and last_replace are a count and a scalar,
     #             which say THAT it happened but not WHERE.
     accepted     = falses(N, gens)
+    # LMR's five-way outcome code per chain per generation (3/2/1/0/-1; see the accept loop).
+    # `accepted` says whether a move happened, this says which of their five kinds it was,
+    # which is what their periodic breakdown reports.
+    outcome      = zeros(Int8, N, gens)
     replaced     = falses(N, gens)
     out_window   = min(250, max(1, burn ÷ 2))
     # The retained window — the span a replacement overwrites for the outlier chain.
@@ -612,7 +636,18 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                     push!(wdlp, lpc[c] - lp[c])
                 end
             end
-            if log(rand(rng)) < lpc[c] - lp[c]           # α = exp(Δ log-posterior)
+            # LMR's five-way outcome code (mpi_mcmc_mod.f90:360-378), recorded so the run can
+            # report the same breakdown they do. α = exp(Δ log-posterior), so the sign of Δ
+            # is the classification: uphill moves are accepted with certainty and are the
+            # ones worth counting separately, because a chain whose accepted moves are nearly
+            # all uphill is still descending rather than sampling.
+            #   3 strong accept  α > 1   accepted an uphill move
+            #   2 equal  accept  α = 1   Δ exactly zero
+            #   1 weak   accept  α < 1   accepted a downhill move on the coin flip
+            #   0 weak   reject  α > 0   the coin went the other way
+            #  -1 reject, no prior mass  out of the box, never evaluated
+            dlp = lpc[c] - lp[c]
+            if log(rand(rng)) < dlp                      # α = exp(Δ log-posterior)
                 jd = 0.0
                 @inbounds for k in 1:d
                     jd += ((cand[k, c] - X[k, c]) / pop_sd[k])^2
@@ -622,6 +657,9 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                 lp[c] = lpc[c]
                 nacc += 1; wacc += 1; wacc_chk += 1; wacc_ad += 1
                 accepted[c, g] = true
+                outcome[c, g] = dlp > 0 ? Int8(3) : dlp == 0 ? Int8(2) : Int8(1)
+            else
+                outcome[c, g] = outbox[c] ? Int8(-1) : Int8(0)
             end
             chain_lp[c, g] = lp[c]
         end
@@ -679,9 +717,21 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
 
         if verbose && (g % print_every == 0 || g == gens)
             # Acceptance alone cannot say whether the run is producing a posterior, nor
-            # what to change if it is not. Four numbers answer four distinct questions:
+            # what to change if it is not. Six numbers answer six distinct questions:
             #
             #   acc   is the chain moving at all
+            #   moved HOW MANY of the N chains moved at least once in this window. acc is a
+            #         rate over proposals and cannot separate "every chain crawling" from
+            #         "a handful alive and the rest frozen", which call for opposite
+            #         responses — the second is what the outlier rule exists to repair. On
+            #         the 2026-08-31 run 47 of 95 chains made no move at all in the retained
+            #         window while acc read 0.008, and only this number shows that.
+            #   sprd  mean per-coordinate population sd, the quantity the DE step is built
+            #         from. RISING means the population is still finding its scale; flat
+            #         means it has settled, and whether it settled somewhere usable is the
+            #         whole question. Measured at the pre-revert base_fc point: a step of
+            #         1e-3 is accepted 45% of the time and 1e-2 is accepted 4e-06 of the
+            #         time, so a spread that parks near 1e-2 is parked in the dead zone.
             #   dlp   the MEDIAN feasible proposal's Δlogπ — is the step the right SIZE?
             #         −1 to −3 is well scaled; −20 means the median proposal is hopeless
             #         and acceptance is riding a tail. This is the tuning number.
@@ -707,9 +757,15 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                                              rhat_max = rhat_max, ess_min = ess_target,
                                              lb = lb, ub = ub)
             fin_frac = wfin / max(weval, 1)
-            @printf("[demc] gen %5d/%d  acc=%.3f  dlp=%s  esjd=%.3f  max logπ=%.6e  \
+            plo   = max(1, g - print_every + 1)
+            nmove = count(any(view(accepted, i, plo:g)) for i in 1:N)
+            psd   = [std(view(chain, k, :, g)) for k in 1:d]
+            kw    = argmax(psd)
+            @printf("[demc] gen %5d/%d  acc=%.3f  moved=%d/%d  sprd=%.2e \
+                     (widest %s %.2e)  dlp=%s  esjd=%.3f  max logπ=%.6e  \
                      R̂=%s  ESS=%s%s%s%s\n",
-                    g, gens, wacc / max(wprop, 1),
+                    g, gens, wacc / max(wprop, 1), nmove, N, mean(psd),
+                    labels === nothing ? string(kw) : last(split(labels[kw])), psd[kw],
                     isempty(wdlp) ? "n/a" : @sprintf("%+.2f", median(wdlp)),
                     wesjd / max(wprop, 1), maximum(lp),
                     isfinite(wr) ? @sprintf("%.3f", wr) : "n/a",
@@ -722,6 +778,46 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                         @sprintf("  box=%.2f", wbox / max(wprop, 1))); flush(stdout)
             wacc = 0; wfin = 0; wprop = 0; weval = 0; wrep = 0; wbox = 0
             empty!(wdlp); wesjd = 0.0
+        end
+
+        # LMR's own periodic block (mpi_mcmc_mod.f90:429-455), reproduced so a run can be
+        # read against theirs line for line. It is ADDITIVE: the line above stays, because it
+        # carries the two quantities theirs does not — the median proposal's Δlogπ, which is
+        # the step-size number, and ESJD. Their rates are cumulative over the retained window
+        # rather than windowed, which is why the shares here move slowly.
+        #
+        # Their block also prints the running mean and best parameter VECTORS. Those are
+        # dropped here: at d = 23 they are two unlabelled 23-number rows per block that no
+        # decision is taken on, and the estimator writes the same quantities to
+        # mcmc_results_<window><suffix>.csv with labels, quantiles and standard errors. What
+        # is kept is the part that cannot be recovered afterwards — the five-way breakdown of
+        # WHY proposals were accepted or rejected, which is the reason to watch a live run.
+        if lmr_print > 0 && (g % lmr_print == 0 || g == gens)
+            lo = max(1, g - retain_len + 1)          # their cyclical buffer, L generations
+            n_buf = N * (g - lo + 1)
+            share(v) = count(==(Int8(v)), @view outcome[:, lo:g]) / n_buf
+            @printf("\n ---------- gen %d, last %d generations ----------\n",
+                    g, g - lo + 1)
+            @printf(" accept  strong %.4f   equal %.4f   weak %.4f\n",
+                    share(3), share(2), share(1))
+            @printf(" reject  weak   %.4f   outside prior %.4f\n", share(0), share(-1))
+            @printf(" logπ over the population: min %.6e  median %.6e  max %.6e\n",
+                    minimum(lp), median(lp), maximum(lp))
+            # A replacement marks the replaced chain's whole trailing window, so counting
+            # marked cells would overstate it; count distinct chains instead, which is the
+            # unit n_replaced also uses.
+            @printf(" outlier chains replaced: %d in this window, %d in the run\n",
+                    count(any(view(replaced, c, lo:g)) for c in 1:N), n_replaced)
+            flush(stdout)
+            # Their DUMPING CHAINS TO FILE block. Without it a run ended by hand — which is
+            # how a run with no abort ends — leaves the best POINT on disk and no draws, and
+            # the draws are what the estimator needs. Skipped at g == gens: the caller writes
+            # its own snapshot when the sampler returns, so dumping here would write the same
+            # file twice in a row.
+            if on_dump !== nothing && g < gens
+                on_dump(view(chain, :, :, 1:g), view(chain_lp, :, 1:g),
+                        view(accepted, :, 1:g), view(replaced, :, 1:g), g)
+            end
         end
 
         if check_every > 0 && g >= check_every && g % check_every == 0 && g < gens
@@ -822,6 +918,7 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     chain    = chain[:, :, 1:g_final]
     chain_lp = chain_lp[:, 1:g_final]
     accepted = accepted[:, 1:g_final]
+    outcome  = outcome[:, 1:g_final]
     replaced = replaced[:, 1:g_final]
     burn  = clamp(floor(Int, burn_frac * g_final), 0, g_final - 1)
 
@@ -829,7 +926,7 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     # chain_lp, accepted and replaced are returned so the bundle can persist them. Without
     # chain_lp the log-target of a draw is recoverable only by re-solving — 950 000 solves at
     # the shipped budget — which would make any later change of estimator a full re-run.
-    return (; draws, chain, chain_lp, accepted, replaced,
+    return (; draws, chain, chain_lp, accepted, outcome, replaced,
               accept = nacc / (g_final * N), lp, N,
               gens = g_final, gens_requested = gens, burn,
               lp_seed, lp_best, theta_best = θ_best,

@@ -108,19 +108,64 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Locate p^oj_S(aS) by linear interpolation of the zero-crossing of
-# S^1 − S^0 above p*_S.
+# Locate p^oj_S(aS) at a zero-crossing of S^1 − S^0 above p*_S.
+#
+# Which crossing is taken is POJ_CROSSING (params.jl): :first is the lowest
+# sign change at or above p*_S, :last the highest.  They coincide unless the
+# difference changes sign more than once above p*_S, which happens at the
+# bottom of the p-grid where the two raw surpluses are nearly equal.
+#
+# Inside the bracketing cell the crossing is interpolated, linearly by default
+# and by the local quadratic under POJ_CROSSING_C1.
 # ---------------------------------------------------------------------------
+
+# Root of the quadratic through (x0,f0), (x1,f1), (x2,f2) lying in [x1, x2], in
+# Newton divided-difference form.  NaN when no real root sits there, so the
+# caller falls back to the linear rule.
+function _quad_crossing(x0, x1, x2, f0, f1, f2)
+    a1 = (f1 - f0) / (x1 - x0)
+    a2 = ((f2 - f1) / (x2 - x1) - a1) / (x2 - x0)
+    A  = a2
+    B  = a1 - a2 * (x0 + x1)
+    C  = f0 - a1 * x0 + a2 * x0 * x1
+    abs(A) < 1e-14 && return abs(B) < 1e-14 ? NaN : -C / B
+    disc = B * B - 4.0 * A * C
+    disc < 0.0 && return NaN
+    sq = sqrt(disc)
+    for r in ((-B + sq) / (2.0 * A), (-B - sq) / (2.0 * A))
+        x1 <= r <= x2 && return r
+    end
+    return NaN
+end
+
+# Crossing inside cell j, where diff[j] > 0 >= diff[j+1].
+@inline function _poj_in_cell(pgrid::Vector{Float64}, diff::AbstractVector{Float64}, j::Int)
+    @inbounds begin
+        d_hi = diff[j];  d_lo = diff[j+1];  dD = d_hi - d_lo
+        abs(dD) < 1e-14 && return pgrid[j+1]
+        if POJ_CROSSING_C1[] && j > 1
+            r = _quad_crossing(pgrid[j-1], pgrid[j], pgrid[j+1], diff[j-1], d_hi, d_lo)
+            isfinite(r) && return r
+        end
+        return pgrid[j] + clamp(d_hi / dD, 0.0, 1.0) * (pgrid[j+1] - pgrid[j])
+    end
+end
+
 function find_poj_from_diff_grid(pgrid::Vector{Float64}, diff::AbstractVector{Float64}, pstar::Float64)
     Np = length(pgrid)
     j0 = pcut_index(pgrid, pstar)
+
+    if POJ_CROSSING[] === :last
+        @inbounds diff[Np] > 0.0 && return 1.0
+        @inbounds for j in (Np - 1):-1:j0
+            diff[j] > 0.0 && return _poj_in_cell(pgrid, diff, j)
+        end
+        @inbounds return pgrid[j0]
+    end
+
     @inbounds for j in j0:Np
         if diff[j] <= 0.0
-            if j > j0 && diff[j-1] > 0.0
-                d_hi = diff[j-1];  d_lo = diff[j];  dD = d_hi - d_lo
-                abs(dD) < 1e-14 && return pgrid[j]
-                return pgrid[j-1] + clamp(d_hi / dD, 0.0, 1.0) * (pgrid[j] - pgrid[j-1])
-            end
+            j > j0 && return _poj_in_cell(pgrid, diff, j - 1)
             return pgrid[j]
         end
     end
@@ -615,7 +660,9 @@ function solve_skilled_block!(model::Model; fU::Float64, EU1::AbstractVector{Flo
                     raw_S1 = (PSeff * pj - (r + ν) * U0k - σ + λ * I_s +
                               f * β * tail_Emax_j) / (base + f * tail_mass_j)
                     Smax_raw[j] = max(raw_S0, raw_S1)
-                    diff_raw[j] = raw_S1 - raw_S0
+                    diff_raw[j] = POJ_SCORE[] === :smooth ?
+                                  smooth_pos(raw_S1) - smooth_pos(raw_S0) :
+                                  raw_S1 - raw_S0
                 end
                 pst_prop[k] = clamp01(find_cutoff_from_j0(sg.p, Smax_raw, j0_prev))
                 poj_prop[k] = max(pst_prop[k], clamp01(find_poj_from_diff_grid(sg.p, diff_raw, pst_prop[k])))
@@ -659,6 +706,17 @@ function solve_skilled_block!(model::Model; fU::Float64, EU1::AbstractVector{Flo
             end
         else
             sc.θ = θ_raw
+        end
+
+        # Under-relax the p^oj iterate (DAMP_POJ_S in params.jl).  Applied after
+        # whichever branch installed it, so the accelerated and the plain map are
+        # damped identically; w = 1 leaves both untouched.
+        w_oj = DAMP_POJ_S[]
+        if w_oj < 1.0
+            @inbounds for k in 1:Nx
+                sc.poj[k] = max(sc.pstar[k],
+                                clamp01(w_oj * sc.poj[k] + (1.0 - w_oj) * poj_old[k]))
+            end
         end
 
         if !isfinite(sc.θ) || any(!isfinite, sc.pstar) || any(!isfinite, sc.poj)

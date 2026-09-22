@@ -186,10 +186,20 @@ const SETTINGS_REGISTRY = [
                 "half-width of the prior box on t; 20.0 matches LMR (main_mpi.f90:146-147). Q is asymptotically flat in every coordinate, so this is what makes the target proper — Inf gives the improper target used before v20.0.0"),
     SettingDecl(:MCMC_PRINT_EVERY, "demc.jl:run_demc", :live,
                 "generations between progress lines; the acc/dlp/esjd averaging window"),
+    SettingDecl(:MCMC_LMR_PRINT, "demc.jl:run_demc", :live,
+                "generations between LMR-format blocks (their stat_display_rate, main_mpi.f90:139 = 500); \
+0 disables. Additive to MCMC_PRINT_EVERY, which carries the median proposal's Δlogπ and ESJD — the two \
+step-size numbers their block omits. What theirs adds is the five-way accept/reject breakdown, in which \
+a high strong-accept share says the chain is still descending rather than sampling"),
     SettingDecl(:MCMC_CHECK_EVERY, "demc.jl:run_demc", :live,
                 "generations between sequential stop checks; 0 disables the stop entirely"),
     SettingDecl(:MCMC_INIT_DISPERSE, "demc.jl:run_demc", :live,
                 "multiplier on the criterion widths at init; >1 is required for the convergence gate to have power"),
+    SettingDecl(:MCMC_GAMMA_SCALE, "demc.jl:run_demc", :live,
+                "fixed multiplier on ter Braak's DE scale 2.38/sqrt(2*delta*n_masked); 1.0 is his \
+value and LMR's. A perturbation scan at the pre-revert base_fc point puts mean acceptance at 0.455 for a \
+per-coordinate step of 1e-3 across all coordinates and 4e-06 at 1e-2, against a population spread \
+that settles near 1e-2, so 1.0 overshoots by about a factor of 4 here. One constant, no feedback"),
     SettingDecl(:MCMC_GAMMA_ADAPT,  "demc.jl:run_demc", :live,
                 "adapt the DE scale toward the acceptance optimum; false restores ter Braak's fixed gamma"),
     SettingDecl(:MCMC_GAMMA_TARGET, "demc.jl:run_demc", :live,

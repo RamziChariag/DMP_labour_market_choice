@@ -515,13 +515,10 @@ function build_smm_spec(
 )
     fixed_nt = (fixed isa NamedTuple) ? fixed : NamedTuple()
 
+    # Silent: a parameter pinned here appears in the spec's own Fixed table with its value,
+    # so announcing the drop separately says the same thing twice — and the ASCII `name`
+    # field it printed duplicated across markets (two η, two σ_w), which read as a defect.
     active_free = filter(ps -> !is_pinned(fixed_nt, ps.block, ps.name), free_specs)
-
-    if length(active_free) < length(free_specs)
-        dropped = [ps.name for ps in free_specs if is_pinned(fixed_nt, ps.block, ps.name)]
-        @printf("SMMSpec: fixed override dropped free params: %s\n",
-                join(string.(dropped), ", "))
-    end
 
     if !isempty(skip_moments)
         unknown = setdiff(skip_moments, keys(moments))

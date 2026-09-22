@@ -696,19 +696,19 @@ else
         flush(stdout)
     end
 
-    @printf("\n  Baseline mode: all structural + regime params are FREE (%d total)\n",
-            length(free_params))
+    # No count here either. `free_params` is the CANDIDATE list; FIX_PARAMS and the external
+    # calibration pin some of it in build_smm_spec, so this number overstates the free set —
+    # it read "29 total" against the spec table's 23. The spec tables are the statement of
+    # what is free.
+    println("\n  Baseline mode: structural + regime params enter as candidates for the free set")
     flush(stdout)
 end
 
-@printf("  Fixed params:  %d  |  Free params:  %d\n",
-        length(fixed_params), length(free_params))
-if !isempty(FIX_PARAMS)
-    _valid_fix = [k for k in keys(FIX_PARAMS) if haskey(_ASCII_TO_FIXED_KEY, k)]
-    @printf("  FIX_PARAMS pinned (%d): %s\n",
-            length(_valid_fix), join(string.(_valid_fix), ", "))
-end
-flush(stdout)
+# No parameter counts printed here. `free_params` at this point is the pre-spec list, before
+# build_smm_spec drops whatever FIX_PARAMS pins, so a count taken here disagrees with the one
+# the spec tables print a few lines later — and those tables list every free and fixed
+# parameter with its bounds and value, which is the same information in a form that can be
+# read against the estimates.
 
 # ============================================================
 # 7. Run parameters — grids, SA, DE, NM, tracing

@@ -37,6 +37,39 @@
 
 const DAMP_THETA_S = Ref(0.9)
 
+# Under-relaxation on the p^oj_S iterate: the OJS cutoff is installed as
+# w·p^oj_new + (1−w)·p^oj_old at the end of each skilled outer iteration.  The
+# Anderson branch installs p^oj raw (damp_pstar_S reaches p*_S only), so w < 1
+# is the only damping available on it.  w = 1 is the shipped map.
+const DAMP_POJ_S = Ref(1.0)
+
+# Which zero of S^1 − S^0 above p*_S is read as p^oj_S.  :last takes the highest
+# sign change, :first the lowest.  The OJS margin is a participation margin —
+# every consumer of p^oj weights the region BELOW it as the searching one — so
+# p^oj is the upper boundary of {p : S^1 > S^0} and :last is the rule that reads
+# it.  :first collapses p^oj onto p*_S whenever the difference dips negative at
+# the bottom of the p-grid, which shuts the OJS margin for that type and leaves
+# the outer loop cycling between the two readings; it is kept only to reproduce
+# runs made before v38.3.0.
+const POJ_CROSSING = Ref(:last)
+
+# Which form of the surpluses the p^oj scan scores.  :raw is the difference of
+# the unsmoothed surpluses; :smooth takes the difference of the smooth_pos forms
+# the inner loop prices (skilled.jl:350,355).  smooth_pos is strictly increasing,
+# so the two agree on the sign of the difference and therefore on which cell
+# holds the crossing — measured no-op at the base_fc estimate, |ΔQ| <= 4.2e-09
+# over 25 parameter points.  The p*_S scan stays raw under both: smooth_pos is
+# strictly positive, so a smoothed S^max never crosses zero and every
+# reservation cutoff would collapse to 0.
+const POJ_SCORE = Ref(:raw)
+
+# Crossing rule INSIDE the bracketing cell.  The shipped rule is linear in the
+# two bracketing nodes, so the located crossing is continuous in the parameters
+# but kinks by O(h) when the bracket index moves; with true the sign change is
+# interpolated by the local quadratic through three consecutive nodes, which
+# reduces that stencil-switch kink to O(h²).
+const POJ_CROSSING_C1 = Ref(false)
+
 
 # ============================================================
 # Structs

@@ -1,24 +1,22 @@
 block,name,label,point_estimate,post_mean,se_curvature,se_bound,q025,q500,q975,rhat,ess,edge_frac,spread_growth,se_chain,symbol,corner_declared,abs_t_curvature,abs_t_bound
-common,a_ℓ,worker type shape a_ℓ,1.05868083,NaN,1.53519174,5.47568122,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,a_ℓ,0,0.689608,0.193342
-common,b_ℓ,worker type shape b_ℓ,2.41892185,NaN,5.32692739,19.04742993,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b_ℓ,0,0.454093,0.126995
-common,ρ_x,ability correlation ρ_x,-0.81300712,NaN,0.14531663,0.48482470,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,ρ_x,0,5.594729,1.676909
-common,c,training cost coeff c,11.07088508,NaN,0.87123499,3.15976505,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,c,0,12.707117,3.503705
-common,A,aggregate production scale A,7.64339608,NaN,9.77652719,34.97176113,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,A,0,0.781811,0.218559
-unsk,bU,unskilled outside flow b_U,0.06608778,NaN,0.66539338,2.38368423,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b_U,0,0.099321,0.027725
-skl,bS,skilled outside flow b_S,0.00003273,NaN,1.30679622,4.84856615,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b_S,0,0.000025,0.000007
-skl,PS,skilled productivity P_S,2.13558805,NaN,24.05414559,86.45512236,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,P_S,0,0.088783,0.024702
-unsk,α_U,unskilled damage shape α_U,4.11574628,NaN,162.56364553,584.85392997,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,α_U,0,0.025318,0.007037
-skl,a_Γ,skilled offer shape a_Γ,0.37080507,NaN,1.39726104,4.91514618,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,a_Γ,0,0.265380,0.075441
-skl,b_Γ,skilled offer shape b_Γ,0.32163374,NaN,2.91490478,10.32471013,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b_Γ,0,0.110341,0.031152
-skl,δ,shock/offer support ratio δ_S,0.87323828,NaN,3.43798232,12.56711209,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,δ_S,0,0.253997,0.069486
-unsk,μ,unskilled matching eff μ_U,0.44469236,NaN,0.00293238,0.00357052,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,μ_U,0,151.649115,124.545569
-skl,μ,skilled matching eff μ_S,0.25591316,NaN,0.00184740,0.00508984,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,μ_S,0,138.525894,50.279204
-unsk,β,unskilled bargaining β_U,0.67748368,NaN,30.35040863,108.70796958,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,β_U,0,0.022322,0.006232
-skl,β,skilled bargaining β_S,0.31826891,NaN,0.18584875,0.64713277,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,β_S,0,1.712516,0.491814
-unsk,λ,unskilled damage rate λ_U,0.16259516,NaN,0.34937044,1.27317032,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,λ_U,0,0.465395,0.127709
-skl,λ,skilled quality shock λ_S,0.13269930,NaN,0.00349695,0.00354439,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,λ_S,0,37.947160,37.439282
-unsk,k,unskilled vacancy cost k_U (months of avg U output),0.75099089,NaN,105.12735561,376.31829102,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_U,0,0.007144,0.001996
-skl,k,skilled vacancy cost k_S (months of avg S output),2.77013251,NaN,0.58308925,2.22863939,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_S,0,4.750786,1.242970
-skl,σ,OJS flow cost σ_S,0.17008130,NaN,2.79223390,10.09206082,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,σ_S,0,0.060912,0.016853
-unsk,ξ,unskilled exogenous separation ξ_U,0.00343484,NaN,0.34936841,1.27195686,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,ξ_U,0,0.009832,0.002700
-skl,ξ,skilled exogenous separation ξ_S,0.00511851,NaN,0.00007113,0.00015463,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,ξ_S,0,71.961574,33.100864
+common,a_ℓ,worker type shape a_ℓ,1.34636544,NaN,0.31526563,1.02498872,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,a_ℓ,0,4.270575,1.313542
+common,b_ℓ,worker type shape b_ℓ,3.97646139,NaN,2.84232984,9.37233768,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b_ℓ,0,1.399015,0.424276
+common,ρ_x,ability correlation ρ_x,-0.80338836,NaN,0.10458529,0.33092756,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,ρ_x,0,7.681658,2.427686
+common,c,training cost coeff c,10.84547615,NaN,0.82150765,2.85863980,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,c,0,13.201917,3.793929
+common,A,aggregate production scale A,7.90835357,NaN,0.46249921,1.61526228,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,A,0,17.099172,4.896018
+common,b,non-employment flow coefficient b,0.00022052,NaN,1.79036339,5.99025370,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b,0,0.000123,0.000037
+skl,PS,skilled productivity P_S,3.21492774,NaN,11.39950780,38.44474224,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,P_S,0,0.282023,0.083625
+unsk,α_U,unskilled damage shape α_U,4.92547470,NaN,43.57168893,153.26842185,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,α_U,0,0.113043,0.032136
+skl,a_Γ,skilled offer shape a_Γ,1.72748385,NaN,6.45561433,19.62121422,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,a_Γ,0,0.267594,0.088042
+skl,b_Γ,skilled offer shape b_Γ,4.33682517,NaN,21.58430775,65.76372129,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b_Γ,0,0.200925,0.065946
+skl,δ,shock/offer support ratio δ_S,0.99760418,NaN,2.24033237,7.80861342,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,δ_S,0,0.445293,0.127757
+unsk,μ,unskilled matching eff μ_U,0.42285902,NaN,0.00216303,0.00409748,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,μ_U,0,195.493598,103.199766
+skl,μ,skilled matching eff μ_S,0.25544509,NaN,0.00184777,0.00507832,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,μ_S,0,138.245015,50.301074
+skl,β,skilled bargaining β_S,0.45649055,NaN,0.46188107,1.37939731,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,β_S,0,0.988329,0.330935
+unsk,λ,unskilled damage rate λ_U,0.14942606,NaN,0.00149749,0.00380367,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,λ_U,0,99.784046,39.284742
+skl,λ,skilled quality shock λ_S,0.13714617,NaN,0.00349698,0.00353316,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,λ_S,0,39.218513,38.816808
+unsk,k,unskilled vacancy cost k_U (months of avg U output),2.54283786,NaN,4.95932585,16.82981379,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_U,0,0.512739,0.151091
+skl,k,skilled vacancy cost k_S (months of avg S output),1.66294973,NaN,2.33084725,6.86494532,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_S,0,0.713453,0.242238
+skl,σ,OJS flow cost σ_S,0.11296521,NaN,0.59596438,2.04852461,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,σ_S,0,0.189550,0.055145
+unsk,ξ,unskilled exogenous separation ξ_U,0.01565021,NaN,0.00072068,0.00262525,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,ξ_U,0,21.715765,5.961411
+skl,ξ,skilled exogenous separation ξ_S,0.00508810,NaN,0.00007096,0.00015426,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,ξ_S,0,71.706064,32.983656
