@@ -3,7 +3,7 @@
 #
 # One run does everything:
 #   1. (Optional) run the transition simulation for each scenario and save
-#      output/transition/transition_<sc><W>.jls
+#      output/transition/transition_<sc><W>_<point>.jls
 #   2. (Optional) generate the transition panels (data-vs-model and
 #      model-decomposition)
 #   3. (Optional) generate model-fit & parameter LaTeX tables, the
@@ -11,14 +11,14 @@
 #
 # Sub-scripts:
 #   transition_simulation.jl   — run_transition_simulation(...)
-#   transition_panel.jl        — make_transition_panel(...),
+#   plots_and_tables/transition_panel.jl — make_transition_panel(...),
 #                                make_model_decomposition_panel(...)
-#   plots_and_tables.jl        — load_all_smm_bundles!(),
+#   plots_and_tables/transition.jl — load_all_smm_bundles!(; scenarios),
 #                                make_model_fit_tables(), make_parameter_tables(),
 #                                make_xbar_table(), make_model_fit_scatter(...)
 #
 # Usage (from the repo root):
-#   julia --threads auto roysearch/transition/transition_main.jl
+#   julia --project=. --threads auto code/transition/transition_main.jl
 #
 # All user-facing switches live in section 1.
 ############################################################
@@ -30,6 +30,16 @@
 # Which scenarios to run.  Use [:fc], [:covid], or [:fc, :covid].
 const SCENARIOS = [:fc, :covid]
 
+# The estimate both windows of a pair are read at; never one of each.
+#   :smm  → estimate_<window><W>_smm.jls, the SMM estimates; the crisis one must hold the
+#           ability distribution at the base one (smm_main.jl, CRISIS_BASE = :smm)
+#   :mcmc → estimate_<window><W>_mcmc.jls, the chains' estimates (the posterior mean of the
+#           retained draws); a chain that aborted has none
+# Every file the run writes ends in `<W>_<point>`, so the runs at the two points coexist.
+# The tables phase reads this point's transition files, stops on one that records another,
+# and reports the bundles they record: exactly the points the paths were solved at.
+const POINT_ESTIMATE = :smm
+
 # Weight-matrix mode used when the SMM results were estimated — must match
 # the W_COND_TARGET set in smm/smm_main.jl, whose default is 0.0 and under
 # which every shipped estimate bundle was produced.  A mismatch is not a
@@ -40,7 +50,7 @@ const W_COND_TARGET = 0.0
 
 # Simulation switch
 #   true  → always (re)run the transition simulation for every SCENARIO
-#   false → reuse the existing transition_<sc><W>.jls if on disk; otherwise
+#   false → reuse the existing transition_<sc><W>_<point>.jls if on disk; otherwise
 #           warn and run a fresh simulation anyway.
 const RERUN_SIMULATION = true
 
@@ -48,15 +58,10 @@ const RERUN_SIMULATION = true
 const RUN_PANELS           = true   # transition-dynamics panels
 const RUN_TABLES_AND_PLOTS = true   # model-fit + parameter tables, scatter
 
-# Grid sizes for the stationary solves (finer than SMM for clean convergence
-# on a single parameter draw).
-const TR_Nx   = 200
-const TR_Np_U = 200
-const TR_Np_S = 200
-
-# Transition-algorithm control knobs
-const TR_T_MAX   = 120.0   # model months (10 years)
-const TR_N_STEPS = 240     # half-month steps
+# Transition-algorithm control knobs.  The grids are the estimation's own, read from the
+# bundles; the horizon is chosen by the accuracy test in transition_simulation.jl.
+const TR_T_MAX   = 120.0   # span of the fine time grid, model months
+const TR_N_STEPS = 240     # half-month steps on the fine grid
 const TR_TOL     = 1e-4
 const TR_MAXIT   = 200
 const TR_DAMP    = 0.3   # matches the TransitionParams default; see its docstring
@@ -84,6 +89,7 @@ using LaTeXStrings
 using Dates
 using Optim
 using Clustering
+using JSON3
 
 println("done."); flush(stdout)
 
@@ -95,10 +101,9 @@ const CODE_ROOT      = normpath(joinpath(TRANSITION_DIR, ".."))
 const SOLVER_DIR     = joinpath(CODE_ROOT, "solver")
 const SMM_DIR        = joinpath(CODE_ROOT, "smm")
 const PT_DIR         = joinpath(CODE_ROOT, "plots_and_tables")
-# paths.jl is the sole definition of PROJECT_ROOT, OUTPUT_DIR and the out_*()
-# accessors. Declared in seven files before v19.6.0, two of them behind
-# !@isdefined guards, so the effective value depended on include order.
+# paths.jl is the sole definition of PROJECT_ROOT, OUTPUT_DIR and the out_*() accessors.
 include(joinpath(CODE_ROOT, "paths.jl"))
+include(joinpath(SMM_DIR, "version.jl"))
 const SMM_OUT_DIR    = out_estimates()
 const TRANS_OUT_DIR  = out_transition()
 const PLOTS_DIR      = joinpath(OUTPUT_DIR, "plots")
@@ -133,6 +138,7 @@ print("Loading SMM modules... "); flush(stdout)
 include(joinpath(SMM_DIR, "settings.jl"))
 include(joinpath(SMM_DIR, "moments.jl"))
 include(joinpath(SMM_DIR, "smm_params.jl"))
+include(joinpath(SMM_DIR, "bundle.jl"))
 include(joinpath(SMM_DIR, "smm.jl"))
 println("done."); flush(stdout)
 
@@ -155,9 +161,10 @@ println("done."); flush(stdout)
 # 6. BANNER
 # ═══════════════════════════════════════════════════════════
 println("\n" * "="^65)
-println("  RoySearch — Transition Run")
+println("  RoySearch v$(ROYSEARCH_VERSION) — Transition Run")
 println("="^65)
 @printf("  Scenarios:            %s\n", join(SCENARIOS, ", "))
+@printf("  POINT_ESTIMATE:       %s\n", POINT_ESTIMATE)
 @printf("  W_COND_TARGET:        %.1f  (%s)\n", W_COND_TARGET, W_SUFFIX)
 @printf("  RERUN_SIMULATION:     %s\n", RERUN_SIMULATION)
 @printf("  RUN_PANELS:           %s\n", RUN_PANELS)
@@ -170,23 +177,21 @@ flush(stdout)
 # 7. SIMULATION PHASE  (per scenario)
 # ═══════════════════════════════════════════════════════════
 for scenario in SCENARIOS
-    out_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(W_SUFFIX).jls")
+    out_file = transition_file(scenario, W_SUFFIX, POINT_ESTIMATE)
 
     if RERUN_SIMULATION
         @printf("[%s] RERUN_SIMULATION=true → running a new simulation.\n", scenario)
         flush(stdout)
-        run_transition_simulation(scenario, W_COND_TARGET;
-            Nx = TR_Nx, Np_U = TR_Np_U, Np_S = TR_Np_S,
-            T_max = TR_T_MAX, N_steps = TR_N_STEPS,
+        run_transition_simulation(scenario, W_SUFFIX;
+            point = POINT_ESTIMATE, T_max = TR_T_MAX, N_steps = TR_N_STEPS,
             tol = TR_TOL, maxit = TR_MAXIT, damp = TR_DAMP)
     elseif isfile(out_file)
         @printf("[%s] Re-using existing transition data: %s\n", scenario, out_file)
         flush(stdout)
     else
         @warn "[$scenario] No existing transition data at $out_file — running a fresh simulation anyway."
-        run_transition_simulation(scenario, W_COND_TARGET;
-            Nx = TR_Nx, Np_U = TR_Np_U, Np_S = TR_Np_S,
-            T_max = TR_T_MAX, N_steps = TR_N_STEPS,
+        run_transition_simulation(scenario, W_SUFFIX;
+            point = POINT_ESTIMATE, T_max = TR_T_MAX, N_steps = TR_N_STEPS,
             tol = TR_TOL, maxit = TR_MAXIT, damp = TR_DAMP)
     end
 end
@@ -199,8 +204,9 @@ if RUN_PANELS
     println("  Generating transition panels")
     println("="^65); flush(stdout)
     for scenario in SCENARIOS
-        make_transition_panel(; scenario = scenario, suffix = W_SUFFIX)
-        make_model_decomposition_panel(; scenario = scenario, suffix = W_SUFFIX)
+        make_transition_panel(; scenario = scenario, point = POINT_ESTIMATE, suffix = W_SUFFIX)
+        make_model_decomposition_panel(; scenario = scenario, point = POINT_ESTIMATE,
+                                         suffix = W_SUFFIX)
     end
 end
 
@@ -212,12 +218,13 @@ if RUN_TABLES_AND_PLOTS
     println("  Generating model-fit & parameter tables, scatter plots")
     println("="^65); flush(stdout)
 
-    load_all_smm_bundles!()
-    make_model_fit_tables()
-    make_parameter_tables()
-    make_xbar_table()
+    load_all_smm_bundles!(; scenarios = SCENARIOS, point = POINT_ESTIMATE, suffix = W_SUFFIX)
+    tag = transition_tag(W_SUFFIX, POINT_ESTIMATE)
+    make_model_fit_tables(; suffix = tag)
+    make_parameter_tables(; suffix = tag)
+    make_xbar_table(; suffix = tag)
     for w in [:base_fc, :base_covid]
-        make_model_fit_scatter(; window = w)
+        make_model_fit_scatter(; window = w, suffix = tag)
     end
 end
 

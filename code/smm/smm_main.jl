@@ -18,31 +18,27 @@
 #                 training_share_target.csv (NSC training_share level;
 #                                             written by the data pipeline)
 #   output/
-#     plots/
-#     tables/
-#     smm/      — serialised SMMResult bundles
+#     estimates/ — estimate_<window>_diagonalW_smm.jls (or _smm_mcmcbase.jls) and the
+#                  smm_estimates_*.csv sibling, written by this file only
 #
-# Two-stage workflow (Model Notes §2 / data_and_moments.pdf §18):
+# Two-stage workflow:
 #   Baseline window  (:base_fc, :base_covid):
-#       Fix (r, ν, φ) from external calibration, η_U/η_S at 0.5 (Hosios),
-#       and σ_wU/σ_wS from λ_w.  Estimate the remaining free parameters
-#       (all 6 deep + 22 regime specs, less those pinned via FIX_PARAMS).
+#       Fix (r, ν, φ) from external calibration and σ_wU/σ_wS from λ_w.
+#       Estimate every other parameter not pinned via FIX_PARAMS.
 #       ν is loaded from nu_estimation.csv using the row for the
 #       corresponding baseline (one row per crisis pair).
 #   Crisis window    (:crisis_fc, :crisis_covid):
-#       Load the matching base bundle (base_fc → crisis_fc;
-#       base_covid → crisis_covid).
-#       Fix the deep structural parameters at the baseline estimates:
-#           common  a_ℓ, b_ℓ, ρ_x
-#           regime  bU, bT, bS
-#       Re-estimate only the regime-specific parameters.
+#       Load the matching base estimate (base_fc → crisis_fc;
+#       base_covid → crisis_covid): the SMM one, or the chain's with CRISIS_BASE = :mcmc.
+#       Fix the ability distribution (a_ℓ, b_ℓ, ρ_x) at that estimate
+#       and estimate every other parameter not pinned via FIX_PARAMS.
 #       ν comes from the baseline row (NOT a crisis-specific value).
 #
 # WINDOWS are read from data/derived/windows.json — the single source
-# of truth shared with the data pipeline. training_share carries the
-# NSC κ_w level adjustment, applied upstream when the data pipeline
-# writes moments_{w}.csv / sampling_var_{w}.csv; the loaders here read
-# the pre-adjusted values (see the moments.jl header for the convention).
+# of truth shared with the data pipeline. training_share is the NSC
+# enrolment target, written by the data pipeline into moments_{w}.csv /
+# sampling_var_{w}.csv; the loaders here read it as written (see the
+# moments.jl header for the convention).
 ############################################################
 
 include(joinpath(@__DIR__, "version.jl"))
@@ -125,7 +121,6 @@ sim_smm = SimParams(
     tol_inner          = 1e-7,
     tol_outer_U        = 1e-6,
     tol_outer_S        = 1e-6,
-    tol_global         = 1e-4,
 
     damp_inner_U       = 0.95,
     damp_inner_S       = 0.95,
@@ -146,7 +141,6 @@ sim_smm = SimParams(
     conv_streak        = 4,
 
     use_anderson       = true,
-    anderson_m         = 1,
     anderson_reg       = 1e-10,
 
     damp_pstar_U       = 1.00,
@@ -168,7 +162,12 @@ sim_smm = SimParams(
 # each resolution for the [env] block printed below.
 assert_no_legacy_env()
 
-WINDOW = env_setting(:WINDOW, :base_fc)
+WINDOW = env_setting(:WINDOW, :crisis_fc)
+# Crisis windows only; a base window ignores it. Which base-window point the crisis window holds the
+# ability distribution at: :smm = the base SMM estimate (writes estimate_<crisis>_smm.jls);
+# :mcmc = the base chain's estimate (writes estimate_<crisis>_smm_mcmcbase.jls, the crisis chain's seed).
+CRISIS_BASE = env_setting(:CRISIS_BASE, :smm)
+CRISIS_BASE in (:smm, :mcmc) || error("CRISIS_BASE must be :smm or :mcmc, got :$CRISIS_BASE.")
 
 # Crisis → baseline pair map. crisis_fc pairs with base_fc; the
 # crisis_covid pair with base_covid. Used to pick the right ν row
@@ -179,6 +178,9 @@ const _PAIR_BASELINE = Dict(
     :base_covid   => :base_covid,
     :crisis_covid => :base_covid,
 )
+
+# The estimate this run writes (ESTIMATE_POINTS, paths.jl).
+const OUT_POINT = WINDOW in (:crisis_fc, :crisis_covid) && CRISIS_BASE === :mcmc ? :smm_mcmcbase : :smm
 
 # ============================================================
 # Moments given zero weight in the objective. The same list feeds both
@@ -238,8 +240,9 @@ const WINDOW_SKIP_MOMENTS = Dict{Symbol,Vector{Symbol}}()
 
 # Wage-reliability calibration knob (single source of truth for both the run
 # header and calibrate_sigma_w). σ_w is calibrated externally from λ_w rather
-# than estimated. Bound–Krueger (1991) avg between men and women:
-# λ_w ≈ 0.87 for log annual earnings.
+# than estimated. 0.78 is set by the author as the middle of the range the
+# wage-validation literature reports (Data and Moments, Observed wages and
+# measurement error).
 const LAMBDA_W = env_setting(:LAMBDA_W, 0.78)
 
 @printf("Estimation window: %s\n", WINDOW)
@@ -253,27 +256,39 @@ flush(stdout)
 #
 # Valid keys (ASCII):
 #   common:  :a_l  :b_l  :rho_x  :c  :A
-#   regime:  :PU  :PS  :bU  :bT  :bS  :alpha_U  :a_Gam  :b_Gam
-#   unsk:    :unsk_mu  :unsk_eta  :unsk_k  :unsk_bet  :unsk_lam  :unsk_xi  :unsk_sigw
-#   skl:     :skl_mu   :skl_eta   :skl_k   :skl_bet
+#   unsk:    :PU  :bU  :bT  :alpha_U
+#            :unsk_mu  :unsk_eta  :unsk_tight  :unsk_bet  :unsk_lam  :unsk_xi  :unsk_sigw
+#   skl:     :PS  :bS  :a_Gam  :b_Gam
+#            :skl_mu   :skl_eta   :skl_tight   :skl_bet
 #            :skl_lam  :skl_sig   :skl_sigw  :skl_xi  :skl_delta
 #   (:unsk_sigw / :skl_sigw = wage measurement-error SD σ_wU / σ_wS)
 #   (:skl_delta = offer/shock support ratio δ_S; :unsk_xi / :skl_xi = exogenous
-#    separation ξ_U / ξ_S)
+#    separation ξ_U / ξ_S; :unsk_tight / :skl_tight = tightness θ_U / θ_S. The vacancy
+#    costs follow from the tightnesses and cannot be pinned.)
 # ============================================================
 FIX_PARAMS = Dict{Symbol,Float64}(
      :unsk_eta => 0.50000,
-     #:unsk_bet => 0.50000,
+     :unsk_bet => 0.50000,
      :skl_eta  => 0.50000,
-     #:skl_bet  => 0.50000,
+     :skl_bet  => 0.50000,
      :bT       => 0.00000,
+     #:bS       => 0.00000,
      :PU       => 1.00000,
+     #:alpha_U  => 1.00000,
+     :a_Gam    => 1.00000,
+     :b_Gam    => 1.00000,
+     :unsk_xi  => 0.00000,
+     :skl_xi  => 0.00000,
+     :skl_delta => 1.00000,
+     :a_l       =>1.000000,
+     :b_l       =>1.000000,
 )
 
 # ============================================================
 # INIT_MODE — how the optimiser is seeded.
 #   :default    seed the spec init from DEFAULT_PARAMS; skip the candidate layer.
-#   :warmstart  seed from a saved optimum; fall back to DEFAULT_PARAMS if absent.
+#   :warmstart  start from the stored point with the lowest Q under the current code
+#               (§8a lists the candidates); DEFAULT_PARAMS if none scores a finite Q.
 #   :clusters   seed SA/DE from the Sobol→hclust candidate bank.
 # USE_AS_SEED           true: use the entered init verbatim; false: perturb it
 #                       before estimation. Under :default the init IS the
@@ -282,8 +297,8 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 #                       (applies when USE_AS_SEED = false).
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
-#                       This is THIS window's own prior optimum; in a crisis
-#                       window the paired baseline optimum is a separate,
+#                       This is the run's own output file; in a crisis
+#                       window the paired base point is a separate,
 #                       always-on start under :clusters (§8b).
 # ============================================================
 # INIT_MODE selects the start-point strategy; the settings that configure each strategy
@@ -292,70 +307,73 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 INIT_MODE = env_setting(:INIT_MODE, :warmstart)
 
 # Starting values for the free parameters, keyed by the ASCII convention in
-# _DEFAULT_PARAM_KEY. Fixed r/ν/φ are ignored here (set from calibration files).
-# The base_fc optimum, from output/tables/smm_estimates_base_fc_diagonalW.csv
-# (Q = 1.1823409777e+03, converged, 876 iterations), expressed on the P_U = 1 ray.
+# _DEFAULT_PARAM_KEY. Fixed r/ν/φ are ignored here (set from calibration files), and so is
+# every parameter FIX_PARAMS pins. Units are the reported ones: A = ln A, c = ln c,
+# b_j and σ_S over A; θ_j in vacancies per searcher.
 #
-# The CSV records the estimate in its original units, where P_U was free and settled at
-# 6.13887191. That is one point on a curve, not a point: A enters the solver only as
-# exp(A) multiplying every output-denominated level, so A -> A + s with P_U, P_S, b_U,
-# b_S and sigma_S scaled by exp(-s) leaves every moment identical to machine precision.
-# Fixing P_U = 1 picks one member of that curve as the numeraire and makes the remaining
-# five separately identified.
-#
-# The conversion is therefore a change of units, not a change of model:
-#     A            <- A + log(6.13887191)      = 5.85261109 + 1.81464100
-#     P_U, P_S, b_U, b_S, sigma_S  <- / 6.13887191
-# Everything else — shapes, rates, shares, and k_U/k_S which are already denominated in
-# months of average output — is dimensionless and carries over unchanged.
-#
-# Pasting the CSV values literally would put P_U (6.139), P_S (12.511) and sigma_S
-# (0.964) outside their current boxes, where the seed loader clamps silently to the
-# edge; the start would then not be the base_fc optimum at all.
+# Seed for the base_fc b_S-route run (b_S free, ξ_S = 0), 2026-10-11: Q = 4378.327899596 under
+# v56.0.0. Built from the ξ_S-route base_fc estimate (Q 3560.09; backup in
+# output/backups/xiS_route_estimates_2026-10-11/base_fc/) with λ_S + ξ_S as λ_S, b_S/A 0.20 from
+# a scan over 0.05-0.30, then damped Gauss–Newton steps on all 14 free parameters.
+# Start with INIT_MODE=default.
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r         => 0.00416667,
     :nu        => 0.00323032,
     :phi       => 0.02222129,
 
-    :a_l       => 0.97844485,
-    :b_l       => 2.17644565,
-    :rho_x     => -0.85844207,
-    :c         => 11.20139923,
-    :A         => 7.66725209,   # 5.85261109 + log(P_U_old)
+    :a_l       => 1.00000000,   # pinned (FIX_PARAMS)
+    :b_l       => 1.00000000,   # pinned (FIX_PARAMS)
+    :rho_x     => -0.3760712472598431,
+    :c         => 11.516787549861228,
+    :A         => 7.238932988787176,
 
     :PU        => 1.00000000,   # the numeraire
-    :PS        => 2.03794586,   # 12.51068861 / P_U_old — skilled productivity RELATIVE
-                                # to unskilled, which is the identified object
+    :PS        => 1.8274460454677544,
 
-    :bU        => 0.06247633,   # 0.38353418 / P_U_old
+    :bU        => 0.0773985303389596,
     :bT        => 0.00000000,   # pinned: no income while training
-    :bS        => 0.00093795,   # 0.00575793 / P_U_old
+    :bS        => 0.1647027391979343,
 
-    :alpha_U   => 3.61288953,
+    :alpha_U   => 3.408485659533842,
 
-    :a_Gam     => 0.93131990,
-    :b_Gam     => 1.08360275,
-    :skl_delta => 0.97626100,
+    :a_Gam     => 1.00000000,   # pinned (FIX_PARAMS)
+    :b_Gam     => 1.00000000,   # pinned (FIX_PARAMS)
+    :skl_delta => 1.00000000,   # pinned (FIX_PARAMS)
 
-    :unsk_mu   => 0.44185129,
-    :unsk_eta  => 0.50000000,
-    :unsk_k    => 1.24229953,
-    :unsk_bet  => 0.57861850,
-    :unsk_lam  => 0.16362151,
-    :unsk_xi   => 0.00633981,
-    :unsk_sigw => 0.25549225,
+    :unsk_mu   => 0.6259721798594244,
+    :unsk_eta  => 0.50000000,   # pinned (FIX_PARAMS)
+    :unsk_tight => 0.4586949068451518,
+    :unsk_bet  => 0.50000000,   # pinned (FIX_PARAMS)
+    :unsk_lam  => 0.1700436663031686,
+    :unsk_xi   => 0.00000000,   # pinned (FIX_PARAMS)
+    :unsk_sigw => 0.25549225,   # set from λ_w (calibrated per window)
 
-    :skl_mu    => 0.30944280,
-    :skl_eta   => 0.50000000,
-    :skl_k     => 2.19244633,
-    :skl_bet   => 0.40200742,
-    :skl_lam   => 0.17238538,
-    :skl_sig   => 0.15708731,   # 0.96433889 / P_U_old
-    :skl_sigw  => 0.23267843,
-    :skl_xi    => 0.00551934,
+    :skl_mu    => 0.2781489587725706,
+    :skl_eta   => 0.50000000,   # pinned (FIX_PARAMS)
+    :skl_tight => 1.2110570013103958,
+    :skl_bet   => 0.50000000,   # pinned (FIX_PARAMS)
+    :skl_lam   => 0.1530505237804924,
+    :skl_sig   => 0.351109497384089,
+    :skl_sigw  => 0.23267843,   # set from λ_w (calibrated per window)
+    :skl_xi    => 0.00000000,   # pinned at 0 on the b_S route (FIX_PARAMS)
 )
 
-# (block, unicode name) → DEFAULT_PARAMS key (ASCII).
+"""
+    default_seed(ps) → Float64
+
+The DEFAULT_PARAMS starting value for one ParamSpec, found through the ASCII key map
+`_DEFAULT_PARAM_KEY` (smm_params.jl). Raises, naming the parameter, when either map lacks
+it: the parameter table carries no starting values, so there is nothing else to fall
+back on.
+"""
+function default_seed(ps::ParamSpec) :: Float64
+    key = get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing)
+    isnothing(key) && error(
+        "default_seed: $(ps.block):$(ps.name) has no ASCII key in _DEFAULT_PARAM_KEY (smm_params.jl).")
+    haskey(DEFAULT_PARAMS, key) || error(
+        "default_seed: DEFAULT_PARAMS has no :$(key) entry, the seed for $(ps.block):$(ps.name).")
+    return DEFAULT_PARAMS[key]
+end
 
 # ============================================================
 # 3. Windows + data moments
@@ -442,6 +460,9 @@ W_COND_TARGET = env_setting(:W_COND_TARGET, 0.0)
 
 
 W_SUFFIX = _w_suffix(W_COND_TARGET)
+# The one bundle this run writes: its checkpoints, its final estimate, and what a later
+# :warmstart or INCLUDE_PREV_OPTIMUM of the same configuration reads back.
+const OUT_JLS = estimate_path(WINDOW, W_SUFFIX; point = OUT_POINT)
 
 W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
                              cond_target=W_COND_TARGET,
@@ -471,62 +492,55 @@ flush(stdout)
 # ============================================================
 # 6. Fixed and free parameters
 #
-#    r, ν, φ are always fixed from external calibration.  The deep /
-#    regime-specific split is defined once, in smm_params.jl, as DEEP_PARAMS and
-#    REGIME_SPECIFIC_PARAMS (Model Notes §2); both branches below read those
-#    sets rather than restating the membership, so the partition has a single
-#    source of truth.  A baseline window estimates everything;  a crisis window
-#    estimates REGIME_SPECIFIC_PARAMS and pins DEEP_PARAMS at the paired
-#    baseline optimum.
+#    r, ν, φ are always fixed from external calibration.  A baseline window
+#    estimates everything else; a crisis window also holds the ability
+#    distribution (ABILITY_PARAMS, smm_params.jl) at the paired base estimate.
 # ============================================================
 
 if WINDOW in (:crisis_fc, :crisis_covid)
-    # Crisis re-estimation — load the matching baseline bundle:
+    # Crisis re-estimation — load the matching base estimate:
     #   crisis_fc    ← base_fc
     #   crisis_covid ← base_covid
+    # CRISIS_BASE picks the SMM estimate or the chain's. Either must be an estimate of this
+    # MAJOR version, and the chain's only if the chain did not abort.
     baseline_window = _PAIR_BASELINE[WINDOW]
-    baseline_jls = estimate_path(baseline_window, W_SUFFIX)
+    baseline_jls = estimate_path(baseline_window, W_SUFFIX; point = CRISIS_BASE)
     @printf("\nCrisis window detected — loading baseline (%s) from:\n  %s\n",
             baseline_window, baseline_jls)
     flush(stdout)
     isfile(baseline_jls) || error(
-        "Baseline result not found at $baseline_jls. " *
-        "Run the $baseline_window estimation first (WINDOW = :$baseline_window, " *
-        "W_COND_TARGET = $W_COND_TARGET).")
+        "Baseline estimate not found at $baseline_jls. Run " *
+        (CRISIS_BASE === :smm ? "smm_main.jl" : "a chain of MCMC_main.jl") *
+        " on $baseline_window first (W_COND_TARGET = $W_COND_TARGET).")
 
     baseline_data = _load_smm_bundle(baseline_jls; delete_on_fail=false, label="baseline file")
     isnothing(baseline_data) && error(
         "Baseline result at $baseline_jls is unreadable. " *
         "Re-run the $baseline_window estimation first."
     )
+    require_current_major(baseline_data, baseline_jls)
+    baseline_data.stage === :mcmc_aborted && error(
+        "$(basename(baseline_jls)): the $baseline_window chain aborted, so its draws are not " *
+        "a stationary sample and the file holds no estimate.")
 
     baseline_result = baseline_data.result
     baseline_spec   = baseline_data.spec
 
-    cp_base, up_base, sp_base =
+    cp_base, up_base, sp_base, tight_base =
         unpack_θ(baseline_result.theta_opt, baseline_spec)
 
     @printf("  Baseline Q = %.6e  (converged = %s)\n",
             baseline_result.loss_opt, baseline_result.converged)
     flush(stdout)
 
-    # Fixed: external calibration (r, ν, φ) + calibrated σ_w + the deep block,
-    # every entry of it, read off the baseline optimum.
-    #
-    # The deep block is assembled by iterating DEEP_PARAMS rather than listing
-    # its members here.  A hand-written list is a silent-failure hazard: a deep
-    # parameter missing from it is excluded from `free_params` (the loop below
-    # keeps only REGIME_SPECIFIC_PARAMS) AND absent from `fixed_params`, so
-    # `unpack_θ` falls through to its hard-coded default and the crisis window is
-    # estimated at a value unrelated to the baseline. `fixed_key` picks the key
-    # convention `unpack_θ` reads back.
-    #
-    # Later entries win the merge: FIX_PARAMS overrides a baseline-derived deep
-    # value, and the calibrated σ_w overrides both.
-    _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
-    _deep_fixed  = NamedTuple(
-        fixed_key(blk, nm) => _baseline_param_value(blk, nm, cp_base, up_base, sp_base)
-        for (blk, nm) in DEEP_PARAMS_ORDERED
+    # Fixed: external calibration (r, ν, φ), the ability distribution read off the
+    # baseline optimum, FIX_PARAMS and the calibrated σ_w.  Later entries win the
+    # merge: FIX_PARAMS overrides a baseline value, and the calibrated σ_w both.
+    # `fixed_key` picks the key convention `unpack_θ` reads back.
+    _extra_fixed   = _fix_params_to_nt(FIX_PARAMS)
+    _ability_fixed = NamedTuple(
+        fixed_key(blk, nm) => _baseline_param_value(blk, nm, cp_base, up_base, sp_base, tight_base)
+        for (blk, nm) in ABILITY_PARAMS
     )
     fixed_params = merge(
         (
@@ -534,61 +548,27 @@ if WINDOW in (:crisis_fc, :crisis_covid)
         ν = calib.nu,
         φ = calib.phi,
         ),
-        _deep_fixed,
+        _ability_fixed,
         _extra_fixed,
         _sigw_fixed,
     )
 
-    # Free parameters: regime-specific only.  Init values follow INIT_MODE:
-    #   :warmstart → the matched baseline optimum;  otherwise → DEFAULT_PARAMS.
-    free_params = ParamSpec[]
-    for ps in default_free_params()
-        (ps.block, ps.name) in REGIME_SPECIFIC_PARAMS || continue
-        init_val = if INIT_MODE == :warmstart
-            _baseline_param_value(ps, cp_base, up_base, sp_base)
-        else
-            ascii_key = get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing)
-            isnothing(ascii_key) ? ps.init : get(DEFAULT_PARAMS, ascii_key, ps.init)
-        end
-        init_val = clamp(init_val, ps.lb + 1e-10, ps.ub - 1e-10)
-        push!(free_params,
-              ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label))
-    end
+    # Free parameters: every parameter but the ability distribution (build_smm_spec
+    # drops what is pinned), started from DEFAULT_PARAMS; under :warmstart §8a replaces
+    # the start with the best stored point.
+    free_params = [with_seed(ps, default_seed(ps))
+                   for ps in default_free_params() if !((ps.block, ps.name) in ABILITY_PARAMS)]
 
-    # The baseline optimum in the crisis window's own free-parameter ordering.
-    # The crisis free set is a subset of the baseline's, so the map is by
-    # (block, name) and never by index.  Under :warmstart these values are
-    # already the spec inits; §8b also injects the vector into the seed bank so
-    # that :clusters evaluates it as a start.
-    baseline_optimum_values = Dict(
-        (ps.block, ps.name) => _baseline_param_value(ps, cp_base, up_base, sp_base)
-        for ps in free_params
-    )
-
-    println("\n  Deep structural parameters FIXED from baseline:")
-    @printf("    common:  a_ℓ=%.4f  b_ℓ=%.4f  ρ_x=%.4f\n",
+    @printf("\n  Ability distribution FIXED at the baseline estimate:  a_ℓ=%.4f  b_ℓ=%.4f  ρ_x=%.4f\n",
             cp_base.a_ℓ, cp_base.b_ℓ, cp_base.ρ_x)
-    @printf("    unsk:    bU=%.4f  bT=%.4f      skl:  bS=%.4f\n",
-            up_base.bU, up_base.bT, sp_base.bS)
-    @printf("  Regime-specific parameters FREE (%d params); init from %s\n",
-            length(free_params),
-            INIT_MODE == :warmstart ? "baseline optimum" : "DEFAULT_PARAMS")
-    # This branch seeds by READING FIELDS off the decoded baseline structs, so unlike the
-    # warm-start branch every parameter "matches" whether or not the baseline estimated it:
-    # a field the baseline spec never freed still decodes, to unpack_θ's default. ξ_U is
-    # called out because it is the one that changed status in v29.0.0 — a baseline written
-    # before the restoration hands over ξ_U = 0 here and says nothing about it.
-    @printf("  Regime init: read %d fields from the baseline; ξ_U = %.10g (%s)\n",
-            length(free_params), up_base.ξ,
-            any(ps -> ps.block === :unsk && ps.name === :ξ, baseline_spec.free) ?
-                "estimated by the baseline" : "NOT in the baseline's free set — unpack_θ default")
+    println("  Every other parameter is a candidate for the free set")
     flush(stdout)
 
 else
     # Baseline estimation.  Fix r / ν / φ and the calibrated σ_w, plus anything
-    # in FIX_PARAMS.  There is no paired baseline optimum to carry into the seed
-    # bank here — the window IS the baseline.
-    baseline_optimum_values = nothing
+    # in FIX_PARAMS.  There is no paired base estimate to carry into the start —
+    # the window IS the baseline.
+    baseline_data = nothing
 
     _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
     fixed_params = merge((
@@ -600,107 +580,16 @@ else
         _sigw_fixed,
     )
 
-    free_params = default_free_params()
-
-    _warmstart_jls = estimate_path(WINDOW, W_SUFFIX)
-
-    if INIT_MODE == :warmstart && isfile(_warmstart_jls)
-        println("\n  INIT_MODE = :warmstart — loading prior parameter values from:")
-        @printf("    %s\n", _warmstart_jls)
-        flush(stdout)
-
-        _ws_data = _load_smm_bundle(_warmstart_jls; delete_on_fail=false, label="warm-start file")
-
-        if !isnothing(_ws_data)
-            _ws_vals = Dict{Tuple{Symbol,Symbol}, Float64}()
-            try
-                _ws_result = _ws_data.result
-                _ws_spec   = _ws_data.spec
-                _ws_cp, _ws_up, _ws_sp = unpack_θ(_ws_result.theta_opt, _ws_spec)
-                for ps in _ws_spec.free
-                    has_field = try
-                        _baseline_param_value(ps, _ws_cp, _ws_up, _ws_sp)
-                        true
-                    catch
-                        false
-                    end
-                    has_field && (_ws_vals[(ps.block, ps.name)] =
-                                  _baseline_param_value(ps, _ws_cp, _ws_up, _ws_sp))
-                end
-                @printf("    Prior Q = %.6e  (converged = %s)\n",
-                        _ws_result.loss_opt, _ws_result.converged)
-            catch e
-                @warn "Warm-start: could not decode prior parameters ($e) — using defaults."
-            end
-
-            if !isempty(_ws_vals)
-                _ws_clamped = String[]
-                free_params = [
-                    let raw = get(_ws_vals, (ps.block, ps.name), ps.init),
-                        init_val = clamp(raw, ps.lb + 1e-10, ps.ub - 1e-10)
-                        # A prior value outside the current box is pulled to the
-                        # edge, so the seed is no longer the point that scored the
-                        # prior Q — this is how a bound change turns a warm start
-                        # into a cold one without any message.
-                        init_val == raw || push!(_ws_clamped, "$(ps.block):$(ps.name)")
-                        ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
-                    end
-                    for ps in free_params
-                ]
-                n_matched = count(ps -> haskey(_ws_vals, (ps.block, ps.name)), free_params)
-                @printf("    Warm-start: matched %d / %d parameters from prior run.\n",
-                        n_matched, length(free_params))
-                # Names present in the prior run but absent here (or the reverse)
-                # silently fall back to ParamSpec defaults, so they are listed.
-                # Block-qualified: μ, η, k, β, λ, ξ and σ_w each exist in BOTH blocks, so a
-                # bare name here is unreadable — it was a bare "ξ" that hid unsk:ξ falling
-                # back to its default after the v29.0.0 restoration.
-                _ws_unmatched = ["$(ps.block):$(ps.name)" for ps in free_params
-                                 if !haskey(_ws_vals, (ps.block, ps.name))]
-                isempty(_ws_unmatched) ||
-                    @printf("    Unmatched (kept at spec default): %s\n",
-                            join(_ws_unmatched, ", "))
-                isempty(_ws_clamped) ||
-                    @printf("    Clamped into current bounds: %s\n",
-                            join(_ws_clamped, ", "))
-            end
-        else
-            println("    Warm-start skipped — could not read file.")
-        end
-    else
-        # :default and :clusters seed the spec's init from DEFAULT_PARAMS.
-        # (:warmstart with no prior file also lands here.)
-        if INIT_MODE == :warmstart
-            println("\n  INIT_MODE = :warmstart but no prior file — seeding from DEFAULT_PARAMS.")
-        else
-            println("\n  INIT_MODE = :$(INIT_MODE) — seeding free-parameter init from DEFAULT_PARAMS.")
-        end
-        flush(stdout)
-
-        free_params = [
-            let ascii_key = get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing),
-                raw_val   = isnothing(ascii_key) ? ps.init :
-                                get(DEFAULT_PARAMS, ascii_key, ps.init),
-                init_val  = clamp(raw_val, ps.lb + 1e-10, ps.ub - 1e-10)
-                ParamSpec(ps.block, ps.name, ps.lb, ps.ub, init_val, ps.label)
-            end
-            for ps in free_params
-        ]
-
-        n_matched = count(ps -> !isnothing(get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing)) &&
-                                 haskey(DEFAULT_PARAMS,
-                                        get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), :__missing__)),
-                          free_params)
-        @printf("    Matched %d / %d free parameters from DEFAULT_PARAMS.\n",
-                n_matched, length(free_params))
-        flush(stdout)
-    end
+    # Every candidate is seeded from DEFAULT_PARAMS, so a warm start that finds no usable
+    # file, or one covering only part of the free set, still starts each parameter from a
+    # value chosen in this file. Under :warmstart §8a replaces the start.
+    free_params = [with_seed(ps, default_seed(ps)) for ps in default_free_params()]
 
     # No count here either. `free_params` is the CANDIDATE list; FIX_PARAMS and the external
     # calibration pin some of it in build_smm_spec, so this number overstates the free set —
     # it read "29 total" against the spec table's 23. The spec tables are the statement of
     # what is free.
-    println("\n  Baseline mode: structural + regime params enter as candidates for the free set")
+    println("\n  Baseline mode: every parameter is a candidate for the free set")
     flush(stdout)
 end
 
@@ -788,7 +677,7 @@ run_params = SMMRunParams(
     sa_cooling_exp     = 2.0,     # sa_halflife = 0 selects that branch
     sa_reheat_patience = 400,     # steps without improvement before a reheat, 0 to disable reheats
     sa_reheat_factor   = 4.00,    # multiplicative reheat: T ← T · factor
-    sa_max_reheats     = env_setting(:SA_MAX_REHEATS, 4),  # cap per run, 0 = unlimited
+    sa_max_reheats     = env_setting(:SA_MAX_REHEATS, 1),  # cap per run, 0 = unlimited
     sa_adapt_window    = 50,      # rolling window for adaptive step / acceptance
     sa_random_init     = false,   # false ⇒ start from pack_θ(spec); true ⇒
                                   # uniform draw inside [lb, ub]
@@ -860,9 +749,9 @@ run_params = SMMRunParams(
     #
     # The scale for all of these is statistical, not numerical.  Q is a chi-square, so
     # ΔQ = 1 is one moment moving by one sampling standard error.  Solver noise was
-    # MEASURED, not propagated — tol_global from 1e-4 to 1e-8, and eight loss-neutral
-    # setting variants, move Q by ΔQ ≈ 1e-6 — so it is six orders below the
-    # statistical unit and no tolerance here needs pairing with tol_global.
+    # MEASURED, not propagated — solve precision swept across four orders, plus eight
+    # loss-neutral setting variants, move Q by ΔQ ≈ 1e-6 — so it is six orders below the
+    # statistical unit and no tolerance here needs pairing with the solver's.
     nm_max_iter  = env_setting(:NM_MAX_ITER, 10_000),  # max NM iterations
     nm_f_tol     = env_setting(:NM_F_TOL, 1e-3),   # f_reltol, inert for NM
                                   # Optim's Nelder–Mead cannot read this: its
@@ -872,9 +761,10 @@ run_params = SMMRunParams(
                                   # of order 1e3 — one moment moving by one sampling
                                   # standard error.  The earlier 1e-2 was pinned to a
                                   # 3e-3 noise floor that was propagated rather than
-                                  # measured; measuring it (tol_global 1e-4 → 1e-8,
-                                  # plus eight loss-neutral variants) puts solver noise
-                                  # at ΔQ ≈ 1e-6, so no pairing with tol_global binds.
+                                  # measured; measuring it (solve precision over four
+                                  # orders, plus eight loss-neutral variants) puts
+                                  # solver noise at ΔQ ≈ 1e-6, so nothing here needs
+                                  # pairing with the solver's own precision.
     nm_x_tol     = env_setting(:NM_X_TOL, 1e-5),   # x_abstol, inert for NM
                                   # Also unread by Nelder–Mead (see f_tol above).
                                   # ABSOLUTE in the unconstrained coordinate, and the
@@ -914,7 +804,7 @@ run_params = SMMRunParams(
     # the walk ends 2.66 above its best, inside one plateau cell. The gap-closing loss
     # is measured on a surrogate whose FLOOR IS the plateau, so it cannot represent
     # sub-plateau refinement and therefore cannot price what settling buys.
-    sa_halflife     = env_setting(:SA_HALFLIFE, 2_000),   # = sa_max_iter ÷ 2
+    sa_halflife     = env_setting(:SA_HALFLIFE, 2_500),   # = sa_max_iter ÷ 2
     nm_rate_tol     = env_setting(:NM_RATE_TOL, 0.05),
     nm_rate_span    = env_setting(:NM_RATE_SPAN, 300),
     nm_simplex_step = env_setting(:NM_SIMPLEX_STEP, 0.2),
@@ -1044,7 +934,7 @@ const SA_SCALE_SIGMA  = env_setting(:SA_SCALE_SIGMA, 0.33)
 # iterations, each costing 2d + line-search solves, so ~200 is hours not minutes.
 const SMM_POLISH          = env_setting(:SMM_POLISH, true)
 const SMM_POLISH_FD_STEP  = env_setting(:SMM_POLISH_FD_STEP, 1e-6)
-const SMM_POLISH_MAX_ITER = env_setting(:SMM_POLISH_MAX_ITER, 200)
+const SMM_POLISH_MAX_ITER = env_setting(:SMM_POLISH_MAX_ITER, 300)
 # Stop on the gradient's ∞-norm, which is what a stationary point means. max|dQ/dt|
 # was 806 at the v23.0.0 annealed point, so 1.0 asks for three orders of magnitude.
 # Failing to reach it is safe: the iteration cap stops the run and the better of the
@@ -1054,16 +944,6 @@ const SMM_POLISH_G_TOL    = env_setting(:SMM_POLISH_G_TOL, 1.0)
 # ============================================================
 # 8. Build SMM spec
 # ============================================================
-# USE_AS_SEED = false starts the optimiser from a perturbation of the entered
-# init rather than the init itself.
-if !run_params.use_as_seed
-    free_params = perturb_free_init(free_params, run_params.seed_perturb_frac,
-                                    Random.default_rng())
-    @printf("  Perturbed the seed init (SD = %.0f%% of each bound range).\n",
-            100 * run_params.seed_perturb_frac)
-    flush(stdout)
-end
-
 spec = build_smm_spec(
     moments, sim_smm;
     fixed        = fixed_params,
@@ -1075,9 +955,80 @@ spec = build_smm_spec(
 )
 
 # Every estimable parameter must be either free or pinned.  One that is neither
-# takes unpack_θ's hard-coded fallback without any error or header mention — the
-# failure mode that left ρ_x at −0.55 in both crisis windows through v14.8.
+# has no value, and unpack_θ would raise at the first solve on the first such
+# field. Checked here, before any solve, so the whole list is reported at once.
 assert_all_params_accounted(spec; context = "$(WINDOW) spec")
+
+# ============================================================
+# 8a. Start point
+#     :warmstart scores every stored point that can start this window under the code
+#     as it stands and starts from the lowest Q, so a file written by an earlier
+#     version is a start like any other and its stored loss is never read:
+#       base window    its SMM estimate; the untagged file written before v57.0.0
+#       crisis window  its own output file; its other SMM estimate (_smm or
+#                      _smm_mcmcbase); the untagged file; the base point
+#     A crisis window's ability distribution is in spec.fixed, so it stays the base
+#     point's whichever candidate wins. A parameter a candidate's run did not estimate
+#     keeps its DEFAULT_PARAMS value, except at the base point, which is read field by
+#     field. No candidate with a finite Q: DEFAULT_PARAMS.
+# ============================================================
+"""
+    warm_start(spec, candidates) -> SMMSpec
+
+`spec` started at the candidate with the lowest Q, printing one line per candidate.
+`candidates` holds `(path, estimated_only, note)`; `estimated_only` is `point_in_spec`'s.
+"""
+function warm_start(spec::SMMSpec, candidates)
+    @printf("\n  INIT_MODE = :warmstart — candidates, Q under v%s:\n", ROYSEARCH_VERSION)
+    best = (Q = Inf, θ = Float64[], name = "DEFAULT_PARAMS")
+    for (path, estimated_only, note) in candidates
+        b = read_bundle(path)
+        status = if !isfile(path)
+            "absent"
+        elseif b === nothing || b.result === nothing || b.spec === nothing
+            "unreadable"
+        else
+            try
+                pt = point_in_spec(b, spec; estimated_only = estimated_only)
+                Q  = smm_objective(pt.θ, spec)
+                Q < best.Q && (best = (Q = Q, θ = pt.θ, name = basename(path)))
+                @sprintf("Q = %.6f", Q) *
+                    (isempty(pt.unmatched) ? "" : "  DEFAULT_PARAMS for " * join(pt.unmatched, ", ")) *
+                    (isempty(pt.clamped)   ? "" : "  clamped: " * join(pt.clamped, ", "))
+            catch e
+                "unusable: " * first(split(sprint(showerror, e), '\n'))
+            end
+        end
+        @printf("    %s %s%s\n", rpad(basename(path), 50), status, note)
+    end
+    @printf("  start: %s\n", best.name)
+    flush(stdout)
+    return isfinite(best.Q) ? _spec_with_init(spec, best.θ) : spec
+end
+
+if INIT_MODE == :warmstart
+    _other_point = OUT_POINT === :smm ? :smm_mcmcbase : :smm
+    spec = warm_start(spec, isnothing(baseline_data) ?
+        [(OUT_JLS, true, ""),
+         (legacy_estimate_path(WINDOW, W_SUFFIX), true, "")] :
+        [(OUT_JLS, true, ""),
+         (estimate_path(WINDOW, W_SUFFIX; point = _other_point), true, ""),
+         (legacy_estimate_path(WINDOW, W_SUFFIX), true, ""),
+         (baseline_jls, false, "  (base point)")])
+else
+    @printf("\n  INIT_MODE = :%s — spec init from DEFAULT_PARAMS\n", INIT_MODE)
+end
+
+# USE_AS_SEED = false starts the optimiser from a perturbation of the chosen start
+# rather than the start itself.
+if !run_params.use_as_seed
+    spec = SMMSpec(perturb_free_init(spec.free, run_params.seed_perturb_frac,
+                                     Random.default_rng()),
+                   spec.fixed, spec.moments, spec.sim, spec.run, spec.W, spec.q_scale)
+    @printf("  Perturbed the start (SD = %.0f%% of each bound range).\n",
+            100 * run_params.seed_perturb_frac)
+    flush(stdout)
+end
 
 print_spec(spec)
 print_env_settings()
@@ -1089,7 +1040,7 @@ seed_bank    = nothing
 prev_optimum = nothing
 
 if INIT_MODE == :clusters
-    cand_path = joinpath(out_estimates(), "candidates_$(WINDOW)$(W_SUFFIX).jls")
+    cand_path = candidates_path(WINDOW, W_SUFFIX; point = OUT_POINT)
     seed_bank = load_or_generate_candidates(spec, cand_path;
                                             window      = WINDOW,
                                             force_regen = run_params.clusters_force_regen,
@@ -1110,14 +1061,8 @@ if INIT_MODE == :clusters
     # Evaluated on the candidate layer's coarse grid so its Q is on the same
     # footing as the rest of the bank.  The injection is in-memory only — the
     # cache on disk stays a pure product of the Sobol layer.
-    if !isnothing(baseline_optimum_values)
-        θ_base = pack_θ([
-            ParamSpec(ps.block, ps.name, ps.lb, ps.ub,
-                      clamp(get(baseline_optimum_values, (ps.block, ps.name), ps.init),
-                            ps.lb + 1e-10, ps.ub - 1e-10),
-                      ps.label)
-            for ps in spec.free
-        ])
+    if !isnothing(baseline_data)
+        θ_base = point_in_spec(baseline_data, spec; estimated_only = false).θ
         Q_base = smm_objective(θ_base, spec;
                                Nx   = spec.run.cand_Nx,
                                Np_U = spec.run.cand_Np_U,
@@ -1143,15 +1088,22 @@ if INIT_MODE == :clusters
     # Optional guaranteed previous optimum.  Valid only if its free-parameter
     # (block, name) sequence AND fixed-parameter values match the current spec.
     if run_params.include_prev_optimum
-        _opt_jls = estimate_path(WINDOW, W_SUFFIX)
-        _opt = _load_smm_bundle(_opt_jls; delete_on_fail=false, label="previous optimum")
+        _opt = _load_smm_bundle(OUT_JLS; delete_on_fail=false, label="previous optimum")
         if !isnothing(_opt)
             _o_free = [(ps.block, ps.name) for ps in _opt.spec.free]
             _c_free = [(ps.block, ps.name) for ps in spec.free]
             if _o_free == _c_free && _opt.spec.fixed == spec.fixed
-                prev_optimum = copy(_opt.result.theta_opt)
-                @printf("  [init] INCLUDE_PREV_OPTIMUM: added valid prior optimum (Q=%.6e).\n",
-                        _opt.result.loss_opt)
+                # theta_opt is in the PRIOR spec's unconstrained coordinates, and the same t
+                # decodes to a different θ under a different box. After a bound change the
+                # optimum is therefore carried over as θ and re-packed in the current box.
+                _same_box = all(((o, c),) -> o.lb == c.lb && o.ub == c.ub,
+                                zip(_opt.spec.free, spec.free))
+                prev_optimum = _same_box ? copy(_opt.result.theta_opt) :
+                    pack_θ([with_seed(c, _to_constrained(t, o.lb, o.ub))
+                            for (t, o, c) in zip(_opt.result.theta_opt, _opt.spec.free, spec.free)])
+                @printf("  [init] INCLUDE_PREV_OPTIMUM: added valid prior optimum (Q=%.6e)%s.\n",
+                        _opt.result.loss_opt,
+                        _same_box ? "" : ", re-expressed in the current bounds")
             else
                 @printf("  [init] INCLUDE_PREV_OPTIMUM: prior optimum invalid (free-set / fixed mismatch) — ignored.\n")
             end
@@ -1187,8 +1139,8 @@ println("Starting SMM optimisation..."); flush(stdout)
 # seed_bank and prev_optimum stay arguments: they are run-time objects built in §8b, not
 # settings, and a SeedBank in the spec would be serialised into every bundle. Every SA and
 # DE setting travels in spec.run.
-# checkpoint_path is the window's OWN bundle — the same file INIT_MODE=:warmstart
-# reads. Every SA and DE reheat overwrites it with the incumbent, so killing a run
+# checkpoint_path is the run's OWN bundle — the first file INIT_MODE=:warmstart
+# scores. Every SA and DE reheat overwrites it with the incumbent, so killing a run
 # and relaunching resumes from the best point reached rather than re-annealing from
 # whatever the run originally started from. The end-of-run write at the bottom of
 # this file replaces it with the full bundle (which also carries `sim`).
@@ -1205,7 +1157,7 @@ res = run_smm(spec; method = :sa, seed_bank = seed_bank, prev_optimum = prev_opt
               sa_halflife  = run_params.sa_halflife,
               sa_rate_tol  = run_params.sa_rate_tol,
               sa_rate_span = run_params.sa_rate_span,
-              checkpoint_path = estimate_path(WINDOW, W_SUFFIX))
+              checkpoint_path = OUT_JLS)
 
 # Gradient polish from the annealed point. Whichever of the two has the lower Q is kept:
 # LBFGS descends monotonically in exact arithmetic, but the gradient here is a finite
@@ -1238,21 +1190,27 @@ results = res
 # ============================================================
 out_estimates()   # ensures the directory exists
 
+# The vacancy costs at the estimate, and whether its equilibrium attracts at them. The
+# check is stored and printed only when a verdict fails.
+eq_hat     = equilibrium_at(results.theta_opt, spec)
+attract    = attracting_check(results.theta_opt, spec)
+isempty(attracting_line(attract)) || println(attracting_line(attract))
+
 # The CSV is a machine artifact and lives beside the bundle it describes. tables/ holds
 # .tex only, so a table directory can be deleted and regenerated without thinking.
-save_results(results, joinpath(out_estimates(),
-                               "smm_estimates_$(WINDOW)$(W_SUFFIX).csv"))
+save_results(results, smm_csv_path(WINDOW, W_SUFFIX; point = OUT_POINT); k = eq_hat.k)
 
-# The .jls bundle is consumed by solver/plots.jl, the transition entry point
-# (transition/transition_main.jl), and MCMC standard errors (smm/MCMC_main.jl).
-smm_jls_path = estimate_path(WINDOW, W_SUFFIX)
+# The .jls bundle is consumed by the transition entry point (transition/transition_main.jl),
+# MCMC standard errors (mcmc/MCMC_main.jl), a crisis window's run, and the warm start.
+smm_jls_path = OUT_JLS
 prov = run_provenance(window = WINDOW, w_suffix = W_SUFFIX, version = ROYSEARCH_VERSION)
 # stage = :smm marks a FINISHED optimiser run, which is what distinguishes this file from
 # the :smm_checkpoint the same path receives at every reheat. Without the marker a consumer
 # cannot tell "the run stopped here" from "the run had reached here", and only the first is
 # an estimate. No standard errors: smm_main does not compute any.
 write_bundle(smm_jls_path; result = results, spec = spec, stage = :smm,
-             provenance = prov, sim = sim_smm)
+             provenance = prov, sim = sim_smm,
+             vacancy_costs = (k = eq_hat.k, se = nothing, post = nothing), attracting = attract)
 @printf("Serialized SMM result → %s\n", smm_jls_path)
 @printf("  provenance: schema %d, v%s, %s%s, git %s, host %s\n",
         prov.schema, prov.version, prov.window, prov.w_suffix,

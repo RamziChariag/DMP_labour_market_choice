@@ -285,7 +285,7 @@ end
 # A key present in the registry under a new spelling while the old spelling still
 # appears in a launcher is the failure mode LEGACY_ENV_KEYS exists to make loud.
 for f in ("vm_run.sh", "setup_vm.sh", "vm_go.sh")
-    path = joinpath(ROOT, "code", "scripts", f)
+    path = joinpath(ROOT, "code", "ops", f)
     isfile(path) || continue
     for m in eachmatch(r"ROYSEARCH_([A-Z0-9_]+)", read(path, String))
         k = String(m.captures[1])

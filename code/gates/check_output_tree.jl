@@ -100,12 +100,13 @@ for (kind, root) in (("plots", joinpath(OUT, "plots")), ("tables", joinpath(OUT,
 end
 
 # ── 6. estimates/ matches only the permitted patterns ──────────────────────
-const EST_OK = r"^(estimate|smm_estimates|mcmc_results|candidates|plateau_probe|tau_margin)_.*\.(jls|csv)$|^estimate_.*_postmean\.jls$"
+# _postmean is the chain estimate's name before v57.0.0, which no code reads.
+const EST_OK = r"^(estimate|smm_estimates|mcmc_results|candidates|plateau_probe|tau_margin)_.*\.(jls|csv)$"
 for f in _files(joinpath(OUT, "estimates"))
     b = basename(f)
     b == ".DS_Store" && continue
     occursin(EST_OK, b) || note("rule 6: unexpected file in estimates/ — $(b)")
-    for bad in (".pre_migration", ".pre_v", ".new", "_backup_Q")
+    for bad in (".pre_migration", ".pre_v", ".new", "_backup_Q", "_postmean")
         occursin(bad, b) && note("rule 6: migration/backup debris in estimates/ — $(b)")
     end
 end

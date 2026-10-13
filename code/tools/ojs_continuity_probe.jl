@@ -5,7 +5,7 @@
 #
 #   PROBE_MODE=moments  julia --project=. -t 6 code/tools/ojs_continuity_probe.jl
 #   PROBE_MODE=jump     julia --project=. -t 6 code/tools/ojs_continuity_probe.jl
-#   PROBE_MODE=jacobian PROBE_TOL=1e-8 julia --project=. -t 6 code/tools/ojs_continuity_probe.jl
+#   PROBE_MODE=jacobian PROBE_TOL=1e-10 julia --project=. -t 6 code/tools/ojs_continuity_probe.jl
 #
 # WHY THIS EXISTS. An SMM estimate, its standard errors and every gradient step
 # require Q to be differentiable in θ. A criterion with a step is not: no finite
@@ -30,14 +30,23 @@
 #             and along −μ_S between h = −3e-7 and −1e-6 (both at aS node 63). A line
 #             is fitted through the three same-side points and the jump is the far-side
 #             point's excess over it. Invariance to the tolerance is what distinguishes
-#             a genuine discretisation step from a solve-precision artefact: an
-#             artefact of scale tol_global shrinks with tol_global, and a step does not.
+#             a genuine discretisation step from a solve-precision artefact: an artefact
+#             of scale ε shrinks with ε, and a step does not.
+#
+#             ε here is the BLOCK tolerance — tol_inner and tol_outer_{U,S} moved
+#             together. The rungs swept tol_global until v40.0.0; the global loop now
+#             converges on the residual battery, which is a pass/fail equilibrium
+#             certificate with no threshold to vary, and the block tolerances are what
+#             set how precisely a solve is resolved. The stored
+#             ojs_jump_tolerance_*.csv and ojs_jacobian_tol*.csv logs were produced
+#             under the tol_global rungs and are not comparable rung-for-rung to a
+#             fresh run.
 #
 #   jacobian  Per-column relative L2 spread of the whitened moment Jacobian over
 #             h ∈ {3e-7, 1e-6, 3e-6}, plus cond(J) at the fixed h = 1e-6. A column
 #             whose value depends on the step is not a derivative, and 5% is the
-#             tolerance at which a fixed-step Jacobian is usable. Run at PROBE_TOL 1e-4
-#             and 1e-8: a spread that improves with the tolerance is a noise floor, one
+#             tolerance at which a fixed-step Jacobian is usable. Run at PROBE_TOL 1e-6
+#             and 1e-10: a spread that improves with the tolerance is a noise floor, one
 #             that does not is a step.
 #
 # Steps are taken in UNCONSTRAINED t, the space the optimiser and the MCMC Jacobian
@@ -65,10 +74,13 @@ end
 const MODE     = Symbol(get(ENV, "PROBE_MODE", "moments"))
 const WINDOW   = get(ENV, "ROYSEARCH_WINDOW", "base_fc")
 const W_SUFFIX = "_diagonalW"
+const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
 const TAG      = get(ENV, "PROBE_TAG", "")
-const TOL      = parse(Float64, get(ENV, "PROBE_TOL", "1e-4"))
+# The block tolerance the probe solves at; 0 means the bundle's own.
+const TOL      = parse(Float64, get(ENV, "PROBE_TOL", "0"))
+const TOLTAG   = TOL == 0.0 ? "bundle" : @sprintf("%.0e", TOL)
 
-const BUNDLE = deserialize(estimate_path(WINDOW, W_SUFFIX))
+const BUNDLE = deserialize(estimate_path(WINDOW, W_SUFFIX; point = POINT_ESTIMATE))
 const SPEC   = BUNDLE.spec
 const Θ0     = collect(float.(BUNDLE.result.theta_opt))
 const MK     = active_moment_keys(SPEC)
@@ -81,6 +93,12 @@ const PNAME  = [string(param_symbol(f)) for f in FREE]
 # duplicate keywords win.
 _sim_with(sim::SimParams; kw...) =
     SimParams(; (f => getfield(sim, f) for f in fieldnames(SimParams))..., kw...)
+
+# The probe's precision rung: every block tolerance moved together, with the budget the
+# loops need to reach it.  The global loop has no tolerance of its own to tighten.
+_sim_at_tol(sim::SimParams, tol::Float64) =
+    _sim_with(sim; tol_inner = tol, tol_outer_U = tol, tol_outer_S = tol,
+              conv_streak = 2, global_B = 0, maxit_global = 600)
 _spec_with_sim(spec::SMMSpec, sim::SimParams) =
     SMMSpec(spec.free, spec.fixed, spec.moments, sim, spec.run, spec.W, spec.q_scale)
 
@@ -106,11 +124,12 @@ moment layer reads it: the degenerate case where no cell straddles the cutoff an
 covered fraction must equal the hard indicator it replaced.
 """
 function eval_point(θ::Vector{Float64}, spec::SMMSpec; snap_poj::Bool = false)
-    cp, up, sp = unpack_θ(θ, spec)
+    cp, up, sp, tight = unpack_θ(θ, spec)
     local model, sr
     try
         model, sr = solve_model(cp, up, sp, spec.sim;
-                                Nx = spec.run.Nx, Np_U = spec.run.Np_U, Np_S = spec.run.Np_S)
+                                Nx = spec.run.Nx, Np_U = spec.run.Np_U, Np_S = spec.run.Np_S,
+                                tightness = tight)
     catch
         return _FAILED
     end
@@ -126,6 +145,10 @@ function eval_point(θ::Vector{Float64}, spec::SMMSpec; snap_poj::Bool = false)
     pg  = obj.pg
     idx = [pcut_index(pg, clamp01(obj.poj[j])) for j in eachindex(obj.poj)]
 
+    # Two independent straddles now carry the OJS margin, and they are counted apart
+    # because they diagnose different things: a p-straddle is a cell the CUTOFF cuts, a
+    # participation straddle is an ability cell the searching FRONTIER cuts.  Only the
+    # second can switch a whole type's margin, so it is the one that admits a limit cycle.
     n_str = 0;  m_str = 0.0
     for j in 1:obj.Nx
         poj_j = clamp01(obj.poj[j])
@@ -136,12 +159,13 @@ function eval_point(θ::Vector{Float64}, spec::SMMSpec; snap_poj::Bool = false)
             end
         end
     end
+    n_part = count(w -> w > 1e-14 && w < 1.0 - 1e-14, obj.s_part)
     return (ok = true,
             Q   = compute_loss_matrix(mm, spec, spec.W),
             m   = [getproperty(mm, k) for k in MK],
             idx = idx,
             Gpoj = model.skl_pre.Γvals[idx],
-            n_straddle = n_str, mass_straddle = m_str,
+            n_straddle = n_str, mass_straddle = m_str, n_part_straddle = n_part,
             w_lo = first(obj.wmid), w_hi = last(obj.wmid))
 end
 
@@ -187,13 +211,10 @@ if MODE === :jump
     # The three same-side steps and the far-side step that crosses the node, per ray.
     RAYS = [("λ_S", [3e-8, 1e-7, 3e-7], 1e-6),
             ("μ_S", [-3e-8, -1e-7, -3e-7], -1e-6)]
-    RUNGS = [("shipped 1e-4", SPEC.sim),
-             ("uniform 1e-4", _sim_with(SPEC.sim; tol_global = 1e-4, conv_streak = 2,
-                                       global_B = 0, maxit_global = 600)),
-             ("uniform 1e-6", _sim_with(SPEC.sim; tol_global = 1e-6, conv_streak = 2,
-                                       global_B = 0, maxit_global = 600)),
-             ("uniform 1e-8", _sim_with(SPEC.sim; tol_global = 1e-8, conv_streak = 2,
-                                       global_B = 0, maxit_global = 600))]
+    RUNGS = [("bundle",       SPEC.sim),
+             ("uniform 1e-6", _sim_at_tol(SPEC.sim, 1e-6)),
+             ("uniform 1e-8", _sim_at_tol(SPEC.sim, 1e-8)),
+             ("uniform 1e-10", _sim_at_tol(SPEC.sim, 1e-10))]
 
     rows = DataFrame(rung = String[], param = String[], h_far = Float64[],
                      jump = Float64[], slope = Float64[], Q_base = Float64[],
@@ -227,8 +248,7 @@ end
 if MODE === :crossing
     # The two points that bracket the crossing on the +λ_S ray, at a tolerance tight
     # enough that nothing between them is solve noise.
-    spec = _spec_with_sim(SPEC, _sim_with(SPEC.sim; tol_global = 1e-8, conv_streak = 2,
-                                         global_B = 0, maxit_global = 600))
+    spec = _spec_with_sim(SPEC, _sim_at_tol(SPEC.sim, 1e-10))
     j  = _IX["λ_S"]
     lo = eval_point(_shift(Θ0, j, 3e-7), spec)
     hi = eval_point(_shift(Θ0, j, 1e-6), spec)
@@ -259,11 +279,9 @@ end
 # ════════════════════════════════════════════════════════════
 if MODE === :jacobian
     HS = [3e-7, 1e-6, 3e-6]
-    sim = TOL == 1e-4 ? SPEC.sim :
-          _sim_with(SPEC.sim; tol_global = TOL, conv_streak = 2, global_B = 0,
-                    maxit_global = 600)
+    sim  = TOL == 0.0 ? SPEC.sim : _sim_at_tol(SPEC.sim, TOL)
     spec = _spec_with_sim(SPEC, sim)
-    @printf("tol_global = %.1e   central differences at h = %s\n\n", sim.tol_global, HS)
+    @printf("block tolerance = %s   central differences at h = %s\n\n", TOLTAG, HS)
 
     # Gw[a][:, j] is the whitened column for parameter j at step HS[a]. Threaded over
     # columns: each solve is already threaded over the ability grid, so the two layers
@@ -305,11 +323,11 @@ if MODE === :jacobian
                 PNAME[j], norm(J[:, j]), nrm[j], spread[j], spread_pair[j], spread_nrm[j],
                 spread[j] > 0.05, feasible[j])
     end
-    @printf("\nCOND,tol=%.1e,cond=%.6e,sigma_max=%.6e,sigma_min=%.6e,rank=%d/%d,fails=%d\n",
-            sim.tol_global, sv[1] / sv[end], sv[1], sv[end], count(>(tolr), sv), D,
+    @printf("\nCOND,tol=%s,cond=%.6e,sigma_max=%.6e,sigma_min=%.6e,rank=%d/%d,fails=%d\n",
+            TOLTAG, sv[1] / sv[end], sv[1], sv[end], count(>(tolr), sv), D,
             count(s -> s > 0.05, spread))
     CSV.write(joinpath(out_logs(),
-                       @sprintf("ojs_jacobian_tol%.0e_%s%s.csv", TOL, WINDOW, TAG)),
+                       @sprintf("ojs_jacobian_tol%s_%s%s.csv", TOLTAG, WINDOW, TAG)),
               DataFrame(param = PNAME, colnorm_h1e6 = [norm(J[:, j]) for j in 1:D],
                         colnorm_mean = nrm, spread = spread, spread_pair = spread_pair,
                         spread_nrm = spread_nrm, feasible = feasible))

@@ -74,7 +74,7 @@ function smm_objective(
 end
 
 const SPEC = let
-    b = deserialize(estimate_path(:base_fc, "_diagonalW"))
+    b = deserialize(estimate_path(:base_fc, "_diagonalW"; point = :smm))
     b.spec
 end
 const D    = length(SPEC.free)

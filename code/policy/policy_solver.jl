@@ -40,16 +40,22 @@ function _extract_policy_result(
     x_bar = isnothing(x_bar_idx) ? 1.0 : xg[x_bar_idx]
 
     # ── Mean wages (employment-weighted) ──────────────────
-    # Unskilled
+    # Unskilled, every employed worker counted once as in the moment layer: a tail cell
+    # below p = 1 by its density × wpU at its wage, the new matches by their mass at the
+    # entry wage w_U(x, 1). Both masses carry the ability weights already.
     wU_num = 0.0;  wU_den = 0.0
-    pgU = obj.pgU;  wpU = obj.wpU
-    for ix in 1:Nx, jp in eachindex(pgU)
-        e_ij = obj.eU_surface[ix, jp]
-        w_ij = obj.wU_surface[ix, jp]
-        if !isnan(w_ij) && e_ij > 1e-16
-            m = e_ij * wx[ix] * wpU[jp]
-            wU_num += m * w_ij
-            wU_den += m
+    wpU = obj.wpU
+    for ix in 1:Nx
+        for jp in eachindex(wpU)
+            w_ij = obj.wU_surface[ix, jp];  m = obj.eU_density[ix, jp] * wpU[jp]
+            if !isnan(w_ij) && m > 1e-16
+                wU_num += m * w_ij
+                wU_den += m
+            end
+        end
+        if obj.eU_entry[ix] > 1e-16
+            wU_num += obj.eU_entry[ix] * obj.wU_entry[ix]
+            wU_den += obj.eU_entry[ix]
         end
     end
     mean_wage_U = wU_den > 1e-14 ? wU_num / wU_den : 0.0
@@ -59,13 +65,14 @@ function _extract_policy_result(
     pg  = obj.pg;   wpS = obj.wpS
     for ix in 1:Nx
         poj_ix = clamp01(obj.poj[ix])
+        part   = obj.s_part[ix]
         for jp in 1:NpS
             e_ij = obj.eS_mat[ix, jp]
             e_ij <= 1e-16 && continue
             m = e_ij * wx[ix] * wpS[jp]
             # Same OJS split as the moment layer: the covered fraction of the cell sits on
             # the poached-worker surface wS1 and the rest on wS0.
-            s_ij = _soft_oj_weight(pg[jp], poj_ix, pg, jp, NpS)
+            s_ij = _ojs_share(part, pg[jp], poj_ix, pg, jp, NpS)
             w1 = obj.wS1_surface[ix, jp];  w0 = obj.wS0_surface[ix, jp]
             if s_ij > 0.0 && !isnan(w1)
                 wS_num += s_ij * m * w1
@@ -102,7 +109,7 @@ function _extract_policy_result(
         obj.agg_mS / max(obj.agg_uU + obj.agg_eU + obj.agg_mS, 1e-14),   # skilled_share (LF-based)
         obj.agg_t  / max(obj.total_pop, 1e-14),   # training_share
         obj.thetaU, obj.thetaS,
-        obj.f_U, obj.f_S,
+        obj.κ_U, obj.f_S,
         obj.sep_rate_U, obj.sep_rate_S, obj.ee_rate_S,
         mean_wage_U, mean_wage_S, wage_premium,
         obj.UU[ix25], obj.UU[ix50], obj.UU[ix75],

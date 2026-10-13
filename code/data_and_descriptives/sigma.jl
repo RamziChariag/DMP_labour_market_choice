@@ -3,9 +3,9 @@
 #
 # Combine step (Stage 8) — the full 31×31 influence-function variance–
 # covariance matrix Σ̂ for every window, used to build the SMM weight
-# matrix. The training_share row/col of the SAVED Σ̂ carries the enrolment-target
-# adjustment (off-diagonals × κ, diagonal × κ²); the in-memory return
-# stays raw for Stage 9 diagnostics. REGULARIZATION_ALPHA comes from setup.jl.
+# matrix. training_share is read from the enrolment target, so its row/col
+# carries no level adjustment (see the save step). REGULARIZATION_ALPHA comes
+# from setup.jl.
 #
 # Also builds a per-moment SAMPLING-variance vector σ̂²_samp (all on one 1/N
 # footing) → sampling_var_{window}.csv, read only by the diagonal-σ SMM weight.

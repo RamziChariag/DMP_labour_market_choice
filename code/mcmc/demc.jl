@@ -419,7 +419,8 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     # A chain whose running maximum keeps climbing above the seed is optimising, not
     # sampling, and no amount of extra budget fixes it: abort so the diagnosis is
     # cheap. drift_max ≤ 0 disables the check.
-    lp_seed    = lp[1]                        # chain 1 starts exactly at θ0
+    # Evaluated at θ0 itself: chain 1 starts there only under :at_seed and :widths.
+    lp_seed    = logπ(θ0f)
     θ_best     = copy(θ0f)                    # argmax of logπ seen so far
     lp_best    = lp_seed
     aborted    = false
@@ -789,7 +790,7 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
         # Their block also prints the running mean and best parameter VECTORS. Those are
         # dropped here: at d = 23 they are two unlabelled 23-number rows per block that no
         # decision is taken on, and the estimator writes the same quantities to
-        # mcmc_results_<window><suffix>.csv with labels, quantiles and standard errors. What
+        # mcmc_results_<window><suffix>_mcmc.csv with labels, quantiles and standard errors. What
         # is kept is the part that cannot be recovered afterwards — the five-way breakdown of
         # WHY proposals were accepted or rejected, which is the reason to watch a live run.
         if lmr_print > 0 && (g % lmr_print == 0 || g == gens)

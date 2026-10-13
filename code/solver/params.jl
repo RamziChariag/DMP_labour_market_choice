@@ -3,8 +3,8 @@
 #
 # Worker type is a PAIR of abilities (aU, aS): aptitude for unskilled and
 # for skilled work, drawn from a joint distribution with Gaussian-copula
-# correlation ρ_x.  Market separation is by comparative advantage (Roy
-# 1951; Gola 2016, 2021), not by curvature of production, so the sectoral
+# correlation ρ_x.  Both markets are populated through comparative advantage
+# (Roy 1951; concordance as in Gola 2021), not through curvature of production, so the sectoral
 # gradients γ_U, γ_S of the single-ability model are gone and a single
 # copula correlation ρ_x is added.  The single-ability model is the
 # ρ_x → 1 limit.
@@ -13,9 +13,6 @@
 #   :common ← r, ν, φ, a_ℓ, b_ℓ, ρ_x, c, A
 #   :unsk   ← μ_U, η_U, k_U, β_U, λ_U, PU, bU, bT, α_U, ξ_U, σ_wU
 #   :skl    ← μ_S, η_S, k_S, β_S, λ_S, σ_S, PS, bS, a_Γ, b_Γ, ξ_S, σ_wS
-# Storage reflects only which solver block consumes a parameter;
-# the four estimation categories (calibrated / pre-estimated / deep /
-# regime-specific) are an orthogonal classification (see the notes).
 ############################################################
 
 
@@ -37,11 +34,17 @@
 
 const DAMP_THETA_S = Ref(0.9)
 
-# Under-relaxation on the p^oj_S iterate: the OJS cutoff is installed as
-# w·p^oj_new + (1−w)·p^oj_old at the end of each skilled outer iteration.  The
-# Anderson branch installs p^oj raw (damp_pstar_S reaches p*_S only), so w < 1
-# is the only damping available on it.  w = 1 is the shipped map.
-const DAMP_POJ_S = Ref(1.0)
+# The same under-relaxation on θ_U, and for the same reason one level down: the
+# unskilled free-entry map was iterated RAW, and raw it is not a contraction.
+# Measured on the a_ℓ line at base_fc, where it was losing a contiguous band of
+# otherwise-feasible draws: θ_U ran an exact period-8 orbit, descending from the
+# clamp ceiling of 100 to the floor of 1e-14 over seven iterations and jumping back
+# on the eighth, because θ_U at the floor gives κ_U ≈ 0, an unfilled vacancy is then
+# worth everything, and free entry answers with the ceiling.  At w = 0.9 all nine
+# swept points solve against four shipped, and Q at the points that already solved
+# moves by at most 4.1e-07 relative (1.1e-10 at the widest offset) — under-relaxation
+# leaves the fixed point of the map exactly invariant and changes only the path to it.
+const DAMP_THETA_U = Ref(0.9)
 
 # Which zero of S^1 − S^0 above p*_S is read as p^oj_S.  :last takes the highest
 # sign change, :first the lowest.  The OJS margin is a participation margin —
@@ -69,6 +72,26 @@ const POJ_SCORE = Ref(:raw)
 # interpolated by the local quadratic through three consecutive nodes, which
 # reduces that stencil-switch kink to O(h²).
 const POJ_CROSSING_C1 = Ref(false)
+
+# How the type-level OJS participation decision is aggregated over an ability cell.
+# On a finite ability grid a "type" is a CELL of positive width: the mass at node k is
+# the Gauss-weighted mass of an interval, not a point mass at a_k.  The participation
+# score is M(aS) = max_{p >= p*_S} (S^1 − S^0)(aS, p) — on-the-job search pays for aS at
+# some acceptable quality iff M(aS) > 0 — so the correct participation weight for cell k
+# is the FRACTION of the cell on which M > 0, and the node indicator 1{M(a_k) > 0} is the
+# approximation to it rather than the other way round.
+#
+# :indicator is the node rule and reproduces every run up to v38.3.0.  A type on the
+# knife edge M(a_k) ≈ 0 switches its whole OJS margin between consecutive outer
+# iterations, p^oj collapses onto p*_S, and the outer map is discontinuous there whatever
+# crossing rule is used inside the searching region: measured at the base_fc estimate,
+# one ability cell of 160 attains the p^oj sup-norm on 100 of 100 iterations and the
+# block runs a closed period-4 orbit for 200 iterations without converging.
+# :fraction is the covered-fraction aggregation — the v22.0.0 pattern the training
+# frontier, the drain and the tail integrals already carry, applied one level up.  The
+# weight moves continuously from 1 to 0 as the frontier crosses the cell, the same state
+# converges in 13 iterations, and the 24-point base_fc audit goes 19/24 to 24/24.
+const OJS_PARTICIPATION = Ref(:fraction)
 
 
 # ============================================================
@@ -113,8 +136,8 @@ end
 Base.@kwdef struct UnskilledParams
     μ   :: Float64    # matching efficiency
     η   :: Float64    # matching elasticity
-    k   :: Float64    # vacancy posting cost, in months of average unskilled
-                      # output: dollar flow = k · π̄_U (mean_output_U, grids.jl)
+    k   :: Float64    # vacancy posting cost, in months of the mean output of a new
+                      # unskilled match: dollar flow = k · π̄_U (mean_output_U, grids.jl)
     β   :: Float64    # worker Nash bargaining weight
     λ   :: Float64    # damage-shock arrival rate
 
@@ -234,6 +257,14 @@ Base.@kwdef mutable struct SkilledCache
     pstar :: Vector{Float64}           # p*_S(aS): endogenous separation cutoff
     poj   :: Vector{Float64}           # p^oj_S(aS): OJS cutoff
 
+    # Fraction of ability cell aS on which on-the-job search pays at all, i.e. the share
+    # of the cell covered by {aS : max_p (S^1 − S^0) > 0}.  Multiplies the p-coverage
+    # weight at every consumer of the OJS margin (_ojs_share, grids.jl), so a cell the
+    # frontier cuts contributes that fraction of the searching branch and the complement
+    # of the non-searching one.  Identically 1 under OJS_PARTICIPATION[] === :indicator,
+    # where p^oj alone carries participation.
+    s_part :: Vector{Float64}
+
     # Cross-market directed-search policy on the (aU, aS) grid:
     # d(aU,aS) = 1 ⇔ U_S^(1)(aU) > U_S^(0)(aS)  (notes eq:dpolicy).
     d     :: Matrix{Float64}
@@ -244,7 +275,7 @@ Base.@kwdef mutable struct SkilledCache
     u_frac :: Vector{Float64}          # û_S(aS): unemployed fraction of a d=0 type's mass
     e_frac :: Matrix{Float64}          # ê_S(aS,p): employed density fraction of a d=0 type's mass
 
-    m_S   :: Matrix{Float64}           # m_S(aU,aS): trained-worker mass = φ t / (ν + d f_U)
+    m_S   :: Matrix{Float64}           # m_S(aU,aS): trained-worker mass = φ t / (ν + d κ_U)
 
     θ     :: Float64                   # skilled market tightness
 end
@@ -255,10 +286,12 @@ end
 ##############
 
 Base.@kwdef struct SimParams
+    # Block tolerances.  There is no global counterpart: the global loop converges on the
+    # equilibrium residual battery, whose components are ratios to their own internal
+    # tolerances and are gated at 1 (solver.jl, global_residuals).
     tol_inner      :: Float64    # tolerance for inner fixed point
     tol_outer_U    :: Float64    # tolerance for unskilled outer loop
     tol_outer_S    :: Float64    # tolerance for skilled outer loop
-    tol_global     :: Float64    # tolerance for global fixed point
 
     maxit_inner    :: Int        # max iterations in inner loop
     maxit_outer    :: Int        # max iterations in block outer loops
@@ -266,12 +299,12 @@ Base.@kwdef struct SimParams
 
     conv_streak    :: Int        # required consecutive convergence hits
 
-    use_anderson   :: Bool       # toggle Anderson acceleration
-    anderson_m     :: Int        # Anderson memory
+    use_anderson   :: Bool       # Anderson acceleration in the unskilled block and the global
+                                 # loop; the skilled block is never accelerated
     anderson_reg   :: Float64    # Anderson regularization
 
-    damp_pstar_U   :: Float64    # damping for unskilled pstar
-    damp_pstar_S   :: Float64    # damping for skilled pstar updates
+    damp_pstar_U   :: Float64    # damping for unskilled p*, read only when use_anderson = false
+    damp_pstar_S   :: Float64    # damping for skilled p*_S and p^oj_S, read on every pass
 
     verbose        :: Int        # verbosity level
     verbose_stride :: Int        # print every N iterations
@@ -327,6 +360,10 @@ Base.@kwdef mutable struct Model
     skl_cache   :: SkilledCache
 
     sim         :: SimParams
+
+    # Set by solve_model! once the solve has converged at a corner: free entry at a market
+    # that holds no one is then priced at its limit composition (marginal_training_cells).
+    corner_limit :: Bool = false
 end
 
 
@@ -395,10 +432,10 @@ function initialise_model(;
     )
 
     sim = SimParams(
-        tol_inner    = 1e-8, tol_outer_U = 1e-6, tol_outer_S = 1e-7, tol_global = 1e-3,
+        tol_inner    = 1e-8, tol_outer_U = 1e-6, tol_outer_S = 1e-7,
         maxit_inner  = 500,  maxit_outer = 300,  maxit_global = 50,
         conv_streak  = 2,
-        use_anderson = true, anderson_m = 1, anderson_reg = 1e-10,
+        use_anderson = true, anderson_reg = 1e-10,
         damp_pstar_U = 1.00, damp_pstar_S = 1.00,
         verbose      = 2,    verbose_stride = 10,
     )
@@ -448,6 +485,7 @@ function build_model(cp::CommonParams, grids::CommonGrids,
         J1     = zeros(Nx, Np_S),
         pstar  = fill(0.10, Nx),
         poj    = fill(0.60, Nx),
+        s_part = ones(Nx),
         d      = zeros(Nx, Nx),
         u_frac = fill(1.0, Nx),
         e_frac = zeros(Nx, Np_S),

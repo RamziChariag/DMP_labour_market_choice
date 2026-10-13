@@ -24,6 +24,10 @@ SLICED="$SMM_DIR/main_spec_only.jl"
 # Truncate the driver just before §9 so the spec-construction path runs verbatim.
 "$JULIA" slice_spec.jl "$SMM_DIR/smm_main.jl" "# 9. Run estimation" "$SLICED"
 
+# The window and INIT_MODE are run settings, read by the driver from the environment.
+export ROYSEARCH_WINDOW=crisis_covid
+export ROYSEARCH_INIT_MODE="$MODE"
+
 # Only the RUN CONFIGURATION differs from the shipped driver: the coarse grid
 # (these tests build a spec, they do not estimate) and, for :clusters, a small
 # Sobol sample.  n_sample must stay a power of two — Owen scrambling requires it.
@@ -31,9 +35,8 @@ python3 - "$MODE" "$SLICED" <<'PY'
 import re, sys
 mode, path = sys.argv[1], sys.argv[2]
 s = open(path).read()
-s = s.replace("INIT_MODE            = :warmstart", f"INIT_MODE            = :{mode}")
 for name in ("Nx      ", "Np_U    ", "Np_S    "):
-    s = re.sub(rf"^    {name}= 120,", f"    {name}= 40,", s, flags=re.M)
+    s = re.sub(rf"^    {name}= \d+,", f"    {name}= 40,", s, flags=re.M)
 if mode == "clusters":
     s = re.sub(r"^    cand_n_sample    = 2048,", "    cand_n_sample    = 32,", s, flags=re.M)
     s = re.sub(r"^    cand_min_cluster = 5,",    "    cand_min_cluster = 2,", s, flags=re.M)

@@ -4,8 +4,7 @@
 # Stage 9 — validation and diagnostics, run at the very end of the
 # pipeline. Prints the moment table, published-benchmark range checks,
 # cross-window direction checks, and the stationary-identity gap. Reads
-# the in-memory results (raw training_share), so it is independent of the
-# κ adjustment baked into the saved CSVs.
+# the in-memory results, which hold training_share as the saved CSVs do.
 #
 # Reads:  phi_calibration.csv, nu_estimation.csv (+ in-memory moments)
 # Writes: — (prints only)

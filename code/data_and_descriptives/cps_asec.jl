@@ -67,19 +67,19 @@ function clean_cps_asec()
     df.weekly_wage = df.hourly_wage .* ft_hours
     filter!(row -> isfinite(row.weekly_wage) && row.weekly_wage > 0.0, df)
 
-    # ── Deflate to constant (2012) dollars ───────────────────────
+    # ── Deflate to constant (2013) dollars ───────────────────────
     if hasproperty(df, :CPI99)
         idx_2013 = findfirst(==(2013), df.YEAR)
-        cpi_2012 = isnothing(idx_2013) ? nothing : df.CPI99[idx_2013]
-        if isnothing(cpi_2012) || ismissing(cpi_2012) || iszero(cpi_2012)
-            cpi_2012 = 1.0
+        cpi_2013 = isnothing(idx_2013) ? nothing : df.CPI99[idx_2013]
+        if isnothing(cpi_2013) || ismissing(cpi_2013) || iszero(cpi_2013)
+            cpi_2013 = 1.0
             @warn "  Could not identify CPI99 base — wages not deflated"
         end
         # IPUMS CPI99 is a reciprocal-type factor (≈1.0 in 1999, falling over
         # time), so real 2013 dollars are weekly_wage × CPI99[t] / CPI99[2013].
         # This is the direct idiom rather than deflate_wage, which expects a
         # standard increasing CPI (as SIPP uses) and would invert the direction.
-        df.real_wage = df.weekly_wage .* Float64.(df.CPI99) ./ Float64(cpi_2012)
+        df.real_wage = df.weekly_wage .* Float64.(df.CPI99) ./ Float64(cpi_2013)
     else
         @warn "  CPI99 not in data — wages remain nominal"
         df.real_wage = df.weekly_wage

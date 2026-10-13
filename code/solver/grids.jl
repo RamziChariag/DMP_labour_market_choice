@@ -9,7 +9,7 @@
 
 @inline q_from_theta(θ::Float64, μ::Float64, η::Float64)    = μ * θ^(-η)
 @inline theta_from_q(q::Float64, μ::Float64, η::Float64)    = (μ / q)^(1/η)
-@inline jobfinding_rate(θ::Float64, μ::Float64, η::Float64) = θ * q_from_theta(θ, μ, η)
+@inline meeting_rate(θ::Float64, μ::Float64, η::Float64) = θ * q_from_theta(θ, μ, η)
 
 
 # ============================================================
@@ -18,6 +18,36 @@
 
 @inline supnorm(a, b)       = maximum(abs.(a .- b))
 @inline clamp01(x::Float64) = min(max(x, 0.0), 1.0)
+
+
+# ============================================================
+# Parallel work partition
+# ============================================================
+
+"""
+    index_chunks(N, [nch]) -> Vector{UnitRange{Int}}
+
+Split `1:N` into at most `nch` (default `nthreads()`) contiguous ranges, for a
+`@sync`/`@spawn` fan-out over them.
+
+WHY CHUNKS AND NOT `@threads`. The inner value loops run inside the SMM's own threaded
+loops over parameter points — the DE population, the Jacobian, the ΔQ=1 widths. Their
+per-worker scratch used to be indexed by `threadid()`, which is only safe under
+`@threads :static`, and `:static` throws `cannot be used concurrently or nested` when a
+caller is already in a threaded loop. `smm_objective` caught that and returned `Inf`, so
+every threaded evaluation in v40.0.0 read as an infeasible parameter point.
+
+`@spawn` nests. With the work partitioned once here, scratch is allocated *inside* each
+task, so no two tasks can alias a buffer and `threadid()` is not needed anywhere. A
+reduction indexed by chunk is also more reproducible than one indexed by thread: the
+partition is a function of `N` alone, so the grouping of terms does not depend on how the
+scheduler happened to assign work.
+"""
+@inline function index_chunks(N::Int, nch::Int = Threads.nthreads())
+    N <= 0 && return UnitRange{Int}[]
+    n = min(max(nch, 1), N)
+    collect(Iterators.partition(1:N, cld(N, n)))
+end
 
 
 # ============================================================
@@ -85,9 +115,10 @@ end
     node_midpoint_intervals(x) -> (xlo, xhi)
 
 The interval each ability node represents: the midpoints to its neighbours,
-clipped to the grid's own support at the ends.  Both continuous frontiers on the
-ability grid — the training frontier τ_T and the cross-market drain d — express a
-cell's covered fraction against these intervals, so they share one definition.
+clipped to the grid's own support at the ends.  Every continuous frontier on the
+ability grid — the training frontier τ_T, the cross-market drain d and the unskilled
+hiring threshold χ — expresses a cell's covered fraction against these intervals, so
+they share one definition.
 """
 function node_midpoint_intervals(x::AbstractVector{Float64})
     N   = length(x)
@@ -97,6 +128,19 @@ function node_midpoint_intervals(x::AbstractVector{Float64})
         xhi[j] = j == N ? x[N] : 0.5 * (x[j] + x[j + 1])
     end
     return xlo, xhi
+end
+
+"""
+    fraction_above(xlo, xhi, x, a) -> Float64
+
+Fraction of the ability cell `[xlo, xhi]` (node `x`) lying above a frontier `a`: the
+cell's quadrature of the indicator 1{ability ≥ a}.  Continuous and piecewise linear in
+`a`, and equal to the indicator whenever `a` sits on a cell edge.  A zero-width cell has
+no interior to split and takes the indicator at its node.
+"""
+@inline function fraction_above(xlo::Float64, xhi::Float64, x::Float64, a::Float64)
+    w = xhi - xlo
+    return w > 0.0 ? clamp((xhi - a) / w, 0.0, 1.0) : (x >= a ? 1.0 : 0.0)
 end
 
 
@@ -214,22 +258,36 @@ end
 
 
 # ============================================================
-# Mean sectoral flow output — LMR-style vacancy-cost units
+# Empty markets
 #
-#   π̄_U ≡ E[π_U] = exp(A) · P_U · E_ℓ[aU] · E_G[p],  E_G[p] = α_U/(α_U+1)
-#   π̄_S ≡ E[π_S] = exp(A) · P_S · E_ℓ[aS] · E_Γ[p],  E_Γ[p] = a_Γ/(a_Γ+b_Γ)
+# A market whose mass is below EMPTY_MASS holds no one.  Its within-market objects are
+# then read at the limit of its composition as it empties (marginal_training_cells),
+# never at its mass, and its aggregates are zero.
+# ============================================================
+
+const EMPTY_MASS = 1.0e-12
+
+
+# ============================================================
+# Mean flow output of a new match — LMR-style vacancy-cost units
 #
-# Production is linear in own ability (notes eq. prod), so the ability
-# factor is the marginal mean E_ℓ[a] = dot(a, wa).  Vacancy costs are
-# k_j · π̄_j with k_j dimensionless (months of average sectoral output),
-# exactly LMR (2016).
+#   π̄_U ≡ exp(A) · P_U · E_ℓ[aU]                      (new unskilled match at p = 1)
+#   π̄_S ≡ exp(A) · P_S · E_ℓ[aS] · E_Γ[p],  E_Γ[p] = a_Γ/(a_Γ+b_Γ)
+#
+# LMR (2016) price a vacancy at c times the mean of f(x,y) over independent
+# population draws of worker and job type: the output of a random new match.
+# Production is linear in own ability (notes eq. prod), so the ability factor
+# is the marginal mean E_ℓ[a] = dot(a, wa).  The quality factor is the mean of
+# the distribution a new match starts from: Γ for a skilled match, the point
+# mass at p = 1 for an unskilled one (G governs only the redraw after a shock).
+# Vacancy costs are k_j · π̄_j with k_j dimensionless, in months of the mean
+# output of a new match, so k_U's unit does not move with α_U.
 # ============================================================
 
 function mean_output_U(model)
     gp = model.grids;  up = model.unsk_par;  cp = model.common
-    Ea = dot(gp.x, gp.wa_U)                   # E_ℓ[aU]
-    Ep = up.α_U / (up.α_U + 1.0)              # E_G[p], G = Beta(α_U, 1)
-    return exp(cp.A) * up.PU * Ea * Ep
+    Ea = dot(gp.x, gp.wa_U)                   # E_ℓ[aU]; starting quality p = 1
+    return exp(cp.A) * up.PU * Ea
 end
 
 function mean_output_S(model)
@@ -303,14 +361,15 @@ end
 # p*: returns 1 above the cell, 0 below it, and the fractional coverage
 # inside it.  Makes every tail integral ∫_{p*}^1 (·) dG a continuous
 # function of p*, which the outer fixed point on the reservation cutoff
-# needs to converge smoothly.
+# needs to converge smoothly.  Node j's cell is [p_j, p_{j+1}], and the top
+# node's is [p_N, 1], so the rule holds at every node: a cutoff crossing p_N
+# fades the top node out like any other instead of switching it off.
 # ============================================================
 
 @inline function _soft_weight(pj::Float64, pstar::Float64,
                               pgrid::Vector{Float64}, j::Int, Np::Int)
     pj >= pstar && return 1.0
-    j  >= Np     && return 0.0
-    p_next = pgrid[min(j + 1, Np)]
+    p_next = j < Np ? pgrid[j + 1] : 1.0
     p_next <= pstar && return 0.0
     cell = p_next - pj
     cell < 1e-14 && return 0.0
@@ -318,17 +377,39 @@ end
 end
 
 # Companion soft weight for the OJS region {p < p^oj}: 1 below the OJS
-# cutoff, 0 above it, linear across the straddling cell.
+# cutoff, 0 above it, linear across the straddling cell (the same cells).
 @inline function _soft_oj_weight(pj::Float64, poj::Float64,
                                  pgrid::Vector{Float64}, j::Int, Np::Int)
     pj >= poj && return 0.0
-    j  >= Np   && return 1.0
-    p_next = pgrid[min(j + 1, Np)]
+    p_next = j < Np ? pgrid[j + 1] : 1.0
     p_next <= poj && return 1.0
     cell = p_next - pj
     cell < 1e-14 && return 1.0
     return clamp((poj - pj) / cell, 0.0, 1.0)
 end
+
+# Fraction of the sub-interval [lo, hi] ⊆ [xa, xb] on which the linear interpolant
+# through (xa, fa) and (xb, fb) is positive.  The one-dimensional covered-fraction
+# primitive behind _soft_oj_weight, written separately so it can also be applied on
+# the ABILITY grid, where the sign of the OJS participation score changes inside a cell.
+@inline function _pos_share(fa::Float64, fb::Float64, xa::Float64, xb::Float64,
+                            lo::Float64, hi::Float64)
+    fa >  0.0 && fb >  0.0 && return 1.0
+    fa <= 0.0 && fb <= 0.0 && return 0.0
+    hi - lo < 1e-14 && return 0.0
+    xc = xa + fa / (fa - fb) * (xb - xa)            # zero of the interpolant
+    return fa > 0.0 ? clamp((xc - lo) / (hi - lo), 0.0, 1.0) :
+                      clamp((hi - xc) / (hi - lo), 0.0, 1.0)
+end
+
+# The searching share of cell (aS, p): the type-level OJS participation weight times
+# the p-coverage of the region below p^oj.  The two OJS margins — which abilities
+# search at all, and from which match qualities — are both covered fractions of a
+# grid cell, so they enter every consumer the same way and every consumer stays
+# continuous in the parameters.
+@inline _ojs_share(part::Float64, pj::Float64, poj::Float64,
+                   pgrid::Vector{Float64}, j::Int, Np::Int) =
+    part * _soft_oj_weight(pj, poj, pgrid, j, Np)
 
 # Smooth non-negative part: ½(x + √(x²+ε²)) ≈ max(x,0) but C^∞.  Replaces
 # max(·,0) on raw surplus expressions so the outer fixed-point map has no

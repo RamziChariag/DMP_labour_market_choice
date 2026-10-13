@@ -140,19 +140,74 @@ settings half; the rest is the versioning gate in full.
    as though it governed the walk — and because the same check found `_run_sa` dropping
    `checkpoint_path`, which silently disabled SA reheat checkpointing. A keyword kept
    deliberately unread (signature compatibility) says so in a comment beside it.
-5. The changed path runs against real data, writing to a scratch directory.
-6. Both version constants agree (`code/smm/version.jl` and
+5. **`check_threading.jl` exits 0, run with `-t 2` or more.** A solve inside
+   `Threads.@threads for i in 1:2` must return a finite objective and be *bitwise* equal
+   to the serial value. It exists because v40.0.0 shipped a solver whose two
+   `@threads :static` loops could not nest: `smm_objective` reported the resulting
+   exception as `Inf`, so the DE population, the ΔQ=1 width measurement and the
+   adaptive-FD Jacobian each read every parameter point as infeasible, and the whole
+   regression was invisible because every test at the time ran serially. The bitwise
+   half matters as much as the finiteness half — a schedule-dependent reduction would
+   trade a loud `Inf` for a silent wrong number.
+6. The changed path runs against real data, writing to a scratch directory.
+7. Both version constants agree (`code/smm/version.jl` and
    `code/data_and_descriptives/data_processing_main.jl:56`).
-7. Old serialised bundles still load, or were migrated in the same pass.
-8. `VERSION_NOTES.md` records the settings added, retired or re-defaulted.
+8. Old serialised bundles still load, or were migrated in the same pass.
+9. `VERSION_NOTES.md` records the settings added, retired or re-defaulted.
 
 The audit `output/settings_audit.csv` (see below) is regenerated when the settings
 surface changes, and its "effective value" column must come from an actual run.
+
+## Settings that choose a file
+
+Two settings say which estimate a run reads or writes rather than how it computes. They
+exist because from v57.0.0 each estimate has a file of its own (`estimate_path`,
+`code/paths.jl`; the file table in `README.md`).
+
+- **`CRISIS_BASE`** (`smm_main.jl`, directly below `WINDOW`; `:smm` or `:mcmc`, default
+  `:smm`). A crisis window holds the ability distribution at its base window's SMM
+  estimate (`:smm`, writing `estimate_<crisis>W_smm.jls`) or at the base chain's estimate
+  (`:mcmc`, writing `estimate_<crisis>W_smm_mcmcbase.jls`, the crisis chain's seed). A
+  base window never reads it, so it can stay set while the window changes, and the
+  registry declares it `:inert` because the shipped `WINDOW` is a base window. Any other
+  value stops the run.
+- **`POINT_ESTIMATE`** (`:smm` or `:mcmc`, default `:smm`). Not an environment setting: a
+  constant at the top of each script that reads an estimate (`transition_main.jl`,
+  `model_main.jl`, `policy_main.jl` and the tools), beside that script's other constants.
+  `:smm` reads `estimate_<w>W_smm.jls`, `:mcmc` reads `estimate_<w>W_mcmc.jls`.
+  `estimate_path` has no default `point`, so no reader falls back to a file it did not
+  name. In `transition_main.jl` it also tags every file the run writes, the transition file
+  `transition_<pair>W_<point>.jls` and its tables and plots `…W_<point>`, so the runs at the
+  two points coexist.
+
+Two MCMC defaults changed in the same version. **`MCMC_CHECKPOINT`** is `false`, declared
+`:inert`: set, it writes the best visited point to `estimate_<w>W_mcmcbest.jls`, and that
+file is all it governs. The chain is snapshotted to `output/chains/chain_<w>W.jls` every
+`MCMC_LMR_PRINT` generations (500) whether or not it is set, so a run killed before the
+sampler returns still leaves its draws, and a chain writes no estimate file but its own.
+**`MCMC_BURN`** is `0.8`, which keeps the last 1,000 generations of the 5,000-generation
+budget, LMR's retained length.
 
 ## Graveyard — what was tried and dropped
 
 For future sessions. Each entry says what the switch did, why it went, and on what
 evidence, so it is not re-proposed.
+
+### `SCENARIO_BUNDLES` — the transition's bundle files, per scenario
+**Retired in v57.0.0.** A constant in `transition_main.jl` naming the two bundles of each
+scenario, each a window (the live estimate) or a file path. Its one non-default entry
+pointed the COVID baseline at an ξ_S backup under `output/backups/`, and `check_pair`
+rejected that pair: ρ_x = −0.4568189183164799 in the backup against −0.49412406238821294
+pinned in the crisis estimate. Replaced by `POINT_ESTIMATE`, which reads both windows of a
+pair through `estimate_path` at the same point. The backup stays on disk, untouched.
+
+### `ROYSEARCH_WIDTH_BASE` — the base point of `width_audit.jl`
+**Retired in v57.0.0.** An environment key read only by `code/tools/width_audit.jl`, through
+`ENV` rather than `env_setting`: `postmean` audited the posterior-mean bundle when one
+existed and fell back to the SMM bundle without stopping, `seed` audited the SMM bundle.
+Replaced by the tool's `POINT_ESTIMATE` constant (`:mcmc`, `:smm`), which reads the file
+it names or stops. The key is in `LEGACY_ENV_KEYS`, so an exported value stops
+`width_audit.jl`, `smm_main.jl` and `MCMC_main.jl` with a pointer to the constant.
 
 ### `local_k` — fixed-sparsity DE population construction
 **Retired before v19.0.0; last remnant (a stale comment in `_run_de`) removed with this
@@ -304,12 +359,115 @@ particular are meaningless outside `MCMC_INIT = :screen`. Renamed for one namesp
 entry point. The legacy entries are what stop a stale launcher from silently reverting
 them to defaults.
 
+### `DAMP_THETA_U` — why it exists and why it is 0.9
+**Ships as `const DAMP_THETA_U = Ref(0.9)` in `solver/params.jl`, alongside `DAMP_THETA_S`
+and for the same structural reason.** The unskilled free-entry map was the only one of the
+two iterated raw, and the skilled block's own comment already recorded that the raw map is
+not a contraction. Measured on the `a_ℓ` line at `base_fc`: θ_U ran an exact period-8 orbit
+between the clamp ceiling and the floor, nine of nine swept points solve at w = 0.9 against
+four shipped, and `Q` at the points that already solved moves by at most 4.1e-07 relative.
+The value is not tuned — it is `DAMP_THETA_S`'s, i.e. LMR `params.f90:275`. w = 0.5 was also
+tested and recovers eight of nine, so the choice is not perched on a knife edge; the ninth
+fails in the GLOBAL loop there, not the unskilled block.
+
+### `OJS_PARTICIPATION` — the on/off versus covered-fraction switch
+**Ships as `const OJS_PARTICIPATION = Ref(:fraction)` in `solver/params.jl` (v39.0.0).**
+`:indicator` is the pre-v39 node rule and is kept permanently so a stored run can be
+reproduced exactly; `:fraction` aggregates the participation decision over the ability cell
+and is the default. Not env-settable, and a module-level `Ref` rather than a `SimParams`
+field, for the reason the next entry gives. Unlike the dampers this one **does** change the
+allocation — `Q` moves 5.6e-05 relative at θ̂ — so it is a specification switch, not a
+relaxation knob, and the two must not be confused when reading a bundle's provenance.
+
+### `anderson_m` — Anderson acceleration memory
+**Retired in v39.3.0. The `SimParams` field and all six sites are deleted, and the four
+stored bundles were migrated in the same pass.** It set how many past iterates the
+accelerator mixes, and nothing ever read it: `Anderson1` / `anderson1_update!`
+(`solver/grids.jl:416-447`) is hardcoded memory-1, so the value reached the solver and was
+ignored. Evidence that it is dead, not merely unused: a run at `anderson_m = 3` is bitwise
+identical to shipped — maximum absolute difference `0.0` across every field over all 200
+iterations at both test points — and removing it moves `Q` at each window's θ̂ by exactly
+zero on all four bundles. `use_anderson` stays: since v45.0.0 it governs the unskilled
+block and the global loop only (`unskilled.jl:496,499`, `solver.jl:308`; see the
+skilled-block entry below). `anderson_reg` stays as a field but is not read:
+`anderson1_update!` (`solver/grids.jl:465`) applies its own fixed guard, `denom < 1e-12`.
+
+The six sites were the field itself (`solver/params.jl:310`) and five constructions of a
+`SimParams`: `solver/params.jl:441` inside `initialise_model`, `solver/model_main.jl:164`,
+`smm/smm_main.jl:149`, `policy/policy_main.jl:202` and
+`transition/transition_simulation.jl:132`. Removal followed the standing pattern above for
+a serialised field — it waited for a migration that was happening anyway, here the
+addition of `RunProvenance.migrated_from`.
+
 ### `DAMP_THETA_S` as a `SimParams` field
 **Rejected; ships as `const DAMP_THETA_S = Ref(0.9)` in `solver/params.jl:38`.** Free-entry
 under-relaxation on θ_S belongs conceptually in `SimParams`, and that is where it was
 first tried. It cannot go there: Julia's serialiser reads structs positionally by field
 count, so the added field made every `.jls` bundle on disk unreadable. The module-level
 `Ref` is the deliberate alternative. It is **never assigned at runtime** — nothing writes
-`DAMP_THETA_S[] = …` — so the value is `0.9` (LMR `params.f90:275`) on every path, and it
-is not env-settable by design: it changes the solver's fixed point, and a run that
-silently used a different relaxation would not be comparable to a stored estimate.
+`DAMP_THETA_S[] = …` — so the value is `0.9` (LMR `params.f90:275`) on every path.
+
+**From v40.0.0 the `Ref` is a CEILING, not the weight itself.** `solve_skilled_block!`
+carries a local weight that halves on a sign reversal in the undamped free-entry target
+(floor `0.1`) and relaxes back by ×1.2 toward `DAMP_THETA_S[]` otherwise. The state is
+local to the call, deliberately: a module-level `Ref` carrying it between solves would make
+a result depend on the order in which parameter draws are evaluated. At θ̂ no reversal
+occurs and the weight sits at the ceiling for every pass, so the shipped value still
+governs where the estimates live.
+
+The correction that matters for the paragraph below: **under-relaxation cannot stabilise
+the oscillating roots at all.** The skilled outer map's slope in θ_S is
+`(1/η_S)·dlnJ̄_S/dlnθ_S`, which contracts iff `dlnJ̄_S/dlnθ_S < η_S = 0.5`; on the ridge
+that quantity measures 0.52–0.90, i.e. slope `b` = 1.04–1.80, and the damped slope is
+`1 + w(b−1) > 1` for every `w ∈ (0,1]`. A shorter step there lets the iteration be repelled
+from the unstable root and settle on a different, stable one. So the adaptive schedule does
+not tame those points — it **selects among their equilibria**, which is the same
+branch-dependence the next paragraph documents for a fixed `w`.
+
+It is not env-settable by design, and the reason is not that the damper moves the fixed
+point — it does not. Under-relaxation leaves the fixed point of the map algebraically
+invariant, since `θ = w·G(θ) + (1−w)·θ` holds exactly when `θ = G(θ)`, as the
+`DAMP_THETA_U` entry above already says; measured at `2.7e-10` relative on `Q` at θ̂
+between `w = 0.9` and `w = 0.5`. What `w` selects is **which** fixed point the solver
+lands on. On a diagonal band of the (`a_ℓ`, `c`) plane at `base_fc` the skilled free-entry
+locus `q_S(θ_S)·J̄_S(θ_S)` is non-monotone and has more than one root, and across a 19×19
+plane `w = 0.9` against `w = 0.5` recovers 13 points, loses 17 and re-roots 20 — about 50
+of 361 — with `Q` moving up to `8.3e-02` relative and `θ_S` up to `0.134`. Three of the
+re-rooted points were solved under both values and both states satisfy all three adding-up
+identities to machine zero, so they are two genuine equilibria at one parameter vector. A
+`Q` recorded from such a point is therefore branch-dependent, and a run that silently used
+a different relaxation would not be comparable to a stored estimate.
+
+### Anderson acceleration in the skilled block
+**Removed in v45.0.0; the code path is gone, not switched off.** The skilled outer loop
+(`solve_skilled_block!`, `solver/skilled.jl:765`) is a plain damped fixed-point iteration:
+the cutoffs are installed as `w·proposal + (1−w)·old` with `w = damp_pstar_S` (both p*_S and
+p^oj_S), and θ_S takes the adaptive free-entry step under the `DAMP_THETA_S` ceiling. The
+unskilled block and the global loop keep Anderson under `use_anderson`, which therefore no
+longer covers every loop. There is deliberately no toggle for the skilled block.
+
+What it did and why it went: the joint Anderson(m=1) step on `[θ_S; p*_S; gap]` took its
+mixing weight from all components at once, 92% of the denominator from the gap block, so the
+θ_S step was set by the cutoffs. In the base_fc multiplicity band it reversed the θ_S step on
+45–53% of passes, leaving a drift of at most 9e-5 per pass, and those points never converged.
+Without it the 19×19 base_fc (a_ℓ, c) plane goes from 342 to 360 feasible points (none lost),
+the estimates keep their equilibrium (|ΔQ|/Q ≤ 1.3e-7), and a restart at the repelling middle
+root no longer converges there. The v45.0.0 changelog entry has the measurements.
+
+Removing it in ALL loops (`use_anderson = false`) was measured on v43 and rejected: the plane
+collapses to 45/361, because the unskilled block stops converging (304 of 316 failures have
+`converged_U = false`).
+
+**`damp_pstar_S` is live from v45.0.0.** Before, it was read only on the non-Anderson skilled
+branch, which no shipped entry point selected, so its value did nothing. It now weights every
+skilled cutoff install. The stored bundles and `smm_main.jl`/`model_main.jl` carry `0.50`,
+which is the value every v45.0.0 measurement used. `policy_main.jl` and `initialise_model`
+carry `1.00` (undamped cutoffs); the policy settings converge at all four estimates with
+either value. `damp_pstar_U` is still read only when `use_anderson = false`.
+
+### `DAMP_POJ_S` — extra under-relaxation on p^oj_S
+**Retired in v45.0.0.** A module-level `Ref(1.0)` that blended p^oj_S toward its previous
+value at the end of each skilled pass. It existed because the Anderson branch installed
+p^oj_S raw, so it was the only damping that branch could apply to it. With the Anderson branch
+gone, `damp_pstar_S` already damps p^oj_S, and a second blend would only compound the first.
+Nothing ever assigned it, and at `1.0` its block was skipped, so removing it changes no number.

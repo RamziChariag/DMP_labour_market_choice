@@ -2,7 +2,7 @@
 #
 # Rebuilds the crisis spec with ρ_x deleted from the pinned block, reproducing
 # exactly what v14.8 constructed, and checks that `assert_all_params_accounted`
-# raises rather than letting the run proceed on unpack_θ's −0.55 fallback.
+# raises at spec construction, before any solve, naming common:ρ_x.
 
 include(joinpath(@__DIR__, "main_spec_only.jl"))
 

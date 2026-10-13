@@ -22,11 +22,11 @@
 #   moments_{window}.csv and sampling_var_{window}.csv; the loaders below
 #   read them verbatim and apply no scaling of their own.
 #
-#   The earlier κ_w bridge (κ_w · CPS_training_share) was removed: the CPS
-#   enrolment count was meant to cancel, but stopped cancelling once the
-#   moment's numerator was restricted to NILF trainees while κ's denominator
-#   stayed on all enrolled, leaving a participation ratio that drifted ~6%
-#   within each crisis pair.
+#   The earlier enr_scale_w bridge (enr_scale_w · CPS_training_share) was
+#   removed: the CPS enrolment count was meant to cancel, but stopped cancelling
+#   once the moment's numerator was restricted to NILF trainees while the
+#   scale's denominator stayed on all enrolled, leaving a participation ratio
+#   that drifted ~6% within each crisis pair.
 ############################################################
 
 
@@ -71,17 +71,17 @@ got $(length(MOMENT_NAMES))"""
 """
     load_training_share_scale(; window, derived_dir)
 
-REMOVED in v17.0. The training_share target no longer carries a κ_w level
-adjustment: it is read directly (see the header). This stub remains
+REMOVED in v17.0. The training_share target no longer carries an enr_scale_w
+level adjustment: it is read directly (see the header). This stub remains
 so that any caller still expecting the old behaviour fails immediately and
-visibly, rather than silently defaulting to κ = 1.0 and producing an estimate
+visibly, rather than silently defaulting to a scale of 1.0 and producing an estimate
 against a target that is not the one the data pipeline shipped.
 """
 function load_training_share_scale(; window::Symbol, derived_dir::String) :: Float64
     error("""
     load_training_share_scale was removed in v17.0.
 
-    training_share is no longer κ-scaled. moments_$(window).csv already holds
+    training_share is no longer rescaled. moments_$(window).csv already holds
     the enrolment target and sampling_var_$(window).csv its across-Fall-year variance;
     read them directly. A stale derived/training_share_scale.csv may still be on
     disk from an earlier pipeline run — it is not an input to anything and can
@@ -384,6 +384,88 @@ end
 # Model-side moments
 # ============================================================
 
+# ── Log-wage moments with lognormal measurement error ──────────────────────
+# Observed log wage = structural log wage + N(0, σ_w²).  A market's structural
+# distribution is its wage points (`wage_points` of compute_equilibrium_objects), one
+# (wage, mass) pair per employed cell, every employed worker counted once.  The error
+# leaves the mean and the third central moment unchanged (it is symmetric) and adds σ_w²
+# to the variance; the percentiles and the overlaps are read off the σ_w-convolved
+# distribution F(y) = Σ_k q_k Φ((y − log w_k)/σ_w).  Every moment is evaluated on the
+# points themselves, with no histogram in between, so each is a continuous function of
+# the wages and masses and carries no discretisation error of its own.
+
+"""
+    _logwage_distribution(pts, σ_w) → NamedTuple or nothing
+
+One market's log-wage distribution from its wage points `pts = (w, m)`: the log wages
+and normalised masses, mean, variance including σ_w², and third central moment.
+`nothing` for a market that employs no one.
+"""
+function _logwage_distribution(pts, σ_w::Real)
+    M = sum(pts.m)
+    M < 1e-12 && return nothing
+    logw = log.(max.(pts.w, 1e-14))
+    q    = pts.m ./ M
+    μ    = dot(q, logw)
+    dev  = logw .- μ
+    v0   = dot(q, dev .^ 2)
+    return (logw = logw, q = q, σ_w = float(σ_w),
+            mean = μ, var = v0 + σ_w^2, cm3 = dot(q, dev .^ 3), sd = sqrt(v0 + σ_w^2))
+end
+
+# The convolved CDF at log wage y and its density; with σ_w → 0 the step CDF of the points.
+function _conv_cdf_pdf(d, y::Real)
+    F = 0.0;  f = 0.0
+    if d.σ_w > 1e-10
+        @inbounds for k in eachindex(d.logw)
+            z  = (y - d.logw[k]) / d.σ_w
+            F += d.q[k] * cdf(Normal(), z);  f += d.q[k] * pdf(Normal(), z)
+        end
+        f /= d.σ_w
+    else
+        @inbounds for k in eachindex(d.logw)
+            d.logw[k] <= y && (F += d.q[k])
+        end
+    end
+    return F, f
+end
+_conv_cdf(d, y::Real) = first(_conv_cdf_pdf(d, y))
+
+# Quantile of the convolved distribution: Newton on F from the normal approximation,
+# kept inside the bracket that F's monotonicity maintains (bisection whenever a Newton
+# step would leave it).  F is smooth with a positive density, so this converges
+# quadratically; it stops once the Newton step is below 1e-13 in log w, tested before the
+# bracket so that a converged step is never mistaken for one leaving it.  With σ_w → 0,
+# the discrete quantile of the points.
+function _conv_quantile(d, target::Real)
+    if d.σ_w <= 1e-10
+        o = sortperm(d.logw);  cum = 0.0
+        for k in o
+            cum += d.q[k];  cum >= target && return d.logw[k]
+        end
+        return d.logw[o[end]]
+    end
+    a = minimum(d.logw) - 8.0 * d.σ_w;  b = maximum(d.logw) + 8.0 * d.σ_w
+    y = clamp(d.mean + d.sd * quantile(Normal(), target), a, b)
+    for _ in 1:100
+        F, f = _conv_cdf_pdf(d, y)
+        F < target ? (a = y) : (b = y)
+        step = f > 0.0 ? (F - target) / f : Inf
+        abs(step) < 1e-13 && return y - step
+        y_new = y - step
+        y = a < y_new < b ? y_new : 0.5 * (a + b)
+    end
+    return y
+end
+
+# (mean, variance, third moment, p10, p25, p50, p75, p90) of log wages; all 0 for a market
+# that employs no one.
+function _logwage_moments(d)
+    d === nothing && return ntuple(_ -> 0.0, 8)
+    return (d.mean, d.var, d.cm3, _conv_quantile(d, 0.10), _conv_quantile(d, 0.25),
+            _conv_quantile(d, 0.50), _conv_quantile(d, 0.75), _conv_quantile(d, 0.90))
+end
+
 """
     model_moments(obj) → NamedTuple
 
@@ -391,122 +473,18 @@ Extract the targeted moments from a solved model's equilibrium
 objects.  `obj` is the NamedTuple returned by
 `compute_equilibrium_objects`.
 
-When aggregate employment is negligible for a segment, all
-wage-related moments for that segment collapse to 0 — this avoids
-spuriously "good" wage percentile values produced by interpolating
-a near-zero density and a misleading wage premium computed over a
-dummy grid.
+A market that employs no one has no wage distribution: its wage
+moments, the wage premium and both overlaps are 0.
 """
-# ── Log-wage moments with lognormal measurement error ──────────────────────
-# Observed log wage = structural log wage + N(0, σ_w²).  Effects on moments:
-#   mean : unchanged          variance : structural + σ_w²
-#   third central moment : unchanged (symmetric error)
-#   p10 … p90 : quantiles of the σ_w-convolved log-wage distribution.
-# Input (wmid, dens, bw) is the LEVEL-wage density from the equilibrium;
-# returns (mean_log, var_log, cm3_log, p10_log, p25_log, p50_log, p75_log, p90_log).
-function _logwage_moments(wmid::AbstractVector, dens::AbstractVector,
-                          bw::Real, σ_w::Real)
-    logw = log.(max.(wmid, 1e-14))
-    mass = dens .* bw
-    M    = sum(mass)
-    M < 1e-12 && return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    mass = mass ./ M
-    μ    = sum(logw .* mass)
-    dev  = logw .- μ
-    v0   = sum((dev .^ 2) .* mass)
-    cm3  = sum((dev .^ 3) .* mass)
-    var  = v0 + σ_w^2
-    if σ_w > 1e-10
-        nd   = Normal(0.0, float(σ_w))
-        Fcdf = y -> begin
-            s = 0.0
-            @inbounds for j in eachindex(logw)
-                s += mass[j] * cdf(nd, y - logw[j])
-            end
-            s
-        end
-        lo  = minimum(logw) - 8.0 * σ_w
-        hi  = maximum(logw) + 8.0 * σ_w
-        p10 = _invert_cdf(Fcdf, 0.10, lo, hi)
-        p25 = _invert_cdf(Fcdf, 0.25, lo, hi)
-        p50 = _invert_cdf(Fcdf, 0.50, lo, hi)
-        p75 = _invert_cdf(Fcdf, 0.75, lo, hi)
-        p90 = _invert_cdf(Fcdf, 0.90, lo, hi)
-    else
-        p10 = _disc_pctile(logw, mass, 0.10)
-        p25 = _disc_pctile(logw, mass, 0.25)
-        p50 = _disc_pctile(logw, mass, 0.50)
-        p75 = _disc_pctile(logw, mass, 0.75)
-        p90 = _disc_pctile(logw, mass, 0.90)
-    end
-    return (μ, var, cm3, p10, p25, p50, p75, p90)
-end
-
-# Bisection inverse of a monotone-increasing CDF F on [lo, hi].
-function _invert_cdf(F, target::Real, lo::Real, hi::Real)
-    a = float(lo); b = float(hi)
-    F(a) >= target && return a
-    F(b) <= target && return b
-    @inbounds for _ in 1:60
-        m = 0.5 * (a + b)
-        (F(m) < target) ? (a = m) : (b = m)
-    end
-    return 0.5 * (a + b)
-end
-
-# Discrete quantile of a normalised log-wage mass vector (σ_w → 0 fallback).
-function _disc_pctile(logw::AbstractVector, mass::AbstractVector, target::Real)
-    cum = 0.0
-    @inbounds for j in eachindex(logw)
-        cum += mass[j]
-        cum >= target && return logw[j]
-    end
-    return logw[end]
-end
-
-# CDF of the σ_w-convolved log-wage distribution as a callable F(y).  Same
-# lognormal-measurement-error layer as _logwage_moments: each structural
-# log-wage atom logw[j] (mass[j]) is smeared by N(0, σ_w²), so
-# F(y) = Σ_j mass[j] · Φ((y − logw[j]) / σ_w).  With σ_w → 0 this is the
-# step CDF of the discrete structural mass.  Returns nothing if the segment
-# has negligible employment, signalling the caller to skip the overlap.
-function _logwage_conv_cdf(wmid::AbstractVector, dens::AbstractVector,
-                           bw::Real, σ_w::Real)
-    logw = log.(max.(wmid, 1e-14))
-    mass = dens .* bw
-    M    = sum(mass)
-    M < 1e-12 && return nothing
-    mass = mass ./ M
-    if σ_w > 1e-10
-        nd = Normal(0.0, float(σ_w))
-        return y -> begin
-            s = 0.0
-            @inbounds for j in eachindex(logw)
-                s += mass[j] * cdf(nd, y - logw[j])
-            end
-            s
-        end
-    else
-        return y -> begin
-            s = 0.0
-            @inbounds for j in eachindex(logw)
-                logw[j] <= y && (s += mass[j])
-            end
-            s
-        end
-    end
-end
-
 function model_moments(obj)
-    _emp_tol = 1e-12
-    _has_eU  = obj.agg_eU > _emp_tol
-    _has_eS  = obj.agg_eS > _emp_tol
+    # Every within-market object arrives defined, a market that holds no one included:
+    # compute_equilibrium_objects reads it at the limit of its composition as it empties.
+    # So the moments are read as they are.  A market with no vacancies employs no one even
+    # in that limit; its wage moments, and both overlaps, are 0.
 
-    # Labour-market stocks.  When the skilled segment is empty,
-    # report ur_S = 1.0 so that the SMM does not interpret a
-    # nonexistent skilled labour force as having low unemployment.
+    # Labour-market stocks.
     ur_U           = obj.ur_U
-    ur_S           = obj.agg_mS > _emp_tol ? obj.ur_S : 1.0
+    ur_S           = obj.ur_S
     ur_total       = obj.ur_total
     _model_lf      = obj.agg_uU + obj.agg_eU + obj.agg_mS
     skilled_share  = obj.agg_mS  / max(_model_lf, 1e-14)
@@ -518,97 +496,62 @@ function model_moments(obj)
     σ_wU = hasproperty(obj, :σ_wU) ? obj.σ_wU : 0.0
     σ_wS = hasproperty(obj, :σ_wS) ? obj.σ_wS : 0.0
 
-    # Transition rates
-    jfr_U      = _has_eU ? obj.f_U : 0.0
-    jfr_S      = _has_eS ? obj.f_S : 0.0
-    sep_rate_U = obj.sep_rate_U
-    sep_rate_S = obj.sep_rate_S
-    ee_rate_S  = obj.ee_rate_S
-
-    # Within-job wage-change hazards λ_j·(1 − G_j(p*)) (SIPP moments). Read
-    # from the equilibrium; 0.0 when the field is absent.
-    wchg_rate_U = hasproperty(obj, :wchg_rate_U) ? obj.wchg_rate_U : 0.0
-    wchg_rate_S = hasproperty(obj, :wchg_rate_S) ? obj.wchg_rate_S : 0.0
+    # Transition rates and the within-job wage-change rates (SIPP), each built as the
+    # data stage measures it: the mean transition probability over the moment's
+    # universe, converted as its source converts it (compute_equilibrium_objects,
+    # `measured`).
+    jfr_U       = obj.measured.jfr_U
+    jfr_S       = obj.measured.jfr_S
+    sep_rate_U  = obj.measured.sep_rate_U
+    sep_rate_S  = obj.measured.sep_rate_S
+    ee_rate_S   = obj.measured.ee_rate_S
+    wchg_rate_U = obj.measured.wchg_rate_U
+    wchg_rate_S = obj.measured.wchg_rate_S
 
     # Skilled EE-move mean wage step (SIPP moment). Read from the equilibrium;
     # 0.0 when the field is absent.
     ee_step_S = hasproperty(obj, :ee_step_S) ? obj.ee_step_S : 0.0
 
-    # Wages — all moments on LOG wages, with lognormal measurement error σ_w.
-    # "mean_wage_*", "emp_var_*", "emp_cm3_*", "p10…p90_wage_*" now hold the
-    # corresponding LOG-wage objects (mean/var/3rd-moment/quantiles of log w);
-    # the DATA side must compute these on log(wage_norm) to match.
-    wmid   = obj.wmid
-    dens_U = obj.dens_U
-    dens_S = obj.dens_S
-    bw     = length(wmid) >= 2 ? wmid[2] - wmid[1] : 1.0
+    # Wages — every moment on LOG wages with lognormal measurement error σ_w: the
+    # "mean_wage_*", "emp_var_*", "emp_cm3_*" and "p10…p90_wage_*" moments are the log-wage
+    # objects, and the data side computes them on log(wage_norm).
+    dist_U = _logwage_distribution(obj.wage_points.U, σ_wU)
+    dist_S = _logwage_distribution(obj.wage_points.S, σ_wS)
+    (mean_wage_U, emp_var_U, emp_cm3_U,
+     p10_wage_U, p25_wage_U, p50_wage_U, p75_wage_U, p90_wage_U) = _logwage_moments(dist_U)
+    (mean_wage_S, emp_var_S, emp_cm3_S,
+     p10_wage_S, p25_wage_S, p50_wage_S, p75_wage_S, p90_wage_S) = _logwage_moments(dist_S)
 
-    if _has_eU
-        (mean_log_wage_U, emp_var_U, emp_cm3_U,
-         p10_wage_U, p25_wage_U, p50_wage_U, p75_wage_U, p90_wage_U) =
-            _logwage_moments(wmid, dens_U, bw, σ_wU)
-        mean_wage_U = mean_log_wage_U
-    else
-        mean_wage_U = 0.0; mean_log_wage_U = 0.0
-        emp_var_U = 0.0; emp_cm3_U = 0.0
-        p10_wage_U = 0.0; p25_wage_U = 0.0; p50_wage_U = 0.0
-        p75_wage_U = 0.0; p90_wage_U = 0.0
-    end
-
-    if _has_eS
-        (mean_log_wage_S, emp_var_S, emp_cm3_S,
-         p10_wage_S, p25_wage_S, p50_wage_S, p75_wage_S, p90_wage_S) =
-            _logwage_moments(wmid, dens_S, bw, σ_wS)
-        mean_wage_S = mean_log_wage_S
-    else
-        mean_wage_S = 0.0; mean_log_wage_S = 0.0
-        emp_var_S = 0.0; emp_cm3_S = 0.0
-        p10_wage_S = 0.0; p25_wage_S = 0.0; p50_wage_S = 0.0
-        p75_wage_S = 0.0; p90_wage_S = 0.0
-    end
-
-    wage_premium = (_has_eU && _has_eS) ?
-                   (mean_log_wage_S - mean_log_wage_U) : 0.0
+    wage_premium = mean_wage_S - mean_wage_U
 
     # Cross-market wage overlap (one moment per bargaining weight).  Each is
     # a tail probability of one segment's σ_w-convolved log-wage distribution
     # evaluated at the OTHER segment's convolved median:
     #   overlap_UgtS = P(log w_U > med log w_S) = 1 − F_U^conv(p50_wage_S)
     #   overlap_SltU = P(log w_S < med log w_U) =     F_S^conv(p50_wage_U)
-    # Both require non-empty employment on both sides; otherwise the overlap
-    # is undefined and reported as 0 (matched by the skip on an empty segment).
-    if _has_eU && _has_eS
-        F_U_conv = _logwage_conv_cdf(wmid, dens_U, bw, σ_wU)
-        F_S_conv = _logwage_conv_cdf(wmid, dens_S, bw, σ_wS)
-        overlap_UgtS = isnothing(F_U_conv) ? 0.0 : 1.0 - F_U_conv(p50_wage_S)
-        overlap_SltU = isnothing(F_S_conv) ? 0.0 : F_S_conv(p50_wage_U)
-    else
-        overlap_UgtS = 0.0
-        overlap_SltU = 0.0
-    end
+    both = !isnothing(dist_U) && !isnothing(dist_S)
+    overlap_UgtS = both ? 1.0 - _conv_cdf(dist_U, p50_wage_S) : 0.0
+    overlap_SltU = both ? _conv_cdf(dist_S, p50_wage_U)       : 0.0
 
     # Skilled long-term-unemployment share: survival of a skilled spell past
     # a* ≈ 6.23 months under the type-mixture of exponential exit hazards.
     # Computed in compute_equilibrium_objects (it needs uS, Γ(p*_S), κ_S, wx);
-    # read it through here. Absent or empty skilled segment ⇒ 0.
-    ltu_share_S = (hasproperty(obj, :ltu_share_S) && _has_eS) ? obj.ltu_share_S : 0.0
+    # read it through here. Absent from objects that predate it ⇒ 0.
+    ltu_share_S = hasproperty(obj, :ltu_share_S) ? obj.ltu_share_S : 0.0
 
     # Duration profile: the solver returns one survivor vector per market, ordered
     # as DURATION_THRESHOLDS_WK. hasproperty keeps this readable against equilibrium
     # objects produced before v21.2.0, which carry ltu_share_S but no survivor vectors.
-    _usurv = (fld, has_seg) -> begin
-        (hasproperty(obj, fld) && has_seg) ? collect(getproperty(obj, fld)) :
-            fill(0.0, length(DURATION_THRESHOLDS_WK))
-    end
-    _usurv_U = _usurv(:usurv_U, _has_eU)
-    _usurv_S = _usurv(:usurv_S, _has_eS)
+    _usurv = fld -> hasproperty(obj, fld) ? collect(getproperty(obj, fld)) :
+                    fill(0.0, length(DURATION_THRESHOLDS_WK))
+    _usurv_U = _usurv(:usurv_U)
+    _usurv_S = _usurv(:usurv_S)
     _duration_vals = NamedTuple{Tuple(DURATION_MOMENT_NAMES)}(
         Tuple(vcat(_usurv_U, _usurv_S)))
 
     # Tightness
-    _THETA_CAP = 1e14
-    theta_U = _has_eU ? obj.thetaU : _THETA_CAP
-    theta_S = _has_eS ? obj.thetaS : _THETA_CAP
+    theta_U = obj.thetaU
+    theta_S = obj.thetaS
 
     return (
         ur_total       = ur_total,

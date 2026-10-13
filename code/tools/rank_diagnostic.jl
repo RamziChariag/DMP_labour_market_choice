@@ -43,6 +43,7 @@ end
 
 const WINDOW   = get(ENV, "ROYSEARCH_WINDOW", "base_fc")
 const W_SUFFIX = "_diagonalW"
+const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
 const OUT      = get(ENV, "RANK_OUT",
                      joinpath(out_estimates(),
                               "rank_diagnostic_$(WINDOW)$(W_SUFFIX).csv"))
@@ -51,7 +52,7 @@ const OUT      = get(ENV, "RANK_OUT",
 # inside one smooth region. 1e-3 sat in the stable band on the earlier step-size sweep.
 const H = parse(Float64, get(ENV, "RANK_H", "1e-3"))
 
-bundle = deserialize(estimate_path(WINDOW, W_SUFFIX))
+bundle = deserialize(estimate_path(WINDOW, W_SUFFIX; point = POINT_ESTIMATE))
 spec   = bundle.spec
 θ0     = collect(float.(bundle.result.theta_opt))
 free   = spec.free

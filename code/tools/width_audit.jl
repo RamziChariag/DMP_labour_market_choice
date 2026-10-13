@@ -38,7 +38,7 @@
 #
 # USAGE
 #   ROYSEARCH_WINDOW=base_fc julia --project=. code/tools/width_audit.jl
-#   ROYSEARCH_WIDTH_BASE=seed        # base point: postmean (default) or seed
+#   The base point is POINT_ESTIMATE below: :smm (default) or :mcmc.
 ############################################################
 
 using LinearAlgebra, Statistics, Random, Printf, Serialization
@@ -55,6 +55,8 @@ end
 for f in ["moments.jl", "smm_params.jl", "bundle.jl", "smm.jl", "candidates.jl"]
     include(joinpath(RT, "code", "smm", f))
 end
+# A retired key still exported (ROYSEARCH_WIDTH_BASE) stops the run instead of being ignored.
+assert_no_legacy_env()
 
 const WINDOW   = Symbol(get(ENV, "ROYSEARCH_WINDOW", "base_fc"))
 # W_COND_TARGET is set in the entry points (smm_main.jl:420, MCMC_main.jl:488), not in
@@ -62,28 +64,22 @@ const WINDOW   = Symbol(get(ENV, "ROYSEARCH_WINDOW", "base_fc"))
 # other four tools in this directory hardcode "_diagonalW"; this one at least lets the caller
 # override, so an equalW run can be audited without editing the file.
 const W_SUFFIX = get(ENV, "ROYSEARCH_W_SUFFIX", "_diagonalW")
-const BASEMODE = Symbol(get(ENV, "ROYSEARCH_WIDTH_BASE", "postmean"))
-BASEMODE in (:postmean, :seed) ||
-    error("ROYSEARCH_WIDTH_BASE = $(BASEMODE); use postmean or seed.")
+# The base point: the SMM estimate, or the chain's, whose widths a chain table needs; the
+# two differ and the difference is itself worth seeing.
+const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
 
 @printf("RoySearch v%s — criterion width audit\n", ROYSEARCH_VERSION)
-@printf("  window = %s   weighting = %s   base = %s\n", WINDOW, W_SUFFIX, BASEMODE)
+@printf("  window = %s   weighting = %s   base = %s\n", WINDOW, W_SUFFIX, POINT_ESTIMATE)
 
-# The base point. postmean is the estimator, so it is the point whose widths a table needs;
-# seed is offered because the two differ and the difference is itself worth seeing.
-pm  = joinpath(out_estimates(), "estimate_$(WINDOW)$(W_SUFFIX)_postmean.jls")
-sd_ = joinpath(out_estimates(), "estimate_$(WINDOW)$(W_SUFFIX).jls")
-path = BASEMODE === :postmean && isfile(pm) ? pm : sd_
+path = estimate_path(WINDOW, W_SUFFIX; point = POINT_ESTIMATE)
 isfile(path) || error("no estimate bundle at $(path); run the SMM or the chain first.")
-BASEMODE === :postmean && !isfile(pm) &&
-    @printf("  (no postmean bundle; falling back to %s)\n", basename(sd_))
 b    = open(deserialize, path)
 spec = b.spec
 t0   = collect(float.(getfield(b.result, 1)))     # bundles always store t
 sp   = spec.free
 d    = length(sp)
 se   = nothing
-chp  = joinpath(out_chains(), "chain_$(WINDOW)$(W_SUFFIX).jls")
+chp  = chain_path(WINDOW, W_SUFFIX)
 if isfile(chp)
     ch = open(deserialize, chp)
     hasproperty(ch, :se_chain) && length(ch.se_chain) == d && (se = collect(float.(ch.se_chain)))

@@ -1,0 +1,17 @@
+block,name,label,point_estimate,post_mean,se_curvature,se_bound,q025,q500,q975,rhat,ess,edge_frac,spread_growth,se_chain,symbol,corner_declared,abs_t_curvature,abs_t_bound,rail_frac
+common,ρ_x,ability correlation ρ_x,-0.49412406,NaN,0.02348502,0.10332198,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,ρ_x,0,21.039970,4.782371,2.85476562e-01
+common,c,training cost coeff c,11.07288322,NaN,0.02042078,0.08810697,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,c,0,542.236033,125.675450,4.36346309e-01
+common,A,aggregate production scale A,7.43290488,NaN,0.01268008,0.05327918,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,A,0,586.187587,139.508623,4.27849187e-01
+unsk,bU,unskilled outside flow b_U,0.03816441,NaN,0.00357796,0.01535766,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b_U,0,10.666526,2.485041,1.90822064e-01
+skl,bS,skilled outside flow b_S,0.20862162,NaN,0.00235221,0.01133966,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,b_S,0,88.691790,18.397514,4.17243239e-01
+skl,PS,skilled productivity P_S,1.62412123,NaN,0.02439941,0.10401226,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,P_S,0,66.563954,15.614710,3.24822084e-01
+unsk,α_U,unskilled damage shape α_U,1.52098020,NaN,0.05226589,0.22689025,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,α_U,0,29.100816,6.703594,2.40844102e-01
+unsk,μ,unskilled matching eff μ_U,0.31617695,NaN,0.00443680,0.02088224,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,μ_U,0,71.262438,15.140947,1.58046376e-01
+skl,μ,skilled matching eff μ_S,0.21955320,NaN,0.00155340,0.00539546,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,μ_S,0,141.336978,40.692248,1.09732085e-01
+unsk,λ,unskilled damage rate λ_U,0.22499665,NaN,0.00071221,0.00111944,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,λ_U,0,315.911659,200.991207,4.08977353e-01
+skl,λ,skilled quality shock λ_S,0.22762807,NaN,0.00093552,0.00114111,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,λ_S,0,243.317448,199.479981,4.55147174e-01
+unsk,tight,unskilled tightness θ_U,0.81518669,NaN,0.00254823,0.00255604,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,θ_U,0,319.903698,318.925513,2.59385319e-01
+skl,tight,skilled tightness θ_S,1.83697009,NaN,0.01167317,0.01170991,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,θ_S,0,157.366849,156.873055,3.54483691e-01
+skl,σ,OJS flow cost σ_S,0.20712194,NaN,0.00486217,0.02013120,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,σ_S,0,42.598662,10.288606,4.14243880e-01
+unsk,k,unskilled vacancy cost k_U (months of new-match U output),0.69134904,NaN,0.02166456,0.10015572,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_U,0,31.911520,6.902741,NaN
+skl,k,skilled vacancy cost k_S (months of new-match S output),0.49342165,NaN,0.00400417,0.01125125,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_S,0,123.226829,43.854813,NaN

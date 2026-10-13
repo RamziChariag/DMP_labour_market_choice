@@ -466,8 +466,8 @@ function make_moments()
 
         # F. Frequency consistency — convert transition PROBABILITIES to
         # continuous-time monthly HAZARDS so they match the model objects.
-        # The model reports rates as Poisson hazards (f = μθ^{1−η},
-        # sep = λ·G(p*), ee = κ·(1−Γ)); the data moments above are monthly
+        # The model reports rates as Poisson hazards (meetings κ = μθ^{1−η},
+        # sep = λ·G(p*), ee = κ_S·(1−Γ)); the data moments above are monthly
         # transition probabilities. For a monthly probability p the hazard is
         # h = −log(1 − p). Negligible for small rates (separations / EE);
         # ~10–25% for job finding, where p is large. Stocks (ur_*, shares),

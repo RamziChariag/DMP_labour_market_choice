@@ -8,7 +8,10 @@
 #                                 of what a run did, and a bundle without its log is a
 #                                 parameter vector with no history. Same commit as the
 #                                 bundle it describes.
-#   output/transition/  TRACKED   read by plots_and_tables/transition.jl.
+#   output/transition/  ignored   read by plots_and_tables/transition.jl, but one transition file is
+#                                 about 1.6 GB (18 arrays over every (a_U, a_S) pair at each of 293
+#                                 dates), over GitHub's limit. It stays on the machine that ran it.
+#   output/backups/     ignored   local safety copies; nothing reads them.
 #   output/chains/      ignored   draw arrays. Once the standard errors are sealed into the
 #                                 estimate bundle nothing needs them for a TABLE — but as of
 #                                 v19.8.0 they also carry chain_lp and the accepted/replaced
@@ -23,6 +26,12 @@
 # index. code/notebooks (37 files), code/single_run_plots_all (20), output/tables (9) and
 # output/plots (191). The `git rm --cached` in the v19.6.0 restructure is what made them
 # effective.
+#
+# SIZE. Nothing over 100 MB is tracked. A pattern here cannot test a size, so the test is
+# code/ops/githooks/pre-commit: at every commit it takes each staged file over 100 MB out of
+# the index (the file on disk is untouched) and appends its path to the end of this file.
+# Activate it once in every clone, this machine and each VM:
+#     git config core.hooksPath code/ops/githooks
 # ─────────────────────────────────────────────────────────────────────────────
 
 /extra documents/
@@ -42,6 +51,8 @@ literature.zip
 /output/plots/
 /output/tables/
 /output/chains/
+/output/backups/
+/output/transition/*.jls
 
 # Migration staging. migrate_bundles.jl and the v19.6.0 relocation stage here, at the repo
 # root and OUTSIDE output/, and remove it on success: a migration that succeeds leaves

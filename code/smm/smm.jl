@@ -71,6 +71,37 @@ function _load_smm_bundle(path::String; delete_on_fail::Bool=false, label::Strin
     return data
 end
 
+"""
+    point_in_spec(b, spec; estimated_only = true) -> (θ, unmatched, clamped)
+
+The point of bundle `b` as an unconstrained vector of `spec`. Where `b`'s free set and box
+are `spec`'s, `θ` is `b`'s own vector, bit for bit. Otherwise each free parameter of `spec`
+takes `b`'s value of the same (block, name), pulled into `spec`'s box (listed in `clamped`).
+With `estimated_only`, a parameter `b`'s run did not estimate keeps `spec`'s own start and
+is listed in `unmatched`; without it, every value is read off `b`'s decoded blocks, which
+gives the pinned value where `b`'s run pinned one.
+"""
+function point_in_spec(b, spec::SMMSpec; estimated_only::Bool = true)
+    same = [(ps.block, ps.name, ps.lb, ps.ub) for ps in b.spec.free] ==
+           [(ps.block, ps.name, ps.lb, ps.ub) for ps in spec.free]
+    same && return (θ = collect(float.(b.result.theta_opt)), unmatched = String[],
+                    clamped = String[])
+    cp, up, sp, tight = unpack_θ(b.result.theta_opt, b.spec)
+    estimated = Set((ps.block, ps.name) for ps in b.spec.free)
+    free = ParamSpec[];  unmatched = String[];  clamped = String[]
+    for ps in spec.free
+        if estimated_only && !((ps.block, ps.name) in estimated)
+            push!(free, ps);  push!(unmatched, "$(ps.block):$(ps.name)")
+            continue
+        end
+        v = _baseline_param_value(ps, cp, up, sp, tight)
+        q = with_seed(ps, v)
+        q.init == v || push!(clamped, "$(ps.block):$(ps.name)")
+        push!(free, q)
+    end
+    return (θ = pack_θ(free), unmatched = unmatched, clamped = clamped)
+end
+
 
 # ============================================================
 # Weighted loss
@@ -144,15 +175,114 @@ end
 # SMM objective
 # ============================================================
 
+const _NO_EQUILIBRIUM = (Q = Inf, moments = nothing, model = nothing, label = :none, eq = nothing)
+
+"""
+    equilibrium_at(θ_unc, spec; Nx, Np_U, Np_S, constrained, sim) → NamedTuple
+
+The equilibrium the estimation scores at θ, and everything a consumer needs from it:
+`(Q, moments, model, k)`.  θ carries the tightnesses, so the point is one equilibrium,
+solved in one pass (`solve_model(...; tightness)`), with the vacancy costs free entry
+implies there, `k = (U = k_U, S = k_S)`, installed in `model`'s parameter blocks.  The
+point is infeasible — `Q = Inf`, `model = nothing`, `k = (U = NaN, S = NaN)` — when the
+solve fails, the residual battery does not certify it, or a scored moment is not finite.
+
+Minimising Q over (ω, θ_U, θ_S) is the best-fitting-equilibrium estimator exactly: at
+given costs the model may have several equilibria, and each is the solution at its own
+tightnesses.
+"""
+function equilibrium_at(
+    θ_unc :: AbstractVector{Float64},
+    spec  :: SMMSpec;
+    Nx    :: Int = spec.run.Nx,
+    Np_U  :: Int = spec.run.Np_U,
+    Np_S  :: Int = spec.run.Np_S,
+    constrained :: Bool = false,
+    sim   :: SimParams = spec.sim,
+)
+    none = (Q = Inf, moments = nothing, model = nothing, k = (U = NaN, S = NaN))
+    # constrained = true: θ_unc is θ itself, not the unconstrained t. See unpack_θ.
+    cp, up, sp, tight = unpack_θ(θ_unc, spec; constrained = constrained)
+    local model, m_model
+    try
+        model, solve_result = solve_model(cp, up, sp, sim; Nx = Nx, Np_U = Np_U, Np_S = Np_S,
+                                          tightness = tight)
+        solve_result.ok || return none
+        m_model = model_moments(compute_equilibrium_objects(model))
+    catch
+        return none
+    end
+    # A moment the equilibrium could not compute leaves Q undefined.
+    all(k -> isfinite(getproperty(m_model, k)), active_moment_keys(spec)) || return none
+    Q = compute_loss_matrix(m_model, spec, spec.W)
+    return (Q = Q, moments = m_model, model = model,
+            k = (U = model.unsk_par.k, S = model.skl_par.k))
+end
+
+"""
+    select_equilibrium(model, spec; branch) → NamedTuple
+
+At given vacancy costs, the attracting skilled equilibrium with the lowest Q, and
+everything a consumer needs from it: `(Q, moments, model, label, eq)`.  `model` is solved
+at those costs (`solve_model!`); `skilled_equilibria` finds every attracting skilled
+equilibrium there (one, or the pair L and H), and only a root the full residual battery
+certifies is eligible.  When none is, `Q = Inf`, `model = nothing`.  For exercises that hold
+the costs fixed (counterfactuals, comparative statics); the estimation does not select,
+because its θ fixes the equilibrium (`equilibrium_at`).
+
+`branch` restricts the choice to one side of the hump: `:best` takes the lowest Q; `:L` or
+`:H` takes that equilibrium, and a lone root qualifies when it is on that side or the map
+has no hump (`:U`), so a branch that does not exist gives `Inf` rather than a switch to the
+other one.  `label` is the selected root's (`:L`, `:H` or `:U`, `:none` when infeasible);
+`eq` is the detector's report.
+"""
+function select_equilibrium(model::Model, spec::SMMSpec; branch::Symbol = :best)
+    local eq
+    try
+        eq = skilled_equilibria(model)
+    catch
+        return _NO_EQUILIBRIUM
+    end
+
+    best = (_NO_EQUILIBRIUM..., eq = eq)
+    for r in eq.roots
+        r.certified || continue
+        branch === :best || r.label === branch || r.label === :U || continue
+        local m_model
+        try
+            m_model = model_moments(compute_equilibrium_objects(r.model))
+        catch
+            continue
+        end
+        # A moment the equilibrium could not compute leaves Q undefined; the root is rejected.
+        all(k -> isfinite(getproperty(m_model, k)), active_moment_keys(spec)) || continue
+        Q = compute_loss_matrix(m_model, spec, spec.W)
+        Q < best.Q && (best = (Q = Q, moments = m_model, model = r.model, label = r.label, eq = eq))
+    end
+    return best
+end
+
+"""
+    equilibrium_tag(sel) → String
+
+The equilibrium `select_equilibrium` selected, in a run report: "unique" or e.g. "H of 2".
+"""
+equilibrium_tag(sel) = sel.eq === nothing || sel.model === nothing ? "none" :
+                       length(sel.eq.roots) == 1 ? "unique" :
+                       @sprintf("%s of %d", sel.label, length(sel.eq.roots))
+
 """
     smm_objective(θ_unc, spec) → Float64
 
-Solve the model at parameters decoded from `θ_unc` and return Q(θ).
-Returns Inf (never throws) on any failure or non-convergence.  The
-solver runs silently regardless of spec.sim.verbose.
+Q(θ) at the equilibrium θ fixes (`equilibrium_at`).  Returns Inf (never throws) on any
+failure or non-convergence, and where a scored moment is not finite.  The solver runs
+silently regardless of spec.sim.verbose.
 
-Degenerate τ(x) profiles (all train, none train, non-monotone, or
-multiple jumps) are rejected as infeasible.
+A corner equilibrium — nobody trains, everybody trains, a market holding
+no one — is an equilibrium and is scored like any other: its within-market
+moments are read at the limit of the market's composition as it empties.
+A market with no vacancies employs no one even in that limit, and its wage
+moments are 0.
 """
 function smm_objective(
     θ_unc :: AbstractVector{Float64},
@@ -164,45 +294,8 @@ function smm_objective(
     constrained :: Bool = false,
 ) :: Float64
 
-    # constrained = true: θ_unc is θ itself, not the unconstrained t. See unpack_θ.
-    cp, up, sp = unpack_θ(θ_unc, spec; constrained = constrained)
-
-    local model, solve_result
-    try
-        model, solve_result = solve_model(cp, up, sp, spec.sim;
-                                          Nx   = Nx,
-                                          Np_U = Np_U,
-                                          Np_S = Np_S)
-    catch
-        return Inf
-    end
-
-    solve_result.ok || return Inf
-
-    local obj_eq, m_model
-    try
-        obj_eq  = compute_equilibrium_objects(model)
-        m_model = model_moments(obj_eq)
-    catch
-        return Inf
-    end
-
-    emptol = 1e-12
-    if obj_eq.agg_eU < emptol || obj_eq.agg_eS < emptol
-        return Inf
-    end
-
-    # Reject a degenerate training margin: with the whole ability grid on one
-    # side of the frontier (nobody trains, or everybody trains) training_share
-    # carries no identifying variation.  The frontier τ(a_U,a_S) is a 2D field of
-    # population fractions, so the interior is checked to a tolerance: exact
-    # equality would essentially never hold once a boundary cell carries a
-    # fraction, and the everybody-trains corner this guard exists to catch would
-    # stop being rejected.  The test reduces to the old one on 0/1 values.
-    τv = vec(obj_eq.τ_mat)
-    if maximum(τv) <= 1e-10 || minimum(τv) >= 1.0 - 1e-10
-        return Inf
-    end
+    ev = equilibrium_at(θ_unc, spec; Nx = Nx, Np_U = Np_U, Np_S = Np_S, constrained = constrained)
+    isfinite(ev.Q) || return Inf
 
     # Hand back the scored moments when the caller supplies a buffer (the MCMC
     # driver needs them per draw for the Jacobian regression); order matches
@@ -211,14 +304,60 @@ function smm_objective(
         ks = active_moment_keys(spec)
         @assert length(moments_out) == length(ks)
         @inbounds for (i, k) in enumerate(ks)
-            moments_out[i] = getproperty(m_model, k)
+            moments_out[i] = getproperty(ev.moments, k)
         end
     end
-
-    # spec.W is always present (equal-weight is a diagonal W built in
-    # build_smm_spec), so there is a single weighted-loss path.
-    return compute_loss_matrix(m_model, spec, spec.W)
+    return ev.Q
 end
+
+# Step of the attracting check, in ln θ_j: wide against the sawtooth OJS entry puts on the
+# skilled free-entry map (≈3e-4 per type, solver.jl), narrow against its curvature.
+const ATTRACT_STEP = 0.01
+
+"""
+    attracting_check(θ_unc, spec) → (D, market, joint)
+    attracting_check(D) → (D, market, joint)
+
+Whether the equilibrium at θ is attracting under a tâtonnement in the tightnesses at its
+own vacancy costs.  `D[i,j] = ∂ ln k_i / ∂ ln θ_j` (i, j ∈ U, S), at the other parameters
+held, by central differences of `ATTRACT_STEP` in ln θ (4 solves).  Market by market the
+equilibrium attracts when each market's cost falls in its own tightness, `D_UU < 0` and
+`D_SS < 0`; jointly when `D` is stable as a 2×2 system, `tr D < 0` and `det D > 0`.  The
+second method takes a `D` measured elsewhere (MCMC_main reads it off the Jacobian).
+"""
+function attracting_check(θ_unc::AbstractVector{Float64}, spec::SMMSpec)
+    cp, up, sp, tight = unpack_θ(θ_unc, spec)
+    grid = (Nx = spec.run.Nx, Np_U = spec.run.Np_U, Np_S = spec.run.Np_S)
+    function lnk(tt)
+        model, sr = solve_model(cp, up, sp, spec.sim; grid..., tightness = tt)
+        sr.ok || return (NaN, NaN)
+        return (log(model.unsk_par.k), log(model.skl_par.k))
+    end
+    h = ATTRACT_STEP
+    D = fill(NaN, 2, 2)
+    U, S = tight.U, tight.S
+    for (j, (tp, tm)) in enumerate((((U = U * exp(h), S = S), (U = U * exp(-h), S = S)),
+                                    ((U = U, S = S * exp(h)), (U = U, S = S * exp(-h)))))
+        kp = lnk(tp);  km = lnk(tm)
+        D[1, j] = (kp[1] - km[1]) / (2h)
+        D[2, j] = (kp[2] - km[2]) / (2h)
+    end
+    return attracting_check(D)
+end
+
+attracting_check(D::AbstractMatrix{Float64}) =
+    (D = Matrix{Float64}(D), market = D[1, 1] < 0.0 && D[2, 2] < 0.0,
+     joint = tr(D) < 0.0 && det(D) > 0.0)
+
+"""
+    attracting_line(chk) → String
+
+The one line a run prints about the attracting check: empty when both verdicts hold.
+"""
+attracting_line(chk) = chk.market && chk.joint ? "" :
+    @sprintf("ATTRACTING CHECK FAILED: market %s, joint %s  (D_UU %.3g  D_US %.3g  D_SU %.3g  D_SS %.3g)",
+             chk.market ? "ok" : "fails", chk.joint ? "ok" : "fails",
+             chk.D[1, 1], chk.D[1, 2], chk.D[2, 1], chk.D[2, 2])
 
 
 # ============================================================
@@ -268,7 +407,7 @@ end
 
 Inline companion to `_count_corners`: lists which free parameters sit within
 `tol` of a bound and whether it is the lower or upper bound, e.g.
-` [skl:μ(lower), unsk:k(upper)]`.  Returns "" when nothing is cornered, so it
+` [skl:μ(lower), unsk:tight(upper)]`.  Returns "" when nothing is cornered, so it
 can be appended straight after a `corners=%d/%d` field with a single `%s`.
 """
 function _corner_tags(
@@ -2615,11 +2754,8 @@ function run_smm(
             isfinite(loss_opt) ? loss_opt : Inf, converged, conv_why, niters)
     flush(stdout)
 
-    cp_opt, up_opt, sp_opt = unpack_θ(theta_opt, spec)
-    params_opt = _params_to_namedtuple(cp_opt, up_opt, sp_opt, spec)
-
-    res = SMMResult(theta_opt, params_opt, loss_opt, converged, niters, spec)
-    print_results(res; why = conv_why)
+    res = SMMResult(theta_opt, _params_to_namedtuple(theta_opt, spec), loss_opt, converged, niters, spec)
+    print_results(res; why = conv_why, k = equilibrium_at(theta_opt, spec).k)
     return res
 end
 
@@ -2628,7 +2764,7 @@ end
 # Result display and saving
 # ============================================================
 
-function print_results(res::SMMResult; why::AbstractString = "")
+function print_results(res::SMMResult; why::AbstractString = "", k = nothing)
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimates                                       ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
@@ -2643,6 +2779,12 @@ function print_results(res::SMMResult; why::AbstractString = "")
         val = hasproperty(res.params_opt, key) ? res.params_opt[key] : NaN
         @printf("  %s%s%20.5f\n", padr(ps.block, 12), padr(param_symbol(ps), 20), val)
     end
+    # The vacancy costs are estimated parameters like the rest; the optimiser moves the
+    # tightnesses and the solve computes the costs from them (equilibrium_at).
+    if k !== nothing
+        @printf("  %s%s%20.5f\n", padr(:unsk, 12), padr("k_U", 20), k.U)
+        @printf("  %s%s%20.5f\n", padr(:skl, 12),  padr("k_S", 20), k.S)
+    end
     if length(res.spec.fixed) > 0
         @printf("\n  Fixed:\n")
         for (k, v) in pairs(res.spec.fixed)
@@ -2651,12 +2793,11 @@ function print_results(res::SMMResult; why::AbstractString = "")
             @printf("    %s%20.5f\n", padr(fixed_symbol(k), 30), v)
         end
     end
-    # The reason is passed in rather than stored on SMMResult: adding a field would
-    # break every bundle already serialised, and the reason is a property of the run
-    # rather than of the estimate.
+    # The reason and the vacancy costs are passed in rather than stored on SMMResult: adding
+    # a field would break every bundle already serialised, and the costs are recomputed
+    # from θ by anyone who needs them (equilibrium_at).
     @printf("\n  Q = %.8e  |  converged = %s%s  |  iters = %d\n",
-            res.loss_opt, res.converged,
-            isempty(why) ? "" : @sprintf(" (%s)", why), res.iterations)
+            res.loss_opt, res.converged, isempty(why) ? "" : @sprintf(" (%s)", why), res.iterations)
     @printf("╚══════════════════════════════════════════════════════╝\n\n")
     flush(stdout)
 end
@@ -2680,8 +2821,7 @@ function write_checkpoint(path::String, θ::AbstractVector, Q::Float64,
                           spec::SMMSpec; tag::String = "")
     isempty(path) && return
     try
-        cp_, up_, sp_ = unpack_θ(collect(float.(θ)), spec)
-        res = SMMResult(collect(float.(θ)), _params_to_namedtuple(cp_, up_, sp_, spec),
+        res = SMMResult(collect(float.(θ)), _params_to_namedtuple(collect(float.(θ)), spec),
                         Q, false, 0, spec)
         # Via write_bundle since v19.6.0: one shape for every writer, and the atomic
         # temp-then-mv it does is the same one this function used to do inline. The
@@ -2696,7 +2836,7 @@ function write_checkpoint(path::String, θ::AbstractVector, Q::Float64,
     end
 end
 
-function save_results(res::SMMResult, path::String)
+function save_results(res::SMMResult, path::String; k)
     open(path, "w") do io
         # `symbol` is the market-suffixed display name (β_S rather than the bare β that
         # `name` carries for both markets), appended so tables and plots can label rows
@@ -2708,8 +2848,13 @@ function save_results(res::SMMResult, path::String)
             @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,false,%s\n",
                     ps.block, ps.name, ps.label, val, ps.lb, ps.ub, param_symbol(ps))
         end
-        for (k, v) in pairs(res.spec.fixed)
-            @printf(io, "fixed,%s,%s,%.8f,,,true,%s\n", k, k, v, fixed_symbol(k))
+        # The vacancy costs have no box: the optimiser moves the tightnesses.
+        for (blk, label) in VACANCY_COSTS
+            @printf(io, "%s,k,%s,%.8f,,,false,%s\n", blk, label, blk === :unsk ? k.U : k.S,
+                    blk === :unsk ? "k_U" : "k_S")
+        end
+        for (key, v) in pairs(res.spec.fixed)
+            @printf(io, "fixed,%s,%s,%.8f,,,true,%s\n", key, key, v, fixed_symbol(key))
         end
         @printf(io, "\n# Q = %.10e\n", res.loss_opt)
         @printf(io, "# converged = %s\n", res.converged)
@@ -2723,14 +2868,11 @@ end
 # Internal helpers
 # ============================================================
 
-function _params_to_namedtuple(cp, up, sp, spec::SMMSpec)
+# The free parameters at an unconstrained θ, keyed `block_name`.
+function _params_to_namedtuple(θ_unc::AbstractVector{Float64}, spec::SMMSpec)
     d = Dict{Symbol, Float64}()
-    for ps in spec.free
-        val = if ps.block == :common; getfield(cp, ps.name)
-              elseif ps.block == :unsk; getfield(up, ps.name)
-              else;                     getfield(sp, ps.name)
-              end
-        d[Symbol(string(ps.block) * "_" * string(ps.name))] = val
+    for (i, ps) in enumerate(spec.free)
+        d[Symbol(string(ps.block) * "_" * string(ps.name))] = _to_constrained(θ_unc[i], ps.lb, ps.ub)
     end
     return NamedTuple(d)
 end

@@ -12,13 +12,8 @@ include(joinpath(@__DIR__, "main_spec_only.jl"))
 
 const RULE = "="^70
 
-θ_base = pack_θ([
-    ParamSpec(ps.block, ps.name, ps.lb, ps.ub,
-              clamp(baseline_optimum_values[(ps.block, ps.name)],
-                    ps.lb + 1e-10, ps.ub - 1e-10),
-              ps.label)
-    for ps in spec.free
-])
+# The base point in the crisis spec's free set, as §8b maps it.
+θ_base = point_in_spec(baseline_data, spec; estimated_only = false).θ
 
 println("\n$RULE\nSMOKE 5 — baseline optimum injected into the seed bank\n$RULE")
 @printf("  bank size          = %d candidates\n", length(seed_bank.candidates))

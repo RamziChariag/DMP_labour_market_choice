@@ -60,6 +60,10 @@ const SETTINGS_REGISTRY = [
     # ── smm_main.jl: window, weighting and seeding ──────────────────────────
     SettingDecl(:WINDOW,        "smm_main.jl:top level",       :live,
                 "estimation window; must be a key of data/derived/windows.json"),
+    SettingDecl(:CRISIS_BASE,   "smm_main.jl:§6", :inert,
+                "read only for a crisis window, and the shipped WINDOW is a base window: " *
+                ":smm holds the ability distribution at the base SMM estimate, :mcmc at the " *
+                "base chain's estimate and writes estimate_<crisis>_smm_mcmcbase.jls"),
     SettingDecl(:INIT_MODE,     "smm_main.jl:top level",       :live,
                 ":default, :warmstart or :clusters — selects how the optimiser is seeded"),
     SettingDecl(:W_COND_TARGET, "smm_params.jl:load_weight_matrix", :live,
@@ -175,7 +179,8 @@ const SETTINGS_REGISTRY = [
                 "false = LMR timing (replacement every generation, mpi_mcmc_mod.f90:421-427); " *
                 "true = burn-in only, which keeps the retained sample reversible"),
     SettingDecl(:MCMC_BURN,       "demc.jl:run_demc", :live,
-                "burn-in fraction; 0.9 matches LMR's 'last 1000 of 10,000' (Appendix C p.86)"),
+                "burn-in fraction; 0.8 of the 5,000-generation budget keeps the last 1,000, " *
+                "LMR's retained length (Appendix C p.86)"),
     SettingDecl(:MCMC_PRIOR,      "MCMC_main.jl:logposterior", :live,
                 ":flat_t (LMR's target, −Q/2) or :flat_theta (−Q/2 + logjac_box); changes the sampled density, so a table must say which"),
     SettingDecl(:MCMC_WIDTHS_CSV, "MCMC_main.jl:init widths", :live,
@@ -221,8 +226,9 @@ that settles near 1e-2, so 1.0 overshoots by about a factor of 4 here. One const
                  450 = MCSE(q05) ≤ 0.10·sd, the precision of a reported interval endpoint. \
                  0.0 ⇒ use min_ess(d), the joint-volume floor, which is a different and much \
                  larger requirement"),
-    SettingDecl(:MCMC_CHECKPOINT, "MCMC_main.jl:promote!", :live,
-                "promote each new best point to the warm-start bundle during the run"),
+    SettingDecl(:MCMC_CHECKPOINT, "MCMC_main.jl:promote!", :inert,
+                "off by default; true writes the best visited point to " *
+                "estimate_<w>_mcmcbest.jls; the chain snapshots do not depend on it"),
     SettingDecl(:MCMC_JAC_ONLY,   "MCMC_main.jl:top level", :live,
                 "skip the chain and take Ĵ = Ĝ'WĜ from a local design"),
     SettingDecl(:MCMC_JAC_ALLOW_GAPS, "MCMC_main.jl:top level", :live,
@@ -257,7 +263,8 @@ that settles near 1e-2, so 1.0 overshoots by about a factor of 4 here. One const
 ]
 
 """
-Keys that were renamed, mapped to the key that replaced them.
+Keys that were renamed or retired, mapped to what replaced them: the new key, or the
+constant that now carries the choice.
 
 A rename is the one lifecycle step that cannot be made safe by a default: the old key
 still parses, still sets nothing, and the run proceeds under a configuration the
@@ -272,6 +279,7 @@ const LEGACY_ENV_KEYS = Dict(
     "ROYSEARCH_SCREEN_FRAC"   => "ROYSEARCH_MCMC_SCREEN_FRAC",
     "ROYSEARCH_SCREEN_CAP"    => "ROYSEARCH_MCMC_SCREEN_CAP",
     "ROYSEARCH_SCREEN_FLOOR"  => "ROYSEARCH_MCMC_SCREEN_FLOOR",
+    "ROYSEARCH_WIDTH_BASE"    => "POINT_ESTIMATE in code/tools/width_audit.jl",
 )
 
 # ============================================================
@@ -330,7 +338,7 @@ get a run configured by the defaults while believing they had overridden them.
 function assert_no_legacy_env()
     stale = [(old, new) for (old, new) in LEGACY_ENV_KEYS if haskey(ENV, old)]
     isempty(stale) && return nothing
-    msg = "Renamed settings are set in the environment and would be ignored:\n"
+    msg = "Renamed or retired settings are set in the environment and would be ignored:\n"
     for (old, new) in sort(stale)
         msg *= "    $old  →  use $new (currently \"$(ENV[old])\")\n"
     end

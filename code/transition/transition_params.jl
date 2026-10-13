@@ -6,27 +6,22 @@
 #   TransitionParams   — algorithm control knobs
 #   TransitionPath     — full time-indexed working storage (internal)
 #   TransitionResult   — serialisable output for downstream use
+#   transition_file    — the file a run writes, tagged by its weight matrix and point
 #
 # State layout on the (aU, aS) copula grid
 # ────────────────────────────────────────
-# Value functions are one-dimensional in ability (unskilled in aU, skilled
-# in aS), exactly as in the stationary solver.  Only the segment masses and
-# the training policy are two-dimensional; the skilled p-composition is
-# per-aS (the p-dynamics read only aS — notes §386).  The path therefore
-# stores:
-#   · 1D value paths        (Nx × Nt)          indexed by aU or aS
-#   · match surplus surfaces (Nx × Np × Nt)    indexed by (own ability, p)
-#   · 2D segment masses     (Nx × Nx × Nt)     indexed by (aU, aS)
-#   · per-aS employment     (Nx × NpS × Nt)    indexed by (aS, p)
+# Off a steady state a value depends on the whole type (aU, aS): the unskilled
+# unemployed price their later training option, and the skilled unemployed their
+# later crossing choice.  Values are therefore stored per type (Nx × Nx × Nt).  The
+# one-dimensional values the stationary solver uses are kept beside them (Nx × Nt):
+# they are the exact values of every type that makes no different choice at any
+# later date, which is most of the grid, so the full two-dimensional surfaces are
+# solved only on the types that do (see transition_values.jl).
 #
-# SURPLUSES, NOT WORKER/FIRM VALUES.  The path carries the RAW match surpluses
-# — before the soft reservation weight and before the positive part — because
-# they are what the backward recursion needs: the raw surplus is the object
-# whose time derivative the HJB prices, and its zero crossing IS the
-# reservation cutoff.  Nash splitting recovers everything a consumer wants
-# (J = (1−β)·ω·smooth_pos(S), E = U + β·ω·smooth_pos(S)), so storing
-# E_S^0/E_S^1/J_S^0/J_S^1 as well would be four arrays holding one object's
-# transforms — and the ω-weighted forms cannot be inverted where ω = 0.
+# SURFACES ARE RAW BRANCH VALUES.  A stored surface is the date-n value of a match
+# before the positive part, continuing on the date-(n+1) envelope; its zero crossing
+# is the reservation cutoff.  Nash splitting recovers worker and firm values
+# (J = (1−β)·S⁺, E = U + β·S⁺).
 ############################################################
 
 # ──────────────────────────────────────────────────────────
@@ -39,22 +34,23 @@
 Controls the backward–forward iteration for transition dynamics.
 
 # Fields
-- `T_max`   : horizon length (model time units, e.g. months)
-- `N_steps` : number of time steps  ⇒  Nt = N_steps + 1 grid points
-- `dt`      : step size = T_max / N_steps  (computed)
-- `tol`     : convergence tolerance on the tightness paths (sup-norm)
+- `T_max`   : span of the fine part of the time grid (model months)
+- `N_steps` : number of fine steps over `[0, T_max]`
+- `dt`      : fine step = T_max / N_steps  (computed)
+- `horizon` : the date the path reaches the crisis steady state, ≥ `T_max`.  Beyond
+              `T_max` the step grows geometrically by `TAIL_GROWTH`, so a long horizon
+              adds few dates; the masses are advanced there in sub-steps of at most
+              `FORWARD_SUBSTEP`.  `horizon = T_max` is the uniform grid.
+- `tol`     : convergence tolerance on the free-entry gap max_n |ln θ^new − ln θ|
 - `maxit`   : maximum backward–forward iterations
-- `damp`    : dampening on the tightness update ∈ (0, 1].  The skilled
-              free-entry map is the binding one, and it is well inside its
-              stability region: base_fc → crisis_fc converges in 16 iterations at
-              0.50, 20 at 0.40, 28 at 0.30 and 54 at 0.15, with base_covid →
-              crisis_covid 13/16/22/41 over the same ladder.
+- `damp`    : weight on the free-entry tightness in the damped update ∈ (0, 1]
 - `verbose` : print iteration info
 """
 mutable struct TransitionParams
     T_max   :: Float64
     N_steps :: Int
     dt      :: Float64
+    horizon :: Float64
     tol     :: Float64
     maxit   :: Int
     damp    :: Float64
@@ -63,15 +59,40 @@ mutable struct TransitionParams
     function TransitionParams(;
         T_max   :: Real  = 120.0,   # 10 years in months
         N_steps :: Int   = 240,
+        horizon :: Real  = T_max,
         tol     :: Real  = 1e-4,
         maxit   :: Int   = 200,
         damp    :: Real  = 0.3,
         verbose :: Bool  = true,
     )
+        horizon >= T_max || error("TransitionParams: horizon $horizon is shorter than T_max $T_max.")
         dt = Float64(T_max) / N_steps
-        new(Float64(T_max), N_steps, dt, Float64(tol), maxit,
+        new(Float64(T_max), N_steps, dt, Float64(horizon), Float64(tol), maxit,
             Float64(damp), verbose)
     end
+end
+
+# Growth of the step beyond the fine grid, and the longest step the explicit laws of
+# motion take.  Values are solved implicitly and are stable at any step; the masses are
+# explicit, and at the stored estimates no exit rate reaches 0.5 per month, so a
+# one-month sub-step keeps every stock positive.
+const TAIL_GROWTH     = 1.05
+const FORWARD_SUBSTEP = 1.0
+
+"""
+    time_grid(tp) -> Vector{Float64}
+
+The dates of the path: `N_steps` equal steps over `[0, T_max]`, then steps growing by
+`TAIL_GROWTH` until `horizon`, the last one ending on it.
+"""
+function time_grid(tp::TransitionParams)
+    t = collect(range(0.0, tp.T_max; length = tp.N_steps + 1))
+    Δ = tp.dt
+    while t[end] < tp.horizon - 1e-9
+        Δ *= TAIL_GROWTH
+        push!(t, min(t[end] + Δ, tp.horizon))
+    end
+    return t
 end
 
 
@@ -93,41 +114,69 @@ mutable struct TransitionPath
     θU :: Vector{Float64}             # (Nt)
     θS :: Vector{Float64}             # (Nt)
 
-    # Unskilled value paths (indexed by aU, except T_val indexed by aS)
-    Usearch   :: Matrix{Float64}      # (Nx,Nt) U^search(aU)
-    T_val     :: Matrix{Float64}      # (Nx,Nt) T(aS): value of training
-    Jfrontier :: Matrix{Float64}      # (Nx,Nt) J_U(aU,1)
-    pstar_U   :: Matrix{Float64}      # (Nx,Nt) p*_U(aU)
-    SU        :: Array{Float64,3}     # (Nx,NpU,Nt) raw S_U(aU,p)
+    # Unskilled values of a type that searches at every later date (the stationary
+    # solver's objects, indexed by aU)
+    Usearch :: Matrix{Float64}        # (Nx,Nt)       U^search(aU)
+    pstar_U :: Matrix{Float64}        # (Nx,Nt)       its reservation p*_U(aU)
+    SU1     :: Matrix{Float64}        # (Nx,Nt)       its entry surplus S_U(aU,1) ≥ 0
+    SU      :: Array{Float64,3}       # (Nx,NpU,Nt)   its raw surface S_U(aU,p)
 
-    # Skilled value paths (indexed by aS, except US1 indexed by aU)
-    US      :: Matrix{Float64}        # (Nx,Nt) U_S^(0)(aS): stay-skilled value
-    US1     :: Matrix{Float64}        # (Nx,Nt) U_S^(1)(aU): cross-to-unskilled value
-    pstar_S :: Matrix{Float64}        # (Nx,Nt) p*_S(aS)
-    poj     :: Matrix{Float64}        # (Nx,Nt) p^oj_S(aS)
-    S0      :: Array{Float64,3}       # (Nx,NpS,Nt) raw S_S^0(aS,p), no OJS
-    S1      :: Array{Float64,3}       # (Nx,NpS,Nt) raw S_S^1(aS,p), with OJS
+    # Unskilled values per type.  A cell holds a searching slice, the fraction 1−τ, and
+    # a training slice, τ; each slice's unemployed have their own value and each
+    # slice's matches their own outside option.
+    UC    :: Array{Float64,3}         # (Nx,Nx,Nt) value of the searching slice's unemployed
+    T     :: Array{Float64,3}         # (Nx,Nx,Nt) training value T(a)
+    Utr   :: Array{Float64,3}         # (Nx,Nx,Nt) training option −c(aS) + T(a)
+    τT    :: Array{Float64,3}         # (Nx,Nx,Nt) training fraction τ(a)
+    pUs   :: Array{Float64,3}         # (Nx,Nx,Nt) reservation of the searching slice's matches
+    pUt   :: Array{Float64,3}         # (Nx,Nx,Nt) reservation of the training slice's matches
+    SUs1  :: Array{Float64,3}         # (Nx,Nx,Nt) searching slice's entry surplus S(a,1) ≥ 0
+    SUt1  :: Array{Float64,3}         # (Nx,Nx,Nt) training slice's raw surplus at p = 1 (its positive part continues)
+    zUs   :: Array{Float64,3}         # (Nx,Nx,Nt) flow value of unemployment, searching slice
+    zUt   :: Array{Float64,3}         # (Nx,Nx,Nt) flow value of unemployment, training slice
+    pureU :: Array{Bool,3}            # (Nx,Nx,Nt) the searching slice keeps searching at every later date
 
-    # Two-dimensional segment masses on the (aU,aS) copula grid
-    uU :: Array{Float64,3}            # (Nx,Nx,Nt) untrained unemployed
-    tU :: Array{Float64,3}            # (Nx,Nx,Nt) in training
-    uS :: Array{Float64,3}            # (Nx,Nx,Nt) skilled unemployed
-    mS :: Array{Float64,3}            # (Nx,Nx,Nt) trained-segment mass
-    τT :: Array{Float64,3}            # (Nx,Nx,Nt) training policy indicator
+    # Skilled values.  Per aS for the types that stay skilled at every later date (the
+    # stationary solver's objects); per type for the branch values of the crossing
+    # choice, which is re-made at every date.
+    US      :: Matrix{Float64}        # (Nx,Nt)       U_S^(0)(aS) of a type that never crosses later
+    zS      :: Matrix{Float64}        # (Nx,Nt)       its flow value of unemployment
+    pstar_S :: Matrix{Float64}        # (Nx,Nt)       p*_S(aS)
+    poj     :: Matrix{Float64}        # (Nx,Nt)       p^oj_S(aS)
+    s_part  :: Matrix{Float64}        # (Nx,Nt)       OJS participation weight of cell aS
+    S0      :: Array{Float64,3}       # (Nx,NpS,Nt)   raw branch value without OJS
+    S1      :: Array{Float64,3}       # (Nx,NpS,Nt)   raw branch value with OJS
+    Sd      :: Array{Float64,3}       # (Nx,NpS,Nt)   value of a destination cell ω·[s S¹+(1−s) S⁰]⁺
+    U0      :: Array{Float64,3}       # (Nx,Nx,Nt)    U_S^(0)(a): search the skilled market today
+    U1      :: Array{Float64,3}       # (Nx,Nx,Nt)    U_S^(1)(a): search the unskilled market today
+    pureS   :: Array{Bool,3}          # (Nx,Nx,Nt)    the type stays skilled at every later date
 
-    # Pre-switch (date-0) state: the initial condition of the forward pass.
-    # The training frontier reallocates the unemployed it encloses, so the
-    # forward pass needs both the policy one date BEFORE the one it steps and a
-    # clean copy of the inherited stocks to restart date 1 from on every outer
-    # iteration — reallocating date 1 in place would compound across them.
-    τT0 :: Matrix{Float64}            # (Nx,Nx) z₀ training policy
-    uU0 :: Matrix{Float64}            # (Nx,Nx) z₀ untrained unemployed
-    tU0 :: Matrix{Float64}            # (Nx,Nx) z₀ in training
+    # Masses per type on the (aU,aS) copula grid, after the date's reallocations
+    uU  :: Array{Float64,3}           # (Nx,Nx,Nt) unskilled unemployed (searching slice)
+    tU  :: Array{Float64,3}           # (Nx,Nx,Nt) in training
+    eUs :: Array{Float64,3}           # (Nx,Nx,Nt) unskilled employment, searching slice
+    eUt :: Array{Float64,3}           # (Nx,Nx,Nt) unskilled employment, training slice
+    uS  :: Array{Float64,3}           # (Nx,Nx,Nt) skilled unemployed
+    mS  :: Array{Float64,3}           # (Nx,Nx,Nt) skilled-segment mass
+    eS  :: Array{Float64,3}           # (Nx,NpS,Nt) per-aS unit shape of skilled employment
+    eUsp :: Array{Float64,3}          # (Nx,NpU+1,Nt) searching-slice matches by (aU, p), atom at p = 1 last
+    eUtp :: Array{Float64,3}          # (Nx,NpU+1,Nt) training-slice matches by (aU, p)
 
-    # Per-aS skilled employment p-composition (for wages and OJS seekers).
-    # UNIT density of a d = 0 type, the convention `SkilledCache.e_frac` uses;
-    # aggregates scale it by the non-draining column mass.
-    eS :: Array{Float64,3}            # (Nx,NpS,Nt) ê_S(aS,p)
+    # Pre-switch state (date 0⁻): the base steady state, per type.
+    τT0  :: Matrix{Float64}           # (Nx,Nx)
+    uU0  :: Matrix{Float64}           # (Nx,Nx)
+    tU0  :: Matrix{Float64}           # (Nx,Nx)
+    eU0p :: Array{Float64,3}          # (Nx,Nx,NpU+1) unskilled employment by p, atom at p = 1 last
+    pU0  :: Vector{Float64}           # (Nx) base unskilled reservation, the support of eU0p
+    pS0  :: Vector{Float64}           # (Nx) base skilled reservation, the support of eS at 0⁻
+    χU0  :: Vector{Float64}           # (Nx) base hired fraction χ by aU row, the support of the p = 1 atom
+
+    # Per-date records of the forward pass
+    wU_mean    :: Vector{Float64}     # (Nt) mean unskilled log wage
+    ended_U    :: Vector{Float64}     # (Nt) unskilled matches ended by a rising cutoff, searching slice
+    quit_T     :: Vector{Float64}     # (Nt) unskilled matches ended into training
+    ended_S    :: Vector{Float64}     # (Nt) skilled matches ended by a rising cutoff
+    swept_T    :: Vector{Float64}     # (Nt) unskilled unemployed moved into training
 end
 
 """
@@ -136,24 +185,26 @@ end
 Allocate a zero-initialised path sized to `model`'s grids and `tp`'s horizon.
 """
 function allocate_path(model::Model, tp::TransitionParams)
-    Nt  = tp.N_steps + 1
+    tgrid = time_grid(tp)
+    Nt  = length(tgrid)
     Nx  = length(model.grids.x)
     NpU = length(model.unsk_grids.p)
     NpS = length(model.skl_grids.p)
-    tgrid = collect(range(0.0, tp.T_max; length = Nt))
 
     z2(a, b)    = zeros(Float64, a, b)
     z3(a, b, c) = zeros(Float64, a, b, c)
+    t3() = z3(Nx, Nx, Nt)
+    b3() = trues(Nx, Nx, Nt) |> Array{Bool,3}
 
     return TransitionPath(
-        tgrid,
-        zeros(Float64, Nt), zeros(Float64, Nt),
-        z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z3(Nx, NpU, Nt),
-        z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt),
-        z3(Nx, NpS, Nt), z3(Nx, NpS, Nt),
-        z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt), z3(Nx, Nx, Nt),
-        z2(Nx, Nx), z2(Nx, Nx), z2(Nx, Nx),
-        z3(Nx, NpS, Nt),
+        tgrid, zeros(Nt), zeros(Nt),
+        z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z3(Nx, NpU, Nt),
+        t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), b3(),
+        z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt),
+        z3(Nx, NpS, Nt), z3(Nx, NpS, Nt), z3(Nx, NpS, Nt), t3(), t3(), b3(),
+        t3(), t3(), t3(), t3(), t3(), t3(), z3(Nx, NpS, Nt), z3(Nx, NpU + 1, Nt), z3(Nx, NpU + 1, Nt),
+        z2(Nx, Nx), z2(Nx, Nx), z2(Nx, Nx), z3(Nx, Nx, NpU + 1), zeros(Nx), zeros(Nx), zeros(Nx),
+        zeros(Nt), zeros(Nt), zeros(Nt), zeros(Nt), zeros(Nt),
     )
 end
 
@@ -181,15 +232,15 @@ struct TransitionResult
     tgrid :: Vector{Float64}
     θU    :: Vector{Float64}
     θS    :: Vector{Float64}
-    fU    :: Vector{Float64}
-    fS    :: Vector{Float64}
+    κU    :: Vector{Float64}
+    κS    :: Vector{Float64}
 
     ur_U           :: Vector{Float64}
     ur_S           :: Vector{Float64}
     ur_total       :: Vector{Float64}
     skilled_share  :: Vector{Float64}
     training_share :: Vector{Float64}
-    mean_wage_U    :: Vector{Float64}
+    mean_wage_U    :: Vector{Float64}     # mean log wages, the data moments' units
     mean_wage_S    :: Vector{Float64}
 
     # Ability-marginal density profiles (Nx × Nt)
@@ -214,8 +265,8 @@ struct TransitionResult
     # training.  The other three are the CROSS-MARKET frontier F_d, kept apart
     # because a zero in one says nothing about the others:
     #   d_region  ∬ d ℓ      — is the active side of F_d a non-empty region?
-    #   d_mass    ∬ d m_S    — does any trained mass sit on it?
-    #   d_flow    f_U ∬ d u_S — does anyone actually cross?
+    #   d_mass    ∬ d m_S    — does any skilled mass sit on it?
+    #   d_flow    κ_U ∬ d u_S — does anyone actually cross?
     # The flow is identically zero at both stationary endpoints by self-selection
     # (notes, prop:ss-crossflow) and positive only while the frontier is in
     # motion, so reading it alone cannot tell an inert solver from a channel that
@@ -224,4 +275,31 @@ struct TransitionResult
     d_region       :: Vector{Float64}
     d_mass         :: Vector{Float64}
     d_flow         :: Vector{Float64}
+end
+
+# ──────────────────────────────────────────────────────────
+# The transition file
+# ──────────────────────────────────────────────────────────
+# A run is tagged by its weight matrix and the point estimate both windows are read at,
+# `<W>_<point>` with point :smm or :mcmc, and every file it writes ends in the tag: the
+# transition file below, and the tables and plots made from it.  The runs at the two points
+# therefore coexist.  Every writer and reader of a transition file loads this file.
+
+transition_tag(w_suffix::AbstractString, point::Symbol) = "$(w_suffix)_$(point)"
+
+transition_file(scenario::Symbol, w_suffix::AbstractString, point::Symbol) =
+    joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(transition_tag(w_suffix, point)).jls")
+
+"""
+    read_transition(scenario, w_suffix, point) -> NamedTuple or nothing
+
+The transition of `scenario` solved at `point`, read from `transition_file`; `nothing` when
+there is none.  A file that records another point stops the run.
+"""
+function read_transition(scenario::Symbol, w_suffix::AbstractString, point::Symbol)
+    f = transition_file(scenario, w_suffix, point)
+    isfile(f) || return nothing
+    tr = open(deserialize, f)
+    tr.point === point || error("$(basename(f)) records point = :$(tr.point), not :$(point).")
+    return tr
 end

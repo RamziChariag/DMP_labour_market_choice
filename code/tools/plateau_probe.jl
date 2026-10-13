@@ -60,6 +60,7 @@ end
 
 const WINDOW    = Symbol(get(ENV, "ROYSEARCH_WINDOW", "base_fc"))
 const W_SUFFIX  = "_diagonalW"
+const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
 const N_PROP    = parse(Int, get(ENV, "PROBE_N", "120"))
 const N_SCAN    = parse(Int, get(ENV, "PROBE_SCAN", "15"))
 const T0_ACCEPT = 0.30      # _sa_loop's shipped t0_accept
@@ -68,7 +69,7 @@ const T0_REL    = 1e-4      # _sa_loop's shipped sa_t0_rel, for the comparison o
 const SIGMA     = env_setting(:SA_SCALE_SIGMA, 0.33)
 const P_SCALE   = env_setting(:SA_SCALE_P_MOVE, 1.0)
 
-const BPATH = estimate_path(WINDOW, W_SUFFIX)
+const BPATH = estimate_path(WINDOW, W_SUFFIX; point = POINT_ESTIMATE)
 isfile(BPATH) || error("no bundle at $BPATH")
 const B    = open(deserialize, BPATH)
 const SPEC = B.spec

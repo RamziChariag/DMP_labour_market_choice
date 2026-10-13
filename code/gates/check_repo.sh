@@ -52,13 +52,17 @@ for w in "${WINDOWS[@]}"; do
 done
 [ "$missing" -eq 0 ] && echo "  all per-window moment/sigma/variance/scale files present"
 
-# A warmstart seeds from a saved optimum; without one, INIT_MODE=:warmstart falls
-# back to DEFAULT_PARAMS, which is a different (and slower) starting point.
+# A warmstart scores every stored point that can start a window (smm_main.jl §8a); with
+# none it starts from DEFAULT_PARAMS, which is a different (and slower) starting point.
 echo ""
-echo "=== warmstart bundles (optional, but a :warmstart run wants them) ==="
+echo "=== warm-start candidates (optional, but a :warmstart run wants one) ==="
 for w in "${WINDOWS[@]}"; do
-    f="output/estimates/estimate_${w}_diagonalW.jls"
-    printf "  %-9s %s\n" "$w" "$([ -f "$f" ] && echo "present" || echo "absent — will start from DEFAULT_PARAMS")"
+    found=""
+    for tag in _smm _smm_mcmcbase ""; do
+        f="output/estimates/estimate_${w}_diagonalW${tag}.jls"
+        [ -f "$f" ] && found="$found $(basename "$f")"
+    done
+    printf "  %-13s %s\n" "$w" "${found:- none — will start from DEFAULT_PARAMS}"
 done
 
 # Settings lifecycle. Runs before the size audit and in --verify-only, because a clone
@@ -73,6 +77,52 @@ if command -v "$JULIA_BIN" >/dev/null 2>&1; then
         :
     else
         echo "  check_forwarding reported findings — see SETTINGS.md" >&2
+        missing=1
+    fi
+else
+    echo "  SKIPPED: julia not on PATH (set JULIA=/path/to/julia to include this gate)"
+fi
+
+# Pair maps. smm_main.jl keeps its own crisis → baseline map beside the CRISIS_BASE
+# switch, and every other script reads paths.jl's; the two must name the same pairs.
+echo ""
+echo "=== crisis → baseline pair map (code/gates/check_pair_map.jl) ==="
+if command -v "$JULIA_BIN" >/dev/null 2>&1; then
+    if "$JULIA_BIN" --project=. --startup-file=no code/gates/check_pair_map.jl; then
+        :
+    else
+        echo "  check_pair_map reported findings — the two pair maps disagree" >&2
+        missing=1
+    fi
+else
+    echo "  SKIPPED: julia not on PATH (set JULIA=/path/to/julia to include this gate)"
+fi
+
+# Threaded evaluation. Runs with -t 2 deliberately: the defect this catches is invisible
+# on one thread, which is how v40.0.0 shipped a solver that returned Inf for every
+# parameter point the DE, the width measurement or the Jacobian evaluated.
+echo ""
+echo "=== threaded evaluation (code/gates/check_threading.jl) ==="
+if command -v "$JULIA_BIN" >/dev/null 2>&1; then
+    if "$JULIA_BIN" --project=. --startup-file=no -t 2 code/gates/check_threading.jl; then
+        :
+    else
+        echo "  check_threading reported findings — a threaded solve is not reproducing" >&2
+        missing=1
+    fi
+else
+    echo "  SKIPPED: julia not on PATH (set JULIA=/path/to/julia to include this gate)"
+fi
+
+# Hiring margin. The solver weights cells by the closed-form hireable set a_U > b̃_U/P_U;
+# this confirms the solved p*_U still selects the same set at every stored estimate.
+echo ""
+echo "=== unskilled hiring margin (code/gates/check_hire_margin.jl) ==="
+if command -v "$JULIA_BIN" >/dev/null 2>&1; then
+    if "$JULIA_BIN" --project=. --startup-file=no code/gates/check_hire_margin.jl; then
+        :
+    else
+        echo "  check_hire_margin reported findings — p*_U and the closed form disagree" >&2
         missing=1
     fi
 else

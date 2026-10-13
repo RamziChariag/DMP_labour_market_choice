@@ -133,34 +133,20 @@ function fig_employment_heatmaps(obj; percentile_print = 1.00)
     plot(p3a, p3b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
 end
 
+# Employment by ability, each market's mass at x summed over its own quality grid: the
+# unskilled tail by density × wpU plus the new matches at p = 1, the skilled cells by
+# density × wpS. The two markets' p-grids differ, so their surfaces are never added.
 function fig_total_employment(obj; percentile_print = 1.00)
-    xg  = obj.xg
-    pg  = obj.pg
-    pgU = obj.pgU
+    xg   = obj.xg
+    ix   = xg .≤ percentile_print
+    eU_x = [dot(obj.eU_density[i, :], obj.wpU) + obj.eU_entry[i] for i in 1:obj.Nx]
+    eS_x = obj.eS_totS
 
-    x_lo,  x_hi  = 0.0, percentile_print
-    pU_lo, pU_hi = 0.0, percentile_print
-    pS_lo, pS_hi = 0.0, percentile_print
-
-    ix = x_lo  .≤ xg  .≤ x_hi
-    iU = pU_lo .≤ pgU .≤ pU_hi
-    iS = pS_lo .≤ pg  .≤ pS_hi
-
-    xg_w  = xg[ix]
-    pg_w  = pg[iS]
-    eU_w  = obj.eU_surface[ix, iU]
-    eS_w  = obj.eS_pS[ix, iS]
-
-    e_total_w = eU_w .+ eS_w
-
-    p3c = heatmap(xg_w, pg_w, e_total_w',
-                  xlabel=L"x", ylabel=L"p",
-                  title=L"Total employment $e_U(x,p)+e_S(x,p)$",
-                  color=:viridis, legend=false, grid=false,
-                  yguidefontrotation=-90)
-    contour!(p3c, xg_w, pg_w, e_total_w',
-             color=:white, alpha=0.4, lw=0.8, levels=15)
-    ylims!(p3c, 0.0, 1.0)
+    p3c = plot(xg[ix], eU_x[ix] .+ eS_x[ix], label = "total", color = :black, lw = 2,
+               xlabel = L"x", ylabel = "employed mass",
+               title = L"Employment by ability, $e_U(x) + e_S(x)$")
+    plot!(p3c, xg[ix], eU_x[ix], label = L"unskilled, by $a_U$", color = _C1, lw = 2)
+    plot!(p3c, xg[ix], eS_x[ix], label = L"skilled, by $a_S$",   color = _C4, lw = 2)
     p3c
 end
 
@@ -401,8 +387,10 @@ function fig_skilled_wages(obj)
     plot(pW2a, pW2b, layout=(1,2), size=(1100,440), margin=5Plots.mm)
 end
 
-# Mean log wage gap by x, computed on the OJS-aware realised skilled wage
-# and the unskilled wage interpolated onto the skilled p-grid.
+# Log gap between the mean skilled and the mean unskilled wage, by type x. Each mean is over
+# its market's own quality grid and counts every employed worker once: a skilled cell by its
+# density × wpS at the OJS-aware realised wage, an unskilled tail cell by its density × wpU,
+# and the new unskilled matches at p = 1 by their mass at the entry wage w_U(x, 1).
 function fig_skill_premium(obj)
     xg = obj.xg
     pg = obj.pg
@@ -413,64 +401,27 @@ function fig_skill_premium(obj)
     wS_actual = fill(NaN, obj.Nx, obj.NpS)
     for ix in 1:obj.Nx
         poj_ix = clamp01(obj.poj[ix])
+        part   = obj.s_part[ix]
         for jp in 1:obj.NpS
-            s  = _soft_oj_weight(pg[jp], poj_ix, pg, jp, obj.NpS)
+            s  = _ojs_share(part, pg[jp], poj_ix, pg, jp, obj.NpS)
             w1 = obj.wS1_surface[ix, jp];  w0 = obj.wS0_surface[ix, jp]
             wS_actual[ix, jp] = s >= 1.0 ? w1 : (s <= 0.0 ? w0 : s * w1 + (1.0 - s) * w0)
         end
     end
 
-    wU_on_pg = fill(NaN, obj.Nx, obj.NpS)
-    for ix in 1:obj.Nx
-        itp = linear_interpolation(obj.pgU, obj.wU_surface[ix, :],
-                                   extrapolation_bc=NaN)
-        wU_on_pg[ix, :] = itp.(pg)
-    end
-
-    eU_on_pg = zeros(obj.Nx, obj.NpS)
-    for ix in 1:obj.Nx
-        itp = linear_interpolation(obj.pgU, obj.eU_surface[ix, :],
-                                   extrapolation_bc=0.0)
-        eU_on_pg[ix, :] = max.(itp.(pg), 0.0)
-    end
-
-    eS_mat = obj.eS_pS
     premium_log_by_x = fill(NaN, obj.Nx)
-
     for ix in 1:obj.Nx
-        numS = 0.0
-        denS = 0.0
-        numU = 0.0
-        denU = 0.0
-        for jp in 1:obj.NpS-1
-            dp = pg[jp+1] - pg[jp]
-
-            wS1 = wS_actual[ix, jp]
-            wS2 = wS_actual[ix, jp+1]
-            eS1 = eS_mat[ix, jp]
-            eS2 = eS_mat[ix, jp+1]
-
-            wU1 = wU_on_pg[ix, jp]
-            wU2 = wU_on_pg[ix, jp+1]
-            eU1 = eU_on_pg[ix, jp]
-            eU2 = eU_on_pg[ix, jp+1]
-
-            if isfinite(wS1) && isfinite(wS2)
-                numS += 0.5 * (wS1*eS1 + wS2*eS2) * dp
-                denS += 0.5 * (eS1 + eS2) * dp
-            end
-
-            if isfinite(wU1) && isfinite(wU2)
-                numU += 0.5 * (wU1*eU1 + wU2*eU2) * dp
-                denU += 0.5 * (eU1 + eU2) * dp
-            end
+        numS = 0.0;  denS = 0.0
+        for jp in 1:obj.NpS
+            w = wS_actual[ix, jp];  m = obj.eS_pS[ix, jp] * obj.wpS[jp]
+            isfinite(w) && (numS += w * m;  denS += m)
         end
-
-        if denS > 0 && denU > 0
-            wSbar = numS / denS
-            wUbar = numU / denU
-            premium_log_by_x[ix] = log(wSbar) - log(wUbar)
+        numU = obj.eU_entry[ix] * obj.wU_entry[ix];  denU = obj.eU_entry[ix]
+        for jp in 1:obj.NpU
+            w = obj.wU_surface[ix, jp];  m = obj.eU_density[ix, jp] * obj.wpU[jp]
+            isfinite(w) && (numU += w * m;  denU += m)
         end
+        denS > 0 && denU > 0 && (premium_log_by_x[ix] = log(numS / denS) - log(numU / denU))
     end
 
     pW3 = plot(xg, premium_log_by_x,

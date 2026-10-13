@@ -6,193 +6,261 @@
 # point); it does not auto-execute when included.
 #
 # Public API
-#   run_transition_simulation(scenario, w_cond_target;
-#                             Nx, Np_U, Np_S,
-#                             T_max, N_steps, tol, maxit, damp)
-#     1. Loads the baseline + crisis SMM bundles for the scenario.
-#     2. Rebuilds the parameter structs (unpack_θ).
-#     3. Solves the two stationary equilibria z₀, z₁.
-#     4. Runs the backward–forward transition (solve_transition).
-#     5. Serialises a bundle to <TRANS_OUT_DIR>/transition_<scenario><W>.jls
-#        (Serialization/.jls, matching the SMM bundles — the model no longer
-#         depends on JLD2).
-#     6. Returns the absolute path of the saved file.
+#   run_transition_simulation(scenario, w_suffix; point, T_max, N_steps, tol, maxit, damp)
+#     1. Loads the two windows' estimates at the same `point` (:smm or :mcmc) and checks
+#        that the pair is one: the same grids and the same ability distribution and
+#        demographic rates.
+#     2. Solves the selected stationary equilibrium of each window at its own grid and
+#        its own estimation settings.
+#     3. Chooses the horizon by an accuracy test and solves the transition there.
+#     4. Serialises the bundle to <TRANS_OUT_DIR>/transition_<scenario><W>_<point>.jls.
 #
-# Expects in scope (provided by transition_main.jl):
-#   · solver + smm modules (solve_model, SimParams, unpack_θ,
-#     compute_equilibrium_objects, _load_smm_bundle, …)
-#   · transition_params.jl, transition_solver.jl
-#   · SMM_OUT_DIR, TRANS_OUT_DIR                     (path constants)
+# Expects in scope (provided by transition_main.jl): the solver, SMM and transition
+# modules, paths.jl and JSON3.
 ############################################################
 
-# ──────────────────────────────────────────────────────────
-# Internal helpers
-# ──────────────────────────────────────────────────────────
+# Bundle shape of the transition output.  Bumped only when its field set changes.
+const TRANSITION_SCHEMA = 2
 
-function _ts_w_suffix(cond_target::Float64)
-    cond_target == 0.0 && return "_diagonalW"
-    cond_target == 1.0 && return "_compressedW"
-    cond_target == 2.0 && return "_equalW"
-    return "_fullW"
-end
+# The horizon test: the horizon doubles, from the fine grid's span, until no reported
+# series moves on the first HORIZON_TEST_MONTHS by more than HORIZON_TOL relative to its
+# own scale; HORIZON_MAX bounds the search.  A series in logs is held to HORIZON_TOL in log
+# units instead: its change is relative already, and dividing it by the size of the log
+# (about 6.5 for the wages at the estimates) would loosen the test that many times.  The
+# tolerance is ten times the outer loop's default free-entry tolerance, so the test is not
+# reading the iteration's own noise.
+const HORIZON_TEST_MONTHS = 36.0
+const HORIZON_TOL         = 1e-3
+const HORIZON_MAX         = 7680.0
 
-function _ts_load_bundle_or_error(path::String, label::String)
-    isfile(path) || error("$label not found: $path\n" *
-        "Run the SMM estimation first (smm/smm_main.jl).")
-    bundle = _load_smm_bundle(path; delete_on_fail = false, label = label)
-    isnothing(bundle) && error("$label is unreadable or stale: $path")
-    return bundle
-end
+# The series the horizon test compares, every one a reported path, and those in logs.
+const REPORTED_SERIES = (:θU, :θS, :ur_U, :ur_S, :ur_total, :skilled_share,
+                         :training_share, :mean_wage_U, :mean_wage_S)
+const LOG_SERIES      = (:mean_wage_U, :mean_wage_S)
 
-# ──────────────────────────────────────────────────────────
-# Public function
-# ──────────────────────────────────────────────────────────
+_scenario_windows(scenario::Symbol) =
+    scenario === :fc    ? (:base_fc, :crisis_fc) :
+    scenario === :covid ? (:base_covid, :crisis_covid) :
+    error("Unknown scenario: $scenario. Must be :fc or :covid.")
 
 """
-    run_transition_simulation(scenario, w_cond_target;
-                              Nx = 200, Np_U = 200, Np_S = 200,
-                              T_max = 120.0, N_steps = 240,
-                              tol = 1e-4, maxit = 200, damp = 0.3)
+    crisis_window_months(window) -> (months, ym_start, ym_end, label)
 
-Solve the backward–forward transition for a single scenario and serialise
-the bundle to `<TRANS_OUT_DIR>/transition_<scenario><W_SUFFIX>.jls`.
-
-Arguments
-  scenario        `:fc` or `:covid`
-  w_cond_target   weight-matrix mode used by the SMM estimation
-                  (0.0 / 1.0 / 2.0 / >2.0 → diagonal / compressed / equal / full)
-
-Keyword arguments
-  Nx, Np_U, Np_S  grid sizes for the stationary solves (finer than SMM for
-                  single-run consistency)
-  T_max           horizon length in model months
-  N_steps         number of time steps (Nt = N_steps + 1)
-  tol             convergence tolerance on ‖Δθ‖∞
-  maxit           maximum backward–forward iterations
-  damp            dampening on the tightness update
-
-Returns the absolute path of the saved `.jls` file.
+The crisis window's length in months, from `data/derived/windows.json`, the list every
+other layer uses.
 """
-function run_transition_simulation(
-    scenario      :: Symbol,
-    w_cond_target :: Float64;
-    Nx      :: Int  = 200,
-    Np_U    :: Int  = 200,
-    Np_S    :: Int  = 200,
-    T_max   :: Real = 120.0,
-    N_steps :: Int  = 240,
-    tol     :: Real = 1e-4,
-    maxit   :: Int  = 200,
-    damp    :: Real = TransitionParams().damp,
-)
-    w_suffix = _ts_w_suffix(Float64(w_cond_target))
+function crisis_window_months(window::Symbol)
+    w  = JSON3.read(read(joinpath(PROJECT_ROOT, "data", "derived", "windows.json"), String))
+    wd = w.windows[window]
+    ys, ms = divrem(wd.ym_start, 100);  ye, me = divrem(wd.ym_end, 100)
+    return (months = 12 * (ye - ys) + (me - ms) + 1, ym_start = wd.ym_start,
+            ym_end = wd.ym_end, label = String(wd.label))
+end
 
+"""
+    point_estimate(window, w_suffix, point) -> (bundle, θ, source)
+
+The estimate a window is read at: `:smm` the SMM estimate, `estimate_<window><W>_smm.jls`;
+`:mcmc` the chain's, `estimate_<window><W>_mcmc.jls` (the posterior mean of the retained
+draws). Both windows of a pair are read at the same `point`. The bundle must come from this
+MAJOR version, and a chain's from a chain that did not abort.
+"""
+function point_estimate(window::Symbol, w_suffix::String, point::Symbol)
+    point in (:smm, :mcmc) || error("POINT_ESTIMATE must be :smm or :mcmc, got :$point.")
+    file = estimate_path(window, w_suffix; point = point)
+    isfile(file) || error("$window: $(basename(file)) not found.")
+    b = read_bundle(file)
+    (b === nothing || b.result === nothing || b.spec === nothing) &&
+        error("$window: $(basename(file)) is unreadable or carries no result/spec.")
+    require_current_major(b, file)
+    b.stage === :mcmc_aborted && error(
+        "$window: the chain behind $(basename(file)) aborted; its draws are not a " *
+        "stationary sample, so the file holds no estimate.")
+    return (bundle = b, θ = b.result.theta_opt, source = basename(file))
+end
+
+"""
+    check_pair(base, crisis, wb, wc)
+
+A transition runs on one grid and one population, so the two windows must share the grid
+sizes of their runs, the ability distribution and the demographic and training rates.
+"""
+function check_pair(base, crisis, wb::Symbol, wc::Symbol)
+    rb = base.bundle.spec.run;  rc = crisis.bundle.spec.run
+    (rb.Nx, rb.Np_U, rb.Np_S) == (rc.Nx, rc.Np_U, rc.Np_S) ||
+        error("$wb and $wc were estimated on different grids: (Nx, Np_U, Np_S) = " *
+              "$((rb.Nx, rb.Np_U, rb.Np_S)) against $((rc.Nx, rc.Np_U, rc.Np_S)).")
+    cb, _, _ = unpack_θ(base.θ, base.bundle.spec)
+    cc, _, _ = unpack_θ(crisis.θ, crisis.bundle.spec)
+    for f in (:a_ℓ, :b_ℓ, :ρ_x, :r, :ν, :φ)
+        getfield(cb, f) == getfield(cc, f) ||
+            error("$wb and $wc are not a pair: $f = $(getfield(cb, f)) in the base point and " *
+                  "$(getfield(cc, f)) in the crisis point. The crisis window must hold the ability " *
+                  "distribution at the base estimate it was paired with.")
+    end
+    return (Nx = rb.Nx, Np_U = rb.Np_U, Np_S = rb.Np_S)
+end
+
+"""
+    solve_endpoint(pt, grid, label) -> equilibrium
+
+The equilibrium at the window's point (`equilibrium_at`): the solve at its tightnesses, with
+its vacancy costs computed there, on its own grid and under its own estimation settings,
+verbosity aside.  The path holds each window's costs fixed from those.
+"""
+function solve_endpoint(pt, grid, label::String)
+    spec = pt.bundle.spec
+    sim  = SimParams(; (f => getfield(spec.sim, f) for f in fieldnames(SimParams))..., verbose = 1)
+    @printf("Solving %s stationary equilibrium (%s)...\n", label, pt.source);  flush(stdout)
+    sel = equilibrium_at(pt.θ, spec; Nx = grid.Nx, Np_U = grid.Np_U, Np_S = grid.Np_S, sim = sim)
+    sel.model === nothing && error("No certified equilibrium at the $label point.")
+    @printf("  θ_U = %.6f   θ_S = %.6f   k_U = %.6f   k_S = %.6f   Q = %.6f\n\n",
+            sel.model.unsk_cache.θ, sel.model.skl_cache.θ, sel.k.U, sel.k.S, sel.Q)
+    flush(stdout)
+    return sel
+end
+
+"""
+    stationary_record(model) -> TransitionResult
+
+The series the transition reports, at the steady state `model`: a one-step transition of
+the model to itself, whose dates both hold that steady state to the stationary solve's
+tolerance (the self-transition property).  It is the pre-switch value of every reported
+series, read with the path's own definitions; date 0 of a path is not, because it comes
+after the date-0 reallocation.
+"""
+stationary_record(model) =
+    solve_transition(deepcopy(model), deepcopy(model),
+                     TransitionParams(T_max = 0.5, N_steps = 1, maxit = 1, verbose = false);
+                     scenario = :steady_state)
+
+"""
+    solve_with_horizon(sel0, sel1, scenario; T_max, N_steps, tol, maxit, damp)
+
+Solve the transition at a horizon chosen by its accuracy test.  The first trial ends at the
+fine grid's span; each next one doubles the horizon (the fine grid is shared, so the dates
+of the test window coincide) and starts from the previous tightness path, interpolated onto
+its dates.  The test passes when no reported series moves by more than HORIZON_TOL on the
+first HORIZON_TEST_MONTHS: relative to its scale, or in log units for the series in logs.
+Returns the accepted solve and the record of every trial.
+"""
+function solve_with_horizon(sel0, sel1, scenario::Symbol; T_max, N_steps, tol, maxit, damp)
+    trials = NamedTuple[]
+    prev = nothing;  H = Float64(T_max)
+    while true
+        tp = TransitionParams(T_max = T_max, N_steps = N_steps, horizon = H, tol = tol,
+                              maxit = maxit, damp = damp, verbose = true)
+        m0 = deepcopy(sel0.model);  m1 = deepcopy(sel1.model)
+        @printf("── horizon %.0f months (%d dates) ──\n", H, length(time_grid(tp)));  flush(stdout)
+        guess = prev === nothing ? nothing :
+                (tgrid = prev.path.tgrid, θU = prev.path.θU, θS = prev.path.θS)
+        res, path = solve_transition_path(m0, m1, tp; scenario = scenario, guess = guess)
+        res.converged || @warn "transition at horizon $H did not converge (gap $(res.final_dist))"
+        cur = (tp = tp, path = path, res = res, model_z1 = m1)
+        change = NaN
+        if prev !== nothing
+            k = count(<=(HORIZON_TEST_MONTHS + 1e-9), prev.res.tgrid)
+            change = maximum(REPORTED_SERIES) do s
+                a = getfield(cur.res, s)[1:k];  b = getfield(prev.res, s)[1:k]
+                scale = s in LOG_SERIES ? 1.0 : max(maximum(abs, b), 1e-300)
+                maximum(abs, a .- b) / scale
+            end
+        end
+        push!(trials, (horizon = H, dates = length(path.tgrid), iterations = res.n_iter,
+                       converged = res.converged, gap = res.final_dist, change_first_months = change))
+        @printf("   horizon %.0f: %d iterations, gap %.2e, change on months 0-%.0f vs previous %.3e\n",
+                H, res.n_iter, res.final_dist, HORIZON_TEST_MONTHS, change);  flush(stdout)
+        (isfinite(change) && change < HORIZON_TOL) && return (accepted = cur, trials = trials)
+        2H > HORIZON_MAX && error("No horizon up to $(HORIZON_MAX) months passes the accuracy test " *
+                                  "(last change $change against $(HORIZON_TOL)).")
+        prev = cur;  H *= 2
+    end
+end
+
+"""
+    run_transition_simulation(scenario, w_suffix; point = :smm,
+                              T_max = 120.0, N_steps = 240, tol = 1e-4, maxit = 200,
+                              damp = 0.3) -> String
+
+Solve the backward–forward transition for one scenario and serialise the bundle to
+`transition_file(scenario, w_suffix, point)`.  Both windows of the scenario are read at
+`point` (`point_estimate`).  `T_max`, `N_steps` are the fine grid; the horizon is
+chosen by the test in `solve_with_horizon`.  Returns the path of the saved file.
+"""
+function run_transition_simulation(scenario::Symbol, w_suffix::String;
+                                   point::Symbol = :smm, T_max::Real = 120.0,
+                                   N_steps::Int = 240, tol::Real = 1e-4, maxit::Int = 200,
+                                   damp::Real = TransitionParams().damp)
+    wb, wc = _scenario_windows(scenario)
+    fb = estimate_path(wb, w_suffix; point = point)
+    fc = estimate_path(wc, w_suffix; point = point)
     println("\n" * "="^65)
-    println("  Transition simulation — $scenario   (W = $w_suffix)")
+    println("  Transition simulation — $scenario   (W = $w_suffix, point = $point)")
     println("="^65)
-    flush(stdout)
+    @printf("  Baseline bundle: %s\n  Crisis bundle:   %s\n\n", fb, fc);  flush(stdout)
 
-    # ── Windows ──────────────────────────────────────────
-    if scenario == :fc
-        base_window, crisis_window = :base_fc, :crisis_fc
-    elseif scenario == :covid
-        base_window, crisis_window = :base_covid, :crisis_covid
-    else
-        error("Unknown scenario: $scenario. Must be :fc or :covid.")
-    end
+    pb = point_estimate(wb, w_suffix, point);  pc = point_estimate(wc, w_suffix, point)
+    grid = check_pair(pb, pc, wb, wc)
+    @printf("  Grid (from both bundles' runs): Nx=%d  Np_U=%d  Np_S=%d\n\n", grid.Nx, grid.Np_U, grid.Np_S)
 
-    base_jls   = estimate_path(base_window, w_suffix)
-    crisis_jls = estimate_path(crisis_window, w_suffix)
-    @printf("  Baseline file:  %s\n", base_jls)
-    @printf("  Crisis file:    %s\n\n", crisis_jls)
-    flush(stdout)
+    sel0 = solve_endpoint(pb, grid, "baseline (z₀)")
+    sel1 = solve_endpoint(pc, grid, "crisis (z₁)")
+    eq_z0 = compute_equilibrium_objects(sel0.model)
+    eq_z1 = compute_equilibrium_objects(sel1.model)
 
-    # ── Load SMM bundles and reconstruct parameters ──────
-    println("Loading SMM results..."); flush(stdout)
-    base_bundle   = _ts_load_bundle_or_error(base_jls,   "Baseline SMM result")
-    crisis_bundle = _ts_load_bundle_or_error(crisis_jls, "Crisis SMM result")
-
-    cp_base,  up_base,  sp_base   = unpack_θ(base_bundle.result.theta_opt,   base_bundle.spec)
-    cp_crisis, up_crisis, sp_crisis = unpack_θ(crisis_bundle.result.theta_opt, crisis_bundle.spec)
-
-    # ── SimParams: inherit tolerances, mild verbosity ────
-    sim = base_bundle.sim
-    sim_solve = SimParams(
-        tol_inner      = sim.tol_inner,
-        tol_outer_U    = sim.tol_outer_U,
-        tol_outer_S    = sim.tol_outer_S,
-        tol_global     = sim.tol_global,
-        maxit_inner    = sim.maxit_inner,
-        maxit_outer    = sim.maxit_outer,
-        maxit_global   = sim.maxit_global,
-        global_B       = sim.global_B,
-        global_K       = sim.global_K,
-        conv_streak    = sim.conv_streak,
-        use_anderson   = sim.use_anderson,
-        anderson_m     = sim.anderson_m,
-        anderson_reg   = sim.anderson_reg,
-        damp_pstar_U   = sim.damp_pstar_U,
-        damp_pstar_S   = sim.damp_pstar_S,
-        verbose        = 1,
-        verbose_stride = sim.verbose_stride,
-    )
-
-    @printf("  Grid sizes: Nx=%d  Np_U=%d  Np_S=%d  (overriding spec.run.Nx=%d)\n",
-            Nx, Np_U, Np_S, base_bundle.spec.run.Nx)
-    @printf("  Baseline Q  = %.6e  (converged = %s)\n",
-            base_bundle.result.loss_opt, base_bundle.result.converged)
-    @printf("  Crisis Q    = %.6e  (converged = %s)\n\n",
-            crisis_bundle.result.loss_opt, crisis_bundle.result.converged)
-    flush(stdout)
-
-    # ── Stationary equilibria ────────────────────────────
-    println("Solving baseline (z₀) stationary equilibrium..."); flush(stdout)
-    model_z0, sr_z0 = solve_model(cp_base, up_base, sp_base, sim_solve;
-                                  Nx = Nx, Np_U = Np_U, Np_S = Np_S)
-    sr_z0.ok || @warn "Baseline model did not converge — transition may be unreliable."
-    eq_z0 = compute_equilibrium_objects(model_z0)
-    @printf("  θ_U = %.4f   θ_S = %.4f   ur_total = %.4f\n\n",
-            eq_z0.thetaU, eq_z0.thetaS, eq_z0.ur_total)
-    flush(stdout)
-
-    println("Solving crisis (z₁) stationary equilibrium..."); flush(stdout)
-    model_z1, sr_z1 = solve_model(cp_crisis, up_crisis, sp_crisis, sim_solve;
-                                  Nx = Nx, Np_U = Np_U, Np_S = Np_S)
-    sr_z1.ok || @warn "Crisis model did not converge — transition may be unreliable."
-    eq_z1 = compute_equilibrium_objects(model_z1)
-    @printf("  θ_U = %.4f   θ_S = %.4f   ur_total = %.4f\n\n",
-            eq_z1.thetaU, eq_z1.thetaS, eq_z1.ur_total)
-    flush(stdout)
-
-    # ── Transition ───────────────────────────────────────
-    tp = TransitionParams(T_max = T_max, N_steps = N_steps,
-                          tol = tol, maxit = maxit, damp = damp, verbose = true)
-    result = solve_transition(model_z0, model_z1, tp; scenario = scenario)
+    sol = solve_with_horizon(sel0, sel1, scenario; T_max = T_max, N_steps = N_steps,
+                             tol = tol, maxit = maxit, damp = damp)
+    path = sol.accepted.path;  result = sol.accepted.res;  tp = sol.accepted.tp
+    cw   = crisis_window_months(wc)
+    stats = path_statistics(path, sol.accepted.model_z1)
+    revs  = policy_reversals(path, sol.accepted.model_z1)
 
     println("="^65)
-    println("  Transition results summary — $scenario")
-    println("="^65)
-    @printf("  Converged: %s  (%d iterations, final dist = %.3e)\n",
-            result.converged, result.n_iter, result.final_dist)
-    @printf("  θ_U: %.4f → %.4f    θ_S: %.4f → %.4f\n",
-            result.θU[1], result.θU[end], result.θS[1], result.θS[end])
-    @printf("  ur_U: %.4f → %.4f    ur_S: %.4f → %.4f    ur_total: %.4f → %.4f\n",
-            result.ur_U[1], result.ur_U[end], result.ur_S[1], result.ur_S[end],
-            result.ur_total[1], result.ur_total[end])
-    @printf("  skilled_share: %.4f → %.4f    training_share: %.4f → %.4f\n",
-            result.skilled_share[1], result.skilled_share[end],
-            result.training_share[1], result.training_share[end])
+    @printf("  %s: converged %s (%d iterations, free-entry gap %.3e), horizon %.0f months\n",
+            scenario, result.converged, result.n_iter, result.final_dist, tp.horizon)
+    @printf("  θ_U: %.4f → %.4f    θ_S: %.4f → %.4f\n", result.θU[1], result.θU[end],
+            result.θS[1], result.θS[end])
+    @printf("  crossing choice: %d reversals in %d cells; largest skilled mass on them %.3e\n",
+            revs.d_reversals, revs.cells_d_reversing, revs.max_mS_on_reversing_cells)
     flush(stdout)
 
-    # ── Save (Serialization/.jls, matching the SMM bundles) ──
     mkpath(TRANS_OUT_DIR)
-    out_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(w_suffix).jls")
-    @printf("\nSaving transition result → %s\n", out_file); flush(stdout)
+    out_file = transition_file(scenario, w_suffix, point)
+    record(m) = (common = m.common, unsk_par = m.unsk_par, skl_par = m.skl_par)
     open(out_file, "w") do io
-        serialize(io, (result = result, eq_z0 = eq_z0, eq_z1 = eq_z1,
-                       tp = tp, scenario = scenario))
+        serialize(io, (
+            schema        = TRANSITION_SCHEMA,
+            version       = ROYSEARCH_VERSION,
+            provenance    = run_provenance(window = Symbol("transition_", scenario),
+                                           w_suffix = w_suffix, version = ROYSEARCH_VERSION),
+            scenario      = scenario,
+            windows       = (base = wb, crisis = wc),
+            point         = point,
+            bundles       = (base = fb, crisis = fc),
+            sources       = (base = pb.source, crisis = pc.source),
+            theta         = (base = pb.θ, crisis = pc.θ),
+            parameters    = (base = record(sel0.model), crisis = record(sel1.model)),
+            settings      = (grid = grid, T_max = tp.T_max, N_steps = tp.N_steps, dt = tp.dt,
+                             horizon = tp.horizon, tail_growth = TAIL_GROWTH,
+                             forward_substep = FORWARD_SUBSTEP, tol = tp.tol, maxit = tp.maxit,
+                             damp = tp.damp, sim_base = pb.bundle.spec.sim,
+                             sim_crisis = pc.bundle.spec.sim,
+                             horizon_test = (months = HORIZON_TEST_MONTHS, tol = HORIZON_TOL,
+                                             trials = sol.trials)),
+            crisis_window = (months = cw.months, ym_start = cw.ym_start, ym_end = cw.ym_end,
+                             label = cw.label, in_window = path.tgrid .< cw.months),
+            result        = result,
+            baseline      = stationary_record(sel0.model),
+            path          = (; (f => getfield(path, f) for f in fieldnames(TransitionPath))...),
+            statistics    = stats,
+            reversals     = revs,
+            model_z0      = sel0.model,
+            model_z1      = sel1.model,
+            eq_z0         = eq_z0,
+            eq_z1         = eq_z1,
+        ))
     end
-    @printf("Done.\n"); flush(stdout)
+    @printf("\nSaved → %s (%.1f MB)\n", out_file, filesize(out_file) / 2^20);  flush(stdout)
     return out_file
 end
 

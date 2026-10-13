@@ -36,7 +36,7 @@ const _CONSOLE_ROW_SPECS = [
     ("θ_S",            :θS),
     ("w̄_U",           :mean_wage_U),
     ("w̄_S",           :mean_wage_S),
-    ("f_U",            :f_U),
+    ("κ_U",            :κ_U),
     ("f_S",            :f_S),
     ("δ_U",            :sep_rate_U),
     ("δ_S",            :sep_rate_S),
@@ -138,7 +138,7 @@ const _LATEX_ROW_SPECS = [
     ("\\(\\theta_S\\)",      :θS),
     ("\\(\\bar{w}_U\\)",     :mean_wage_U),
     ("\\(\\bar{w}_S\\)",     :mean_wage_S),
-    ("\\(f_U\\)",             :f_U),
+    ("\\(\\kappa_U\\)",      :κ_U),
     ("\\(f_S\\)",             :f_S),
     ("\\(\\delta_U\\)",      :sep_rate_U),
     ("\\(\\delta_S\\)",      :sep_rate_S),
@@ -348,7 +348,7 @@ function write_policy_csv(table::PolicyTable, path::String)
             training_share = pr.training_share,
             theta_U      = pr.θU,
             theta_S      = pr.θS,
-            f_U          = pr.f_U,
+            kappa_U      = pr.κ_U,
             f_S          = pr.f_S,
             sep_rate_U   = pr.sep_rate_U,
             sep_rate_S   = pr.sep_rate_S,
@@ -525,13 +525,13 @@ end
 """
     fig_policy_rates(table) → Plot
 
-2×2 panel: Δ f_U, Δ f_S, Δ sep_U, Δ sep_S
+2×2 panel: Δ κ_U, Δ f_S, Δ sep_U, Δ sep_S
 """
 function fig_policy_rates(table::PolicyTable)
     _set_policy_theme!()
 
-    p1 = fig_policy_bar(table; variable = :f_U,
-         ylabel = L"\Delta f_U", title_str = "Unskilled JFR change")
+    p1 = fig_policy_bar(table; variable = :κ_U,
+         ylabel = L"\Delta \kappa_U", title_str = "Unskilled meeting rate change")
     p2 = fig_policy_bar(table; variable = :f_S,
          ylabel = L"\Delta f_S", title_str = "Skilled JFR change")
     p3 = fig_policy_bar(table; variable = :sep_rate_U,

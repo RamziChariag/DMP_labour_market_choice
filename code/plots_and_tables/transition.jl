@@ -6,11 +6,14 @@
 # included.  The supported entry point is transition_main.jl, which
 # loads modules once, then calls:
 #
-#   load_all_smm_bundles!()
-#   make_model_fit_tables()
-#   make_parameter_tables()
-#   make_xbar_table()
-#   make_model_fit_scatter(; window = …)
+#   load_all_smm_bundles!(; scenarios, point)
+#   make_model_fit_tables(; suffix = tag)
+#   make_parameter_tables(; suffix = tag)
+#   make_xbar_table(; suffix = tag)
+#   make_model_fit_scatter(; window = …, suffix = tag)
+#
+# with tag = transition_tag(W_SUFFIX, point): every table and plot ends in it, as the
+# transition files do.
 #
 # The file can also be run standalone (`julia plots_and_tables.jl`),
 # in which case it sets up its own paths and runs the full pipeline.
@@ -33,6 +36,7 @@ if !@isdefined(SMM_DIR);      const SMM_DIR      = joinpath(CODE_DIR, "smm");   
 if !@isdefined(PLOTS_DIR);    const PLOTS_DIR    = joinpath(OUTPUT_DIR, "plots");            end
 if !@isdefined(TABLES_DIR);   const TABLES_DIR   = joinpath(OUTPUT_DIR, "tables");           end
 if !@isdefined(SMM_OUT_DIR);  const SMM_OUT_DIR  = out_estimates();                          end
+if !@isdefined(TRANS_OUT_DIR); const TRANS_OUT_DIR = out_transition();                        end
 if !@isdefined(DERIVED_DIR);  const DERIVED_DIR  = joinpath(DATA_DIR, "derived");            end
 
 mkpath(PLOTS_DIR)
@@ -81,12 +85,18 @@ end
 
 if !@isdefined(MOMENT_NAMES)
     print("Loading SMM modules... "); flush(stdout)
+    include(joinpath(SMM_DIR, "version.jl"))
     include(joinpath(SMM_DIR, "settings.jl"))
     include(joinpath(SMM_DIR, "moments.jl"))
     include(joinpath(SMM_DIR, "smm_params.jl"))
+    include(joinpath(SMM_DIR, "bundle.jl"))
     include(joinpath(SMM_DIR, "smm.jl"))
     println("done."); flush(stdout)
 end
+
+# The transition file's types, name and reader.
+isdefined(Main, :TransitionResult) ||
+    include(joinpath(CODE_DIR, "transition", "transition_params.jl"))
 
 
 # ============================================================
@@ -132,37 +142,43 @@ WINDOW_LABELS = Dict(
 const smm_bundles = Dict{Symbol, Any}()
 
 """
-    load_all_smm_bundles!(; cond_target = W_COND_TARGET, smm_dir = SMM_OUT_DIR)
+    load_all_smm_bundles!(; scenarios, point, suffix = W_SUFFIX)
 
-Populate the package-level `smm_bundles` Dict (window symbol → bundle)
-by reading the .jls files in `smm_dir`.  Safe to call multiple times —
-the existing entries are cleared first.
+Populate the package-level `smm_bundles` Dict (window symbol → bundle) with exactly the
+bundles the transition of each scenario was solved at: the two files its transition file at
+`point` records (`read_transition`, which stops on a file that records another point), so
+the tables report the paths' own points. A window of a scenario without a transition file
+has no entry, and its columns are blank. Safe to call multiple times — the existing entries
+are cleared first.
 """
-function load_all_smm_bundles!(;
-    cond_target::Float64 = W_COND_TARGET,
-    smm_dir::String      = SMM_OUT_DIR,
-)
-    suffix = _w_suffix_pt(cond_target)
+function load_all_smm_bundles!(; scenarios, point::Symbol, suffix::String = W_SUFFIX)
     empty!(smm_bundles)
-    println("\nLoading SMM results..."); flush(stdout)
-    for w in ALL_WINDOWS
-        jls_path = estimate_path(w, suffix)
-        if isfile(jls_path)
-            data = _load_smm_bundle(jls_path; label=string(w))
-            if !isnothing(data)
-                smm_bundles[w] = data
-                @printf("  %-18s  Q = %.6e  converged = %s\n",
-                        w, data.result.loss_opt, data.result.converged)
-            else
-                @warn "Could not read SMM bundle for $w at $jls_path"
-            end
-        else
-            @warn "SMM result file not found: $jls_path"
+    println("\nLoading the estimates the transitions were solved at..."); flush(stdout)
+    for sc in scenarios
+        tr = read_transition(sc, suffix, point)
+        if tr === nothing
+            @printf("  %-14s no %s: its columns are blank\n", sc,
+                    basename(transition_file(sc, suffix, point)))
+            continue
+        end
+        # By name in this tree's estimates/, so a transition file stays readable when the
+        # repository moves (output/transition/ is tracked).
+        for (w, file) in zip(tr.windows, joinpath.(SMM_OUT_DIR, basename.(values(tr.bundles))))
+            b = read_bundle(file)
+            (b === nothing || b.result === nothing || b.spec === nothing) &&
+                error("$(basename(file)), which the $sc transition was solved at, is unreadable.")
+            require_current_major(b, file)
+            smm_bundles[w] = b
+            @printf("  %-14s %s  %s\n", w, basename(file), bundle_summary(b))
         end
     end
     flush(stdout)
     return smm_bundles
 end
+
+# The simulation settings a bundle's point is solved with. A checkpoint bundle carries none,
+# so its own spec's are used: the point is solved in memory, and nothing is written back.
+_bundle_sim(bundle) = bundle.sim === nothing ? bundle.spec.sim : bundle.sim
 
 
 # ============================================================
@@ -172,23 +188,12 @@ end
 """
     _get_model_moments(bundle) → NamedTuple
 
-Re-solve the model at the optimum and compute model moments.
+Model moments at the optimum, read at its equilibrium (`equilibrium_at`).
 """
 function _get_model_moments(bundle)
-    res  = bundle.result
-    spec = bundle.spec
-    sim  = bundle.sim
-
-    cp, up, sp = unpack_θ(res.theta_opt, spec)
-    model, sol = solve_model(cp, up, sp, sim;
-                             Nx=spec.run.Nx, Np_U=spec.run.Np_U, Np_S=spec.run.Np_S)
-
-    if !sol.ok
-        @warn "Model did not fully converge at stored optimum — moments may be unreliable"
-    end
-
-    obj = compute_equilibrium_objects(model)
-    return model_moments(obj)
+    sel = equilibrium_at(bundle.result.theta_opt, bundle.spec; sim = _bundle_sim(bundle))
+    sel.model === nothing && error("No equilibrium at the stored optimum.")
+    return sel.moments
 end
 
 
@@ -407,7 +412,7 @@ Returns:
 function compute_smm_standard_errors(bundle; derived_dir::String, cond_target::Float64=W_COND_TARGET, window::Symbol=:base_fc)
     res  = bundle.result
     spec = bundle.spec
-    sim  = bundle.sim
+    sim  = _bundle_sim(bundle)
 
     θ_opt = res.theta_opt
     n_free = length(θ_opt)
@@ -418,12 +423,10 @@ function compute_smm_standard_errors(bundle; derived_dir::String, cond_target::F
     K_active = length(active_moments)
 
     # ── Helper: compute model moment vector at a given θ ────────────────
+    # θ carries the tightnesses, so each step is one equilibrium and there is no branch to hold.
     function _model_mom_vec(θ)
-        cp, up, sp = unpack_θ(θ, spec)
-        model_sol, sol = solve_model(cp, up, sp, sim;
-                                     Nx=spec.run.Nx, Np_U=spec.run.Np_U, Np_S=spec.run.Np_S)
-        obj = compute_equilibrium_objects(model_sol)
-        mm  = model_moments(obj)
+        mm = equilibrium_at(θ, spec; sim = sim).moments
+        mm === nothing && return fill(NaN, K_active)
         return [hasproperty(mm, nm) ? getproperty(mm, nm) : NaN for nm in active_moments]
     end
 
@@ -724,211 +727,143 @@ end
 # 2. PARAMETER ESTIMATES TABLES A & B (LaTeX)
 # ============================================================
 
-# Parameter classification (these lists drive only the post-processing
-# parameter tables; they do not configure the SMM).
-# Externally calibrated: r, ν, φ, and σ_wU, σ_wS (calibrated from λ_w).
-# Deep structural: a_ℓ, b_ℓ, c, bU, bT, bS, μ_U, η_U, μ_S, η_S, σ_S.
-# Regime-specific: PU, PS, α_U, a_Γ, b_Γ, k_U, β_U, ξ_U, λ_U, k_S, β_S, ξ_S, λ_S.
-# TODO(ramzi): regenerate these display lists against the new spec — β_U/β_S
-# are now free regime-specific and σ_wU/σ_wS are calibrated (moved out of the
-# free regime set). Aligned with the smm_params.jl classification and the
-# sensitivity-notebook GIVEN_PARAMS box.
+# Symbol and description of each parameter, keyed as in default_free_params.
+# Which table a parameter lands in is read off each bundle's spec, so the tables
+# follow FIX_PARAMS without a list of their own.
+const PARAM_DISPLAY = Dict{Tuple{Symbol,Symbol},Tuple{String,String}}(
+    (:common, :a_ℓ) => (raw"$a_\ell$",       "Ability marginal shape"),
+    (:common, :b_ℓ) => (raw"$b_\ell$",       "Ability marginal shape"),
+    (:common, :ρ_x) => (raw"$\rho_x$",       "Ability correlation"),
+    (:common, :c)   => (raw"$c$",            "Training cost"),
+    (:common, :A)   => (raw"$A$",            "Aggregate scale"),
+    (:unsk,   :bU)  => (raw"$b_U$",          "Unskilled unemployment income"),
+    (:unsk,   :bT)  => (raw"$b_T$",          "Training flow"),
+    (:unsk,   :PU)  => (raw"$P_U$",          "Unskilled productivity"),
+    (:unsk,   :α_U) => (raw"$\alpha_U$",     "Unskilled redraw shape"),
+    (:unsk,   :μ)   => (raw"$\mu_U$",        "Unskilled matching efficiency"),
+    (:unsk,   :η)   => (raw"$\eta_U$",       "Unskilled matching elasticity"),
+    (:unsk,   :β)   => (raw"$\beta_U$",      "Unskilled bargaining share"),
+    (:unsk,   :λ)   => (raw"$\lambda_U$",    "Unskilled shock rate"),
+    (:unsk,   :tight) => (raw"$\theta_U$",   "Unskilled tightness"),
+    (:unsk,   :k)   => (raw"$k_U$",          "Unskilled vacancy cost"),
+    (:unsk,   :ξ)   => (raw"$\xi_U$",        "Unskilled exogenous separation"),
+    (:unsk,   :σ_w) => (raw"$\sigma_{w,U}$", "Unskilled wage measurement error"),
+    (:skl,    :bS)  => (raw"$b_S$",          "Skilled unemployment income"),
+    (:skl,    :PS)  => (raw"$P_S$",          "Skilled productivity"),
+    (:skl,    :a_Γ) => (raw"$a_\Gamma$",     "Skilled offer shape"),
+    (:skl,    :b_Γ) => (raw"$b_\Gamma$",     "Skilled offer shape"),
+    (:skl,    :δ)   => (raw"$\delta_S$",     "Skilled redraw support"),
+    (:skl,    :μ)   => (raw"$\mu_S$",        "Skilled matching efficiency"),
+    (:skl,    :η)   => (raw"$\eta_S$",       "Skilled matching elasticity"),
+    (:skl,    :β)   => (raw"$\beta_S$",      "Skilled bargaining share"),
+    (:skl,    :λ)   => (raw"$\lambda_S$",    "Skilled shock rate"),
+    (:skl,    :tight) => (raw"$\theta_S$",   "Skilled tightness"),
+    (:skl,    :k)   => (raw"$k_S$",          "Skilled vacancy cost"),
+    (:skl,    :σ)   => (raw"$\sigma_S$",     "On-the-job search cost"),
+    (:skl,    :ξ)   => (raw"$\xi_S$",        "Skilled exogenous separation"),
+    (:skl,    :σ_w) => (raw"$\sigma_{w,S}$", "Skilled wage measurement error"),
+)
 
-EXTERNALLY_CALIBRATED = [
-    (:r,   "r",            raw"$r$",              "Discount rate"),
-    (:ν,   "nu",           raw"$\nu$",            "Demographic exit rate"),
-    (:φ,   "phi",          raw"$\varphi$",        "Training completion rate"),
-]
-
-DEEP_STRUCTURAL = [
-    (:a_ℓ,    :common, raw"$a_\ell$",       "Worker type shape"),
-    (:b_ℓ,    :common, raw"$b_\ell$",       "Worker type shape"),
-    (:c,      :common, raw"$c$",            "Training cost coeff."),
-    (:bU,     :regime, raw"$b_U$",          "Unskilled UI flow"),
-    (:bT,     :regime, raw"$b_T$",          "Training flow"),
-    (:bS,     :regime, raw"$b_S$",          "Skilled UI flow"),
-    (:μ,      :unsk,   raw"$\mu_U$",        "Unskilled matching eff."),
-    (:η,      :unsk,   raw"$\eta_U$",       "Unskilled matching elas."),
-    (:β,      :unsk,   raw"$\beta_U$",      "Unskilled bargaining"),
-    (:μ,      :skl,    raw"$\mu_S$",        "Skilled matching eff."),
-    (:η,      :skl,    raw"$\eta_S$",       "Skilled matching elas."),
-    (:β,      :skl,    raw"$\beta_S$",      "Skilled bargaining"),
-    (:σ,      :skl,    raw"$\sigma_S$",     "OJS flow cost"),
-]
-
-REGIME_SPECIFIC = [
-    (:PU,   :regime, raw"$P_U$",            "Unskilled productivity"),
-    (:PS,   :regime, raw"$P_S$",            "Skilled productivity"),
-    (:α_U,  :regime, raw"$\alpha_U$",       "Unskilled damage shape"),
-    (:a_Γ,  :regime, raw"$a_\Gamma$",       "Skilled offer shape"),
-    (:b_Γ,  :regime, raw"$b_\Gamma$",       "Skilled offer shape"),
-    (:k,    :unsk,   raw"$k_U$",            "Unskilled vacancy cost"),
-    (:ξ,    :unsk,   raw"$\xi_U$",          "Unskilled exog. sep. rate"),
-    (:λ,    :unsk,   raw"$\lambda_U$",      "Unskilled damage rate"),
-    (:σ_w,  :unsk,   raw"$\sigma_{w,U}$",   "Unskilled wage meas. error"),
-    (:k,    :skl,    raw"$k_S$",            "Skilled vacancy cost"),
-    (:ξ,    :skl,    raw"$\xi_S$",          "Skilled exog. sep. rate"),
-    (:λ,    :skl,    raw"$\lambda_S$",      "Skilled quality shock"),
-    (:σ_w,  :skl,    raw"$\sigma_{w,S}$",   "Skilled wage meas. error"),
-]
+const _PARAM_BLOCK_TITLES = ((:common, "Common"), (:unsk, "Unskilled market"), (:skl, "Skilled market"))
 
 
 """
     _extract_param(bundle, field, block) → Float64
 
-Extract a parameter value from an SMM bundle's optimum.
+Read one parameter, estimated or pinned, off an SMM bundle's optimum.  The vacancy costs
+are the ones the bundle records at its optimum (`vacancy_costs`).
 """
 function _extract_param(bundle, field::Symbol, block::Symbol)
-    res  = bundle.result
-    spec = bundle.spec
-    cp, up, sp = unpack_θ(res.theta_opt, spec)
-    if     block == :common; return Float64(getfield(cp, field))
-    elseif block == :unsk;   return Float64(getfield(up, field))
-    elseif block == :skl;    return Float64(getfield(sp, field))
-    elseif block == :regime  # absorbed into up/sp; these names are block-unique
-        return hasfield(typeof(up), field) ? Float64(getfield(up, field)) :
-                                             Float64(getfield(sp, field))
-    else error("Unknown block: $block")
-    end
+    field === :k && return block === :unsk ? bundle.vacancy_costs.k.U : bundle.vacancy_costs.k.S
+    cp, up, sp, tight = unpack_θ(bundle.result.theta_opt, bundle.spec)
+    return _baseline_param_value(block, field, cp, up, sp, tight)
 end
 
 
 """
     make_parameter_tables(; suffix)
 
-Generate two LaTeX tables with parameter estimates.
-
-Table A (`parameter_estimates_A{suffix}.tex`):
-    Externally calibrated + Deep structural blocks.
-
-Table B (`parameter_estimates_B{suffix}.tex`):
-    Regime-specific block.
-
-Each table has columns:
+Generate two LaTeX tables with columns
     Parameter | Description | Baseline FC | Crisis FC | Δ FC | Baseline COVID | Crisis COVID | Δ COVID
 
-Deep structural parameters show baseline value in both Baseline and Crisis
-columns (crisis = baseline by construction), with --- for Δ.
-Regime-specific parameters show actual estimated values with computed Δ.
+Table A (`parameter_estimates_A{suffix}.tex`): the external calibration and every
+parameter no loaded window estimates, at its pinned value.
+Table B (`parameter_estimates_B{suffix}.tex`): every parameter at least one loaded
+window estimates, grouped by solver block.
+
+Δ is crisis minus baseline, and prints as --- where the two are equal, as for the
+ability distribution, which a crisis window holds at the baseline estimate.
 """
 function make_parameter_tables(; suffix::String=W_SUFFIX)
     println("\n── Generating parameter estimates tables (A & B) ──"); flush(stdout)
 
-    # Load externally calibrated values
     calib = load_calibrated_params(; derived_dir=DERIVED_DIR)
 
-    fmt(x)  = isfinite(x) ? @sprintf("%.5f", x) : "--"
-    fmtd(x) = isfinite(x) ? @sprintf("%+.5f", x) : "--"
+    # The vacancy costs are estimated through the tightnesses, and listed with every other
+    # estimated parameter of their block.
+    params  = vcat(default_free_params(),
+                   [ParamSpec(blk, :k, NaN, NaN, label) for (blk, label) in VACANCY_COSTS])
+    unlisted = [(ps.block, ps.name) for ps in params if !haskey(PARAM_DISPLAY, (ps.block, ps.name))]
+    isempty(unlisted) || error("PARAM_DISPLAY has no entry for $(unlisted).")
 
-    # ── TABLE A: Externally calibrated + Deep structural ─────────────────
+    fmt(x)     = isfinite(x) ? @sprintf("%.5f", x) : "--"
+    fmtΔ(b, c) = !(isfinite(b) && isfinite(c)) ? "--" : b == c ? "---" : @sprintf("%+.5f", c - b)
 
-    lines_A = String[]
-    push!(lines_A, "\\begin{table}[htbp]")
-    push!(lines_A, "  \\centering")
-    push!(lines_A, "  \\caption{Parameter Estimates (A): Calibrated and Deep Structural}")
-    push!(lines_A, "  \\label{tab:param_estimates_a}")
-    push!(lines_A, "  \\small")
-    push!(lines_A, "  \\begin{tabular}{llcccccc}")
-    push!(lines_A, "    \\toprule")
-    push!(lines_A, "    & & \\multicolumn{3}{c}{Financial Crisis} & \\multicolumn{3}{c}{COVID} \\\\")
-    push!(lines_A, "    \\cmidrule(lr){3-5} \\cmidrule(lr){6-8}")
-    push!(lines_A, "    Parameter & Description & Baseline & Crisis & \$\\Delta\$ & Baseline & Crisis & \$\\Delta\$ \\\\")
-    push!(lines_A, "    \\midrule")
+    estimated(ps) = ps.name === :k ||
+                    any(w -> haskey(smm_bundles, w) &&
+                             any(p -> (p.block, p.name) == (ps.block, ps.name), smm_bundles[w].spec.free),
+                        ALL_WINDOWS)
+    value(w, ps)  = haskey(smm_bundles, w) ? _extract_param(smm_bundles[w], ps.name, ps.block) : NaN
 
-    # Block 1: Externally calibrated
+    function row(latex, desc, v)
+        return "    \\quad $latex & $desc & $(fmt(v[1])) & $(fmt(v[2])) & $(fmtΔ(v[1], v[2])) & " *
+               "$(fmt(v[3])) & $(fmt(v[4])) & $(fmtΔ(v[3], v[4])) \\\\"
+    end
+    function head(caption, label)
+        return ["\\begin{table}[htbp]", "  \\centering", "  \\caption{$caption}", "  \\label{$label}",
+                "  \\small", "  \\begin{tabular}{llcccccc}", "    \\toprule",
+                "    & & \\multicolumn{3}{c}{Financial Crisis} & \\multicolumn{3}{c}{COVID} \\\\",
+                "    \\cmidrule(lr){3-5} \\cmidrule(lr){6-8}",
+                "    Parameter & Description & Baseline & Crisis & \$\\Delta\$ & Baseline & Crisis & \$\\Delta\$ \\\\",
+                "    \\midrule"]
+    end
+    tail = ["    \\bottomrule", "  \\end{tabular}", "\\end{table}"]
+    function blocks!(lines, keep)
+        for (blk, title) in _PARAM_BLOCK_TITLES
+            sel = [ps for ps in params if ps.block === blk && keep(ps)]
+            isempty(sel) && continue
+            push!(lines, "    \\multicolumn{8}{l}{\\textit{$title}} \\\\[2pt]")
+            for ps in sel
+                latex, desc = PARAM_DISPLAY[(ps.block, ps.name)]
+                push!(lines, row(latex, desc, [value(w, ps) for w in ALL_WINDOWS]))
+            end
+            push!(lines, "    [4pt]")
+        end
+        return lines
+    end
+    function save(lines, name)
+        path = joinpath(TABLES_DIR, "$(name)$(suffix).tex")
+        open(io -> write(io, join(lines, "\n")), path, "w")
+        @printf("  Saved: %s\n", path); flush(stdout)
+        return path
+    end
+
+    # ── TABLE A: external calibration and pinned parameters ──────────────
+    lines_A = head("Parameter Values (A): Calibrated and Fixed", "tab:param_estimates_a")
     push!(lines_A, "    \\multicolumn{8}{l}{\\textit{Externally calibrated}} \\\\[2pt]")
-    for (field, key, latex, desc) in EXTERNALLY_CALIBRATED
-        val = if field == :r;   calib.r
-              elseif field == :ν; calib.nu
-              else               calib.phi
-              end
-        fv = @sprintf("%.5f", val)
-        push!(lines_A, "    \\quad $latex & $desc & $fv & $fv & --- & $fv & $fv & --- \\\\")
+    for (val, latex, desc) in ((calib.r,   raw"$r$",       "Discount rate"),
+                               (calib.nu,  raw"$\nu$",     "Demographic exit rate"),
+                               (calib.phi, raw"$\varphi$", "Training completion rate"))
+        push!(lines_A, row(latex, desc, fill(val, 4)))
     end
     push!(lines_A, "    [4pt]")
-    push!(lines_A, "    \\hline")
+    blocks!(lines_A, ps -> !estimated(ps))
+    outpath_A = save(append!(lines_A, tail), "parameter_estimates_A")
 
-    # Block 2: Deep structural
-    push!(lines_A, "    \\multicolumn{8}{l}{\\textit{Deep structural}} \\\\[2pt]")
-    for (field, block, latex, desc) in DEEP_STRUCTURAL
-        vals = Dict{Symbol, Float64}()
-        for w in ALL_WINDOWS
-            if haskey(smm_bundles, w)
-                vals[w] = _extract_param(smm_bundles[w], field, block)
-            end
-        end
-
-        # Deep structural: estimated in baseline, identical in crisis by construction
-        base_fc_val      = get(vals, :base_fc,    NaN)
-        base_covid_val   = get(vals, :base_covid,  NaN)
-        # Crisis columns show the same value as baseline (deep structural params don't
-        # shift with the cycle); delta is --- because there is no cross-regime variation
-        crisis_fc_val    = get(vals, :crisis_fc,   base_fc_val)
-        crisis_covid_val = get(vals, :crisis_covid, base_covid_val)
-
-        push!(lines_A,
-              "    \\quad $latex & $desc & $(fmt(base_fc_val)) & $(fmt(crisis_fc_val)) & --- & $(fmt(base_covid_val)) & $(fmt(crisis_covid_val)) & --- \\\\")
-    end
-    push!(lines_A, "    [4pt]")
-
-    push!(lines_A, "    \\bottomrule")
-    push!(lines_A, "  \\end{tabular}")
-    push!(lines_A, "\\end{table}")
-
-    outpath_A = joinpath(TABLES_DIR, "parameter_estimates_A$(suffix).tex")
-    open(outpath_A, "w") do io
-        write(io, join(lines_A, "\n"))
-    end
-    @printf("  Saved: %s\n", outpath_A); flush(stdout)
-
-    # ── TABLE B: Regime-specific ──────────────────────────────────────────
-
-    lines_B = String[]
-    push!(lines_B, "\\begin{table}[htbp]")
-    push!(lines_B, "  \\centering")
-    push!(lines_B, "  \\caption{Parameter Estimates (B): Regime-Specific}")
-    push!(lines_B, "  \\label{tab:param_estimates_b}")
-    push!(lines_B, "  \\small")
-    push!(lines_B, "  \\begin{tabular}{llcccccc}")
-    push!(lines_B, "    \\toprule")
-    push!(lines_B, "    & & \\multicolumn{3}{c}{Financial Crisis} & \\multicolumn{3}{c}{COVID} \\\\")
-    push!(lines_B, "    \\cmidrule(lr){3-5} \\cmidrule(lr){6-8}")
-    push!(lines_B, "    Parameter & Description & Baseline & Crisis & \$\\Delta\$ & Baseline & Crisis & \$\\Delta\$ \\\\")
-    push!(lines_B, "    \\midrule")
-
-    push!(lines_B, "    \\multicolumn{8}{l}{\\textit{Regime-specific}} \\\\[2pt]")
-    for (field, block, latex, desc) in REGIME_SPECIFIC
-        vals = Dict{Symbol, Float64}()
-        for w in ALL_WINDOWS
-            if haskey(smm_bundles, w)
-                vals[w] = _extract_param(smm_bundles[w], field, block)
-            end
-        end
-
-        base_fc_val      = get(vals, :base_fc,    NaN)
-        crisis_fc_val    = get(vals, :crisis_fc,   NaN)
-        base_covid_val   = get(vals, :base_covid,  NaN)
-        crisis_covid_val = get(vals, :crisis_covid, NaN)
-
-        delta_fc    = (isfinite(crisis_fc_val) && isfinite(base_fc_val)) ?
-                      crisis_fc_val - base_fc_val : NaN
-        delta_covid = (isfinite(crisis_covid_val) && isfinite(base_covid_val)) ?
-                      crisis_covid_val - base_covid_val : NaN
-
-        push!(lines_B,
-              "    \\quad $latex & $desc & $(fmt(base_fc_val)) & $(fmt(crisis_fc_val)) & $(fmtd(delta_fc)) & $(fmt(base_covid_val)) & $(fmt(crisis_covid_val)) & $(fmtd(delta_covid)) \\\\")
-    end
-    push!(lines_B, "    [4pt]")
-
-    push!(lines_B, "    \\bottomrule")
-    push!(lines_B, "  \\end{tabular}")
-    push!(lines_B, "\\end{table}")
-
-    outpath_B = joinpath(TABLES_DIR, "parameter_estimates_B$(suffix).tex")
-    open(outpath_B, "w") do io
-        write(io, join(lines_B, "\n"))
-    end
-    @printf("  Saved: %s\n", outpath_B); flush(stdout)
+    # ── TABLE B: estimated parameters ─────────────────────────────────────
+    lines_B = head("Parameter Estimates (B)", "tab:param_estimates_b")
+    blocks!(lines_B, estimated)
+    outpath_B = save(append!(lines_B, tail), "parameter_estimates_B")
 
     return outpath_A, outpath_B
 end
@@ -954,18 +889,17 @@ Returns NaN if no worker trains (τT ≡ 0) or everyone trains (τT ≡ 1).
 function _get_x_bar(bundle; Nx_fine::Int = 400)
     res  = bundle.result
     spec = bundle.spec
-    sim  = bundle.sim
+    sim  = _bundle_sim(bundle)
 
-    cp, up, sp = unpack_θ(res.theta_opt, spec)
-    # Solve on a finer grid so the interpolated cutoff is precise
-    model, sol = solve_model(cp, up, sp, sim;
-                             Nx=Nx_fine, Np_U=spec.run.Np_U, Np_S=spec.run.Np_S)
-
-    if !sol.ok
-        @warn "Model did not fully converge at stored optimum — x̄ may be unreliable"
+    # Solved on a finer grid so the interpolated cutoff is precise, at the optimum's
+    # equilibrium (equilibrium_at).
+    sel = equilibrium_at(res.theta_opt, spec; Nx = Nx_fine, sim = sim)
+    if sel.model === nothing
+        @warn "No equilibrium at the stored optimum on the Nx=$Nx_fine grid — x̄ unavailable"
+        return NaN
     end
 
-    obj = compute_equilibrium_objects(model)
+    obj = compute_equilibrium_objects(sel.model)
     xg  = obj.xg
 
     # gap(x) = (−c(x) + T(x)) − U_search(x);  training chosen where gap ≥ 0
@@ -1149,12 +1083,16 @@ if abspath(PROGRAM_FILE) == @__FILE__
     println("="^60)
     flush(stdout)
 
-    load_all_smm_bundles!()
-    make_model_fit_tables()
-    make_parameter_tables()
-    make_xbar_table()
-    for w in [:base_fc, :base_covid]
-        make_model_fit_scatter(; window=w)
+    for point in (:smm, :mcmc)
+        load_all_smm_bundles!(; scenarios = [:fc, :covid], point = point)
+        isempty(smm_bundles) && continue
+        tag = transition_tag(W_SUFFIX, point)
+        make_model_fit_tables(; suffix = tag)
+        make_parameter_tables(; suffix = tag)
+        make_xbar_table(; suffix = tag)
+        for w in [:base_fc, :base_covid]
+            make_model_fit_scatter(; window = w, suffix = tag)
+        end
     end
 
     println("\n" * "="^60)

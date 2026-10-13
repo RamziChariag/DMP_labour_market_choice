@@ -253,10 +253,11 @@ rather than filled: a single estimate has nothing to be stable against.
 
 A CENTRAL DIFFERENCE NEEDS NO CENTRE. Only `θ̂ ± h` is evaluated, so an infeasible `θ̂` does not
 stop the measurement and is not treated as an error — `diag.centre_ok` records it and the caller
-reports it. This is not a corner case here: `base_fc`'s stored `θ̂` returns `Inf` above one thread
-because `converged_S` depends on the reduction order in `skilled.jl`, and the regression route
-proceeded silently on that window because its cloud points sit off `θ̂`. A derivative centred on a
-point the solver rejects is worth knowing about, not worth crashing over.
+reports it. A derivative centred on a point the solver rejects is worth knowing about, not worth
+crashing over. Through v40.0.0 `centre_ok` was false on `base_fc` for a reason outside the model:
+this routine threads over coordinates, and the solver's `@threads :static` loops could not nest,
+so every evaluation here — centre included — came back `Inf`. That was a defect in the solver's
+parallelism, not a property of `θ̂`, and it is fixed; the flag now means what it says.
 
 `mom(θ_unc)::Vector{Float64}` returns the K active moments at that point, or a NaN vector when
 the solve is infeasible — its LENGTH must be K either way, since that is how K is learned. Note
@@ -264,6 +265,11 @@ that `smm_objective` writes its `moments_out` buffer only after its guards, so a
 on the returned objective and not on the buffer's contents: an `undef` buffer left unwritten
 holds finite garbage. It is called concurrently across coordinates, so it must be thread-safe —
 allocate a buffer per call rather than writing into a shared one.
+
+`n_carried` trailing entries of `mom`'s vector are CARRIED outputs rather than moments: they
+are differentiated at the steps, rungs and extrapolate the moments select, and take no part in
+selecting them, so their derivatives cost no solve of their own. `σ̂` covers the moments only.
+MCMC_main carries the vacancy costs this way, for their delta-method standard errors.
 """
 function jacobian_adaptive_fd(θ̂_unc::Vector{Float64}, free::Vector{ParamSpec},
                               σ̂::Vector{Float64}, mom::Function;
@@ -272,14 +278,17 @@ function jacobian_adaptive_fd(θ̂_unc::Vector{Float64}, free::Vector{ParamSpec}
                               seed_frac::Float64 = 0.01,
                               h_lo_frac::Float64 = 1e-7,
                               h_hi_frac::Float64 = 0.25,
-                              max_retune::Int   = 4)
+                              max_retune::Int   = 4,
+                              n_carried::Int    = 0)
     d = length(free)
     @assert length(θ̂_unc) == d "seed length ≠ number of free parameters"
     @assert n_rungs >= 1 "need at least one halving to extrapolate"
     θ̂ = [_to_constrained(θ̂_unc[k], free[k].lb, free[k].ub) for k in 1:d]
     m0 = mom(θ̂_unc)
     K  = length(m0)
-    K > 0 || error("mom(θ̂) returned an empty vector: the active moment count cannot be learned")
+    Km = K - n_carried          # the moments; rows Km+1:K are carried
+    Km > 0 || error("mom(θ̂) returned no moments: the active moment count cannot be learned")
+    mo = 1:Km
     centre_ok = all(isfinite, m0)
 
     G    = fill(NaN, K, d)      # ∂g/∂θ, natural units
@@ -342,7 +351,7 @@ function jacobian_adaptive_fd(θ̂_unc::Vector{Float64}, free::Vector{ParamSpec}
         # step that works. Treating the two alike is what pinned every base_fc coordinate at
         # the upper rail with a displacement of 26 against a target of 1.
         for _ in 1:max_retune
-            sd_now = norm(Δ ./ σ̂)
+            sd_now = norm(Δ[mo] ./ σ̂)
             (target_sd / 3 <= sd_now <= target_sd * 3) && break
             h_new = clamp(h * target_sd / max(sd_now, 1e-300), h_lo, h_max)
             h_new == h && break                     # the bracket binds; take what it allows
@@ -355,7 +364,7 @@ function jacobian_adaptive_fd(θ̂_unc::Vector{Float64}, free::Vector{ParamSpec}
                 break                               # inward hole: this step is the best there is
             end
         end
-        disp[j]  = norm(Δ ./ σ̂)
+        disp[j]  = norm(Δ[mo] ./ σ̂)
         tuned[j] = target_sd / 3 <= disp[j] <= target_sd * 3
 
         # Ladder, then one Richardson extrapolate per adjacent pair OF THE SAME ORDER:
@@ -388,10 +397,10 @@ function jacobian_adaptive_fd(θ̂_unc::Vector{Float64}, free::Vector{ParamSpec}
         # scale-free and does not blow up on a moment this coordinate happens not to move.
         pick = 1
         if length(R) > 1
-            gaps = [norm((R[i][2] .- R[i + 1][2]) ./ σ̂) for i in 1:(length(R) - 1)]
+            gaps = [norm((R[i][2][mo] .- R[i + 1][2][mo]) ./ σ̂) for i in 1:(length(R) - 1)]
             pick = argmin(gaps)
-            ref  = max(norm(R[pick][2] ./ σ̂) / sqrt(K), 1e-300)
-            @views STAB[:, j] .= abs.(R[pick][2] .- R[pick + 1][2]) ./ σ̂ ./ ref
+            ref  = max(norm(R[pick][2][mo] ./ σ̂) / sqrt(Km), 1e-300)
+            @views STAB[mo, j] .= abs.(R[pick][2][mo] .- R[pick + 1][2][mo]) ./ σ̂ ./ ref
         end
         @views G[:, j] .= R[pick][2]
         hsel[j] = h / 2.0^(R[pick][1] - 1)
@@ -407,7 +416,7 @@ function jacobian_adaptive_fd(θ̂_unc::Vector{Float64}, free::Vector{ParamSpec}
 end
 
 """
-    se_bound_diagonal(G, W, σ̂) -> (se_bound, se_curv)
+    se_bound_diagonal(G, W, σ̂, C = I) -> (se_bound, se_curv)
 
 Standard errors from CH Theorem 4 with the ONLY input about Ω being its
 diagonal.  With `a_j = W G J⁻¹ e_j` and `J = G′WG`, the sandwich variance is
@@ -420,17 +429,22 @@ from different surveys raise no issue here.  The bound therefore holds for the
 true Ω whatever it is, and a reported interval built on it cannot be too
 narrow.  Returned alongside `se_curv = sqrt(diag(J⁻¹))`, the curvature-only
 standard error (exact under efficient weighting; CH Theorem 3).
+
+Each column `c` of `C` is a linear combination of the parameters, and the two errors are
+those of `c′θ̂`: `a = W G J⁻¹ c` and `sqrt(c′J⁻¹c)`.  With `C = I` they are the parameters'
+own; with `C` the gradient of a function of the parameters they are its delta-method errors.
 """
-function se_bound_diagonal(G::Matrix{Float64}, W::Matrix{Float64}, σ̂::Vector{Float64})
+function se_bound_diagonal(G::Matrix{Float64}, W::Matrix{Float64}, σ̂::Vector{Float64},
+                           C::AbstractMatrix{Float64} = Matrix{Float64}(I, size(G, 2), size(G, 2)))
     J  = G' * W * G
     Ji = pinv(J)
-    A  = W * G * Ji                                  # column j = a_j
-    d  = size(G, 2)
-    se_bound = Vector{Float64}(undef, d)
-    @inbounds for j in 1:d
+    A  = W * G * Ji * C                              # column j = a_j
+    m  = size(C, 2)
+    se_bound = Vector{Float64}(undef, m)
+    @inbounds for j in 1:m
         se_bound[j] = sum(abs.(@view A[:, j]) .* σ̂)
     end
-    return (se_bound, sqrt.(abs.(diag(Ji))))
+    return (se_bound, sqrt.(abs.(diag(C' * Ji * C))))
 end
 
 """
@@ -896,6 +910,12 @@ a Markov chain. Each column perturbs every coordinate by a Gaussian step scaled 
 CONSTRAINED units across parameters whose boxes differ by orders of magnitude — an
 isotropic step in `t` would move `k_U` by 31% of its value and `δ_S` by 0.08%.
 
+A coordinate within `rel_step` of a box width from a bound has no two-sided
+neighbourhood, and the t-scale formula breaks there: `σ(1−σ)` → 0, so the step in `t`
+grows without limit and every draw lands at one end of the box. Such a coordinate is
+stepped one-sided instead, moving inward by `|z|·rel_step` box widths in θ and mapped
+back to `t`. Interior coordinates are drawn exactly as before.
+
 The first column is the seed itself, which anchors the regression at the point
 whose curvature is wanted.
 
@@ -903,8 +923,8 @@ Randomised rather than a coordinate-wise stencil: with K moments and d parameter
 the regression needs only d+1 points, so `n ≈ 10d` is heavily oversampled, and
 random directions estimate all d columns of Ĝ jointly instead of spending 2d solves
 on one axis at a time. It also avoids the failure mode of a one-at-a-time
-difference on this solver, where a step small enough to be local is comparable to
-the `tol_global = 1e-4` termination and the difference measures solver noise.
+difference on this solver, where a step small enough to be local is comparable to the
+solver's own termination precision and the difference measures solver noise.
 """
 function local_design(θ̂_unc::AbstractVector{Float64}, free::Vector{ParamSpec};
                       n::Int = 10 * length(free), rel_step::Float64 = 0.05,
@@ -916,12 +936,23 @@ function local_design(θ̂_unc::AbstractVector{Float64}, free::Vector{ParamSpec}
     # Step in t chosen so the induced move in θ is rel_step × the box width:
     # dθ/dt = (ub−lb)·σ(1−σ), so Δt = rel_step / (σ(1−σ)) gives Δθ ≈ rel_step·(ub−lb).
     scale = Vector{Float64}(undef, d)
+    # +1 / −1: at the lower / upper bound, stepped inward in θ;  0: interior, stepped in t.
+    edge  = zeros(Int, d)
+    θ̂c    = [_to_constrained(θ̂_unc[k], free[k].lb, free[k].ub) for k in 1:d]
     @inbounds for k in 1:d
         s = 1.0 / (1.0 + exp(-θ̂_unc[k]))
         scale[k] = rel_step / max(s * (1 - s), 1e-6)
+        w = free[k].ub - free[k].lb
+        θ̂c[k] - free[k].lb < rel_step * w && (edge[k] = 1)
+        free[k].ub - θ̂c[k] < rel_step * w && (edge[k] = -1)
     end
+    # One draw per (j, k) in the same order whichever branch uses it, so the interior
+    # coordinates of every column are identical to a design without edge coordinates.
     @inbounds for j in 2:n, k in 1:d
-        X[k, j] = θ̂_unc[k] + scale[k] * randn(rng)
+        z = randn(rng)
+        X[k, j] = edge[k] == 0 ? θ̂_unc[k] + scale[k] * z :
+                  _to_unconstrained(θ̂c[k] + edge[k] * abs(z) * rel_step * (free[k].ub - free[k].lb),
+                                    free[k].lb, free[k].ub)
     end
     return X
 end

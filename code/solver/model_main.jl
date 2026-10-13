@@ -33,7 +33,8 @@ const PLOTS_ROOT   = joinpath(OUTPUT_DIR, "plots")
 # window, otherwise the table compares apples to oranges.
 const MOMENT_WINDOW = :base_covid     # :base_fc | :crisis_fc | :base_covid | :crisis_covid
 const W_SUFFIX      = "_equalW"
-const SMM_BUNDLE    = estimate_path(MOMENT_WINDOW, W_SUFFIX)
+const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
+const SMM_BUNDLE    = estimate_path(MOMENT_WINDOW, W_SUFFIX; point = POINT_ESTIMATE)
 
 # Packages
 print("Loading packages... "); flush(stdout)
@@ -140,7 +141,6 @@ sim_fallback = SimParams(
     tol_inner          = 1e-7,
     tol_outer_U        = 1e-6,
     tol_outer_S        = 1e-6,
-    tol_global         = 1e-4,
 
     damp_inner_U       = 0.95,
     damp_inner_S       = 0.95,
@@ -161,7 +161,6 @@ sim_fallback = SimParams(
     conv_streak        = 1,
 
     use_anderson       = true,
-    anderson_m         = 1,
     anderson_reg       = 1e-10,
 
     damp_pstar_U       = 1.00,
@@ -181,13 +180,13 @@ println("Parameters:")
         common.r, common.ν, common.φ)
 @printf("                   a_ℓ=%.5f  b_ℓ=%.5f  c=%.5f\n",
         common.a_ℓ, common.b_ℓ, common.c)
-@printf("  Unsk (regime):   PU=%.5f   bU=%.5f   bT=%.5f   α_U=%.5f\n",
+@printf("  UnskilledParams: PU=%.5f   bU=%.5f   bT=%.5f   α_U=%.5f\n",
         unsk_par.PU, unsk_par.bU, unsk_par.bT, unsk_par.α_U)
-@printf("  Skl  (regime):   P_S=%.5f  bS=%.5f  a_Γ=%.5f  b_Γ=%.5f\n",
-        skl_par.PS, skl_par.bS, skl_par.a_Γ, skl_par.b_Γ)
-@printf("  UnskilledParams: μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f\n",
+@printf("                   μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f\n",
         unsk_par.μ, unsk_par.η, unsk_par.k, unsk_par.β, unsk_par.λ)
-@printf("  SkilledParams:   μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f   σ=%.5f\n",
+@printf("  SkilledParams:   P_S=%.5f  bS=%.5f  a_Γ=%.5f  b_Γ=%.5f\n",
+        skl_par.PS, skl_par.bS, skl_par.a_Γ, skl_par.b_Γ)
+@printf("                   μ=%.5f   η=%.5f   k=%.5f   β=%.5f   λ=%.5f   σ=%.5f\n",
         skl_par.μ, skl_par.η, skl_par.k, skl_par.β, skl_par.λ, skl_par.σ)
 flush(stdout)
 
@@ -335,6 +334,13 @@ flush(stdout)
 # ============================================================
 # 3. Equilibrium objects and accounting
 # ============================================================
+# Where the skilled market has more than one equilibrium, the plots show the one the
+# estimation would select against the bundle's targets (select_equilibrium).
+if BUNDLE !== nothing && result.ok
+    sel = select_equilibrium(model, BUNDLE.spec)
+    sel.model === nothing || (model = sel.model)
+    @printf("Skilled equilibrium: %s\n", equilibrium_tag(sel))
+end
 obj = compute_equilibrium_objects(model)
 print_accounting(obj)
 

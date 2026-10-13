@@ -8,7 +8,7 @@
 # can return a sequence of steady states. Three properties separate the two,
 # and this script measures all three on the base→crisis pair.
 #
-#   (i)   The mass-weighted cross-market flow ∬ d f_U u_S is identically zero
+#   (i)   The mass-weighted cross-market flow ∬ d κ_U u_S is identically zero
 #         at BOTH stationary endpoints by self-selection (notes,
 #         prop:ss-crossflow). If it is also zero along the whole path, either
 #         the path is not transitory or the channel is directional and cannot
@@ -22,7 +22,7 @@
 #         shows up here as a terminal gap.
 #
 # Writes output/logs/transition_audit_<pair>.csv: the per-date series the
-# report reads. Reads the estimate bundles; writes nothing under
+# report uses. Loads the estimate bundles; writes nothing under
 # output/estimates/ or output/chains/.
 #
 # TA_NULL=true runs the pair against ITSELF — the same estimate at both ends,
@@ -31,7 +31,7 @@
 # It is the cheapest way to tell a transition that is wrong from one that is
 # merely slow, and it should be the first thing run after touching either.
 #
-# Environment: TA_PAIR (fc|covid), TA_NX (120 — the estimation grid),
+# Environment: TA_PAIR (fc|covid), TA_NX (120),
 # TA_NSTEPS (240), TA_MAXIT (150), TA_TMAX (120.0), TA_DAMP (the TransitionParams default),
 # TA_NULL (false).
 ############################################################
@@ -62,6 +62,7 @@ const TMAX    = parse(Float64, get(ENV, "TA_TMAX",   "120.0"))
 const DAMP    = haskey(ENV, "TA_DAMP") ? parse(Float64, ENV["TA_DAMP"]) : TransitionParams().damp
 const NULLRUN = lowercase(get(ENV, "TA_NULL", "false")) == "true"
 const WSUFFIX = "_diagonalW"
+const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
 
 const _PAIR = PAIR === :fc    ? (:base_fc,    :crisis_fc)    :
               PAIR === :covid ? (:base_covid, :crisis_covid) :
@@ -73,19 +74,23 @@ println("\n$RULE\nTRANSITION AUDIT — $(PAIR_WINDOWS[1]) → $(PAIR_WINDOWS[2])
         NX, NSTEPS + 1, TMAX, MAXIT, DAMP, Threads.nthreads())
 
 # ── Stationary endpoints ────────────────────────────────────────────────────
-b0 = deserialize(estimate_path(PAIR_WINDOWS[1], WSUFFIX))
-b1 = deserialize(estimate_path(PAIR_WINDOWS[2], WSUFFIX))
-cp0, up0, sp0 = unpack_θ(b0.result.theta_opt, b0.spec)
-cp1, up1, sp1 = unpack_θ(b1.result.theta_opt, b1.spec)
-sim = SimParams(; (f => getfield(b0.spec.sim, f) for f in fieldnames(SimParams))...,
-                verbose = 0)
+# The equilibrium at each window's estimate (equilibrium_at), solved under that window's
+# own estimation SimParams, as run_transition_simulation solves them.
+function selected_endpoint(window)
+    b   = deserialize(estimate_path(window, WSUFFIX; point = POINT_ESTIMATE))
+    sim = SimParams(; (f => getfield(b.spec.sim, f) for f in fieldnames(SimParams))...,
+                    verbose = 0)
+    sel = equilibrium_at(b.result.theta_opt, b.spec; Nx = NX, Np_U = NX, Np_S = NX, sim = sim)
+    sel.model === nothing && error("No certified equilibrium at the $window estimate on Nx = $NX.")
+    return sel
+end
 
 t_start = time()
-model_z0, sr0 = solve_model(cp0, up0, sp0, sim; Nx = NX, Np_U = NX, Np_S = NX)
-model_z1, sr1 = solve_model(cp1, up1, sp1, sim; Nx = NX, Np_U = NX, Np_S = NX)
-@printf("z0 ok=%s (U=%s S=%s G=%s)   z1 ok=%s (U=%s S=%s G=%s)   [%.0f s]\n",
-        sr0.ok, sr0.converged_U, sr0.converged_S, sr0.converged_global,
-        sr1.ok, sr1.converged_U, sr1.converged_S, sr1.converged_global, time() - t_start)
+sel0 = selected_endpoint(PAIR_WINDOWS[1])
+sel1 = selected_endpoint(PAIR_WINDOWS[2])
+model_z0, model_z1 = sel0.model, sel1.model
+@printf("z0 k = (%.6f, %.6f)   z1 k = (%.6f, %.6f)   [%.0f s]\n",
+        sel0.k.U, sel0.k.S, sel1.k.U, sel1.k.S, time() - t_start)
 
 eq0 = compute_equilibrium_objects(model_z0)
 eq1 = compute_equilibrium_objects(model_z1)
@@ -155,10 +160,10 @@ println("\n$RULE\nTESTS\n$RULE")
 #     flow are three different statements and a zero in one implies nothing
 #     about the others.
 dmax, darg = findmax(res.d_flow)
-@printf("(i)   max d-flow  f_U ∬d·u_S = %.6e at t = %.1f months (endpoints %.3e, %.3e)\n",
+@printf("(i)   max d-flow  κ_U ∬d·u_S = %.6e at t = %.1f months (endpoints %.3e, %.3e)\n",
         dmax, res.tgrid[darg], res.d_flow[1], res.d_flow[end])
 @printf("      F_d active-side population ∬d·ℓ:   max = %.6e\n", maximum(res.d_region))
-@printf("      F_d active-side trained mass ∬d·m_S: max = %.6e\n", maximum(res.d_mass))
+@printf("      F_d active-side skilled mass ∬d·m_S: max = %.6e\n", maximum(res.d_mass))
 @printf("      F_τ floor along the path: %.6f → %.6f   (min %.6f, max %.6f)\n",
         res.frontier_floor[1], res.frontier_floor[end],
         minimum(res.frontier_floor), maximum(res.frontier_floor))
@@ -232,8 +237,8 @@ out = DataFrame(
     d_flow            = res.d_flow,
     theta_U           = res.θU,
     theta_S           = res.θS,
-    f_U               = res.fU,
-    f_S               = res.fS,
+    kappa_U           = res.κU,
+    kappa_S           = res.κS,
     skilled_share     = res.skilled_share,
     training_share    = res.training_share,
     ur_U              = res.ur_U,

@@ -20,10 +20,11 @@
 # THE TREE THIS DEFINES
 #
 #   output/
-#   ├── estimates/    TRACKED   estimate_<window>_diagonalW.{jls,csv} — one per window,
-#   │                           progressively refined: smm_main writes it, MCMC overwrites
-#   │                           it with the better point plus the standard errors
-#   ├── chains/       ignored   transient MCMC draws, deletable once the SEs are sealed
+#   ├── estimates/    TRACKED   estimate_<window>_diagonalW_<point>.jls and their CSV
+#   │                           siblings, one file per estimate (ESTIMATE_POINTS below):
+#   │                           smm_main writes the SMM ones, a chain run the _mcmc one,
+#   │                           and neither writes the other's
+#   ├── chains/       ignored   transient MCMC draws
 #   ├── transition/   TRACKED   what plots_and_tables/transition.jl reads
 #   ├── logs/         TRACKED   the record of what each run did
 #   ├── plots/        ignored   descriptives/ fit/<w>/ model/<w>/ transition/<pair>/
@@ -137,18 +138,78 @@ design choice, and a choice whose evidence has been deleted is a choice nobody c
 """
 out_logs()       = (d = joinpath(OUTPUT_DIR, "logs");       mkpath(d); d)
 
-"""
-    estimate_path(window, w_suffix; ext = "jls") -> String
+# The base window each window is paired with. A crisis window holds the ability distribution
+# at its pair's base estimate, and a transition runs between the two. smm_main.jl keeps its
+# own copy, `_PAIR_BASELINE`; gates/check_pair_map.jl holds the two equal.
+const PAIR_BASE = Dict(:base_fc    => :base_fc,    :crisis_fc    => :base_fc,
+                       :base_covid => :base_covid, :crisis_covid => :base_covid)
+is_crisis(window) = PAIR_BASE[Symbol(window)] !== Symbol(window)
 
-The one filename convention for an estimate bundle and its CSV sibling. Going through this
-rather than interpolating at each site is what lets a gate assert that `output/estimates/`
-contains nothing else.
-"""
-function estimate_path(window, w_suffix::AbstractString; ext::AbstractString = "jls")
+# The estimates a window can hold, each in a file of its own so that no run overwrites
+# another's:
+#   :smm           the SMM estimate (smm_main.jl; a crisis window with CRISIS_BASE = :smm)
+#   :smm_mcmcbase  a crisis window's SMM estimate with the ability distribution at the base
+#                  window's chain estimate (smm_main.jl, CRISIS_BASE = :mcmc); the crisis
+#                  chain's seed
+#   :mcmc          the chain's estimate (MCMC_main.jl, a chain run)
+const ESTIMATE_POINTS = (:smm, :smm_mcmcbase, :mcmc)
+
+function _estimates_file(stem::AbstractString, window, w_suffix::AbstractString,
+                         tag::AbstractString, ext::AbstractString)
     w = String(window)
     w in WINDOWS || error("paths: unknown window \"$w\" — must be one of $(WINDOWS)")
-    return joinpath(out_estimates(), "estimate_$(w)$(w_suffix).$(ext)")
+    return joinpath(out_estimates(), "$(stem)_$(w)$(w_suffix)$(tag).$(ext)")
 end
+
+function _point_tag(point::Symbol, admitted)
+    point in admitted || error("paths: point :$point — must be one of $(admitted)")
+    return "_" * String(point)
+end
+
+"""
+    estimate_path(window, w_suffix; point) -> String
+
+The estimate bundle of `window` for `point` (one of `ESTIMATE_POINTS`). `point` has no
+default, so every reader and writer names the estimate it means. Going through this rather
+than interpolating at each site is what lets a gate assert that `output/estimates/` contains
+nothing else.
+"""
+estimate_path(window, w_suffix::AbstractString; point::Symbol) =
+    _estimates_file("estimate", window, w_suffix, _point_tag(point, ESTIMATE_POINTS), "jls")
+
+"""
+    legacy_estimate_path(window, w_suffix) -> String
+
+The untagged `estimate_<window><w_suffix>.jls` written before v57.0.0, when SMM and MCMC
+shared one file. Read only as a warm-start candidate.
+"""
+legacy_estimate_path(window, w_suffix::AbstractString) =
+    _estimates_file("estimate", window, w_suffix, "", "jls")
+
+"""
+    mcmcbest_path(window, w_suffix) -> String
+
+The best point a chain visited, written only with MCMC_CHECKPOINT = true.
+"""
+mcmcbest_path(window, w_suffix::AbstractString) =
+    _estimates_file("estimate", window, w_suffix, "_mcmcbest", "jls")
+
+"""
+    candidates_path(window, w_suffix; point) -> String
+
+The `:clusters` candidate bank, tagged like the bundle its run writes (`:smm` or
+`:smm_mcmcbase`): the bank's Q values depend on the fixed ability distribution.
+"""
+candidates_path(window, w_suffix::AbstractString; point::Symbol) =
+    _estimates_file("candidates", window, w_suffix, _point_tag(point, (:smm, :smm_mcmcbase)), "jls")
+
+# The CSV siblings: smm_main.jl's estimates (`:smm` or `:smm_mcmcbase`, the tag of its
+# bundle) and MCMC_main.jl's standard errors (`:smm` for the chain-free pass on the SMM
+# estimate, `:mcmc` for a chain run).
+smm_csv_path(window, w_suffix::AbstractString; point::Symbol) =
+    _estimates_file("smm_estimates", window, w_suffix, _point_tag(point, (:smm, :smm_mcmcbase)), "csv")
+mcmc_csv_path(window, w_suffix::AbstractString; point::Symbol) =
+    _estimates_file("mcmc_results", window, w_suffix, _point_tag(point, (:smm, :mcmc)), "csv")
 
 """
     chain_path(window, w_suffix) -> String

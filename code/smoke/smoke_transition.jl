@@ -47,8 +47,8 @@ const MAXIT  = parse(Int, get(ENV, "SMOKE_MAXIT", "6"))
 
 println("\n$RULE\nSMOKE — transition path on the $WINDOW estimate (v$ROYSEARCH_VERSION)\n$RULE")
 
-bundle = deserialize(estimate_path(WINDOW, "_diagonalW"))
-cp, up, sp = unpack_θ(bundle.result.theta_opt, bundle.spec)
+bundle = deserialize(estimate_path(WINDOW, "_diagonalW"; point = :smm))
+cp, up, sp, tight = unpack_θ(bundle.result.theta_opt, bundle.spec)
 # @with_kw gives no copy-with-changes constructor, so the fields are splatted by name
 # and the override follows — the same idiom model_main.jl uses.
 cp1 = CommonParams(; (f => getfield(cp, f) for f in fieldnames(CommonParams))...,
@@ -57,8 +57,10 @@ sim = bundle.spec.sim
 
 @printf("grid Nx = %d   outer cap = %d   A: %.6f → %.6f\n", NX, MAXIT, cp.A, cp1.A)
 
-model_z0, sr0 = solve_model(cp,  up, sp, sim; Nx = NX, Np_U = NX, Np_S = NX)
-model_z1, sr1 = solve_model(cp1, up, sp, sim; Nx = NX, Np_U = NX, Np_S = NX)
+# z0 is the estimate's equilibrium, at its tightnesses; z1 holds z0's vacancy costs and
+# moves A, so its tightnesses come from free entry.
+model_z0, sr0 = solve_model(cp, up, sp, sim; Nx = NX, Np_U = NX, Np_S = NX, tightness = tight)
+model_z1, sr1 = solve_model(cp1, model_z0.unsk_par, model_z0.skl_par, sim; Nx = NX, Np_U = NX, Np_S = NX)
 @printf("steady states: z0 ok = %s   z1 ok = %s\n", sr0.ok, sr1.ok)
 (sr0.ok && sr1.ok) || error("SMOKE FAILED: a terminal steady state did not solve.")
 
@@ -66,7 +68,7 @@ tp  = TransitionParams(T_max = 120.0, N_steps = 240, tol = 1e-4, maxit = MAXIT,
                        verbose = false)
 res = solve_transition(model_z0, model_z1, tp; scenario = :fc)
 
-series = (:θU, :θS, :fU, :fS, :ur_U, :ur_S, :ur_total, :skilled_share,
+series = (:θU, :θS, :κU, :κS, :ur_U, :ur_S, :ur_total, :skilled_share,
           :training_share, :mean_wage_U, :mean_wage_S)
 nonfinite = [s for s in series if !all(isfinite, getfield(res, s))]
 isempty(nonfinite) ||

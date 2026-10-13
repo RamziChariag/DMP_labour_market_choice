@@ -213,8 +213,8 @@ struct PolicyResult
     θU          :: Float64
     θS          :: Float64
 
-    # ── Contact rates ─────────────────────────────────────
-    f_U         :: Float64       # unskilled job-finding rate
+    # ── Meeting and flow rates ────────────────────────────
+    κ_U         :: Float64       # unskilled meeting rate
     f_S         :: Float64       # skilled job-finding rate
     sep_rate_U  :: Float64       # unskilled separation rate
     sep_rate_S  :: Float64       # skilled separation rate

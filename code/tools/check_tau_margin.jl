@@ -2,13 +2,11 @@
 ############################################################
 # scripts/check_tau_margin.jl — how close is the training frontier to degenerate?
 #
-# The objective rejects a parameter vector when the training frontier is degenerate:
-#
-#   solver/unskilled.jl   uc.τT[i, j] = covered fraction of aS node j above aS*(aU)
-#   smm/smm.jl            maximum(τv) <= 1e-10 || minimum(τv) >= 1-1e-10  →  return Inf
-#
-# Until v23.0.0 τ was a 0/1 indicator, so that guard was DISCRETE in a quantity that is
-# CONTINUOUS in θ: where the frontier admitted only a handful of cells, a perturbation far
+# The training frontier is uc.τT[i, j], the covered fraction of aS node j above aS*(aU)
+# (solver/unskilled.jl).  Until v41.0.0 the objective rejected a degenerate frontier —
+# nobody or everybody training — and until v23.0.0 τ was a 0/1 indicator, so that guard
+# was DISCRETE in a quantity that is CONTINUOUS in θ: where the frontier admitted only a
+# handful of cells, a perturbation far
 # below any economically meaningful size — 1e-15, the rounding of a transform round trip —
 # flipped the last cell to zero and the point became infeasible.  That matched the observed
 # pattern, a warm start reproducing for base_covid and being rejected for base_fc, the
@@ -17,7 +15,7 @@
 # τ is now the covered fraction, so the margin is continuous and the cliff this script was
 # written to measure is gone.  It remains useful for the question underneath: how much
 # population mass the frontier actually separates, and how close a window sits to the
-# nobody-trains or everybody-trains corner that the guard still rejects.
+# nobody-trains or everybody-trains corner, which is now scored as an equilibrium.
 #
 # Nothing in the run reports the cell count, so this script measures it: how many
 # cells are on the training side, and how large the smallest surviving margin
@@ -60,6 +58,7 @@ const ROOT        = find_repo_root()
 const CODE        = joinpath(ROOT, "code")
 const ALL_WINDOWS = ["base_fc", "crisis_fc", "base_covid", "crisis_covid"]
 const W_SUFFIX    = "_diagonalW"
+const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
 
 for f in ("solver/grids.jl", "solver/params.jl", "solver/unskilled.jl",
           "solver/skilled.jl", "solver/solver.jl", "solver/equilibrium.jl",
@@ -84,14 +83,15 @@ of order machine epsilon relative to the values involved, the cell — and with 
 feasibility of the whole point — is decided by rounding.
 """
 function tau_report(θ_unc :: AbstractVector{Float64}, spec :: SMMSpec)
-    cp, up, sp = unpack_θ(θ_unc, spec)
+    cp, up, sp, tight = unpack_θ(θ_unc, spec)
     model, sr  = solve_model(cp, up, sp, spec.sim;
-                             Nx = spec.run.Nx, Np_U = spec.run.Np_U, Np_S = spec.run.Np_S)
+                             Nx = spec.run.Nx, Np_U = spec.run.Np_U, Np_S = spec.run.Np_S,
+                             tightness = tight)
     # Which of the three flags failed matters: ok = converged_U && converged_S &&
-    # converged_global (solver.jl:47), and the global flag is itself a discrete test
-    # `d < tol_global` evaluated under an iteration cap.  A marginal global
-    # convergence is a second knife edge, independent of the frontier one, and only
-    # the flag breakdown tells them apart.
+    # converged_global (solver.jl), and the global flag is itself a discrete test —
+    # `Rmax < 1` on the equilibrium residual battery, evaluated under an iteration cap.
+    # A marginal global convergence is a second knife edge, independent of the frontier
+    # one, and only the flag breakdown tells them apart.
     sr.ok || return (ok = false, cU = sr.converged_U, cS = sr.converged_S,
                      cG = sr.converged_global)
 
@@ -139,7 +139,7 @@ function main(argv = ARGS)
 
     rows = NamedTuple[]
     for w in windows
-        path = estimate_path(w, W_SUFFIX)
+        path = estimate_path(w, W_SUFFIX; point = POINT_ESTIMATE)
         if !isfile(path)
             @printf("  %-13s no bundle\n", w)
             continue
@@ -180,13 +180,14 @@ function main(argv = ARGS)
         @printf("Global loop not converged: %s\n", join([r.window for r in unconv], ", "))
         println("""
         For these windows the solve never reaches ok, so the frontier guard is never
-        evaluated and the frontier is not the cause.  `ok` requires
-        `d < tol_global` to hold within maxit_global iterations (solver.jl:179, :47).
-        The bundle carries tol_global = 1e-4 with maxit_global = 20 and conv_streak = 1,
-        so a point whose residual only just clears the tolerance at the cap flips to
-        unconverged under a perturbation of any size — including the 1e-15 of a
-        transform round trip.  Raising maxit_global is the direct test: if the same
-        seed is accepted at maxit_global = 60, the cap was the binding constraint.""")
+        evaluated and the frontier is not the cause.  `ok` requires the equilibrium
+        residual battery to hold `Rmax < 1` for conv_streak consecutive passes within
+        maxit_global iterations (solver.jl, global_residuals).  A point whose residual
+        only just clears the gate at the cap flips to unconverged under a perturbation
+        of any size — including the 1e-15 of a transform round trip.  Raising
+        maxit_global is the direct test: if the same seed is accepted at
+        maxit_global = 60, the cap was the binding constraint.  Which COMPONENT binds
+        is the second question, and the verbose global trace prints all four.""")
     end
 
     knife = filter(r -> r.verdict in ("KNIFE EDGE", "ALREADY DEGENERATE", "fragile"), rows)

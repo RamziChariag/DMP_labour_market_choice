@@ -6,12 +6,12 @@
 # when included.  The supported entry point is transition_main.jl.
 #
 # Generates two figures per scenario:
-#   1. Data-vs-model panel  (output/plots/transition_panel_<sc><W>.png)
-#   2. Model decomposition  (output/plots/model_transition_<sc><W>.png)
+#   1. Data-vs-model panel  (output/plots/transition_panel_<sc><W>_<point>.png)
+#   2. Model decomposition  (output/plots/model_transition_<sc><W>_<point>.png)
 #
 # Public API:
-#   make_transition_panel(; scenario, suffix)
-#   make_model_decomposition_panel(; scenario, suffix)
+#   make_transition_panel(; scenario, point, suffix)
+#   make_model_decomposition_panel(; scenario, point, suffix)
 #
 # Expects the following to be in scope (provided by transition_main.jl):
 #   - W_SUFFIX, TRANSITION_DIR, PROJECT_ROOT, DERIVED_DIR,
@@ -407,34 +407,33 @@ end
 # ═══════════════════════════════════════════════════════════
 
 """
-    build_model_series(result, cal)
+    build_model_series(result, baseline, cal)
         → (dates, ur, θU, θS, wage_U, wage_S, train_sh, skilled_sh)
 
 Splice the steady-state flat line (pre-switch) with the transition path
 (post-switch) for all six variables.  Returns vectors aligned to the
 episode monthly calendar (length = total months in episode).
 
-The model tgrid has dt=0.5 (half-month steps); we interpolate onto
-monthly resolution for the crisis window.
+`baseline` is the transition bundle's pre-switch steady state, in the same series as
+`result`.  Date 0 of `result` is not: it comes after the date-0 reallocation.  The model
+time grid is in model months, half-month steps to `T_max` and longer beyond; it is
+interpolated onto monthly resolution for the crisis window.
 """
-function build_model_series(result, cal::EpisodeCalendar)
+function build_model_series(result, baseline, cal::EpisodeCalendar)
     dates  = monthly_range(cal.start_date, cal.end_date)
     N      = length(dates)
 
-    # Baseline SS value = t=0 of the transition result
-    # (The transition solver starts from the baseline SS)
-    ss_ur        = result.ur_total[1]
-    ss_θU        = result.θU[1]
-    ss_θS        = result.θS[1]
-    ss_wage_U    = result.mean_wage_U[1]
-    ss_wage_S    = result.mean_wage_S[1]
-    ss_train_sh  = result.training_share[1]
-    ss_skilled_sh= result.skilled_share[1]
+    ss_ur        = baseline.ur_total[1]
+    ss_θU        = baseline.θU[1]
+    ss_θS        = baseline.θS[1]
+    ss_wage_U    = baseline.mean_wage_U[1]
+    ss_wage_S    = baseline.mean_wage_S[1]
+    ss_train_sh  = baseline.training_share[1]
+    ss_skilled_sh= baseline.skilled_share[1]
 
-    # Transition path grid: tgrid[1] = 0 corresponds to switch date.
-    # Map model "months" 0..n_crisis onto crisis calendar months.
-    # tgrid is in model months (dt = 0.5), Nt = 241 for 120 model months.
-    tgrid = result.tgrid     # length Nt, 0 to T_max (120 months by default)
+    # tgrid[1] = 0 is the switch date; model months 0..n_crisis map onto the crisis
+    # calendar months.
+    tgrid = result.tgrid
     Nt    = length(tgrid)
 
     # Build interpolation functions for each series over tgrid
@@ -745,16 +744,18 @@ end
 # ═══════════════════════════════════════════════════════════
 
 """
-    make_transition_panel(; scenario, suffix)
+    make_transition_panel(; scenario, point, suffix)
 
 Generate and save the 3×2 transition dynamics panel for the given scenario.
 
 Arguments:
   scenario  :fc or :covid
+  point     :smm or :mcmc, the estimates the transition was solved at
   suffix    weight-matrix suffix string (default W_SUFFIX)
 """
 function make_transition_panel(;
     scenario :: Symbol = :fc,
+    point    :: Symbol,
     suffix   :: String = W_SUFFIX,
 )
     println("\n── Transition panel: $scenario ──"); flush(stdout)
@@ -768,13 +769,13 @@ function make_transition_panel(;
             cal.start_date, cal.end_date, N, cal.switch_date)
 
     # ── Load TransitionResult ─────────────────────────────────────────────
-    trans_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(suffix).jls")
-    if !isfile(trans_file)
-        @warn "Transition result not found: $trans_file\n" *
+    bundle = read_transition(scenario, suffix, point)
+    if bundle === nothing
+        @warn "Transition result not found: $(transition_file(scenario, suffix, point))\n" *
               "Run the simulation first.  Skipping panel."
         return nothing
     end
-    trans = open(deserialize, trans_file).result
+    trans  = bundle.result
     @printf("  Loaded transition result (converged=%s, scenario=%s)\n",
             trans.converged, trans.scenario)
 
@@ -795,7 +796,7 @@ function make_transition_panel(;
 
     # ── Build model series ────────────────────────────────────────────────
     dates_m, mod_ur, mod_θU, mod_θS, mod_wU, mod_wS, mod_tr, mod_sk =
-        build_model_series(trans, cal)
+        build_model_series(trans, bundle.baseline, cal)
 
     # ── Build data series ─────────────────────────────────────────────────
     ds = build_data_series(cal, cps_monthly, θU_dict, θS_dict,
@@ -843,7 +844,7 @@ function make_transition_panel(;
     # ── Save ──────────────────────────────────────────────────────────────
     mkpath(PLOTS_DIR)
     label   = scenario == :fc ? "fc" : "covid"
-    out_file= joinpath(PLOTS_DIR, "transition_panel_$(label)$(suffix).png")
+    out_file= joinpath(PLOTS_DIR, "transition_panel_$(label)$(transition_tag(suffix, point)).png")
     savefig(fig, out_file)
     @printf("  Saved: %s\n", out_file)
     flush(stdout)
@@ -868,28 +869,31 @@ _COL_SKL   = :seagreen
 _COL_UNSK  = :mediumpurple
 
 """
-    make_model_decomposition_panel(; scenario, suffix)
+    make_model_decomposition_panel(; scenario, point, suffix)
 
 Model-only 3×2 panel with skilled (green) and unskilled (purple) lines.
 20% of the x-axis is the pre-shock steady state, 80% is the transition.
+`point` and `suffix` as in `make_transition_panel`.
 """
 function make_model_decomposition_panel(;
     scenario :: Symbol = :fc,
+    point    :: Symbol,
     suffix   :: String = W_SUFFIX,
 )
     println("\n── Model decomposition panel: $scenario ──"); flush(stdout)
     _set_theme!()
 
     # ── Load transition result ─────────────────────────────────────────
-    trans_file = joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(suffix).jls")
-    if !isfile(trans_file)
-        @warn "Transition result not found: $trans_file"
+    bundle = read_transition(scenario, suffix, point)
+    if bundle === nothing
+        @warn "Transition result not found: $(transition_file(scenario, suffix, point))"
         return nothing
     end
-    result = open(deserialize, trans_file).result
+    result   = bundle.result
+    baseline = bundle.baseline       # the pre-switch steady state, in the same series
     @printf("  Loaded transition (converged=%s)\n", result.converged)
 
-    tgrid = result.tgrid   # 0 to T_max (120 months), dt=0.5, Nt=241
+    tgrid = result.tgrid   # model months from the switch
     Nt    = length(tgrid)
     T_max = tgrid[end]
     wx    = result.wx       # Gauss–Jacobi population weights (integrate densities ∝ ℓ)
@@ -913,9 +917,8 @@ function make_model_decomposition_panel(;
         return series[idx-1] * (1.0 - α) + series[idx] * α
     end
 
-    # Splice: N_pre points at SS value, then N_post points from transition
-    function _splice(series::Vector{Float64})
-        ss = series[1]
+    # Splice: N_pre points at the pre-switch steady state, then N_post from the transition
+    function _splice(series::Vector{Float64}, ss::Float64)
         out = Vector{Float64}(undef, N_tot)
         for i in 1:N_pre
             out[i] = ss
@@ -926,10 +929,9 @@ function make_model_decomposition_panel(;
         return out
     end
 
-    # Same for 2-D arrays (Nx × Nt) — aggregate with wx weights
-    function _splice_agg(mat::Matrix{Float64})
-        # mat is Nx × Nt; aggregate: sum over x with weights wx
-        ss_agg = dot(wx, mat[:, 1])
+    # Same for ability profiles (Nx × Nt), aggregated with the wx weights
+    function _splice_agg(mat::Matrix{Float64}, ss_profile::AbstractVector{Float64})
+        ss_agg = dot(wx, ss_profile)
         out = Vector{Float64}(undef, N_tot)
         for i in 1:N_pre
             out[i] = ss_agg
@@ -939,7 +941,7 @@ function make_model_decomposition_panel(;
             t_q = clamp(Float64(j - 1), tgrid[1], tgrid[end])
             idx = searchsortedfirst(tgrid, t_q)
             if idx == 1
-                out[N_pre + j] = ss_agg
+                out[N_pre + j] = dot(wx, mat[:, 1])
             elseif idx > Nt
                 out[N_pre + j] = dot(wx, mat[:, Nt])
             else
@@ -952,18 +954,18 @@ function make_model_decomposition_panel(;
     end
 
     # ── Splice all series ─────────────────────────────────────────
-    m_ur_U  = _splice(result.ur_U)
-    m_ur_S  = _splice(result.ur_S)
-    m_θU    = _splice(result.θU)
-    m_θS    = _splice(result.θS)
-    m_wU    = _splice(result.mean_wage_U)
-    m_wS    = _splice(result.mean_wage_S)
-    m_fU    = _splice(result.fU)
-    m_fS    = _splice(result.fS)
+    m_ur_U  = _splice(result.ur_U, baseline.ur_U[1])
+    m_ur_S  = _splice(result.ur_S, baseline.ur_S[1])
+    m_θU    = _splice(result.θU, baseline.θU[1])
+    m_θS    = _splice(result.θS, baseline.θS[1])
+    m_wU    = _splice(result.mean_wage_U, baseline.mean_wage_U[1])
+    m_wS    = _splice(result.mean_wage_S, baseline.mean_wage_S[1])
+    m_κU    = _splice(result.κU, baseline.κU[1])
+    m_κS    = _splice(result.κS, baseline.κS[1])
 
     # ── Vacancies: v_j = θ_j × U_j (aggregate unemployment mass) ────
-    agg_uU = _splice_agg(result.uU)   # aggregate unskilled unemployed
-    agg_uS = _splice_agg(result.uS)   # aggregate skilled unemployed
+    agg_uU = _splice_agg(result.uU, view(baseline.uU, :, 1))   # aggregate unskilled unemployed
+    agg_uS = _splice_agg(result.uS, view(baseline.uS, :, 1))   # aggregate skilled unemployed
     m_vU   = m_θU .* agg_uU
     m_vS   = m_θS .* agg_uS
 
@@ -986,8 +988,8 @@ function make_model_decomposition_panel(;
         end
         return sep
     end
-    m_sepU = _compute_sep(m_ur_U, m_fU)
-    m_sepS = _compute_sep(m_ur_S, m_fS)
+    m_sepU = _compute_sep(m_ur_U, m_κU)
+    m_sepS = _compute_sep(m_ur_S, m_κS)
 
     # ── X-axis and ticks ────────────────────────────────────────
     xs = collect(1:N_tot)
@@ -1038,8 +1040,8 @@ function make_model_decomposition_panel(;
 
     # ── Panel 5: Job-finding rates (bottom left) ───────────────────
     p5 = _panel("Job-finding rate"; show_xlabel=true)
-    plot!(p5, xs, m_fS, color=_COL_SKL,  lw=1.6, label="Skilled")
-    plot!(p5, xs, m_fU, color=_COL_UNSK, lw=1.6, label="Unskilled")
+    plot!(p5, xs, m_κS, color=_COL_SKL,  lw=1.6, label="Skilled")
+    plot!(p5, xs, m_κU, color=_COL_UNSK, lw=1.6, label="Unskilled")
 
     # ── Panel 6: Separation rates (bottom right) ───────────────────
     p6 = _panel("Separation rate"; show_xlabel=true)
@@ -1063,7 +1065,7 @@ function make_model_decomposition_panel(;
     ylims!(p2, _ylims_from_data(m_vU, m_vS))
     ylims!(p3, _ylims_from_data(m_wU, m_wS))
     ylims!(p4, _ylims_from_data(m_θU, m_θS))
-    ylims!(p5, _ylims_from_data(m_fU, m_fS))
+    ylims!(p5, _ylims_from_data(m_κU, m_κS))
     ylims!(p6, _ylims_from_data(m_sepU, m_sepS))
 
     # ── Combine 3×2 ────────────────────────────────────────────────
@@ -1075,7 +1077,7 @@ function make_model_decomposition_panel(;
 
     mkpath(PLOTS_DIR)
     label    = scenario == :fc ? "fc" : "covid"
-    out_file = joinpath(PLOTS_DIR, "model_transition_$(label)$(suffix).png")
+    out_file = joinpath(PLOTS_DIR, "model_transition_$(label)$(transition_tag(suffix, point)).png")
     savefig(fig, out_file)
     @printf("  Saved: %s\n", out_file)
     flush(stdout)
@@ -1095,9 +1097,9 @@ if abspath(PROGRAM_FILE) == @__FILE__
     println("="^65)
     flush(stdout)
 
-    for sc in [:fc, :covid]
-        make_transition_panel(; scenario=sc, suffix=W_SUFFIX)
-        make_model_decomposition_panel(; scenario=sc, suffix=W_SUFFIX)
+    for sc in [:fc, :covid], point in (:smm, :mcmc)
+        make_transition_panel(; scenario=sc, point=point, suffix=W_SUFFIX)
+        make_model_decomposition_panel(; scenario=sc, point=point, suffix=W_SUFFIX)
     end
 
     println("\nDone.")

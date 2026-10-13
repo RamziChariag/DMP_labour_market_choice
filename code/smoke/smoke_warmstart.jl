@@ -2,22 +2,23 @@
 #
 # Runs the driver's real spec-construction path (a copy of smm_main.jl truncated
 # just before §9), then checks:
-#   1. every DEEP_PARAMS entry is pinned in spec.fixed, at the baseline value;
-#   2. ρ_x in particular is the baseline estimate, not unpack_θ's −0.55 fallback;
-#   3. the free set is exactly REGIME_SPECIFIC_PARAMS minus FIX_PARAMS / σ_w pins;
-#   4. with no seed bank, SA's start set is the single point pack_θ(spec), and
-#      the Q it reports at [SA init] is the objective at the baseline vector.
+#   1. every ABILITY_PARAMS entry is pinned in spec.fixed, at the baseline value;
+#   2. ρ_x in particular is the baseline estimate;
+#   3. every parameter is either estimated or pinned;
+#   4. with no seed bank, SA's start set is the single point pack_θ(spec), the
+#      warm start §8a chose, and the Q it reports at [SA init] is the objective
+#      there. With no crisis estimate on disk the warm start is the base point.
 
 include(joinpath(@__DIR__, "main_spec_only.jl"))
 
 const RULE = "="^70
 
-println("\n$RULE\nSMOKE 1 — deep block pinned in spec.fixed\n$RULE")
-for (blk, nm) in DEEP_PARAMS_ORDERED
+println("\n$RULE\nSMOKE 1 — ability distribution pinned in spec.fixed\n$RULE")
+for (blk, nm) in ABILITY_PARAMS
     key    = fixed_key(blk, nm)
     pinned = is_pinned(spec.fixed, blk, nm)
     val    = pinned ? spec.fixed[key] : NaN
-    base   = _baseline_param_value(blk, nm, cp_base, up_base, sp_base)
+    base   = _baseline_param_value(blk, nm, cp_base, up_base, sp_base, tight_base)
     @printf("  %-6s %-4s  key=:%-10s  pinned=%-5s  value=%12.6f  baseline=%12.6f  match=%s\n",
             blk, nm, key, pinned, val, base, isapprox(val, base; atol = 0, rtol = 0))
 end
@@ -26,7 +27,6 @@ println("\n$RULE\nSMOKE 2 — ρ_x actually seen by the model\n$RULE")
 cp_spec, _, _ = unpack_θ(pack_θ(spec), spec)
 @printf("  baseline optimum ρ_x            = %.6f\n", cp_base.ρ_x)
 @printf("  ρ_x reaching CommonParams       = %.6f\n", cp_spec.ρ_x)
-@printf("  unpack_θ hard-coded fallback    = %.6f\n", -0.55)
 @printf("  ρ_x in spec.free?               = %s\n",
         any(ps -> ps.name === :ρ_x, spec.free))
 @printf("  ρ_x pinned at baseline?         = %s\n", cp_spec.ρ_x == cp_base.ρ_x)
@@ -43,11 +43,11 @@ println("  assert_all_params_accounted: PASS")
 
 println("\n$RULE\nSMOKE 4 — first solve under :warmstart + USE_AS_SEED = true\n$RULE")
 θ_spec = pack_θ(spec)
-_, up_spec, sp_spec = unpack_θ(θ_spec, spec)
-max_dev = maximum(abs(_baseline_param_value(ps, cp_spec, up_spec, sp_spec) -
-                      _baseline_param_value(ps, cp_base, up_base, sp_base))
+_, up_spec, sp_spec, tight_spec = unpack_θ(θ_spec, spec)
+max_dev = maximum(abs(_baseline_param_value(ps, cp_spec, up_spec, sp_spec, tight_spec) -
+                      _baseline_param_value(ps, cp_base, up_base, sp_base, tight_base))
                   for ps in spec.free)
-@printf("  max |spec init − baseline optimum| over the free set = %.3e\n", max_dev)
+@printf("  max |spec init − base point| over the free set = %.3e\n", max_dev)
 
 starts = _sa_starts_from_bank(seed_bank, prev_optimum)
 @printf("  seed_bank = %s;  prev_optimum = %s;  SA starts from bank = %d\n",
@@ -57,7 +57,7 @@ starts = _sa_starts_from_bank(seed_bank, prev_optimum)
         spec.run.sa_random_init)
 
 Q_at_init = smm_objective(θ_spec, spec)
-@printf("  Q at the baseline vector = %.10e\n", Q_at_init)
+@printf("  Q at the spec init = %.10e\n", Q_at_init)
 
 # One SA iteration at step = 0: the single proposal coincides with the start, so
 # the returned incumbent is the point _sa_loop evaluated FIRST, recoverable
@@ -73,9 +73,9 @@ println("\n  Running _run_sa for one zero-step iteration — [SA init] Q0 IS the
 Q_match = isapprox(Q_sa, Q_at_init; rtol = 1e-10)
 @printf("\n  first evaluated θ == pack_θ(spec) exactly?  %s  (max |Δ| = %.3e)\n",
         θ_sa == θ_spec, maximum(abs.(θ_sa .- θ_spec)))
-@printf("  first-solve Q ≈ Q(baseline vector)?        %s  (%.12e vs %.12e, rel Δ = %.2e)\n",
+@printf("  first-solve Q ≈ Q(spec init)?              %s  (%.12e vs %.12e, rel Δ = %.2e)\n",
         Q_match, Q_sa, Q_at_init, abs(Q_sa - Q_at_init) / abs(Q_at_init))
 (θ_sa == θ_spec && Q_match) ||
-    error("SMOKE 4 FAILED: SA's first solve is not the baseline vector.")
+    error("SMOKE 4 FAILED: SA's first solve is not the spec init.")
 
 println("\n$RULE\nSMOKE PASSED\n$RULE")

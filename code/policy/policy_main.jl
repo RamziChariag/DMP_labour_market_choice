@@ -40,6 +40,7 @@
 
 # Which baseline to use for the counterfactuals
 const BASELINE_WINDOW = :base_fc
+const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
 
 # Weight-matrix mode (must match the SMM estimation)
 const W_COND_TARGET = 1e8     # 0.0 = diagonal, 1.0 = compressed, 2.0 = equal, >2.0 = full
@@ -152,7 +153,7 @@ end
 
 const W_SUFFIX = _w_suffix(W_COND_TARGET)
 
-baseline_jls = estimate_path(BASELINE_WINDOW, W_SUFFIX)
+baseline_jls = estimate_path(BASELINE_WINDOW, W_SUFFIX; point = POINT_ESTIMATE)
 
 @printf("  Baseline window:  %s\n", BASELINE_WINDOW)
 @printf("  W suffix:         %s\n", W_SUFFIX)
@@ -190,7 +191,6 @@ sim = SimParams(
     tol_inner      = 1e-8,
     tol_outer_U    = 1e-6,
     tol_outer_S    = 1e-7,
-    tol_global     = 1e-3,
 
     maxit_inner    = 500,
     maxit_outer    = 300,
@@ -199,7 +199,6 @@ sim = SimParams(
     conv_streak    = 2,
 
     use_anderson   = true,
-    anderson_m     = 1,
     anderson_reg   = 1e-10,
 
     damp_pstar_U   = 1.30,

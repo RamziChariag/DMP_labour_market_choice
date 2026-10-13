@@ -35,6 +35,3922 @@ measurement was, not just the verdict.
 
 ---
 
+## v57.1.0 — 2026-10-13
+
+**MINOR: a transition's files are named by the point they were solved at, and its horizon test
+holds the mean log wages to 1e-3 in log units.** The SMM and MCMC code is unchanged: no file
+that `smm_main.jl` or `MCMC_main.jl` loads changes except `version.jl`, so every estimate and
+every Q reproduces bit for bit. The transition reproduces v57.0.0 at both points on the covid
+pair: the same accepted horizon, every printed line of the solve, and all ten tables byte for
+byte; only the files' names and the horizon test's recorded criterion differ.
+
+**Comparability.** Estimates written under v57.0.0 and v57.1.0 are interchangeable. A transition
+file written under v57.0.0 (`transition_<pair>_diagonalW.jls`, untagged) is read by nothing:
+re-run the transition. `output/transition/transition_fc_fullW.jld2` is untouched.
+
+### What changed
+- **The transition file** (`transition/transition_params.jl`:281–305). A run is tagged
+  `<W>_<point>` (`transition_tag` :288), and every file it writes ends in the tag:
+  `transition_file(scenario, w_suffix, point)` (:290) names
+  `output/transition/transition_<pair><W>_<point>.jls`, and the tables and plots made from it
+  carry the same ending. `read_transition` (:299) returns the record, `nothing` when there is
+  none, and stops on a file that records another point. Every writer and reader of a
+  transition file loads `transition_params.jl`; the five places that built the name before
+  (`transition_main.jl`, `transition_simulation.jl`, two in `transition_panel.jl`,
+  `plots_and_tables/transition.jl`) call these instead.
+- **Writer** (`transition/transition_simulation.jl`:228): `run_transition_simulation` saves to
+  `transition_file`.
+- **Orchestrator** (`transition/transition_main.jl`). The re-use check names the tagged file
+  (:180); the panels take `point = POINT_ESTIMATE` (:207); the tables phase loads the bundles of
+  this point's transition files (:221) and passes `suffix = transition_tag(W_SUFFIX,
+  POINT_ESTIMATE)` to every table and to the scatter (:222).
+- **Panels** (`plots_and_tables/transition_panel.jl`). `make_transition_panel` and
+  `make_model_decomposition_panel` take `point` (:758, :880), read through `read_transition`
+  (:772, :887) and save `transition_panel_<pair><W>_<point>.png` (:847) and
+  `model_transition_<pair><W>_<point>.png` (:1080). Run standalone, the file draws every
+  pair at both points it finds (:1100).
+- **Tables** (`plots_and_tables/transition.jl`). `load_all_smm_bundles!(; scenarios, point)`
+  (:154) reads through `read_transition` (:158), so the tables phase stops on a transition file
+  that records another point. The table writers and the scatter are unchanged: their `suffix`
+  names the file, and the orchestrator now passes the tag. Run standalone, the file loads
+  `transition_params.jl` (:98), which it needs to read a transition file, and makes the tables
+  of each point that has transition files (:1086).
+- **Horizon test** (`transition/transition_simulation.jl`:25–39, :165). `LOG_SERIES =
+  (:mean_wage_U, :mean_wage_S)` are compared by their absolute change on months 0–36, every
+  other reported series by its change relative to its own scale, both against `HORIZON_TOL =
+  1e-3`. Since v57.0.0 the path's mean wages are mean log wages, whose change is relative
+  already; dividing it by the log's own size (about 6.5) had made the test that many times
+  looser on them. 1e-3 in log units is the strictness of the test on level wages to first
+  order. The record's `change_first_months` is the new criterion.
+- **Docs.** README: the two paths' transition steps name the files they write; the transition
+  section gives the tagged names, the tables phase's refusal and the horizon rule. SETTINGS.md:
+  `POINT_ESTIMATE` tags every file of a transition run.
+- **Not changed:** every file `smm_main.jl` and `MCMC_main.jl` load (`paths.jl`, `solver/`,
+  `smm/`, `mcmc/`) except `version.jl`; the x̄ table (its function is untouched, and its file
+  name follows the tag through its `suffix` argument like every table's); `.gitignore` (the
+  proposed `/output/transition/transition_*.jls` matches the new names too).
+
+### Measured, not asserted (scratch tree, v57 covid estimates, 2 threads, one run at a time)
+- **The transition at both points**, on copies of the v57.0.0 scratch estimates of the covid
+  pair (`using Plots` removed and a stand-in that records each `savefig` path, since GR does
+  not build in the sandbox):
+
+  | | `:smm` | `:mcmc` |
+  |---|---|---|
+  | accepted horizon, new rule | 240 months | 240 months |
+  | iterations at horizon 120 / 240 | 26 / 14 | 25 / 14 |
+  | largest change on months 0–36 at 240 | 3.0493e-4 | 3.0549e-4 |
+  | transition file, bytes | 1,586,038,860 | 1,586,038,637 |
+  | wall time | 2206 s | 2161 s |
+
+  The largest change equals v57.0.0's at both points, so a series not in logs sets it, and the
+  two mean log wages moved by at most that, 3.05e-4 in log units against 1e-3. Every printed
+  line of the two solves (14 each: iterations, gaps, the horizon results, θ_U and θ_S at the
+  endpoints and on the path, the crossing reversals) equals v57.0.0's.
+- **The two runs coexist.** At the end the scratch `output/` held
+  `transition_covid_diagonalW_smm.jls`, `transition_covid_diagonalW_mcmc.jls` and both sets of
+  five tables (`model_fit_A`, `model_fit_B`, `parameter_estimates_A`, `parameter_estimates_B`,
+  `xbar_table`, each `_diagonalW_smm.tex` and `_diagonalW_mcmc.tex`), every table byte-identical to
+  the one v57.0.0 wrote at the same point. The plots went to
+  `transition_panel_covid_diagonalW_<point>.png`, `model_transition_covid_diagonalW_<point>.png`
+  and `model_fit_scatter_base_covid_diagonalW_<point>.png`; the panels ran on a second pass that
+  re-used each transition file (`RERUN_SIMULATION = false`).
+- **Refusal.** A file named `transition_covid_diagonalW_mcmc.jls` that records `point = :smm`
+  stops the tables phase under `POINT_ESTIMATE = :mcmc` in one line
+  ("transition_covid_diagonalW_mcmc.jls records point = :smm, not :mcmc."), and nothing is
+  written.
+- **Gates.** The six changed files parse; `check_forwarding` reports only the known
+  `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` row; `check_dead_settings` PASS; `check_structure` the same 7
+  findings; `check_output_tree` PASS on the scratch output holding both runs; `check_pair_map`
+  OK; `smoke_transition.jl` on base_covid PASSED (100 s, nothing written); `check_version_sync`
+  in sync at 57.1.0. The runs preceded the bump, so the two files record version 57.0.0.
+
+### Settings
+None added, retired or re-defaulted. `POINT_ESTIMATE` (`transition_main.jl`) now also names a
+transition run's files.
+
+### Known gaps
+- **`transition_tag` and `transition_file` belong in `paths.jl`**, beside `out_transition()`,
+  where every other output path is built. They are in `transition_params.jl` because this
+  version leaves every file the SMM and MCMC drivers load untouched; moving them changes no
+  output.
+- **Plots does not build in the sandbox** (GR_jll), so no panel or scatter was drawn: the
+  panels and the scatter ran with a stand-in whose `savefig` records the path it is given.
+- **The fc pair's horizon under the new rule is not measured**; only the covid pair ran.
+- **The x̄ table is still blank** in every cell; it is with the author.
+
+### Tried and rejected
+- **A subdirectory per point** (`output/tables/smm/`, `output/plots/smm/`). The suffix is the
+  convention the estimate files and the transition file already use (`…W_<point>.jls`), and it
+  keeps the two runs' files side by side in one listing; a subdirectory would be a second
+  convention for the same tag.
+
+---
+
+## v57.0.0 — 2026-10-13
+
+**MAJOR: every wage moment is a different number.** The unskilled wage distribution now
+counts each employed worker once: the shipped code weighted matches below p = 1 by their
+density in p rather than by their mass, so the hiring atom carried 0.065% of the weight while
+holding 11.2% of unskilled employment (base_fc). Mean, variance and third moment, the ten
+percentiles and both overlaps are now computed from the wage points themselves rather than
+from a 120-bin level histogram, and the top quality node gets a covered-fraction cell. Q moves
+at every estimate (base_fc 4377.33 → 5609.81).
+
+**And every estimate has a file of its own.** `smm_main.jl` writes `estimate_<w>W_smm.jls`
+(or `_smm_mcmcbase.jls`, a crisis window held at the base chain's estimate, chosen by the new
+`CRISIS_BASE`), a chain run of `MCMC_main.jl` writes `estimate_<w>W_mcmc.jls`, and neither
+writes the other's; every reader names the file it reads, and refuses one written by another
+MAJOR version.
+
+**Comparability.** No wage moment, and no Q, from v56.0.4 or earlier can be compared with
+this version. Every stored estimate (`estimate_<w>_diagonalW.jls` for the four windows, and
+the ξ_S backup) remains loadable, because no struct changed and the moment layer reads
+only freshly computed objects. They are no longer optima of the objective, so every window
+needs re-estimation (the Gauss–Newton steps below). The candidate banks and the base_fc chain
+are superseded for the same reason. Non-wage moments change only through the top-cell rule,
+at points where a cutoff sits in [p_N, 1]. The untagged `estimate_<w>_diagonalW.jls` files
+are read from now on only as warm-start candidates, which re-score them under this code;
+`estimate_base_fc_diagonalW_postmean.jls`, the `_backup_Q` copies and the untagged candidate
+banks are read by nothing. Transition files written before this version name untagged
+bundles, which the tables phase refuses: re-run the transition.
+
+### What changed — (A) the wage moments
+- **Top quality cell** (`solver/grids.jl`:369, :381). `_soft_weight` and `_soft_oj_weight`
+  give node N the cell [p_N, 1] (`p_next = 1` at j = Np, :372, :384), so the covered-fraction
+  rule now applies at every node. A cutoff crossing p_N fades the top node out instead of
+  switching it off. Every caller inherits the change: the stationary solve, the skilled block,
+  the transition, and the wage surfaces.
+- **Wage points** (`solver/equilibrium.jl`). The unskilled tail point carries
+  `eU_density[i, jp] * wpU[jp]`, density × quadrature weight (:250); the hiring atom keeps its
+  mass `eU_entry`. A new field `wage_points = (U = (w, m), S = (w, m))` (:280, :513) holds
+  one (wage, mass) pair per employed cell.
+- **Node wages** (`solver/equilibrium.jl`:190–223). Every wage formula is evaluated at every
+  node whatever the node's mass (`wU_node`, `wU_entry`, `wS0_node`, `wS1_node`); the reported
+  surfaces keep a wage only where the node has mass, as before. The 120-bin level histograms
+  (`wmid`, `dens_U`, `dens_S`, `dens_S0`, `dens_S1`) take their edges from the 0.2% and 99.8%
+  quantiles of this fixed-size set (:286), so they move continuously with the parameters.
+  They serve figures only; no SMM moment reads them.
+- **Moment layer** (`smm/moments.jl`:387–468, :518–534).
+  - `_logwage_distribution(pts, σ_w)` computes the mean, the variance + σ_w² and the third
+    central moment of log wages from the points.
+  - `_conv_cdf_pdf` evaluates the σ_w-convolved CDF F(y) = Σ_k q_k Φ((y − log w_k)/σ_w)
+    and its density.
+  - `_conv_quantile` finds p10–p90 by Newton on F, starting from the normal approximation and
+    falling back to bisection inside the bracket; it stops when the step falls below 1e-13 in
+    log w.
+  - The overlaps are 1 − F_U(p50_S) and F_S(p50_U). The premium is mean_S − mean_U.
+  - Removed as dead: `_logwage_moments(wmid, dens, bw, σ_w)`, `_logwage_conv_cdf`,
+    `_invert_cdf`, `_disc_pctile`. The σ_w → 0 branches are kept.
+  - The `model_moments` docstring now sits on `model_moments`; it was attached to
+    `_logwage_moments`.
+- **The consumers outside the moment layer** (audit of `wage_fix_report.md`). An unskilled
+  match below p = 1 counts with density × quadrature weight, a new match at p = 1 with its
+  mass, and the top cell [p_N, 1] is part of the tail:
+  - `solver/equilibrium.jl`:144: `eU_surface` is the density in p plus, in the top column,
+    the new matches' mass, and says so; the returned object now carries `eU_density` (:499) so
+    that consumers weight it explicitly.
+  - `plots_and_tables/model.jl`:394 (`fig_skill_premium`): each market's mean over its own
+    quality grid, the unskilled tail by density × wpU at every node and the new matches by
+    their mass at the entry wage, the skilled cells by density × wpS. The trapezoid on the
+    skilled grid, which dropped [p_N, 1] and treated the atom as a density at p_N, is gone.
+  - `plots_and_tables/model.jl`:139 (`fig_total_employment`): employment by ability, each
+    market's mass summed over its own grid. It added the unskilled surface (Np_U columns) to
+    the skilled one (Np_S columns), a DimensionMismatch at the shipped grids.
+  - `policy/policy_solver.jl`:43–61: `mean_wage_U` with the same weighting. `policy/` still
+    does not load (known: it reads `obj.wx` and `obj.eS_mat`, which do not exist).
+  - `transition/transition_solver.jl`:284, :730: the path's mean wages are mean LOG wages.
+    They were level means plotted in `plots_and_tables/transition_panel.jl` against the data
+    moments `mean_wage_U/S`, which are mean log wages; the panels now compare like with like.
+    The points and masses are the path's own, as before (`TransitionResult` fields documented,
+    `transition_params.jl`:242).
+  - No change at A2, A5, A7, A8, A10 and A11.
+
+### What changed — (B) one file per estimate
+- **Files** (`code/paths.jl`). `estimate_path(window, W; point)` (:177) takes a required
+  `point` ∈ `ESTIMATE_POINTS = (:smm, :smm_mcmcbase, :mcmc)` (:155), with no default, so no
+  caller reads a file it did not name: `estimate_<w>W_smm.jls` (smm_main.jl; a crisis window
+  with `CRISIS_BASE = :smm`), `estimate_<crisis>W_smm_mcmcbase.jls` (smm_main.jl, crisis window,
+  `CRISIS_BASE = :mcmc`, the crisis chain's seed), `estimate_<w>W_mcmc.jls` (a chain run). Also
+  `legacy_estimate_path` (:186, the untagged pre-v57 file, read only as a warm start),
+  `mcmcbest_path` (:194), `candidates_path` (:203, the `:clusters` bank, tagged like its run's
+  bundle), `smm_csv_path` / `mcmc_csv_path` (:209, :211), and `PAIR_BASE` / `is_crisis`
+  (:144, :146) for every script but smm_main.jl, which keeps its own `_PAIR_BASELINE`.
+- **Bundles** (`code/smm/bundle.jl`). `require_current_major(b, path)` (:233): every reader of an
+  estimate stops in one line on a file written by another MAJOR version. `:mcmc_postmean`
+  leaves `BUNDLE_STAGES` (:77); `:mcmc` and `:mcmc_aborted` now mark the chain's own file;
+  `bundle_has_se` (:213) admits an `:smm` bundle the chain-free pass added errors to;
+  `provenance_from_path` (:101) parses the tagged names.
+- **SMM driver** (`code/smm/smm_main.jl`). `CRISIS_BASE = env_setting(:CRISIS_BASE, :smm)` (:169),
+  directly below `WINDOW` and validated, then the unchanged `_PAIR_BASELINE` block (:175), then
+  `OUT_POINT` (:183); `OUT_JLS` (:465) names the one file the run writes (checkpoints, CSV and
+  final bundle). The crisis branch reads `estimate_path(base; point = CRISIS_BASE)` (:507) and,
+  after the unchanged loader, refuses another MAJOR version and stage `:mcmc_aborted` (:521);
+  nothing else in the crisis wiring changed. §8a (:963, `warm_start` :981, :1009) replaces the
+  two warm-start blocks: every candidate is scored under the current code, one line each, and
+  the lowest Q starts; a parameter its run did not estimate keeps `DEFAULT_PARAMS` and is
+  listed. Candidates: base window — its `_smm` file, the untagged file; crisis window — its own
+  output file, its other SMM file, the untagged file, the base point (read field by field, as
+  before). A crisis window's ability distribution is the base point's whichever wins.
+  `USE_AS_SEED = false` perturbs the chosen start (:1024). `:clusters` reads the tagged bank
+  (:1043) and injects the base point through `point_in_spec` (:1065); `INCLUDE_PREV_OPTIMUM`
+  reads `OUT_JLS` (:1091). `point_in_spec(b, spec; estimated_only)` (`smm.jl`:84) maps a stored
+  point into a spec, bit for bit where free set and box agree.
+- **MCMC** (`code/mcmc/`). Seed (`MCMC_main.jl`:641): `estimate_<w>W_smm.jls` on every route but a
+  crisis chain, which reads `estimate_<crisis>W_smm_mcmcbase.jls` and stops unless its ability
+  distribution equals that of `estimate_<base>W_mcmc.jls` bit for bit (:651); another MAJOR
+  version stops (:650). It does not read `CRISIS_BASE`. A chain run writes
+  `estimate_<w>W_mcmc.jls` (:1883): the posterior mean (the t-space mean where the reported one
+  does not solve), stage `:mcmc` or `:mcmc_aborted`, `sim = spec.sim`, se (curvature, bound,
+  chain), `se_source = :chain`, the vacancy costs at θ̄ with the delta-method errors, the
+  attracting check at θ̄ (:1886, four solves, printed only when it fails), the diagnostics and
+  `mcmc.seed`, the seed file's name. It never writes an SMM bundle. The chain-free pass adds
+  `se` (with `se_source = :jacobian_<MCMC_JAC_METHOD>`), the costs' errors and the attracting
+  check to the SMM bundle it read, only if that file still holds the point it started from
+  (:1858). `MCMC_CHECKPOINT` governs only `estimate_<w>W_mcmcbest.jls` (`promote!` :922, stage
+  `:mcmc_checkpoint`); the `_backup_Q` copy and the "Re-run smm_main.jl" advice are gone, and
+  the end-of-run line says where the best visited point is (:1826). The chain snapshot to
+  `output/chains/chain_<w>W.jls` every `MCMC_LMR_PRINT` generations no longer depends on it
+  (`on_dump = snapshot_chain` :1098), so a run killed before the sampler returns keeps its
+  draws. CSVs: `mcmc_results_<w>W_smm.csv` (chain-free) or `_mcmc.csv` (chain) (:1545).
+  `demc.jl`:423 takes the seed's logπ at θ0 itself instead of chain 1's, which is wrong unless
+  `MCMC_INIT` is `:at_seed` or `:widths`.
+- **Transition** (`code/transition/`, `code/plots_and_tables/transition.jl`). `transition_main.jl`
+  includes `bundle.jl` (:140) and `version.jl` (:105), whose absence stopped every run at the
+  first `read_bundle` (UndefVarError) and at the save. `POINT_ESTIMATE` (:40) picks the `_smm`
+  or the `_mcmc` file for both windows of a pair; `SCENARIO_BUNDLES` and its ξ_S backup path
+  are gone (the backup stays on disk). `point_estimate(window, W, point)`
+  (`transition_simulation.jl`:64) refuses another MAJOR version and `:mcmc_aborted`;
+  `check_pair` is unchanged. The tables phase reads the two files each transition file
+  records (`load_all_smm_bundles!(; scenarios)` :146, by name in the tree's `estimates/`); a
+  bundle without `sim` is solved at its own `spec.sim` in memory (`_bundle_sim` :173), never
+  written back. That removes the TypeError the tables phase hit (v56.0.4 `transition.jl`:178) on a
+  bundle with `sim = nothing`.
+- **Other readers** pass `point` explicitly: `POINT_ESTIMATE` (default `:smm`) in
+  `solver/model_main.jl`, `policy/policy_main.jl` and `tools/` (`check_tau_margin`,
+  `ojs_continuity_probe`, `plateau_probe`, `rank_diagnostic`, `transition_audit`, `width_audit`,
+  where it replaces `ROYSEARCH_WIDTH_BASE`, now in `LEGACY_ENV_KEYS` with a pointer to the
+  constant and checked at the tool's start, :59); `:smm` in `tools/test_generator.jl` and
+  `smoke/smoke_transition.jl`. `tools/migrate_bundles.jl` carries every estimate file of a
+  window, the untagged one included (:93); the smoke tests read the base point through
+  `point_in_spec`.
+- **Gates.** `gates/check_pair_map.jl` (new, run by `check_repo.sh`) reads smm_main.jl's
+  `_PAIR_BASELINE` from its parsed source, without running the driver, and fails unless it names
+  the same pairs as `PAIR_BASE`. `check_hire_margin.jl` checks every tagged estimate on disk
+  (:68), `check_threading.jl` the first (:60); `check_output_tree.jl` lists `_postmean` as debris
+  (:109); `check_repo.sh` lists the warm-start candidates. `check_forwarding.jl` check 4 reads
+  the launchers in `code/ops/` (:288): it read `code/scripts/`, empty since the launchers moved,
+  so it had checked nothing.
+- **VM script** (`code/ops/vm_run.sh`). `ROYSEARCH_INIT_MODE=warmstart` with a one-line comment
+  in place of `default` and a comment no longer true; the force-add of
+  `output/tables/smm_estimates_*.csv`, a path that has not existed since v19.6.0, is gone
+  (`git add -A output/estimates` covers every v57 name: `git check-ignore` matches none).
+- **Docs.** README: "Estimate files, and the two estimation paths" (file table; each path step by
+  step with the file each step reads and writes; `CRISIS_BASE`; `POINT_ESTIMATE`; the warm
+  start); the wage points and the top cell under "Continuity of the criterion"; the transition
+  and standard-error sections; a verification row for `check_pair_map.jl`. The copy-over
+  warm-start advice is gone. SETTINGS.md: "Settings that choose a file", and graveyard entries
+  for `SCENARIO_BUNDLES` and `ROYSEARCH_WIDTH_BASE`.
+
+### Measured, not asserted (scratch trees, estimation grids, 2 threads)
+- **Q at the stored points, and the gap to the exact-quantile reference:**
+
+  | window | v56.0.4 | v57 | v57 − reference |
+  |---|---|---|---|
+  | base_fc | 4377.327871 | 5609.8087 | −1.7e-5 |
+  | crisis_fc | 2730.395707 | 3419.6248 | −3.2e-5 |
+  | base_covid | 3877.568377 | 4927.6920 | −2.8e-5 |
+  | base_covid_ξS | 3935.549800 | 5249.7881 | −4.9e-5 |
+  | crisis_covid | 2115.636010 | 2245.9995 | −5.3e-6 |
+
+  Every gap is the reference's 4-decimal rounding. Q against an independent 60-step
+  bisection on the same points agrees within 1.6e-11. On the integrated tree the warm start
+  prints the same four values for the untagged files (5609.808683, 3419.624768, 4927.691972,
+  2245.999495).
+- **Percentiles and overlaps against exact evaluation:** within 3.8e-13 sampling SDs at all
+  five points.
+- **Wage-point masses** (scratch exact). Skilled: equal to employed mass to 3e-11. Unskilled
+  at base_fc: aggregate +0.28% (points 0.625287 against rows 0.623526), tail +0.32%
+  (quadrature 0.555136 against the identity 0.553375), largest row 0.79% (row 35). Unskilled
+  at base_covid: +0.19%, +0.20%, 0.56% (row 28).
+- **Continuity.** Bisected crossings, with max |ΔQ| at a crossing:
+  - base_fc: u 43 crossings, 7.3e-9; w 91, 7.8e-10; b_U 231, 9.0e-10; Gauss–Newton step 92,
+    2.8e-7; σ_S 306, 3.6e-6 (one non-wage crossing, see Known gaps).
+  - A + P_S at the other four windows: 56 / 70 / 62 / 72 crossings, max 3.7e-8.
+  - Before the change the same scans gave jumps up to 1.75 (base_fc) and 4.9e-2 (base_covid_ξS).
+- **Gauss–Newton step at the stored points** (Ĝ adaptive-FD, se the J⁻¹ errors). ‖δ/se‖ is
+  8.77 (base_fc), 18.96 (crisis_fc), 24.66 (base_covid), 11.72 (crisis_covid). At base_covid
+  the linearisation holds to t ≈ 0.1 and the line minimum is Q 4258.29 at t = 0.447, 11.0 se
+  from the stored point; the other three reach theirs at t ≈ 1.01–1.02.
+- **Grid refinement at base_fc**, ΔQ against (160,160,180): Np_U 320 −18.41; Nx 240 −0.52;
+  Np_S 360 +0.19. The largest wage-moment changes are p10_wage_U +0.154 SD (Np_U) and
+  p25_wage_S +0.135 SD (Np_S).
+- **Time per evaluation at base_fc:** 0.1325 → 0.1361 s at 2 threads and 0.2033 → 0.2069 s
+  at 1 thread; the moment layer takes 5.3 → 14.9 ms.
+- **`transition_audit` with `TA_NULL=true`:** fc and covid are bit-identical to v56.0.4 at
+  `TA_NX` = 120 (terminal gap 2.23e-9 and 4.58e-9).
+- **The two paths, end to end** (a scratch tree whose `output/` held copies of the four untagged
+  estimates and the base_fc chain; SMM at `SA_MAX_ITER=2 SA_MAX_REHEATS=0 SMM_POLISH=false`,
+  chains at `MCMC_N=8 MCMC_GENS=12`):
+  - base_covid by SMM: the warm start lists `estimate_base_covid_diagonalW_smm.jls` absent and
+    the untagged file at Q 4927.691972, and starts there; only the `_smm` bundle and its CSV
+    are written. With `CRISIS_BASE=mcmc` from the same state: the same file, the CSV
+    byte-identical, the parameter vector bitwise equal.
+  - crisis_covid by SMM on the SMM base: four candidate lines (own and `_smm_mcmcbase` absent,
+    the untagged file 2245.999495, the base point 14405.713516); writes the crisis `_smm`.
+  - base_covid chain: writes `_mcmc` (Q(θ̄) 4898.152649; best visited 4875.519, seed 4927.692),
+    its CSV and the chain file; the `_smm` file is byte-identical before and after.
+  - base_covid chain-free pass: the `_smm` parameter vector, loss, stage, `sim`, fixed values,
+    provenance and tag unchanged; `se` (curvature, bound, chain) and `se_source = :jacobian_fd`
+    added; `mcmc_results_base_covid_diagonalW_smm.csv` written; 168 solves.
+  - crisis_covid by SMM on the chain base: writes `_smm_mcmcbase`, its fixed ρ_x
+    −0.4941375408702589, the base `_mcmc` value bit for bit (−0.49412406238821294 at the SMM
+    base). The crisis chain seeds from it, passes the ability check and writes the crisis
+    `_mcmc` (Q(θ̄) 2234.090955); given a seed made on the SMM base it stops in one line and
+    writes nothing.
+  - Refusals, each one line, nothing written: a v56 file under a v57 name (smm_main.jl on a
+    crisis window, MCMC_main.jl, the transition), an aborted base chain, `CRISIS_BASE=foo`, a
+    crisis chain without `_smm_mcmcbase`, an exported `ROYSEARCH_WIDTH_BASE`. A warm start with
+    no candidate starts from `DEFAULT_PARAMS`; an unreadable one is listed as such.
+  - The transition at both `POINT_ESTIMATE` values on the covid pair, in a copy without Plots:
+    the endpoints solve at Q 4927.691972 and 2245.999495 (`:smm`) and 4898.152649 and
+    2234.090955 (`:mcmc`). Both accept the 240-month horizon (`:smm` 26 + 14 iterations, change
+    on months 0–36 3.049e-4, as before the fix; `:mcmc` 25 + 14, 3.055e-4) and write the
+    transition file and the five tables from exactly the two recorded bundles; nothing in
+    `estimates/` changes. At the base point the stationary mean log wages agree with the moment
+    layer to 3.0e-4 (U) and 2e-6 (S).
+- **The re-weighted figures** at the stored base_covid point (Plots replaced by stubs that
+  record each series): employment by ability sums to the wage-point masses (unskilled
+  0.553173422246, skilled 0.347208772837, both to 2.2e-16 relative), with the new matches
+  7.25% of unskilled employment; the skill premium is finite for the 103 of 160 types employed
+  in both markets, 0.2847 to 0.4491, and equals a direct evaluation from the wage points' own
+  definitions to every printed digit at the median type.
+- **Gates:** every changed file parses; `check_forwarding` reports only the known
+  `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` row, and check 4, now reading `code/ops/`, finds nothing in
+  the three launchers; `check_pair_map` OK; `check_threading -t 2` at base_fc Q =
+  5609.8086833222, threaded bitwise equal to serial; `check_hire_margin` 0 disagreements on
+  every tagged estimate; `check_dead_settings` PASS; `check_structure` the same 7 files as
+  before; `check_output_tree` PASS on the scratch output and lists a `_postmean` file as
+  debris; `migrate_bundles.jl verify` loads all ten estimate files; smoke `guard` and `clusters`
+  PASS. `vm_run.sh` ran in scratch as far as its julia call, with git and shutdown stubbed and
+  the call pointed at the spec-only driver: every export accepted, the warm start chose the
+  untagged base_covid file.
+
+### Settings
+- **Added:** `CRISIS_BASE` (`smm_main.jl`:169, `:smm` | `:mcmc`, default `:smm`; registry
+  `:inert`, since the shipped `WINDOW` is a base window).
+- **Re-defaulted:** `MCMC_CHECKPOINT` `true` → `false` (`:inert`), and it now governs only the
+  `_mcmcbest` file; `MCMC_BURN` 0.75 → 0.8, the last 1,000 of the 5,000-generation budget.
+- **Retired:** `SCENARIO_BUNDLES` (transition_main.jl constant) and `ROYSEARCH_WIDTH_BASE`
+  (`width_audit.jl`, now in `LEGACY_ENV_KEYS`); `POINT_ESTIMATE` constants replace both. See
+  SETTINGS.md.
+- **Launcher:** `code/ops/vm_run.sh` exports `ROYSEARCH_INIT_MODE=warmstart`.
+
+### Known gaps
+- **Tail quadrature, not part of the fix.** The unskilled tail by quadrature exceeds its
+  identity eU_rowU − eU_entry by 0.32% at base_fc (0.20% at base_covid). The excess is first
+  order in the p-grid: +0.161% at Np_U 320 and +0.081% at 640. It is the source of the
+  Np_U refinement gap above. The weights are not normalised.
+- **A non-wage step at the floor of the skilled grid, present in v56.0.4 too.** Along σ_S at
+  base_fc, s = 4.1220759, p*_S of type 108 crosses p_1. Q steps by −3.6e-6 (ur_S +5.9e-7 SD,
+  sep_rate_S +5.2e-7 SD); v56.0.4 gives −3.56e-6 at the same point.
+- **A p^oj crossing (type 88, s = 10.447) steps Q by −9.4e-7**, with p10_wage_S 1.3e-8 SD
+  and ee_rate_S 1.2e-8 SD. It is below the 1e-6 criterion.
+- **Rejected solves met by the scans**, identical in v56.0.4:
+  - base_fc along σ_S at s = −22.655 (R1 = 1.62) and s = 8.718 (R1 = 2.99);
+  - crisis_fc along A + P_S at s = 0.0535 (R1 = 8014);
+  - crisis_covid's window [0.020511177, 0.020565618] (R1 = 1.282).
+
+  In each case both blocks report converged and the battery rejects on R1. The scans skipped
+  the rest of each affected interval.
+- **A transition file is about 1.59 GB** (1,586,038,862 bytes for the covid pair) and lands in
+  `output/transition/`, which git tracks; GitHub refuses files over 100 MB. Proposed, not
+  applied: `/output/transition/transition_*.jls` in `.gitignore`.
+- **The transition file and the tables do not name the point.** `transition_<sc>W.jls` and
+  `output/tables/*W.tex` are the same at `POINT_ESTIMATE = :smm` and `:mcmc`, so the second run
+  replaces the first; the transition file records the point and its two bundles.
+- **The x̄ table is blank, as before v57.** `_get_x_bar` (`plots_and_tables/transition.jl`:881)
+  looks for a sign change of net_T − Usearch node by node, but net_T is indexed by a_S and
+  Usearch by a_U; at both covid points the difference is negative at every node, so every
+  cell prints "--".
+- **The horizon test reads the mean wages in logs now.** Its criterion is each series' change
+  relative to its own scale, so on the wage series it is about as loose as the log wage is
+  large (≈ 6.5). On the covid pair it does not bind: the largest change is the one measured
+  before the fix (3.049e-4 at `:smm`, against 1e-3), so a non-wage series sets it, and the
+  accepted horizon is 240 months either way. Testing the log-wage series by their absolute
+  change would restore the level test's strictness to first order.
+- **Plots does not build in the sandbox** (GR_jll: "Incompatible processor"), so
+  `transition_main.jl` and `model_main.jl` stop at `using Plots`; the panels, the scatter and
+  the figures themselves were not drawn. The transition and its tables ran in a copy without
+  Plots; the two re-weighted figures' series were checked through stubs.
+- **`run_smoke.sh warmstart` fails SMOKE 4**, as before v57 (max |Δ| 6.284e-02, the same): the
+  test's zero-step iteration takes a real move since v40.1.0. Its fix awaits the author.
+- **`policy/` does not load** (known); only its unskilled mean-wage weighting changed.
+
+### Tried and rejected
+- **A uniform log-wage grid with cloud-in-cell assignment, its range from the min and max of
+  every node's log wage, at 2,000 cells** (the specified reference implementation). At base_covid_ξS
+  one skilled node wage is 0.038 (log −3.27) while the points lie in [4.43, 7.67], so the
+  range spans 11 log units. The grid then misses the exact quantiles by up to 1.35e-3 SD,
+  halving the spacing moves p90_wage_S by 1.0e-3 SD, and Q differs from exact by −0.118
+  (−0.007 to −0.025 at the other four points). At 4,000 cells the gaps are 3.4e-4 SD and Q
+  −0.029. The moment layer took 17.3 ms at 2,000 cells, against 14.9 ms for exact evaluation.
+  Rejected for exact evaluation, which is both faster and free of discretisation error.
+- **Newton with the convergence test after the bracket test.** A converged step at 4e-16 rounded
+  to the bracket end and was read as leaving the bracket. S p90 then took 28 passes over the
+  points instead of 5. The test now comes first.
+- **One pair map for every script, smm_main.jl included.** It changed the block the author
+  uses as the landmark for the crisis switch; smm_main.jl keeps `_PAIR_BASELINE` byte for byte
+  and `check_pair_map.jl` holds the two equal, statically rather than by a runtime line.
+- **Tagging the files by a field inside RunProvenance** (the seed file's name): the struct is
+  read by field position, so a new field would make every stored bundle unreadable. The chain
+  estimate records it as `mcmc.seed`, a NamedTuple read by name.
+
+---
+
+## v56.0.4 — 2026-10-12
+
+**PATCH: one console column of `MCMC_main.jl`.** The chain route's table gains an R̂ column
+after |t|(bnd), ticked ✓ where R̂ ≤ `MCMC_RHAT_MAX`; every CSV is byte-identical to v56.0.3's
+(measured below).
+
+**Comparability.** Full. No stored output is superseded.
+
+### What changed (`code/mcmc/MCMC_main.jl`)
+- Header (:1460) and parameter rows (:1625): `%7.3f` of `rhat[k]`, the split R̂ on the retained
+  draws that the `R̂ max=… (gate ≤ …)` line takes its maximum over, then ` ✓` where
+  `rhat[k] <= MCMC_RHAT_MAX` and two blanks otherwise, so the RAIL / edge flag stays in one
+  column. The header reserves the two blanks, so the box still spans the widest row (✓ and
+  RAIL: 109 of the box's 110 columns). The k_U, k_S rows leave the cell blank; the JAC_ONLY
+  table has no R̂ column. The merged R̂ / ESS line is unchanged; comments :1456 and :1522 say so.
+
+### Measured, not asserted
+Scratch tree, the v56.0.3 test (base_fc at a copy of the stored estimate, 2 threads; chain
+`ROYSEARCH_MCMC_N=8 ROYSEARCH_MCMC_GENS=24`; `ROYSEARCH_MCMC_JAC_ONLY=true`; every other
+setting at its current default): both CSVs byte-identical to v56.0.3's (sha256 694b32fb…,
+b9f4c5cd…); the JAC_ONLY console identical apart from the version. On the chain route the 14
+R̂ cells equal the CSV's `rhat` to three decimals, their maximum is the header line's 2.703, and
+none is ticked (1.624 to 2.703 at this budget; the author's 2026-10-12 base_fc run, read from
+its CSV, spans 1.298 to 1.656, so it would print no tick either). The tick and flag layout was
+checked by rendering the row format with R̂ = 1.042, 1.099, 1.100, 2.703 and NaN beside RAIL and
+edge. `MCMC_main.jl` parses; `check_version_sync` in sync at 56.0.4; `check_forwarding`,
+`check_dead_settings`, `check_structure` and `check_output_tree` report v56.0.3's findings.
+
+### Settings
+None.
+
+### Known gaps
+- No run of the chain route has produced a tick: its branch was checked by rendering only.
+
+### Tried and rejected
+Nothing was measured and rejected in this version.
+
+---
+
+## v56.0.3 — 2026-10-12
+
+**PATCH: one console flag of `MCMC_main.jl`.** The parameter rows of the chain route's table
+no longer end in an `R̂` flag; R̂ is stated once, as the attained maximum against its gate, on
+the box-header line. Every CSV is byte-identical to the unedited tree's (measured below).
+
+**Comparability.** Full. No stored output is superseded.
+
+### What changed
+- `code/mcmc/MCMC_main.jl`:1620: the row flag is `RAIL` or `edge` only; the `R̂` branch
+  (`draws_ok && rhat[k] > MCMC_RHAT_MAX`) is gone. The comments at :1457 and :1462 no longer
+  list R̂ among the flags. The JAC_ONLY table never carried it (no draws).
+
+### Measured, not asserted
+Scratch trees of the repository before and after the edit, base_fc at a copy of the stored
+estimate, 2 threads, chain `ROYSEARCH_MCMC_N=8 ROYSEARCH_MCMC_GENS=24` and
+`ROYSEARCH_MCMC_JAC_ONLY=true`, every other setting at its current default: both CSVs
+byte-identical before and after (sha256 694b32fb…, b9f4c5cd…; the chain hash is not the one in
+v56.0.2's entry because the test runs at the current defaults). Apart from the scratch trees'
+paths, the console differs only in the 14 parameter rows, which lose their trailing `R̂`, and in
+the version. `MCMC_main.jl` parses; `check_version_sync` in sync at 56.0.3; `check_forwarding`,
+`check_dead_settings`, `check_structure` and `check_output_tree` report v56.0.2's findings.
+
+### Settings
+None.
+
+### Known gaps
+Nothing new; v56.0.1's other gaps stand.
+
+### Tried and rejected
+Nothing was measured and rejected in this version.
+
+---
+
+## v56.0.2 — 2026-10-12
+
+**PATCH: one console line of `MCMC_main.jl`.** The posterior-mean bundle line no longer
+prints Q(θ̄), which the estimate line above it already gives; every CSV is byte-identical
+to v56.0.1's (measured below).
+
+**Comparability.** Full. No stored output is superseded.
+
+### What changed
+- `code/mcmc/MCMC_main.jl`:1872: `posterior mean bundle → <file>` in place of
+  `posterior mean bundle: Q(θ̄)=… → <file>`, the duplicate listed under v56.0.1's known
+  gaps. On the t-space fallback the bundle's own Q still prints, on the fallback line.
+
+### Measured, not asserted
+Scratch tree, the v56.0.1 test (base_fc at a copy of the stored estimate, 2 threads; chain
+`ROYSEARCH_MCMC_N=8 ROYSEARCH_MCMC_GENS=24`; `ROYSEARCH_MCMC_JAC_ONLY=true`): both CSVs
+byte-identical to v56.0.0's and v56.0.1's (sha256 694b32fb…, fc278af8…). Apart from the scratch
+trees' paths, the console differs from v56.0.1's in that line and the version only. `MCMC_main.jl`
+parses; `check_version_sync` in sync at 56.0.2; `check_forwarding`, `check_dead_settings`,
+`check_structure` and `check_output_tree` report v56.0.1's findings.
+
+### Settings
+None.
+
+### Known gaps
+Nothing new; v56.0.1's other gaps stand.
+
+### Tried and rejected
+Nothing was measured and rejected in this version.
+
+---
+
+## v56.0.1 — 2026-10-12
+
+**PATCH: console output of `MCMC_main.jl` only.** Both routes write a byte-identical CSV, and
+every field of the chain file and of both bundles is equal to v56.0.0's apart from the
+version and time stamped in their provenance (measured below).
+
+**Comparability.** Full. No stored output is superseded.
+
+### What changed (`code/mcmc/MCMC_main.jl`)
+- Table, last column (:1615, :1654, :1658): |t|(bnd) is formed against θ̂ on the chain route
+  too, `_abs_t(pe, se_bnd[k])` and `_abs_t(pe, se_bnd_k[i])`, so it is the JAC_ONLY column
+  and the CSV's `abs_t_bound` in every row. |t|(chain) and |t|(J⁻¹) are still formed against
+  the reported estimate; the CSV header comment (:1563) and the row comments say which is
+  which. Under JAC_ONLY the reported estimate is θ̂, so that table does not change.
+- Box header (:1524): one line, `R̂ max=… (gate ≤ …)  ESS min=… (gate ≥ …)`. The attained
+  values printed NaN on every run, because the reductions were seeded with `init = NaN` and
+  max and min propagate NaN. The line `logπ(θ̂)=…  max logπ=…  gates: …` is gone, and with it
+  the solve `logposterior(θ0)` it alone used: logπ(θ̂) = −Q(θ̂)/2 is printed as Q(θ̂) below the
+  table, and max logπ is on the last progress line.
+- `seed drift=…` (:1498) prints only where the drift abort is armed (`MCMC_CHECK_EVERY > 0`
+  and `MCMC_DRIFT_MAX > 0`, the condition at `demc.jl`:823-825) or the run aborted.
+- Below the table (:1693): `estimate = mean of the pooled post-burn-in draws; se(chain) =
+  their SD` and `Q(θ̄)=…   Q(θ̂)=…`, two lines in place of fourteen. Q(theta_best) is on the
+  promotion line.
+- Posterior-mean bundle (:1872): one line, `posterior mean bundle: Q(θ̄)=… → <file>`, without
+  the warm-start instructions or the `(reported)` / `(t_space_fallback)` tag (a fallback
+  prints its own line); the variable `used` that held the tag is gone. The infeasible
+  branch is one line.
+- Bundle sealing (:1959): the NOTE on a bundle without a simulated panel is deleted, with
+  its comment block; one comment at `sim = _est.sim` records that
+  `plots_and_tables/transition.jl` reads `bundle.sim` unguarded (:178, :399, :876; the
+  deleted comment named `transition/plots_and_tables.jl`).
+- `README.md`, Standard errors: the CSV row says 20 columns (it said 17) and that the
+  console's |t|(bnd) is `abs_t_bound`; a new row lists `estimate_{window}{W}_postmean.jls`,
+  with the warm-start use the console no longer prints.
+
+### Measured, not asserted
+Scratch trees (code copied, `data/` symlinked), base_fc seeded at a copy of the stored
+estimate (sha256 d05cc98d…), restored before every run, 2 threads. Chain route
+`ROYSEARCH_MCMC_N=8 ROYSEARCH_MCMC_GENS=24` (6 retained generations, 48 draws; split R̂ needs
+4, so 12 generations give NaN by construction); chain-free route `ROYSEARCH_MCMC_JAC_ONLY=true`.
+
+| | v56.0.0 | v56.0.1 |
+|---|---|---|
+| CSV, JAC_ONLY (sha256) | 694b32fb… | 694b32fb… (byte-identical) |
+| CSV, chain (sha256) | fc278af8… | fc278af8… (byte-identical) |
+| JAC_ONLY bundle | — | byte-identical |
+| chain file, chain-route bundles | — | equal in every field but provenance (and the chain file's `seed_jls`, the scratch path) |
+| console \|t\|(bnd) = CSV `abs_t_bound`, JAC_ONLY | 16 of 16 rows | 16 of 16 |
+| console \|t\|(bnd) = CSV `abs_t_bound`, chain | 10 of 16 | 16 of 16, and equal to the JAC_ONLY column |
+| R̂ max / ESS min printed (CSV: 3.430 / 48) | NaN / NaN | 3.430 / 48 |
+
+The six rows that moved on the chain route: A 195.22 → 195.21, α_U 5.25 → 5.26, μ_S 40.26 →
+40.28, λ_U 101.57 → 101.61, θ_U 373.33 → 373.37, θ_S 153.38 → 153.37. No other console
+column moved, and the JAC_ONLY console is identical apart from the banner.
+
+Gate: `MCMC_main.jl` parses (`Meta.parseall`); both routes run end to end;
+`check_version_sync` in sync at 56.0.1; `check_forwarding` only the known
+`ROYSEARCH_MCMC_JAC_ALLOW_GAPS`; `check_dead_settings` PASS (188 keyword arguments);
+`check_structure` the same 7 files; `check_output_tree` PASS on the scratch tree. Every
+finding is identical to v56.0.0's on the same tree.
+
+### Settings
+None.
+
+### Known gaps
+- The printing branch of the seed-drift line did not run: the test had no stopping test and
+  no abort. Its condition is the one `demc.jl` aborts on.
+- With a stopping test armed, a run that stops between progress lines no longer prints its
+  final population's max logπ: demc prints the progress line at multiples of
+  `MCMC_PRINT_EVERY` and at the last requested generation only.
+- On a converged chain the estimate column holds θ̄ while |t|(bnd) is |θ̂|/se(bound), so in
+  those rows |t|(bnd) is not the row's estimate over its se(bound).
+- Q(θ̄) is printed twice, on the estimator line and on the posterior-mean bundle line, from two
+  solves of the same point unless the t-space fallback fires.
+- `check_threading` and `check_hire_margin` were not run: no solver or SMM file changed.
+- README, chain-free route row: still "Ĝ regressed on a `local_design` around θ̂, ≈ 600
+  solves"; under the shipped `MCMC_JAC_METHOD = :fd` it is the adaptive FD, 168 solves at
+  base_fc. Not changed here.
+
+### Tried and rejected
+Nothing was measured and rejected in this version.
+
+---
+
+## v56.0.0 — 2026-10-11
+
+**MAJOR: the optimiser's coordinates for the two markets are the tightnesses θ_U and θ_S,
+and the vacancy costs k_U and k_S are computed from free entry in every evaluation**
+(`tightness_reparam_spec.md`, approved by the author 2026-10-11). The model and the
+estimator are unchanged: given (θ_U, θ_S) the stationary state is unique and free entry
+gives each cost in closed form, k_j = q_j(θ_j) J̄_j / π̄_j, while the map from costs to
+tightnesses is a correspondence (unskilled free entry has three zeros at both COVID
+estimates). Minimising Q over the parameter vector with the tightnesses in it is the
+best-fitting-equilibrium estimator exactly, every evaluation is one equilibrium solved in
+one pass, and Q has no branch switches. k_U and k_S stay estimated parameters and every
+table lists them. The parameter vector, the bundle schema and the free-parameter keys change,
+so the theorist must be told; Q at every stored estimate is reproduced to solver tolerance.
+
+**Comparability.** Q and every moment at the stored estimates are unchanged to the solver's
+tolerance (table below), so v55 estimates and v56 estimates are comparable. Every estimate
+bundle in use was rebuilt into the new parameter vector, once, by hand, outside the codebase
+(below). Superseded and not rebuilt: the candidate banks (their cache key holds the free-
+parameter names and the box, so the next `:clusters` run regenerates them; the base_covid
+bank was already invalid after today's b_S box edit), the chain `output/chains/
+chain_base_fc_diagonalW.jls` (a chain's draws under a prior over k are not draws under the
+prior over the new parameter vector, so no conversion is exact), and the ten
+`estimate_base_fc_diagonalW_*` backup/postmean files, which no current code can read (struct
+shapes from before v49).
+
+### What changed
+- **Solver.** `solve_at_tightness!(model, θU, θS)` (`solver/solver.jl`:265): the unskilled
+  block at θ_U (`solve_unskilled_block!(...; θU_fixed)`, `unskilled.jl`:582), then the skilled
+  block at θ_S with κ_U and E_U(a_U,1) from it, then τ and the masses at the solved U_S, then
+  the costs, installed in the parameter blocks (`_with_k` :298). U^search(a_U) does not read
+  U_S (training enters only τ), so the dependence between the blocks runs one way and no
+  outer loop is needed. A market that holds no one is priced at the limit of its composition
+  (`corner_limit`, as in `solve_model!`). With the costs installed the state is an
+  equilibrium of the model at those costs in every condition, so the residual battery is the
+  certification unchanged (R2 = 0 to rounding by construction). `solve_model(...; tightness)`
+  (:70) selects it. Free entry is split into its objects and the two directions:
+  `unskilled_meeting_value` (`unskilled.jl`:516), `update_theta_unskilled` (:547, the same
+  expression as before, so every fixed-cost solve is bitwise unchanged),
+  `vacancy_cost_unskilled` (:563), `vacancy_cost_skilled` (`skilled.jl`:676).
+  `solve_model!`, `skilled_equilibria` and the FreeEntryMap stay for exercises that hold the
+  costs fixed.
+- **Parameters** (`smm/smm_params.jl`). `(:unsk, :tight)` in [0.05, 3.0] and `(:skl, :tight)`
+  in [0.10, 5.0] replace the two costs (:687); ASCII keys `:unsk_tight` / `:skl_tight` in both
+  key maps; `FIX_PARAMS` with `:unsk_k` or `:skl_k` raises (`_COST_KEYS` :847).
+  `unpack_θ` (:987) returns `(cp, up, sp, tight)`, the blocks carrying `k = NaN` until the
+  solve computes it; `_baseline_param_value` (:884) reads the tightnesses. `VACANCY_COSTS`
+  (:710) labels the cost rows of every table. `BUNDLE_SCHEMA = 3` (:337).
+- **Evaluation** (`smm/smm.jl`). `equilibrium_at(θ, spec)` (:163) → `(Q, moments, model, k)`
+  replaces `select_equilibrium(θ, spec)`; `smm_objective` (:256) keeps its signature and
+  return and loses `branch`. `select_equilibrium(model, spec; branch)` (:208) and
+  `equilibrium_tag` stay for fixed-cost exercises. `attracting_check` (:297): D_ij =
+  ∂ln k_i/∂ln θ_j by central differences of `ATTRACT_STEP` = 0.01 in ln θ_j (:284, 4 solves);
+  market verdict D_UU < 0 and D_SS < 0, joint tr D < 0 and det D > 0; `attracting_line` (:326)
+  is the one line printed when a verdict fails. `print_results` and `save_results` list
+  k_U, k_S beside the free parameters; `_params_to_namedtuple(θ, spec)` (:2841).
+- **Bundle** (`smm/bundle.jl`): fields `vacancy_costs = (k, se, post)` and
+  `attracting = (D, market, joint)`.
+- **SMM driver** (`smm/smm_main.jl`): `DEFAULT_PARAMS` has `:unsk_tight => 0.8224582555625224`,
+  `:skl_tight => 1.8287428145020777` (:342, the hand point M0.1's solved tightnesses under
+  v54.0.0) in place of the two costs; every other seed and the b_S box are as the author set
+  them today; the seed comment says so. §10 (:1223) computes the costs and the attracting
+  check at the estimate and stores both.
+- **Standard errors and the chain** (`mcmc/`). `jacobian_adaptive_fd(...; n_carried)`
+  (`mcmc_diagnostics.jl`:282) differentiates trailing outputs at the steps the moments select;
+  MCMC_main carries k_U, k_S through every Jacobian evaluation (`moments_and_k` :1181), so
+  their standard errors are the delta method's at no extra solve:
+  `se_bound_diagonal(G, W, σ̂, C)` (:437) evaluates both errors at linear combinations, here
+  the gradient of k. The SMM covariance does not depend on the coordinates, so these are the
+  errors a k-coordinate estimation reports, and the other parameters' errors are unchanged by
+  the change of coordinates. D is read off the Jacobian's tightness columns. The table and
+  `mcmc_results_*.csv` gain rows `k` per block; JAC_ONLY writes `vacancy_costs` and
+  `attracting` into the estimate bundle and nothing else. The chain records each draw's costs
+  from the evaluation that scored it (`_AT_POINT` :830, keyed by the point's hash), stored as
+  `k_draws` in the chain file and summarised in `vacancy_costs.post`. The prior is
+  `MCMC_PRIOR`'s over the new parameter vector, so flat in θ_U, θ_S where it was flat in the
+  costs. No gate changed.
+- **Transition** (`transition_simulation.jl`): each endpoint is the solve at its window's
+  tightnesses (`solve_endpoint` :132) and its costs are computed there; along the path every
+  parameter, the costs included, switches at date 0 and the tightness paths are solved from
+  free entry at every date, as before. No equilibrium selection at the endpoints.
+- **Other readers**: `gates/check_hire_margin.jl`, `tools/transition_audit.jl`,
+  `tools/check_tau_margin.jl`, `tools/ojs_continuity_probe.jl` and `tools/migrate_bundles.jl`
+  solve at the tightnesses; `smoke_transition.jl` solves z₀ at them and z₁ at z₀'s costs;
+  `plots_and_tables/transition.jl` reads moments from `equilibrium_at` and lists θ_U, θ_S, k_U,
+  k_S in the parameter tables (costs from `vacancy_costs`). `policy/` is untouched (it did not
+  load before either). README: "The tightnesses as parameters" replaces "Multiple skilled
+  equilibria"; the transition and standard-error sections say how the costs enter.
+
+### Bundle rebuild (scratch scripts outside the repository)
+The five bundles in use were copied to `output/backups/tightness_reparam_2026-10-11/` and
+byte-verified first. Each stored point was solved once under v55.0.0 (`select_equilibrium`, every
+one a unique root), and its seed in `spec.free` too; the rebuilt bundle keeps every other
+coordinate of θ bit for bit, puts the solved tightnesses in place of the costs in the new box
+(all inside it, so no bound moved), records the stored costs in `vacancy_costs.k`, and the
+attracting check in `attracting`; `migrated_from` gains the version the estimate came from.
+
+| bundle | sha256 before → after | Q, v55.0.0 | Q, v56.0.0 | ΔQ (relative) | k_U computed vs stored | k_S computed vs stored | max moment gap |
+|---|---|---|---|---|---|---|---|
+| base_fc | 92e3da9b → ff4de6c1 | 3560.0920827910 | 3560.0920747456 | −2.3e-09 | −3.4e-12 | −6.2e-09 | 1.9e-07 |
+| crisis_fc | 4c56efbb → bf001ecd | 1997.8722326122 | 1997.8722532032 | +1.0e-08 | −7.8e-09 | −9.6e-09 | 3.3e-07 |
+| base_covid (live, the author's SA checkpoint) | 85685140 → 5a9468a1 | 9516.9530618521 | 9516.9530683760 | +6.9e-10 | −7.3e-10 | +1.3e-12 | 1.6e-08 |
+| base_covid (ξ_S-route estimate, the backup) | 23c2ae2b → 2dfe1def | 3935.5499739559 | 3935.5497996394 | −4.4e-08 | −9.3e-10 | +1.3e-08 | 1.6e-06 |
+| crisis_covid | 32c8f63b → 4a174ef4 | 2207.7930668364 | 2207.7932128767 | +6.6e-08 | −3.6e-08 | +2.3e-08 | 1.1e-05 |
+
+Q is not bit-identical because the old Q came from the global loop and the new from one
+pass: both are the same equilibrium, each to its own tolerance (the old battery R2 at these
+points was 1.1e-05 to 3.9e-01 of tolerance). The stored `loss_opt` of base_fc (2957.41) and
+crisis_fc (1923.73) predate later code; the rebuilt bundles carry the v56 Q.
+
+Attracting check at the rebuilt estimates (D = ∂ln k/∂ln θ, rows k_U, k_S; columns θ_U, θ_S):
+base_fc [−0.5037 0.0110; 0.0029 −0.9904], crisis_fc [−0.6870 0.0130; 0.0051 −0.9560],
+base_covid live [−0.2208 0.0077; 0.0051 −0.9721], base_covid ξ_S route [−0.2080 0.0087;
+0.0043 −0.8525], crisis_covid [−0.2628 0.0105; 0.0078 −0.7671]: every verdict holds.
+
+### Measured, not asserted (scratch tree, estimation grids)
+Speed of one objective evaluation (median of 5 after one warm-up), and block solves per
+evaluation:
+
+| estimate | v55, 1 thread | v56, 1 thread | v55, 2 threads | v56, 2 threads | blocks v55 (U + S, global passes) | blocks v56 |
+|---|---|---|---|---|---|---|
+| base_fc | 6.467 s | 0.242 s | 4.399 s | 0.154 s | 122 + 122 (122) | 1 + 1 (0) |
+| crisis_fc | 6.365 s | 0.226 s | 4.267 s | 0.151 s | 122 + 122 (122) | 1 + 1 (0) |
+| base_covid | 8.050 s | 0.254 s | 5.402 s | 0.169 s | 117 + 117 (117) | 1 + 1 (0) |
+| crisis_covid | 7.279 s | 0.300 s | 4.904 s | 0.205 s | 97 + 97 (97) | 1 + 1 (0) |
+
+The v55 counts include the solves `skilled_equilibria` makes along the free-entry map.
+
+COVID check (base_covid ξ_S-route estimate, θ_S held at 1.8368271058): at the three unskilled
+zeros the multiplicity experiments report, θ_U = 0.5822, 0.6871, 0.8154, Q = 27326.303949,
+11908.993750, 3935.524598, and k_U is the estimate's 0.6174421292 to 2.3e-05, 1.1e-05, 1.0e-05
+(the roots' four digits). Refined to the zero of k_U(θ_U) − k̂_U: θ_U = 0.58218045, 0.68713786,
+0.81536030, k_U equal to 1e-14, Q = 27329.219151, 11904.409769, 3935.549800, battery Rmax
+8.0e-02 at each; D_UU = −0.674, +0.197, −0.208, so the attracting check marks the middle root
+as repelling.
+
+Delta method against a direct k-coordinate Jacobian (base_fc, unique equilibrium; simple
+central differences of 1e-3 of each value in both, the k-coordinate columns re-solving the
+tightnesses by Newton steps from the estimated root, 122 solves): se(J⁻¹) of k_U 4.198e-02
+against 4.178e-02 (gap −0.47%), se(bound) 1.871e-01 against 1.862e-01 (−0.51%); k_S 8.300e-03
+against 8.301e-03 (+0.007%), 1.7006e-02 against 1.7009e-02 (+0.018%); every other parameter's
+two errors agree to at most 1.0% (b_U −0.97%, λ_U se(bound) +1.0%), the finite-difference noise
+at these steps.
+
+`MCMC_JAC_ONLY` end to end at base_fc, 2 threads: 14 of 14 coordinates in 166 solves, cond(Ĵ)
+4.09e+06; θ_U 0.45875 (se(J⁻¹) 0.00119, se(bound) 0.00121), θ_S 1.21036 (0.00778, 0.00782),
+k_U 1.12064 (0.03867, 0.17011), k_S 1.25608 (0.00831, 0.01684); D from the Jacobian
+[−0.5036 0.0110; 0.0029 −0.9996], both verdicts hold, nothing printed.
+
+Threaded (2) and serial (1) agree bitwise: `check_threading -t 2` Q = 3560.0920747456 three times.
+
+Gate: changed files parse; the entry points load; `assert_all_params_accounted` passes for
+every rebuilt spec; `check_hire_margin` 0 disagreements; `check_dead_settings` PASS (188
+keyword arguments); `check_forwarding` only the known `ROYSEARCH_MCMC_JAC_ALLOW_GAPS`;
+`check_structure` the same 7 files; `smoke_transition.jl`, `run_smoke.sh guard` and
+`run_smoke.sh clusters` pass (an 18-candidate bank, the paired baseline injected as start 6);
+`transition_audit.jl TA_NULL=true` runs.
+
+### Settings
+New: none. `DEFAULT_PARAMS` keys `:unsk_k`, `:skl_k` became `:unsk_tight`, `:skl_tight`.
+No other setting added, retired or moved.
+
+### Known gaps
+- `run_smoke.sh warmstart` fails at its SMOKE 4 test ("SA's first solve is not the baseline
+  vector", max |Δ| = 6.284e-02); v55.0.0 fails it identically on the repository as it stands,
+  so it comes from the current settings and stored bundles, not from this change. Not
+  investigated.
+- `check_output_tree` rule 6 flags the `.pre_migration` files and Q-named backups in
+  `output/estimates/`, in v55.0.0 as in v56.0.0.
+- The stationary-solver standard errors of θ_U, θ_S in a bundle written before this version do
+  not exist; no bundle in use carried standard errors.
+- The single pass assumes the blocks' dependence runs one way, which holds in the code as
+  written for every κ_U (the training option does not enter U^search). Should the model
+  later give a crossing type a training option in its unskilled value, that changes.
+
+### Tried and rejected
+Nothing was measured and rejected in this version.
+
+---
+
+## v55.0.0 — 2026-10-11
+
+**MAJOR: the transition's match continuation ends a match where the cutoff has moved past
+it, the training slice's p = 1 atom is judged on its raw surplus, a crosser hired joins the
+slice of its type, and the output bundle carries the pre-switch steady state (`schema = 2`).**
+Every transition number changes (the fc and covid paths below); solver/, smm/ (except
+`version.jl`), mcmc/, gates/ and smoke/ are byte-identical to v54.0.0, and so is every Q.
+
+**Comparability.** Every Q, moment, selected root and estimate bundle is unchanged (table
+below). Every transition path from v54.0.0 or earlier is superseded. No v54 transition bundle
+exists in `output/transition/` (only the April `transition_fc_fullW.jld2`, which no code reads),
+so nothing is rebuilt. A schema-1 bundle has no `baseline`; the panels require schema 2.
+
+### What changed
+- **Continuation at a moving cutoff** (`transition/transition_values.jl`). `_continuation!`
+  (:99) is the positive part of the next date's surface above the boundary nodes (`_boundary`
+  :77: the last node below the cutoff, or the top two nodes when the cutoff lies above the
+  grid), the raw value at the boundary nodes, and 0 below them; it returns the boundary values
+  as an edge. Each date is solved with the edges in place; where the solution's boundary nodes
+  differ from an edge's, or the solve did not converge, `_drop_moved_edges!` (:114) takes that
+  edge's values out (the cutoff has moved past the node, the match ends, its continuation is 0)
+  and the date is solved again (`_unskilled_surface!` :160, and the skilled values and types
+  steps). Edges of zero weight are skipped. A steady state and every date whose boundary does
+  not move are solved exactly as before. The training slices mix their two continuations with
+  their edges weighted by the slice shares (`_scaled` :86, :612, :678).
+- **Training slice's p = 1 atom** (A1). `SUt1` stores the training slice's raw surplus at
+  p = 1 (`transition_values.jl`:680, :897; `transition_params.jl`:133); its positive part
+  continues wherever it is read as a value (:815, `transition_solver.jl`:552), and the forward
+  pass keeps the atom only where the raw surplus is ≥ 0 (`transition_solver.jl`:249). Before,
+  the stored value was the positive part, so the test never ended the atom.
+- **Crossers' hires** (A2). A skilled unemployed hired in the unskilled market joins the slice
+  of her type: the hire's value is U_tr + β S_t(a,1)⁺ where U_tr ≥ U_C, else U_C + β S_s(a,1)
+  (`transition_values.jl`:815). Forward, the share ω_X = max(d + τ − 1, 0)/d of a cell's
+  crossers that the frontier encloses enters the training slice's atom (`_enclosed_crossers`
+  `transition_solver.jl`:164, :342), and free entry values those hires at the training slice's
+  surplus (:548).
+- **Pre-switch steady state** (`transition/transition_simulation.jl`). `stationary_record`
+  (:152) is a one-step self-transition at z₀, measured by `path_statistics` like the path;
+  the bundle field `baseline` (:271) holds it; `TRANSITION_SCHEMA = 2` (:24). The panels
+  draw it before the switch (`plots_and_tables/transition_panel.jl`, `build_model_series`
+  :422, `_splice` :919, `_splice_agg` :931). Before, they took date 0, which is after the
+  date-0 reallocation (fc: ur 0.051392 and θ_U 0.179858 against the steady state's 0.053935
+  and 0.458752).
+- README: "Transition path" lists `baseline` and `schema = 2`.
+
+### Measured, not asserted (scratch tree, estimation grid Nx = Np_U = 160, Np_S = 180, 1 thread unless stated)
+Self-transitions (241 dates, 3 outer iterations, tol 1e-12), free-entry gap: base_fc 5.917e-12,
+crisis_fc 8.116e-08, base_covid 1.656e-09, crisis_covid 5.115e-08, the v54 values to every
+printed digit. Against v54 on the base_fc self-transition (same runs, 3 iterations): every θ,
+mass and rate moment agrees to ≤ 4.5e-13 (relative) or 1e-17 (shares); the value arrays agree
+to ≤ 6e-11 except `SUt1` (it now holds the raw surplus, up to −5160 where v54 stored 0) and
+`U_S^(1)` (A2, below); `d_region` (∬ d ℓ) is 0.441906 against 0.441004.
+
+base_fc → crisis_fc: 56 iterations at horizon 120 (gap 9.36e-05), 10 more at 240 (gap
+7.12e-05); the reported series moved by at most 1.199e-04 of their scale over months 0–36, so
+240 is the horizon. 5980 s. Free entry ≤ 2.896e-05 (U, t = 4), 7.122e-05 (S); population
+identity 5.692e-19; no negative mass. **A15: no (row, node) pair on any date in either block
+(v54: 284 pairs on dates 1–11).** Date-1 reallocation: 1.8823e-03 of the population quit into
+training (v54 1.5894e-03; the difference is A1), 2.6631e-03 swept, no match ended. Crossing
+choice: 336 reversals in 106 cells (1 at node level), skilled mass on them 0; τ 0 node-level
+reversals; OJS participation 3. At month 120 the path is away from its month-240 values by:
+training share +3.469e-02, ur_S +1.498e-02, skilled share −4.580e-03, ur +3.214e-03, ur_U
+−4.307e-04, θ_S −7.631e-04, θ_U −4.417e-06; within 1% from month θ_S 3.5, θ_U 10, ur_U 21.5,
+ur 57.5, skilled 85.5, ur_S 138.8, training 173.4. Terminal θ against z₁: U 1.809e-05, S −1.933e-04.
+
+base_covid → crisis_covid: 100 iterations at 120 (gap 9.46e-05), 10 at 240 (gap 9.90e-05,
+change 1.711e-04). 10337 s. Free entry ≤ 4.545e-05 (U), 9.902e-05 (S); identity 2.345e-18; no
+negative mass. A15: 0 dates (v54: 4). Date-1 quits into training 3.5073e-03 (v54 3.0919e-03),
+swept 3.7713e-03. Crossing: 780 reversals in 169 cells (10 at node level), skilled mass 0; τ 3;
+OJS 15. θ_U 0.9551 → 1.0513, θ_S 2.4236 → 2.3205. The path jumps at t = 4.5 (below).
+
+A1: on fc, 1,759,465 (cell, date) pairs in 6005 cells have a training slice with raw
+S_t(a,1) < 0; on covid 2,064,208 in 7047 cells. The atom mass carried into them is 0 to the
+reported precision: the atom there is the mass swept in at the date, which now quits into
+training at once (date-1 quits +2.929e-04 fc, +4.154e-04 covid). A2: no (cell, date) pair on
+either path has crossers enclosed by the frontier, so the forward split moves no mass.
+
+Step halving (fc, Nx = Np = 60, T_max = 120, tol 1e-5): Δ = 0.5 converges in 45 iterations
+(gap 8.473e-06); Δ = 0.25 does not converge in 300 (gap 3.245e-04, oscillating between 1.2e-05
+and 3.2e-04, the worst dates t = 0.5–2). Its θ_U is 3.888e-03 from Δ = 0.5 (t = 2), θ_S
+1.176e-04 (t = 5.5), masses ≤ 3.0e-06 (v54, converged in 46: 3.1e-03, 1.1e-04, 3.2e-06).
+Guess independence (z₀ against z₁ guess, Δ = 0.5): θ_U 9.664e-07, θ_S 3.340e-08, masses ≤ 2.1e-11.
+
+Threaded (2) and serial (1) agree bitwise in every path array and result field (fc and covid,
+Nx = 60, 4 iterations).
+
+Q at the stored estimates (bundle grids, `select_equilibrium`), unchanged:
+
+| estimate | bundle sha256 | Q | battery R2 |
+|---|---|---|---|
+| base_fc | 92e3da9b | 3560.0920827909513 | 1.10e-05 |
+| crisis_fc | 4c56efbb | 1997.8722326121679 | 2.69e-02 |
+| base_covid | 23c2ae2b | 3935.5499739559359 | 1.71e-03 |
+| crisis_covid | 32c8f63b | 2207.7930668364093 | 3.88e-01 |
+
+Gate: changed files parse; the panel's `build_model_series` reads the fc bundle with its
+`baseline` (78 dates, ur 0.05394 first, the steady state); `smoke_transition.jl` passes;
+`transition_audit.jl` with `TA_NULL=true` runs; `check_threading -t 2` OK (3560.0920827910);
+`check_hire_margin` 0 disagreements; `check_dead_settings`, `check_output_tree` PASS;
+`check_forwarding` only the known `ROYSEARCH_MCMC_JAC_ALLOW_GAPS`; `check_structure` the same 7 files.
+
+### Settings
+None added, retired or moved.
+
+### Known gaps
+- **The covid path is not unique.** The unskilled free-entry map has three roots at both covid
+  endpoints (base_covid ≈ 0.59 and 0.8154 attracting, ≈ 0.69 repelling; crisis_covid ≈ 0.70 and
+  1.0512 attracting, ≈ 0.97 repelling). The path's θ_U starts at 0.955, falls to 0.937 by
+  t = 4 and jumps to 1.034 at t = 4.5 (Δ ln θ_U 0.0926), crossing the repelling root; 5.99e-03
+  of the population's matches end at that date, and ur_U goes 0.0603 → 0.0713 (in v54, at
+  t = 4.0: rows a_U ≥ 0.067, qualities p 0.062–0.124 that accumulated in the first months). The values are continuous
+  through it (per-step change of U^search ≤ 1.7e-04, relative); only their slope kinks. It is a
+  perfect-foresight path, and not the only one: at Nx = 60 the z₀ guess converges to another
+  (θ_U 0.78 by month 6, a jump at month 119.5). v54 jumped at t = 4.0 (0.0862, 5.48e-03); the
+  continuation moved it, A1 did not (A1 on and off: same date, size and ended mass).
+- **Step halving does not converge at Δ = 0.25** (above). The number of edges dropped per pass
+  is constant (14,623) from iteration 35, so the continuation rule is not toggling; the cause is
+  not identified.
+- **A2's value side has no stationary counterpart.** The stationary solver values a crosser's
+  hire at U^search(a_U) + β S_U(a_U,1) (`solver.jl`:174), with no training option. On the base_fc
+  self-transition U_S^(1) differs from v54 in 5,644 of 25,600 types, all in the node-level
+  training region, by up to 10% (row 27, a_S top); no node-level crossing decision changes and
+  no mass moves (≤ 1e-17), but `d_region` moves 0.441004 → 0.441906.
+- The p = 1 atom of a training slice is tested at the node: a cell whose slice surplus is
+  negative ends its whole atom.
+- The training-slice continuation mixes in the other slice's edge with weight ς; where ς is tiny
+  this gives ~1e-08 differences from v54 in `SUt1`'s positive part on a self-transition.
+- Output size: each bundle is 1.5 GB.
+- The node-level approximations of the v54 entry remain.
+
+### Tried and rejected
+- Keeping the next date's boundary node at its raw value in every case (v54): where the
+  cutoff rises past that node it inherits a negative continuation (A15, 284 pairs on fc).
+- The positive part at every node: the boundary values locate the zero, and clipping them
+  moves a steady state's cutoff.
+- Solving each date once with the edges in place, without the fallback for a non-converging
+  pass: on fc at horizon 240, row 57 at t = 4 cycled between cutoffs 0.41115 and 0.39795 for
+  300 passes (residual 3.75e-02); with the edges dropped it converges at 0.3979.
+
+---
+
+## v54.0.0 — 2026-10-10
+
+**MAJOR: the transition layer implements the theorist's transition specification
+(`transition_spec.md`) with the author's reading (A) of the crossing choice, and its entry
+point is rebuilt around the stored estimates.** The path now solves every choice at every
+date per type where a later choice can differ, conserves mass in levels, and reports what the
+author asked for in one output bundle. Every transition number changes; the theorist must be
+told. solver/, smm/ (except `version.jl`), mcmc/, plots_and_tables/, gates/ and smoke/ are
+byte-identical to v53.0.0, and so is every Q.
+
+**Comparability.** Every Q, moment, selected root and estimate bundle is unchanged (table
+below). Every transition path from v53.0.0 or earlier is superseded. No stored transition
+bundle exists in the v53 format (the only file in `output/transition/` is an April
+`transition_fc_fullW.jld2`, which no code reads), so nothing is rebuilt.
+
+### What changed
+- **Backward pass** (`transition/transition_values.jl`, rewritten). Values continue on the next
+  date's envelope (spec P0). Per-type values are stored as (aU, aS, date) and solved only on
+  the types whose later choices can differ (`pureU`, `pureS`); the others are the solver's
+  one-dimensional values exactly (spec R1). Reading (A): the skilled unemployed choose the
+  market at every date, and both branches and T continue on max{U_S^(0), U_S^(1)} of the next
+  date (`_skilled_types_step!` :736, `_training_step!` :458). A cell has a searching and a
+  training slice, and the share the training frontier sweeps or releases between dates mixes
+  their continuations (`_slice_continuations!` :512).
+- **Training frontier within a date** (`_unskilled_slices_step!` :543). τ is located on the
+  value of searching at n and n+1, C⁰, and the types between that frontier and the next date's
+  train at n when U_tr ≥ C¹ (the value at a full sweep). Locating it on the swept value made τ
+  a fixed point of C(τ) with slope 1/(1−τ): on crisis_fc and base_covid a self-transition left
+  the steady state (τ moved 0.48 at the first backward step, free-entry gap 1.1e-4).
+- **Forward pass** (`transition/transition_solver.jl`). The masses are advanced in levels at the
+  date's rates, in sub-steps of at most `FORWARD_SUBSTEP` = 1 month (`_forward_pass!` :209,
+  `_advance_unskilled_cells!` :318). Date-n reallocations follow spec L6: matches a cutoff
+  passes end, the frontier's sweep moves the searching slice's unemployed and matches into
+  training. The p = 1 atom is judged by the hiring margin, not by the cutoff (`_end_below!`
+  :149, kept share χ₁/χ₀ at date 1 :243): p* = 1 on the row the hiring margin crosses holds
+  matches of positive surplus, and ending them moved 1.5e-4 of the population at date 1 of
+  every base_fc self-transition at Nx = 160. Where the base cutoff covers no node, the row's
+  employment is all at p = 1 (`_unskilled_p_shape!` :60); dropping it lost 7.0e-10 of the
+  population on crisis_fc.
+- **Free entry** (`_free_entry_tightness` :524) with the per-type firm values; convergence on
+  max over dates of |ln θ^new − ln θ| (spec); first guess z₁.
+- **Time grid** (`transition_params.jl`, `time_grid` :87): the fine grid to `T_max`, then a tail
+  growing by `TAIL_GROWTH` = 1.05 to `horizon`. `horizon = T_max` is the old uniform grid.
+- **Threads.** The backward pass's per-type flags were `BitArray`s written from threads, so two
+  threads wrote bits of one word: threaded and serial disagreed from the second outer iteration
+  (U_S^(0) at 3 dates, then everything). They are `Array{Bool}` (`_backward_pass!` :893).
+- **Speed** (bit-identical to the unoptimised reference; see below): the cutoff scan stops at the
+  last node a cutoff can reach; slice transfers and empty measures are skipped; redraw weights
+  are formed once per row and cutoff (`_redraw_weights!` :169); the unskilled cells are advanced
+  in threads by row.
+- **Outputs.** `path_statistics` (:776): flows by date (hires, crossers' hires d·κ_U·χ·u_S,
+  separations by slice, entries into and completions of training, skilled hires, separations
+  and job-to-job moves, the date's reallocations) and the rate moments measured as
+  `compute_equilibrium_objects` measures them. `policy_reversals` (:871, `REVERSAL_TOL` = 1e-6
+  of a cell): reversals of d (with the skilled mass on the cells), τ and OJS participation.
+  `TransitionPath` gains the unskilled employment by (aU, p) of each slice (`eUsp`, `eUtp`).
+  `solve_transition_path` (:588) returns the path and takes a warm start; `solve_transition`
+  is unchanged for its callers.
+- **Entry point** (`transition_main.jl`, `transition_simulation.jl`, rewritten). Grids from each
+  bundle's `spec.run`, an error if the windows differ there or in a_ℓ, b_ℓ, ρ_x, r, ν, φ
+  (`check_pair` :109). `POINT_ESTIMATE` (`transition_main.jl`:37) = `:smm` (θ̂) or `:mcmc`, the
+  estimate MCMC_main reports: θ̂ when the chain failed its gates, else the posterior mean of the
+  `_postmean` bundle, checked against the chain's mean; an error for a window no chain sealed
+  (`point_estimate` :72). `SCENARIO_BUNDLES` (:42): the covid baseline is the backup
+  `output/backups/base_covid_xiS_route_2026-10-10/estimate_base_covid_diagonalW.jls`. Endpoints by
+  `select_equilibrium` under each window's `spec.sim`. Horizon by test (`solve_with_horizon`
+  :152): doubling from 120 months until no reported series moves by more than `HORIZON_TOL` =
+  1e-3 of its scale over the first 36 months; every trial recorded. Crisis-window length from
+  `windows.json` (`crisis_window_months` :54). Output `output/transition/transition_<sc><W>.jls`,
+  a NamedTuple with `schema = 1` (README, "Transition path").
+- Settings: `TR_Nx`, `TR_Np_U`, `TR_Np_S` removed; `POINT_ESTIMATE`, `SCENARIO_BUNDLES` added.
+- `tools/transition_audit.jl`: two comment words. README: a "Transition path" section; one line
+  reference moved (`transition_solver.jl:448`).
+
+### Measured, not asserted (scratch tree, 2 threads unless stated, estimation grid Nx = Np_U = 160, Np_S = 180)
+Self-transitions (a window against itself, 241 dates, 3 outer iterations, tol 1e-12). Sup over
+dates of the distance to the steady state, and the free-entry residual the stationary battery
+leaves at that endpoint (R2, normalised by its tolerance):
+
+| | base_fc | crisis_fc | base_covid | crisis_covid |
+|---|---|---|---|---|
+| free-entry gap | 5.9e-12 | 8.1e-08 | 1.7e-09 | 5.1e-08 |
+| θ_U / θ_S, relative | 8.6e-12 / 1.4e-13 | 1.2e-07 / 2.5e-10 | 2.0e-09 / 1.1e-11 | 5.5e-08 / 1.7e-10 |
+| U^search, U_S^(0), relative | 3.0e-12, 1.5e-14 | 4.7e-09, 6.9e-12 | 3.1e-11, 3.6e-13 | 1.4e-09, 1.4e-12 |
+| τ, absolute | 2.5e-10 | 2.8e-06 | 5.2e-08 | 3.3e-07 |
+| masses, share of own total | ≤ 2.1e-13 | ≤ 4.0e-09 | ≤ 1.4e-12 | ≤ 1.1e-10 |
+| rate moments, max \|path − z1\| | ≤ 1.3e-12 | ≤ 9.8e-09 | ≤ 3.9e-10 | ≤ 1.4e-08 |
+| population identity | 6.2e-19 | 4.2e-19 | 6.4e-19 | 1.5e-18 |
+| battery R2 at the endpoint | 1.1e-05 | 2.7e-02 | 1.7e-03 | 3.9e-01 |
+
+The ordering follows the endpoint's own free-entry residual: the path settles on its exact
+fixed point, which the stationary solve reaches to its tolerance. On a grid that is not an
+estimation grid, base_fc at Nx = Np_U = Np_S = 160 (1 thread): gap 1.9e-10, θ_U 2.6e-10, τ 3.7e-09.
+
+base_fc → crisis_fc, the entry path: 53 iterations at horizon 120 (gap 9.4e-05), 9 more at 240
+(gap 7.3e-05); the reported series moved by at most 1.3e-04 of their scale over months 0–36
+between the two, so 240 is the horizon. 4262 s. Free entry ≤ 7.3e-05 (U), 6.8e-05 (S) at every
+date; population identity 5.8e-19; no negative mass. Date-1 reallocation: 1.59e-03 of the
+population quit into training, 2.66e-03 swept into training, no match ended. Crossing choice:
+d > 0 on 10,498 cells at some date, none holding skilled mass at any date; 575 reversals in 150
+cells (1 at node level), skilled mass on them 0. τ: 0 node-level reversals; OJS participation: 5.
+
+At month 120 the path is still away from its month-240 values by: training share +3.5%, ur_S
++1.5%, skilled share −0.46%, ur +0.32%, ur_U −0.04%, θ_S −0.09%, θ_U −1e-06. It stays within
+1% of them from month: θ_S 3.5, θ_U 10, ur_U 21.5, ur 57.5, skilled share 85.5, ur_S 139,
+training share 173.
+
+Other checks (Nx = Np = 60, fc pair, tol 1e-5, 1 thread): base-θ guess against crisis-θ guess,
+θ paths within 1.8e-07 (A11); halving the step to 0.25 moves θ_U by 3.1e-03 and θ_S by 1.1e-04
+at most, in the first 6 months (A10). A backward step with 1/dt = 0 returns the stationary
+envelope max{U_S^(0), U_S^(1)} to 1.6e-11 with no change of d (A2); T, and through it τ, keeps
+the next date's U_S by construction.
+
+Threaded (2) and serial (1) agree bitwise in every path array and result field (fc and covid,
+Nx = 60, 4 iterations); the optimised tree agrees bitwise with the unoptimised reference (same
+runs, and fc at Nx = Np = 160, 2 iterations: 58.4 s reference, 33.4 s optimised).
+
+Q at the stored estimates (bundle grids, `select_equilibrium`), unchanged:
+
+| estimate | bundle sha256 | Q |
+|---|---|---|
+| base_fc | 92e3da9b | 3560.0920827909513 |
+| crisis_fc | 4c56efbb | 1997.8722326121679 |
+| base_covid | 23c2ae2b | 3935.5499739559359 |
+| crisis_covid | 32c8f63b | 2207.7930668364093 |
+
+Gate: changed files parse; the transition chain loads; `run_transition_simulation(:fc)` runs
+end to end and writes to the scratch tree; the panel's `build_model_series` reads its `result`
+(Plots does not precompile in the sandbox, so the panels themselves were not drawn);
+`smoke_transition.jl` passes; `transition_audit.jl` with `TA_NULL=true` runs; `check_threading
+-t 2` OK (3560.0920827910); `check_hire_margin` 0 disagreements; `check_dead_settings`,
+`check_output_tree` PASS; `check_forwarding` only the known `ROYSEARCH_MCMC_JAC_ALLOW_GAPS`;
+`check_structure` the same 7 files.
+
+### Settings
+`TR_Nx`, `TR_Np_U`, `TR_Np_S` removed (grids come from the bundles). New: `POINT_ESTIMATE = :smm`,
+`SCENARIO_BUNDLES` (covid baseline at the 2026-10-10 backup). Unchanged: `SCENARIOS`, `TR_T_MAX`
+120, `TR_N_STEPS` 240, `TR_TOL` 1e-4, `TR_MAXIT` 200, `TR_DAMP` 0.3.
+
+### Known gaps
+- **A15 fails near a rising unskilled cutoff.** On dates 1–11 of the fc path, 284 (row, node)
+  pairs just above p*_U have a raw unskilled surface below the node beneath them, by up to 0.7%
+  of the row's top-node surplus (row 32, date 1: −0.52, 0.086, −1.552, 7.527 at p = 0.731 …
+  0.756, with p* rising 0.738 → 0.750). The continuation keeps the next date's straddling node at
+  its raw (negative) linear extension; when the cutoff rises past a node, that node is above
+  today's cutoff and inherits a negative continuation where the match's value at n+1 is 0. The
+  masses are unaffected (acceptance is by the covered fraction above p*); the surface, and the
+  redraw integral through it, are biased at those nodes. Not seen in the self-transitions; at
+  Nx = 60 the fc path shows it on 5 dates. Not fixed.
+- **Output size**: the fc bundle is 1.5 GB (293 dates; the per-type arrays are 60 MB each).
+- Approximations, all at node level: non-pure skilled types use their column's OJS
+  participation and cutoff; skilled employment of crossing types takes the column's p-shape
+  (inert here: no crossing cell holds skilled mass); the training slice's continuation is
+  formed per node; the p = 1 atom of a training slice ends when that slice's entry surplus is
+  negative; the frontier's two-step test is per node.
+- T continues on the next date's U_S (explicit in that term), so A2 holds for every value but
+  T and τ; A10 measures the time error at 3e-3 of θ_U in the first months.
+- Path statistics carry the flow and rate moments; duration, survival and wage-dispersion
+  moments have no off-steady-state counterpart here and are not reported.
+- The panels take the date-0 value of each series as the pre-switch steady state; date 1 is
+  after the date-0 reallocation (`plots_and_tables/transition_panel.jl`, untouched).
+- The crisis_covid second stationary equilibrium (v53.0.0 entry) is not revisited.
+- `:mcmc` was tested on synthetic sealed bundles in scratch; no stored estimate is MCMC-sealed.
+
+### Tried and rejected
+- Locating the training frontier on the swept searching value: unstable (above).
+- Ending the p = 1 atom when the cutoff reaches 1: ends matches of positive surplus.
+
+## v53.0.0 — 2026-10-10
+
+**MAJOR: the transition layer is brought back in line with the stationary solver.** Every change
+is numerics or forwarding, not economics: the transition now integrates the same objects the
+solver integrates, solves its endpoints under the settings the estimation used, and conserves
+the skilled p-composition. Every transition path changes, so a transition result is not
+comparable across this version and the theorist must be told. solver/, smm/ and mcmc/ are
+byte-identical to v52.1.0, and so is every Q.
+
+**Comparability.** Every Q, moment, selected root and bundle is unchanged (table below). Every
+transition path computed under v52.1.0 or earlier is superseded, including the base_fc → base_fc
+null path (it moved the training frontier). Nothing in `output/` was touched; no stored
+`TransitionResult` exists (byte scan in v52.1.0), so nothing is rebuilt.
+
+### What changed (`transition/`, `tools/transition_audit.jl`)
+- **Value integrals use the solver's search rule.** The skilled date step and the terminal seed
+  integrated the destination over max(S⁰, S¹). `skilled_inner_loop!` integrates
+  s S¹ + (1−s) S⁰ with s = `_ojs_share(part, ·)`, and so do both now (`transition_values.jl`,
+  `_seed_terminal_values!`, `_skilled_value_step!`). The participation weight of a cell reads
+  its neighbours' scores, so a date is swept with the weight fixed, the weight is rebuilt and
+  the sweep repeats until it settles to `tol_outer_S`. `POJ_SCORE` is honoured.
+- **Training policy through `training_policy!`** (`_margin_step!`) instead of the complement of
+  `drain_fraction!`, which differs in the last bits, so the null path's τ never equalled the
+  stationary τ.
+- **Unskilled reservation** (`_unskilled_value_step!`): the exact zero of the affine raw surplus
+  on [0, 1], as `update_pstar_from_surplus!` gives without the continuation. The node scan
+  returned p* = 1 for hired types whose zero lies above the top node.
+- **Skilled p-composition** (`transition_solver.jl`, `_forward_skilled_pdist!`): the step is taken
+  in levels and divided by the non-draining column mass it reaches. Advancing the unit shape by
+  the level law omitted −ê ṁ₀/m₀. The loop starts at the straddling cell, as the stationary
+  block's does.
+- **Endpoint settings** (`transition_simulation.jl`): each window is solved under its own
+  `spec.sim`. The hand-rebuilt SimParams dropped `damp_inner_U/S` (0.95 → 1.0), `inner_B/K`
+  (20/10 → 0/5) and `outer_B/K` (30/10 → 0/5), and the crisis endpoint used the base
+  window's settings.
+- **`solve_transition`** asserts the shared ability grid, population weights and p-grids it
+  already assumed.
+- **`tools/transition_audit.jl`** takes its endpoints from `select_equilibrium` under each
+  window's `spec.sim` (it used `solve_model`, whatever root the normal solve reached).
+- Comments: the header's claims that the estimates carry ξ_U ≠ 0 and δ_S < 1, and the
+  `_skilled_margin_masses` claim about the moment layer, are removed; unskilled/skilled replace
+  untrained/trained in `transition_params.jl` and the solver header; `transition_main.jl`'s
+  usage line names the real path.
+
+### Measured, not asserted (scratch copies of v52.1.0 and v53.0.0, 2 threads, Nx = Np = 120, 241 dates, T_max 120)
+Self-transition (base → base, outer tol 1e-12), sup over dates of the distance to the steady state:
+
+| | v52.1.0 base_fc | v53.0.0 base_fc | v52.1.0 base_covid | v53.0.0 base_covid |
+|---|---|---|---|---|
+| outer iterations | 40 | 8 | 60 (not converged, 1.2e-11) | 50 |
+| θ_U / θ_S, relative | 2.9e-07 / 2.3e-06 | 4.6e-11 / 1.0e-12 | 4.2e-07 / 1.4e-06 | 1.6e-08 / 9.4e-12 |
+| U_S⁽⁰⁾, T, relative | 1.1e-05, 8.4e-06 | 2.9e-14, 7.4e-12 | 4.2e-06, 3.2e-06 | 3.2e-13, 2.9e-12 |
+| τ, absolute | 4.1e-03 | 9.7e-09 | 1.9e-03 | 2.3e-07 |
+| masses, share of own total | ≤ 2.1e-07 | ≤ 7.7e-13 | ≤ 2.9e-08 | ≤ 1.5e-12 |
+| max\|1 − û − ∫ê\| | 1.9e-06 | 5.9e-15 | 1.4e-06 | 9.3e-15 |
+
+The stationary battery's free-entry residual at these endpoints is 4.3e-11 (base_fc) and
+2.5e-08 (base_covid), relative.
+
+Real pairs (tol 1e-4): fc 22 iterations in both versions, covid 65. Closure max|1 − û − ∫ê|
+over columns holding more than 1e-6 of the skilled mass: 1.96 → 1.8e-15 (fc), 2.11 → 1.8e-15
+(covid); mass-weighted 3.0e-02 → 4.1e-16 and 2.8e-02 → 4.4e-16. θ_S at the last date against
+z1: 2.9e-03 → 1.5e-03 (fc). Free-entry residual at every date ≤ 6.1e-04 (U) and 3.5e-04 (S) on fc,
+the outer tolerance at work. Population identity ≤ 3.3e-16 at every date. Threaded (2) and
+serial (1) agree bitwise in every TransitionResult field and path array (fc, both versions).
+
+Q at the stored estimates (bundle grids, `select_equilibrium`), identical in both trees:
+
+| estimate | bundle sha256 | Q |
+|---|---|---|
+| base_fc | 92e3da9b | 3560.0920827909513 |
+| crisis_fc | 4c56efbb | 1997.8722326121679 |
+| base_covid | 23c2ae2b | 3935.5499739559359 |
+| crisis_covid | 32c8f63b | 2207.7930668364093 |
+
+The first three equal the v52.1.0 entry's numbers. The crisis_covid bundle was rewritten on
+2026-10-10 05:10 UTC by the running estimation, so it is not the file v52.1.0 measured.
+
+Gate: changed files parse; `run_transition_simulation(:fc)` runs through the changed entry path
+at Nx = 120 (22 iterations, 9.741e-05) and writes to the scratch tree; `check_threading -t 2` OK
+(3560.0920827910); `check_hire_margin` 0 disagreements; `check_dead_settings`,
+`check_output_tree` PASS; `check_forwarding` the known `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` finding;
+`check_structure` the same 7 files; versions in sync at 53.0.0. Backup of the pre-change files,
+byte-verified: `output/backups/pre_transition_sync_2026-10-10/`.
+
+### Settings
+None added, retired or re-defaulted.
+
+### Known gaps
+- **The transition economics is still the v35 one** (to be replaced by the spec in
+  `transition_spec.md`): every continuation is on its own branch (U^search, U_S⁽⁰⁾, U_S⁽¹⁾, the raw
+  surfaces, each OJS branch), T continues on U_S⁽⁰⁾, wages use (r+ν)U, unskilled employment has
+  no p-distribution, so a rising reservation destroys nothing, and incumbents never quit across
+  margins.
+- **A second stationary equilibrium at the crisis_covid estimate** (bundle 32c8f63b). It lies in
+  the unskilled block: θ_U = 0.698670, θ_S = 2.313589, battery Rmax 1.0e-04, median p*_U 0.0007,
+  Q 26764.17, against the selected θ_U = 1.051248, θ_S = 2.321161, Q 2207.79. These are at the
+  estimation grid; it was found by warm-starting the stationary solver at the covid transition's
+  month-60 state. `skilled_equilibria` assumes uniqueness given θ_S and cannot find it. The
+  lowest-Q rule is not affected. The covid path sits within 3e-4 of θ_U = 0.6975 from month 20 to
+  month 100. Not checked: whether the other three estimates have such a root.
+- At T_max = 120 the fc terminal masses miss z1 by t +4.6%, m_S −1.0% (rate ≈ ν).
+
+### Tried and rejected
+Nothing.
+
+## v52.1.0 — 2026-10-09
+
+**MINOR: the meeting rates are named κ throughout the code.** The notes' convention is now
+κ_j = θ_j q_j(θ_j), the rate at which a job seeker in market j meets a vacancy, for unemployed
+and on-the-job searchers alike; f_j is no longer a meeting rate anywhere. Every identifier
+holding θ_j q_j(θ_j) moves to κ: the matching-function helper, locals, keyword arguments,
+NamedTuple and struct fields, and every reader of them. No equilibrium object is redefined
+and every number reproduces bitwise, so the theorist does not need to be told about results.
+The layer is MINOR, not PATCH, because identifiers that scripts call or read changed: a
+function name, a keyword argument, two struct fields and one field of
+`compute_equilibrium_objects`.
+
+**Comparability.** Every number is bit-identical to v52.0.0: Q, the selected root, θ_S and all 43
+moments at the four stored estimates, all 83 fields of `compute_equilibrium_objects`, the
+transition smoke series and the `transition_audit` (TA_NULL) CSV. No serialised object stores a
+renamed field or type (measured below), so no bundle, bank or chain is rebuilt and nothing in
+`output/` was touched. Two writers now emit renamed CSV columns: `transition_audit.jl`
+(`f_U`, `f_S` → `kappa_U`, `kappa_S`) and `write_policy_csv` (`f_U` → `kappa_U`). No code reads
+either file. The stored `output/logs/transition_audit_fc*.csv` and
+`output/tables/policy_results_pre-fc*.csv` keep their old headers; they are outputs and are not
+rewritten.
+
+### What changed
+- **Matching technology** (`solver/grids.jl:12`): `jobfinding_rate(θ, μ, η)` → `meeting_rate`.
+  θ q(θ) is the meeting rate; job finding is meeting × acceptance. All 19 call sites follow.
+- **Solver** (rename only):
+  - `solver/unskilled.jl`: the unskilled meeting rate `f` → `κ` in `unskilled_inner_loop!`
+    (l.265–353; its returned field `f` → `κ`), `unemployment_split_unskilled` (l.400) and
+    `solve_stationary_unskilled!` (l.442) arguments, `update_theta_unskilled` (`f_new` → `κ_new`,
+    l.480), `solve_unskilled_block!` readers `inner.κ` / `inner_final.κ` (l.584–655).
+  - `solver/skilled.jl`: keyword `fU` → `κU` in `skilled_inner_loop!` (l.298) and
+    `solve_skilled_block!` (l.766). The skilled meeting rate `f` → `κ` (l.308, 446, 694–734), and
+    the inner loop's returned field `f` → `κ` (l.428, read at l.796).
+  - `solver/solver.jl`: `fU` → `κU` (`_mS_from_t` l.76, the global loop l.173–298), `inner.κ`
+    (l.179). In `_classify` (l.517–519) the curvature local `κ` → `curv`, so the letter means
+    one thing in the solver.
+  - `solver/equilibrium.jl`: the unskilled meeting rate `f_U` → `κ_U`, and the returned field
+    `f_U` → `κ_U` (l.511). `prob_f_U` → `prob_κ_U`. **`f_S` is kept** (l.330): it is
+    (κ_S·Σ(1−Γ_o(p*_S))u_stay + κ_U·u_drain)/u_S, the skilled unemployed's job-finding hazard
+    (meeting × acceptance), which is what f_j now means.
+- **Transition** (`transition/`): struct `TransitionResult` fields `fU`, `fS` → `κU`, `κS`
+  (`transition_params.jl:185`). `fU`/`fS`/`f_U0`/`fU_p`/`fS_p` and the local `f` → κ forms in
+  `transition_solver.jl` and `transition_values.jl`. **`fU_hire` is kept**
+  (`transition_solver.jl:191`): it is κ_U × the hired share of the cell's unemployed, a
+  job-finding hazard.
+- **Readers**: `smoke/smoke_transition.jl:69`, `tools/transition_audit.jl:235`,
+  `plots_and_tables/transition_panel.jl:961`, `policy/policy_params.jl:217` (`PolicyResult.f_U`
+  → `κ_U`; `f_S` kept), `policy/policy_solver.jl:106`, `plots_and_tables/policy.jl` (table rows,
+  CSV column, the Δκ_U panel label and title, l.39–534).
+- **Comments** that named a meeting rate f follow the rename. The κ_w scale of the retired
+  enrolment bridge is named `enr_scale_w` (`smm/moments.jl:25–84`, `smm/smm_main.jl:39`).
+  Three comments that still described that bridge as live now state what the code does:
+  `smm/smm_main.jl:39–42`, `data_and_descriptives/sigma.jl:6–8` and `validation.jl:7`. No code
+  variable carried κ_w (removed in v17.0).
+- **Version** `smm/version.jl:11`.
+
+### Measured, not asserted (scratch copies of v52.0.0 and v52.1.0, 4 threads per process, bundle grids)
+| estimate | root | Q v52.0.0 | Q v52.1.0 | bitwise | moments equal | objects equal |
+|---|---|---|---|---|---|---|
+| base_fc | U | 3560.0920827909513 | 3560.0920827909513 | yes | 43 / 43 | 83 / 83 |
+| crisis_fc | U | 1997.8722326121679 | 1997.8722326121679 | yes | 43 / 43 | 83 / 83 |
+| base_covid | U | 3935.5499739559359 | 3935.5499739559359 | yes | 43 / 43 | 83 / 83 |
+| crisis_covid | U | 2032.0733666850374 | 2032.0733666850374 | yes | 43 / 43 | 83 / 83 |
+
+The estimate bundles used were byte-identical to the repo copies at the time of the
+comparison (sha256 prefixes 92e3da9b…, 4c56efbb…, 23c2ae2b…, 3e5e2fa1…). Objects were compared
+with `isequal`, under the key map f_U → κ_U.
+- Bundle check. Every `.jls` under `output/estimates`, `output/chains`, `output/smm` was
+  deserialised and walked, collecting every struct field name, NamedTuple key, Dict key,
+  Symbol and Function. The search covered f_U, fU, f_S, fS, f, κ*, kappa, jobfinding_rate and
+  meeting_rate. There was no hit in the four estimates, the four candidate banks or the
+  chain, whose types are SMMResult, SMMSpec, ParamSpec, RunProvenance and SeedBank. 20 legacy
+  files do not deserialise under v52.0.0 either (TypeError, pre-existing). Neither
+  `TransitionResult` nor `PolicyResult` occurs in any `.jls` (byte scan).
+  `output/transition/transition_fc_fullW.jld2` (2026-04-05) holds an older TransitionResult
+  layout (`n_iterations`, no θU/θS), and JLD2 is not a project dependency.
+- `smoke/smoke_transition.jl`: identical output except the two series names.
+  `tools/transition_audit.jl` with `TA_NULL=true`: the CSV body is byte-identical and the header
+  carries `kappa_U,kappa_S`.
+- Every changed file parses. `smm_main`, `MCMC_main` and `data_processing_main` load their
+  include chains as shipped. `transition_main` and `model_main` load with a Plots stub, because
+  Plots does not precompile in the sandbox. `model_main` also needs `using Optim` supplied, since
+  `smm.jl:2092` needs it and `model_main.jl` does not import it. `policy_main` stops at
+  `policy_params.jl:109` (`RegimeParams`, retired). Every outcome is identical under v52.0.0.
+- Gates, identical to v52.0.0: `check_threading` (2 threads) serial = threaded Q
+  3560.0920827910 at base_fc; `check_hire_margin` 0 disagreements at all four estimates;
+  `check_dead_settings`, `check_output_tree` pass; `check_forwarding` reports only the known
+  `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` finding (so `check_repo.sh --verify-only` exits 1 as it did);
+  `check_structure` flags the same 7 files; `check_version_sync` in sync at 52.1.0.
+
+### Settings
+None.
+
+### Known gaps
+- `plots_and_tables/transition_panel.jl:1040` plots κ_U, κ_S under the panel title
+  "Job-finding rate", and `_compute_sep` (l.975) uses them as the job-finding rate in its
+  approximate flow identity. Both were left as they were: the label and the approximation are
+  for the author to decide.
+- `plots_and_tables/transition.jl:333–335` tags the moments `jfr_U`/`jfr_S` "fU"/"fS". These
+  are moment labels and f is the job-finding hazard, so they stay.
+- `model_main.jl` does not load as shipped (no `using Optim` for `smm.jl`). This predates the
+  change and was not touched.
+- Legacy notebooks in `code/notebooks/` define their own `jobfinding_rate`, or include files
+  that no longer exist. They are not part of any entry point and were not edited.
+- The theorist updates `latex/` in parallel; nothing under `latex/` was edited.
+
+### Tried and rejected
+Nothing.
+
+## v52.0.0 — 2026-10-07
+
+**MAJOR: the seven rate moments are built as the data stage builds them.** Every model-side
+rate moment is now the mean transition probability over that moment's universe, converted as its
+data source converts it, instead of a mean of type hazards. For `jfr_U` this also changes what is
+counted: the CPS U→E rate counts hires over all unskilled unemployed, and the moment was the
+meeting rate f_U, which counts a meeting with a type no firm hires. The solver, the model and
+every object the solve computes are untouched (author's condition: only the model moment
+computation changes). Moments, hence Q, change at every estimate, so the theorist must be told.
+
+**Comparability.** No parameter changed, so every stored bundle loads unchanged and needs no
+rebuild, and every stored estimate is still a valid parameter point. Every stored Q is
+superseded as a measure of fit: the stored `loss_opt` in each bundle, and the
+`smm_estimates_*.csv` / `mcmc_results_*.csv` reports, are v51 moment values. Every window needs
+re-estimation under v52 before its fit is compared with anything. At each of the four estimates
+there is a single certified root (U), so the selected equilibrium is the same under both moment
+sets.
+
+### What changed
+- **Post-solve layer only** (`solver/equilibrium.jl`, `compute_equilibrium_objects`).
+  - `_hazard_of_mean_probability(prob, mass, empty)` (l.38): −log(1 − p̄), p̄ the mass-weighted
+    mean of the cells' monthly probabilities; `_MONTHS_PER_QUARTER = 3.0` (l.32).
+  - The E-to-E loop accumulates the searching share's quarterly move probability
+    s·e·(1 − e^{−3κ_S(1−Γ_o(p))}) beside the existing flow (l.406).
+  - New block "Rate moments as the data stage measures them" (l.420–446) and one new returned
+    field, `measured`, a NamedTuple keyed by moment name (l.516). Per moment:
+    - `jfr_U`: hired_U(a_U)·(1 − e^{−f_U}) over the unskilled-unemployed rows (`uU_rowU`). The
+      never-hired branch of a row is unemployed and searching but is never hired.
+    - `jfr_S`: stayers 1 − e^{−κ_S(1−Γ_o(p*_S))} over `uS_d0mass`, crossers 1 − e^{−f_U} over
+      `uS_d1mass`.
+    - `sep_rate_U/S`: 1 − e^{−δ_j(a)} over `eU_rowU` / `eS_totS`. `wchg_rate_U/S`:
+      1 − e^{−λ_j(1−G_j(p*))} over the same masses. All four are converted by −log(1 − p̄), as
+      `data_and_descriptives/moments.jl` (CPS) and `sipp.jl` (`_sipp_hazard`,
+      `_bbg_cell_hazard`) convert theirs.
+    - `ee_rate_S`: the quarterly probability q̄ over the employed skilled, reported as
+      1 − (1 − q̄)^{1/3}, the conversion `j2j.jl:70` applies to EEHire/MainB.
+  - A cell split by a covered fraction (the hired share of a row's unemployed, the searching
+    share of an employed cell) is a mixture: share × the moving branch's probability.
+  - Every existing field (`f_U`, `f_S`, `sep_rate_U/S`, `ee_rate_S`, `wchg_rate_U/S`, ...) keeps its
+    meaning and its value, because the notes, plots, transitions and policy code read them.
+- **`smm/moments.jl`, `model_moments`** (l.521–531): the seven rate moments read
+  `obj.measured`. The `hasproperty` fallbacks on `wchg_rate_U/S` are gone, since every object
+  carries the field.
+- **Untouched, byte-verified against v51.0.1**: `solver/grids.jl`, `params.jl`, `unskilled.jl`,
+  `skilled.jl`, `solver.jl`, and every file outside the two above.
+- Backup of the pre-change files, byte-verified: `output/backups/pre_rate_moments_2026-10-07/`.
+
+### Measured (scratch copies of v51.0.1 and v52.0.0, 4 threads per process, bundle grids, `select_equilibrium` at each stored estimate)
+The solve is bit-identical. "Solve fields" are θ_U, θ_S, p*_U, p*_S, p^oj, s_part, d, every mass
+array (u_U, t, e_U, m_U, m_S, u_S, e_S, row and column masses, the e_U surface), the aggregates,
+f_U, f_S, the existing hazard fields, the survivors and the wage densities, compared with
+`isequal`:
+
+| estimate | root | θ_U | θ_S | solve fields bitwise equal | non-rate moments bitwise equal |
+|---|---|---|---|---|---|
+| base_fc | U | 0.458752030675076 | 1.21036198933046 | 35 / 35 | 36 / 36 |
+| crisis_fc | U | 0.225767401330156 | 0.646112536469146 | 35 / 35 | 36 / 36 |
+| base_covid | U | 0.830743278223685 | 1.84410585649858 | 35 / 35 | 36 / 36 |
+| crisis_covid | U | 1.03733094318729 | 2.32079704846696 | 35 / 35 | 36 / 36 |
+
+Rate moments (every other moment is bitwise unchanged):
+
+| estimate | moment | v51.0.1 | v52.0.0 | change | data |
+|---|---|---|---|---|---|
+| base_fc | jfr_U | 0.3042998787 | 0.2549790924 | -1.621e-01 rel | 0.302524 |
+| base_fc | jfr_S | 0.2764928892 | 0.2764928892 | -2.220e-16 rel | 0.320369 |
+| base_fc | sep_rate_U | 0.0148374406 | 0.0147476682 | -6.050e-03 rel | 0.015251 |
+| base_fc | sep_rate_S | 0.0050249718 | 0.0050249718 | -2.220e-16 rel | 0.006241 |
+| base_fc | ee_rate_S | 0.0093876771 | 0.0065374186 | -3.036e-01 rel | 0.007969 |
+| base_fc | wchg_rate_U | 0.1567947176 | 0.1567003790 | -6.017e-04 rel | 0.150512 |
+| base_fc | wchg_rate_S | 0.1584881279 | 0.1584881279 | -3.331e-16 rel | 0.129177 |
+| crisis_fc | jfr_U | 0.2122322121 | 0.1966506601 | -7.342e-02 rel | 0.210655 |
+| crisis_fc | jfr_S | 0.2010450075 | 0.2010450075 | +4.441e-16 rel | 0.237466 |
+| crisis_fc | sep_rate_U | 0.0198976174 | 0.0198447410 | -2.657e-03 rel | 0.020563 |
+| crisis_fc | sep_rate_S | 0.0064577500 | 0.0064577500 | +2.220e-16 rel | 0.008171 |
+| crisis_fc | ee_rate_S | 0.0070309798 | 0.0053832277 | -2.344e-01 rel | 0.006150 |
+| crisis_fc | wchg_rate_U | 0.1124371956 | 0.1123825601 | -4.859e-04 rel | 0.103098 |
+| crisis_fc | wchg_rate_S | 0.1123775397 | 0.1123775397 | +4.441e-16 rel | 0.091078 |
+| base_covid | jfr_U | 0.3713716405 | 0.1572955872 | -5.764e-01 rel | 0.296387 |
+| base_covid | jfr_S | 0.2462842390 | 0.2462842390 | -2.220e-16 rel | 0.316990 |
+| base_covid | sep_rate_U | 0.0082032135 | 0.0080120434 | -2.330e-02 rel | 0.013278 |
+| base_covid | sep_rate_S | 0.0039170296 | 0.0039170296 | +8.882e-16 rel | 0.005919 |
+| base_covid | ee_rate_S | 0.0006668503 | 0.0004726203 | -2.913e-01 rel | 0.008508 |
+| base_covid | wchg_rate_U | 0.2059929260 | 0.2057865086 | -1.002e-03 rel | 0.208465 |
+| base_covid | wchg_rate_S | 0.2282015549 | 0.2282015549 | -2.220e-16 rel | 0.222416 |
+| crisis_covid | jfr_U | 0.3212887626 | 0.2718833275 | -1.538e-01 rel | 0.314352 |
+| crisis_covid | jfr_S | 0.2485890160 | 0.2485890160 | +2.220e-16 rel | 0.319650 |
+| crisis_covid | sep_rate_U | 0.0198911693 | 0.0196219841 | -1.353e-02 rel | 0.021155 |
+| crisis_covid | sep_rate_S | 0.0074488333 | 0.0074488333 | -2.220e-16 rel | 0.010383 |
+| crisis_covid | ee_rate_S | 0.0004545586 | 0.0003208037 | -2.943e-01 rel | 0.009151 |
+| crisis_covid | wchg_rate_U | 0.2379992337 | 0.2377099449 | -1.216e-03 rel | 0.236831 |
+| crisis_covid | wchg_rate_S | 0.2396000500 | 0.2396000500 | +6.661e-16 rel | 0.239340 |
+
+Q at each stored estimate:
+
+| estimate | stored loss_opt | Q v51.0.1 | Q v52.0.0 | Q with the /tmp/nm scratch's jfr_U and ee_rate_S |
+|---|---|---|---|---|
+| base_fc | 2957.413051 | 2957.413051 | 3560.092083 | 3557.734669 |
+| crisis_fc | 1923.728847 | 1923.728847 | 1997.872233 | 1997.805302 |
+| base_covid | 8228.151227 | 8228.151227 | 11006.443827 | 10974.612779 |
+| crisis_covid | 1816.503405 | 1844.894080 | 2032.073367 | 2029.576186 |
+
+Q contributions of the active rate moments:
+
+| estimate | moment | Q contribution v51.0.1 | v52.0.0 |
+|---|---|---|---|
+| base_fc | jfr_U | 0.832 | 596.271 |
+| base_fc | jfr_S | 82.298 | 82.298 |
+| base_fc | sep_rate_U | 16.158 | 23.930 |
+| base_fc | sep_rate_S | 150.094 | 150.094 |
+| base_fc | ee_rate_S | 7.733 | 7.880 |
+| base_fc | wchg_rate_U | 22.773 | 22.094 |
+| base_fc | wchg_rate_S | 70.256 | 70.256 |
+| crisis_fc | jfr_U | 0.925 | 72.905 |
+| crisis_fc | jfr_S | 81.001 | 81.001 |
+| crisis_fc | sep_rate_U | 17.197 | 20.038 |
+| crisis_fc | sep_rate_S | 141.503 | 141.503 |
+| crisis_fc | ee_rate_S | 0.915 | 0.692 |
+| crisis_fc | wchg_rate_U | 39.001 | 38.546 |
+| crisis_fc | wchg_rate_S | 34.623 | 34.623 |
+| base_covid | jfr_U | 1056.269 | 3634.339 |
+| base_covid | jfr_S | 217.054 | 217.054 |
+| base_covid | sep_rate_U | 2187.854 | 2355.780 |
+| base_covid | sep_rate_S | 455.819 | 455.819 |
+| base_covid | ee_rate_S | 601.431 | 631.595 |
+| base_covid | wchg_rate_U | 12.267 | 14.401 |
+| base_covid | wchg_rate_S | 38.504 | 38.504 |
+| crisis_covid | jfr_U | 4.651 | 174.318 |
+| crisis_covid | jfr_S | 161.167 | 161.167 |
+| crisis_covid | sep_rate_U | 36.408 | 53.570 |
+| crisis_covid | sep_rate_S | 282.112 | 282.112 |
+| crisis_covid | ee_rate_S | 25.406 | 26.194 |
+| crisis_covid | wchg_rate_U | 1.008 | 0.571 |
+| crisis_covid | wchg_rate_S | 0.041 | 0.041 |
+
+Two of the scratch's constructions were changed (see Tried and rejected). The scratch's shared
+moments (`jfr_S`, `sep_rate_U/S`, `wchg_rate_U/S`) are reproduced to ≤ 1e-14 relative. With its
+`jfr_U` and `ee_rate_S` substituted, Q reproduces the scratch run (3557.734669, 1997.805302,
+10974.612779) to ≤ 2.8e-15 relative. Moments unchanged to rounding (`jfr_S`, `sep_rate_S`,
+`wchg_rate_S`) have a skilled hazard that is constant over the universe at these estimates
+(Γ(p*_S) = 0 wherever the skilled hold mass, and the drained mass is 0), and the mean probability of a constant hazard converts back to it.
+
+Release gate: both changed files parse. The include chains of `smm_main.jl`, `MCMC_main.jl`,
+`transition_main.jl` (through `transition_simulation.jl`) and `model_main.jl` (through §solver
+and §SMM) load, and every name the edits call resolves. `using Plots` cannot precompile GR_jll
+in the sandbox depot, so the plotting includes were not load-tested. Gate results:
+- `check_threading.jl -t 2`: serial and threaded Q = 3560.0920827910 at base_fc, bitwise equal.
+- `check_hire_margin.jl`: 0 disagreements at all four estimates.
+- `check_dead_settings`, `check_output_tree`: pass.
+- `check_forwarding`: the known v49 baseline finding only (`ROYSEARCH_MCMC_JAC_ALLOW_GAPS`).
+- `check_structure`: the same 7 files as v51.0.1.
+- `check_version_sync`: in sync at 52.0.0.
+
+### Settings
+None.
+
+### Known gaps
+- Convention shared by every rate moment: each cell keeps its hazard over the measurement
+  interval (a month, or a quarter for J2J), with no state change inside it. This is the reading
+  under which the data stage's −log(1−p) is a hazard. A hire followed by a separation inside the
+  month, a λ redraw, an exit or a second move inside a J2J quarter are ignored.
+- The SIPP universe is same-job stayer pairs. The model weights the employed at the start of
+  the month, which differs only by the type-specific probability of staying in the match.
+- The J2J denominator caveat in Data and Moments (section 'Data–model definitional gaps', item 2) is unchanged.
+- crisis_covid: the stored `loss_opt` 1816.503405 is not the v51.0.1 re-evaluation
+  1844.894080. That gap predates this change (recorded at v50.0.0).
+- Smoke tests not run: `smoke warmstart` calls `_run_sa` and `smoke clusters` builds a Sobol
+  bank. Neither path is touched; no parameter or spec changed.
+- `plots_and_tables/transition.jl:333` labels `jfr_U` "fU" in the fit table, which now shows
+  the measured moment. That is a label only, and was not changed.
+- `transition/transition_solver.jl` (`_skilled_margin_masses` docstring) says the moment layer
+  reads `sep_rate_S` at the node; `equilibrium.jl` integrates the cell masses at the cutoff
+  (`cdf_at_cutoff`). The docstring is stale, predates this change, and was not touched.
+- The notes (`latex/notes_delivery_2026-10-05/data_and_moments.tex`) still describe the
+  hazards as the model moments. Each such sentence is listed in `rate_moments_change.md` for
+  the theorist.
+
+### Tried and rejected
+- **Per-row hazard f_U·hired_U for `jfr_U`** (the scratch at `/tmp/nm`). hired_U is the share
+  of a row's unemployed in the hired branch, and the rest has hazard 0. The row's probability is
+  therefore hired·(1 − e^{−f_U}), not 1 − e^{−f_U·hired}, which overstates it by Jensen.
+  - Only the row straddling a^h has 0 < hired < 1 (rows 26, 25, 29, 20 in the four windows).
+  - Measured gap at base_fc / crisis_fc / base_covid: `jfr_U` 3.5e-4 / 1.4e-4 / 2.0e-4
+    relative, ΔQ 2.211 / 0.290 / 1.667.
+- **`ee_rate_S` left as the hazard** (the scratch). The target is the monthly probability
+  1 − (1 − ee^Q)^{1/3} of a quarterly rate. Mirroring it lowers `ee_rate_S` by 23–30%, not by
+  the half percent the notes cite for the data-side conversion.
+  - The flow is concentrated: 3.6% of base_fc skilled employed search on the job, at a mean
+    hazard of 0.263 per month, so their quarterly move probability is 1 − e^{−0.79} = 0.55
+    against 0.79 for the linear reading (base_covid: 0.27% at 0.245).
+  - ΔQ against the hazard: +0.147 base_fc, −0.223 crisis_fc, +30.164 base_covid.
+
+## v51.0.1 — 2026-10-05
+
+**PATCH: comments only.** Four comments used wording the paper does not use or attributed a
+setting to a source it does not come from; no code line changed.
+
+**Comparability.** Every number is bit-identical to v51.0.0: only comment lines changed.
+
+### What changed
+- `solver/params.jl` header: "Market separation is by comparative advantage (Roy 1951; Gola
+  2016, 2021)" becomes "Both markets are populated through comparative advantage (Roy 1951;
+  concordance as in Gola 2021)". Gola 2016 is an unpublished earlier version of Gola 2021.
+- `smm/smm_main.jl`, `LAMBDA_W` comment, and `smm/smm_params.jl`, `λ_w` field comment: the
+  attribution of λ_w to Bound–Krueger (1991) is removed. 0.78 is set by the author as the middle
+  of the range the wage-validation literature reports (Data and Moments, Observed wages and
+  measurement error).
+- `transition/transition_solver.jl` header and `solve_transition` docstring: "unanticipated
+  permanent shock" becomes an unanticipated change in the parameters at date T, the notes'
+  wording.
+
+### Measured, not asserted
+The four files parse (`Meta.parseall`). No solve was run: a comment cannot change a number.
+
+### Settings
+None.
+
+### Known gaps
+Nothing.
+
+## v51.0.0 — 2026-10-04
+
+**MAJOR: a crisis window estimates unemployment income.** Up to v50.0.1 a crisis window held
+b_U, b_T and b_S at the estimate of its paired baseline window, together with the ability
+distribution (a_ℓ, b_ℓ, ρ_x). It now holds only the ability distribution; b_U is estimated in
+every window, and b_T and b_S stay pinned at zero through FIX_PARAMS (author's decision). A crisis
+window has 13 free parameters, a baseline window 14.
+
+**Comparability.** Baseline windows are unchanged. No crisis window had been estimated under
+v50, so no stored estimate is superseded; the stored crisis bundles predate v50 and their
+candidate banks are stale (the free set changed), so a crisis run starts from `:clusters`.
+
+### What changed
+- `smm/smm_params.jl`: `REGIME_SPECIFIC_PARAMS`, `DEEP_PARAMS` and `DEEP_PARAMS_ORDERED` are
+  replaced by one tuple, `ABILITY_PARAMS = ((:common, :a_ℓ), (:common, :b_ℓ), (:common, :ρ_x))`.
+  The file header no longer classifies parameters.
+- `smm/smm_main.jl`, §6: the crisis branch pins `ABILITY_PARAMS` at the baseline optimum and offers
+  every other parameter to `build_smm_spec`, which drops what FIX_PARAMS pins. Header, FIX_PARAMS
+  key list (now grouped by solver block) and run-log lines follow.
+- `plots_and_tables/transition.jl`: the parameter tables read which parameters are estimated off
+  each bundle's spec, through one `PARAM_DISPLAY` map, instead of two hand-kept lists.
+- `solver/model_main.jl`, `solver/params.jl`, `smoke/`: labels and comments.
+
+Checked on a scratch copy: the crisis_fc spec builds with the 13 free parameters above, the
+ability distribution pinned at the base_fc estimate, and `assert_all_params_accounted` passing.
+
+### Settings
+None.
+
+## v50.0.1 — 2026-10-04
+
+**PATCH: console output of `MCMC_main.jl` only.** Every number, every CSV column and every
+bundle field is unchanged; the JAC_ONLY table on base_fc is digit-for-digit the v50.0.0 one.
+
+**Comparability.** Full. No stored output is superseded.
+
+### What changed (`code/mcmc/MCMC_main.jl`, §6 and §8)
+- The Ĝ diagnostics (FD scheme, step/box width, Richardson instability, cond(G̃), pinv rank)
+  print above the summary box on both paths.
+- JAC_ONLY: the box is titled "Standard errors from Ĵ = Ĝ'WĜ" and holds only the table. The
+  chain lines (gens, seed drift, logπ, gates, target, Ĵ source) print only when a chain ran.
+  The footer is two lines; the "No promotion" line is not printed, since there is no chain.
+- Chain path: the table is the JAC_ONLY table plus se(chain) beside the estimate and |t|(chain)
+  after se(bound). R̂ and the edge test stay in the trailing flag, and the attained R̂ max and
+  ESS min print against the gates in the box header. The estimate column is the reported
+  estimate (posterior mean once the chain converged, θ̂ otherwise), as |t| already used.
+- The box rules are drawn to the table's width.
+
+### Measured, not asserted
+JAC_ONLY on a scratch copy of the repo at the base_fc estimate: 166 solves, 14 of 14
+coordinates, the table identical to the v50.0.0 run's. Chain-path layout checked by rendering
+the row format with representative values (no chain was run).
+
+### Settings
+None.
+
+## v50.0.0 — 2026-10-03
+
+**MAJOR: the unit of the unskilled vacancy cost k_U changes.** The posting cost is k_U·π̄_U, and
+π̄_U is now the mean output of a new unskilled match, exp(A)·P_U·E_ℓ[a_U]. The factor
+E_G[p] = α_U/(α_U+1), the mean of the shock redraw, is removed: unskilled matches start at
+p = 1. This is the LMR (2016) convention, where the posting cost is c times the mean of
+f(x, y) over independent draws of worker and job type (their `solver.f90:89`). π̄_S already
+followed it, because a skilled match starts from a draw of the offer distribution Γ. k_U's unit
+no longer moves with α_U, which is free and regime-specific (author's decision).
+
+**Comparability.** The change is an exact reparameterisation: k_U(v50) = k_U(v49)·α_U/(α_U+1)
+gives the identical equilibrium. Every stored bundle was rebuilt once, by hand, into the new
+unit, so stored Q values are unchanged and v50 bundles are read with no conversion code.
+- k_U values in v49 bundles, reports or notes are **not** comparable to v50 values without the
+  factor α_U/(α_U+1) at that point's α_U.
+- The `smm_estimates_*.csv` and `mcmc_results_*.csv` reports in `output/estimates` still carry
+  v49-unit k_U. They are reports, not inputs, and were not rewritten.
+- A bundle written by a v49 process after this change carries v49-unit k_U and a 49.0.0
+  provenance stamp.
+
+### What changed
+- **Normaliser** (`solver/grids.jl`, `mean_output_U`): E_G[p] removed. The block comment states
+  both conventions. The only call site is unskilled free entry (`solver/unskilled.jl:537`);
+  `mean_output_S` is unchanged.
+- **Bound** (`smm/smm_params.jl`, `default_free_params()`): k_U lb 0.05 → 0.025, so the box holds
+  every rebuilt candidate. The v49 floor of 0.05 maps to 0.025 at α_U = 1. ub is unchanged at 12.
+- **Comments and labels**: `solver/params.jl` (k field), `smm/smm_params.jl` (vacancy-cost
+  block and k_U/k_S labels), `solver/unskilled.jl` (free-entry header).
+- **Stored bundles rebuilt once by a scratch script outside the repo** (`/tmp/kU/convert.jl`):
+  k_U → k_U·α_U/(α_U+1) with each bundle's own α_U, free or pinned. Each value was converted in
+  natural units and re-expressed in that bundle's box. Bundles on the live v49 box [0.05, 12]
+  take [0.025, 12]; older boxes keep their numbers. Only the k_U coordinate moves. The script
+  also converted `result.params_opt.unsk_k`, the k_U seed in `spec.free`, candidate banks and
+  chain draws, and restamped provenance to 50.0.0 (`migrated_from` gains 49.0.0).
+
+| file | k_U v49 → v50 | α_U |
+|---|---|---|
+| estimate_base_fc | 3.67840 → 1.83920 | 1 (pinned) |
+| estimate_crisis_fc | 1.15197 → 0.88758 | 3.357 |
+| estimate_base_covid | 0.86276 → 0.71155 | 4.706 |
+| estimate_crisis_covid | 0.50610 → 0.34521 | 2.146 |
+| candidates_base_fc (1725) | → [0.02976, 5.99844] | 1 (pinned) |
+| candidates_crisis_fc / base_covid / crisis_covid | → [0.00807, 10.192] / [0.00327, 10.152] / [0.00807, 10.192] | per candidate |
+| chains/chain_base_fc (180000 draws) | → [0.54115, 0.69927] | per draw |
+
+  24 older side bundles (`*_backup_Q*`, `_postmean`, `_pre_xiU_restore*`, `_rejected*` and every
+  `*.jls.pre_migration`) already failed to deserialise under v49. They were not touched.
+- Backup of the nine rebuilt files, byte-verified: `output/backups/pre_kU_unit_2026-10-03/`.
+
+### Measured, not asserted
+Q at each stored estimate, v50 code on the rebuilt bundle against v49 code on the original:
+
+| estimate | Q v50 | Q v49 | relative difference |
+|---|---|---|---|
+| base_fc | 16385.802626441855 | 16385.802626441819 | 2.2e-15 |
+| crisis_fc | 710.081449797087 | 710.081449797083 | 5.1e-15 |
+| base_covid | 2884.581528455633 | 2884.581528455622 | 3.8e-15 |
+| crisis_covid | 1844.894079700002 | 1844.894079700002 | 0 |
+
+The stored `loss_opt` already differed from the v49 re-evaluation for crisis_fc and both covid
+windows (2.8e-4, 1.8e-2, 1.6e-2). That gap predates this change and is unchanged by it.
+
+### Settings
+None.
+
+## v49.0.0 — 2026-10-02
+
+**MAJOR: five parameter boxes move, and the parameter table no longer carries starting values.**
+The box is part of the estimation problem: ρ_x was restricted to [−1, −0.1], which ruled out
+zero and positive concordance a priori, and it is now [−0.98, 0.90]. A re-estimation under
+v49.0.0 therefore solves a different problem from v48.0.0 (author's decision). The removal of
+the `smm_params.jl` starting values is MINOR on its own. It changes no seed that reaches any
+current run, and the measurements below show that bit for bit.
+
+**Comparability.** Every stored v48.0.0 number stays valid. Q at the four estimates is
+bit-identical, because each bundle carries its own spec and box. All four estimates lie
+strictly inside the new boxes. What is superseded is the estimation set-up:
+- All four `candidates_<w>_diagonalW.jls` banks are stale. Their cache key includes lb/ub, so
+  the next `:clusters` run regenerates them, at 2048 Sobol points per window.
+- A v49.0.0 re-estimate is not comparable to a v48.0.0 one where the old box bound.
+- MCMC run from a stored bundle is unaffected, since it reads the bundle's own box. A chain on
+  a bundle written under v49.0.0 lives in the new box.
+
+### What changed
+- **Bounds** (`smm/smm_params.jl`, `default_free_params()`). Exactly these five; every other
+  lb/ub is unchanged.
+  - ρ_x: [−1, −0.1] → [−0.98, 0.90]. The comment now states the reason for each end of the box.
+  - P_S: ub 3.257928 → 5.0.
+  - σ_S: ub 0.244345 → 0.5.
+  - k_U and k_S: lb 0.0005 → 0.05.
+- **No starting values in the table.** `ParamSpec(block, name, lb, ub, label)` is a new
+  5-argument constructor that sets `init = NaN`, and the table is written with it.
+  - The `ParamSpec` struct is unchanged, so no bundle migrates.
+  - `with_seed(ps, value)` (`smm_params.jl`) writes a seed, clamped 1e-10 inside the box. It is
+    now the only place that clamp is written. `perturb_free_init` and every seeding site in
+    `smm_main.jl` use it.
+- **`pack_θ` raises on a non-finite init, naming `block:name`.** A path that forgets to seed
+  fails at its first use instead of starting from a value nobody chose.
+- **`unpack_θ` has no fallback values.** It resolves each field in this order: the
+  block-qualified pinned key, then the bare pinned key, then the free value. A field in none of
+  these raises, naming `block:name`.
+  - Free values are keyed like `fixed_key`: bare for a name unique to one block, qualified for
+    μ, η, k, β, λ, ξ, σ_w. The function is now one pass. The second pass, which repaired the
+    shared names, is gone.
+  - That second pass applied `_to_constrained` even under `constrained = true`. So under
+    `MCMC_SPACE = :theta`, the shared-name coordinates were box-mapped twice. The path is
+    unreachable as shipped (MCMC_main guards `:theta` off), but it is one candidate for part of
+    the 1.66e+07 Q recorded at that guard. That has not been measured.
+- **`smm_main.jl` seeds every path from `DEFAULT_PARAMS` or a stored optimum.**
+  `default_seed(ps)` looks the value up through `_DEFAULT_PARAM_KEY` and raises, naming the
+  parameter, when either map lacks it.
+  - Crisis window, non-warmstart: `default_seed`.
+  - Baseline window: every candidate is seeded from `DEFAULT_PARAMS` first. A readable
+    warm-start bundle then overwrites the parameters it estimated. This also closes two silent
+    paths that fell back to the table literals: an unreadable warm-start file, and one that
+    could not be decoded.
+  - The message reads `Unmatched (seeded from DEFAULT_PARAMS)`.
+  - §8b baseline-optimum injection: a strict lookup in `baseline_optimum_values`. The crisis
+    free set is a subset of it by construction, so a miss is a bug, not a case for a default.
+  - §8b `INCLUDE_PREV_OPTIMUM` keeps the stored t when the box is unchanged. After a bound
+    change it carries the prior optimum over as θ and re-packs it in the current box. Without
+    this, the stored t would decode to a different point. At the base_fc optimum it would give
+    ρ_x −0.5210 for −0.7803, P_S 3.8166 for 2.4868, σ_S 0.3126 for 0.1527, k_U 0.7992 for
+    0.7528 and k_S 3.0406 for 3.0034. The remap reproduces θ to ≤ 2.2e-16 relative.
+- **Text only.**
+  - `print_spec`'s column header is now `seed`.
+  - Comments and error text that described a hard-coded fallback in `assert_all_params_accounted`,
+    §6 and §8 are updated.
+  - The ξ_U provenance line reads "pinned in the baseline spec".
+  - `smoke_warmstart.jl` no longer prints the −0.55 fallback.
+- **Smoke runner** (`code/smoke/run_smoke.sh`, `README.md`). It now sets `ROYSEARCH_WINDOW` and
+  `ROYSEARCH_INIT_MODE`. Its old text substitutions targeted literals that no longer exist,
+  so as left it would have run `base_fc` under `:clusters` with the full 2048-point bank. The
+  grid regex now matches any integer. The README states that `clusters` must run in a scratch
+  copy (Known gaps).
+
+### Measured (scratch copies of v48.0.0 and v49.0.0; v49 also with the old boxes restored)
+- **A. Q at the four stored estimates, through each bundle's own spec**, bit-identical: v48
+  run twice, then v49.
+
+  | window | Q (v48.0.0 = v49.0.0) |
+  |---|---|
+  | base_fc | 1059.5806221932073 |
+  | crisis_fc | 710.0814497970832 |
+  | base_covid | 2884.581528455622 |
+  | crisis_covid | 1844.8940797000023 |
+
+  - These equal the v48.0.0 entry's values.
+  - Every field `unpack_θ` returns for the four bundles is identical between trees.
+- **B. Seeds, through `smm_main.jl`'s own construction (truncated before §8b).**
+  - Run for 4 windows × {`:clusters`, `:warmstart`}, with 18 / 13 / 18 / 13 free parameters.
+  - With the boxes held fixed, `pack_θ(spec)` and every init are bit-identical in all 8 cases.
+  - No warm-start parameter fell back to a table literal. The six unmatched candidates (unsk:bT,
+    unsk:PU, unsk:η, skl:η, unsk:σ_w, skl:σ_w) are all pinned by FIX_PARAMS or the λ_w
+    calibration, so none reaches `spec.free`.
+  - Under the new boxes the constrained seeds are again bit-identical in all 8 cases. t moves
+    only on the re-boxed free coordinates: 5 in the baseline windows, 4 in the crisis windows,
+    where ρ_x is pinned. `Clamped into current bounds` fires in no window.
+- **Estimates against the new boxes.** All are strictly inside. The only value on any bound is
+  b_T = 0, which is pinned and whose box is unchanged.
+  - ρ_x: −0.7803 (FC), −0.2465 (COVID).
+  - P_S: 2.487, 2.689, 2.832, 3.097.
+  - σ_S: 0.1527, 0.1458, 0.0174, 0.0705.
+  - k_U: 0.753, 1.152, 0.863, 0.506.
+  - k_S: 3.003, 5.408, 0.528, 0.485.
+- **C. Guards.**
+  - `pack_θ(default_free_params())` raises and lists all 29 parameters.
+  - One NaN seed raises: `pack_θ: no starting value for common:ρ_x`.
+  - A spec with ρ_x neither free nor pinned raises in `unpack_θ`: `common:ρ_x is neither free
+    nor pinned`.
+  - Freeing skl:μ while unsk:μ is neither free nor pinned raises, naming unsk:μ. The other
+    block's copy is not borrowed.
+- **D. Bundles.** Deserialisation status is identical in both trees.
+  - The four estimate bundles and the four candidate banks load.
+  - Ten `estimate_base_fc_diagonalW_*` side bundles fail, as before, with `TypeError: in new,
+    expected Int64, got a value of type Float64`. These are the seven `backup_Q*`, plus
+    `postmean`, `pre_xiU_restore_Q4960.615185` and `rejected_Q27002.469793`.
+- **E. Smoke tests** (crisis_covid, scratch copy): `warmstart`, `guard` and `clusters` all
+  PASS.
+  - The guard message now reads "unpack_θ has no value for common:ρ_x".
+  - `clusters` regenerated its bank.
+- **Gates.**
+  - `check_forwarding`: the pre-existing `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` finding only.
+  - `check_threading` and `check_hire_margin`: OK.
+  - `check_version_sync`: in sync at 49.0.0.
+  - `MCMC_main.jl` loads up to the DE-MC launch for base_fc (23 free) and crisis_fc (18 free).
+    Its spec builds, `unpack_θ` decodes and logπ is finite at the seed. No chain was run.
+
+### Settings
+None added, retired or re-defaulted.
+
+### Known gaps
+- `FIX_PARAMS` carries `:a_gam` / `:b_gam`, but the ASCII keys are `:a_Gam` / `:b_Gam`. Every
+  run warns `unrecognised key … ignored`, so a_Γ and b_Γ are estimated, not pinned at 1. This
+  predates this version and is left to the author, who owns FIX_PARAMS.
+- `policy/policy_main.jl:178` destructures `unpack_θ` into four values. It returns three, so
+  that line raises. This predates this version and is not touched.
+- `smoke_clusters` writes a 32-point bank to `output/estimates/`. `_meta_matches` does not
+  compare `n_sample`, so a later estimation would accept that bank. Run it in a scratch copy.
+- `run_smoke.sh` is tracked as mode 100644. Invoke it as `bash run_smoke.sh <test>`.
+- The stored `loss_opt` of the four bundles predates v48.0.0 and differs from the Q they
+  re-evaluate to (for example 1046.76 against 1059.58 at base_fc). This is the v48.0.0
+  respecification, not this change.
+
+### Tried and rejected
+- **Removing `ParamSpec.init`.** The field is the seed carrier for `pack_θ`, `perturb_free_init`
+  and `_spec_with_init`, and it is serialised in every bundle. Removing it is the silent
+  "remove a field, types match" case for some layouts, and it would migrate every bundle for no
+  change in behaviour.
+- **A `DEFAULT_PARAMS` fallback at the §8b baseline injection.** It would put a non-baseline
+  vector into the bank under the label "baseline optimum". A strict lookup is correct.
+- **Rejecting a prior optimum whose box differs.** That discards a valid start. Re-packing it as
+  θ keeps the start, bit-faithful to 2.2e-16.
+
+---
+
+## v48.0.0 — 2026-10-01
+
+**MAJOR: every unskilled entry object is evaluated at p = 1, not at the top quadrature node.**
+A new unskilled match starts at the top of the quality support, p = 1. The unskilled p grid is
+Gauss–Legendre (Np_U = 160), so its top node is p_N = 1 − 5.612e-5, and v47.0.0 read the entry
+surplus off the grid, `Svec[end] = S_U(a_U, p_N)`. That understated S_U(a_U,1) by
+A P_U a_U (1 − p_N)/(r+ν+λ_U+ξ_U) for every hired type. It also gave zero surplus to the band of
+hired types a^h < a_U < a^h/p_N, since `_soft_weight` returns 0 on the top cell. The entry
+surplus is now the model's closed form at p = 1,
+`S_U(a_U,1) = max((A P_U a_U − (r+ν) U^search + λ_U I)/(r+ν+λ_U+ξ_U), 0)`, with the tail integral
+I kept on its grid quadrature. J_U(a_U,1), E_U(a_U,1), the U^search update, the p* update,
+free entry, E_U(a_U,1) as consumed by the skilled block, and the wage paid to a new hire all
+read it. S_U(a_U,1) now rises from 0 at a^h, continuously in a_U, as the hireable-set lemma
+says. The hired set (χ, a^h = b̃_U/P_U), the never-hired convention and every skilled-side
+formula are unchanged. The layer is MAJOR: an equilibrium object is redefined and Q moves at
+every point, all four estimates included (theorist's decision).
+
+**Comparability.** None for Q, and the windows need re-estimation. Every v47.0.0 Q, moment,
+θ_U and transition path is superseded; relative moves are of order 1e-4 (table below). No
+struct changed. All four bundles load and re-evaluate unchanged. The equilibrium-object
+NamedTuple gains two fields, `eU_entry` and `wU_entry`. No serialised object carries it.
+
+### What changed
+- `solver/unskilled.jl:119` `entry_surplus_unskilled(PUeff, flow, λ, I, D)` returns
+  `max((A P_U a_U·1 + flow + λ I)/D, 0)`, where `flow` is the part of the numerator without p.
+  - `unskilled_inner_loop!:302` calls it with `flow = −(r+ν) U^search`.
+  - `Jfrontier = (1−β) S1` and `E1vec = U^search + β S1` are formed from that value, as before.
+  - Every downstream reader of `uc.Jfrontier` / `E1vec` follows: the U^search update,
+    `update_pstar_from_surplus!`, `update_theta_unskilled`, the skilled block's `EU1`
+    (`solver.jl:174, :279`), and `equilibrium.jl`'s `JU_frontier`, `SU1`, `EU1`.
+- `transition/transition_values.jl:260` `_unskilled_value_step!` calls the same helper with
+  the transition's own numerator, `flow_out + inv_dt · S^raw_{n+1}(1)`.
+  - The continuation `S^raw_{n+1}(1)` (`:251`) is extrapolated from the top two nodes.
+  - This is exact, because the raw surplus is affine in p at every date: the terminal
+    surface is affine, and each step adds a flow affine in p.
+  - The terminal date copies the stationary `Jfrontier`, which is already at p = 1.
+- `solver/equilibrium.jl`:
+  - The hiring atom is its own vector, `eU_entry` (`:128`), and the damaged tail is
+    `eU_density` (`:125`).
+  - The reported `eU_surface` is `eU_density` with the atom in its top column, as before (`:130`).
+  - The wage block pays the atom `wU_entry = β_U A P_U a_U·1 + (1−β_U)(r+ν) U^search`
+    (`:184`). Each row's atom enters the unskilled wage list as its own support point (`:229`).
+  - Under v47 the atom shared the top node's entry at w_U(a_U, p_N), and it was dropped
+    altogether when p* > p_N, because that node's wage is NaN.
+- `transition_solver.jl` and `policy/` contain no entry-surplus read of their own. The
+  transition's forward pass and free entry read `path.Jfrontier`. Its mean-wage series already
+  pays unskilled employment at p = 1 (`transition_solver.jl:677`).
+
+### Measured (scratch copies of v47.0.0 and v48.0.0, 1 thread per process, bundle grids, `select_equilibrium`)
+- **Q at the estimates**. "values" is the solver change alone: the v48 `unskilled.jl` and
+  `transition_values.jl` on the v47 `equilibrium.jl`. "wage" is the atom change alone.
+  "bins" is the wage change with the atom split off but still paid w_U(a_U, p_N).
+
+  | window | v47.0.0 | v48.0.0 | ΔQ | rel | values | wage | of which bins |
+  |---|---|---|---|---|---|---|---|
+  | base_fc | 1059.3616874672787 | 1059.5806221932073 | +0.21894 | +2.07e-4 | +0.24253 | −0.02355 | −0.02356 |
+  | crisis_fc | 709.9846318828362 | 710.08144979708322 | +0.09682 | +1.36e-4 | +0.06239 | +0.03446 | +0.03446 |
+  | base_covid | 2884.5949766504946 | 2884.581528455622 | −0.01345 | −4.7e-6 | −0.11367 | +0.10026 | +0.10041 |
+  | crisis_covid | 1845.7773747608371 | 1844.8940797000023 | −0.88330 | −4.79e-4 | −0.90488 | +0.02165 | +0.02171 |
+
+  - `smm_objective` returns the same four values.
+  - **Value channel.** Raising S_U(a_U,1) by A P_U a_U(1−p_N)/D raises U^search, by a median
+    of 7.6e-6 to 1.8e-5 relative across windows. It also moves p*_U up at every hired node,
+    by a median of 5.8e-5 to 2.0e-4. The moments that move most are `emp_cm3_U` (up to 9.9e-4
+    relative), `sep_rate_U` (6e-5 to 8.5e-4) and `ur_U` (up to 4.8e-4).
+  - **Wage channel.** Almost all of it is the histogram range, not the wage itself. Paying
+    the atom w_U(a_U,1) instead of w_U(a_U,p_N) moves Q by at most 1.5e-4. Giving the atom
+    its own support point moves Q by up to 0.10, because `_wage_density`'s range is
+    `quantile(all_wages, 0.002 / 0.998)` over unweighted support points (Known gaps).
+  - At all four estimates the straddling node lies below a^h (node 26 at −3.2e-7 relative in
+    the FC windows), so no band type exists there, and v47's zero-surplus band does not bite.
+- **(1) b_U sweep at base_fc** (41 points over ±1e-4 relative, the 11-point x_26 ladder, and
+  39 points over s ∈ [−6.0e-5, −5.3e-5] around the old onset s* = −5.6444e-5):
+  - **The onset step is gone.** At s = −5.645e-5 → −5.644e-5, Q is 1059.462176 → 1059.490359
+    under v47 (+0.0282) and 1059.707564 → 1059.707541 under v48 (−2.3e-5, the local slope
+    × 1e-8).
+  - A quadratic fits Q over the 39-point window with max residual 1.5e-2 under v47 and
+    2.2e-10 under v48.
+  - On the 41-point sweep, the largest interval excess over the neighbouring slopes is
+    0.02826 (v47) and 4e-5 (v48). Max |second difference| is 2.84e-2 (v47) and 4.9e-5 (v48).
+  - **The x_26 crossing stays continuous.** The ladder's largest excess is 2.2e-9.
+  - All points are feasible and labelled H in both trees. Relative ΔQ along the sweep lies in
+    [2.05e-4, 2.33e-4].
+- **(6) J_U(a_U,1) across a^h at fixed parameters.**
+  - At every hired straddling node, J_U(x_26,1) equals
+    (1−β_U) A P_U (x − a^h)/(r+ν+λ_U+ξ_U+f_U β_U) to 7 digits (λI ≈ 0 there):
+    1.097513e-6 at x−a^h = 1e-8 relative, 1.097513e-4 at 1e-6, and 6.159119e-3 at the old
+    onset. It is exactly 0 at and below a^h.
+  - v47 gave 0, 0 and 0 at those three points.
+  - At the base_fc estimate the three nodes are x_25 (J = 0), x_26 (3.2e-7 below a^h, J = 0)
+    and x_27 (J = 8.712663; v47 8.706580; the closed form without λI gives 8.470699).
+- **(3) base_fc 19×19 (a_ℓ, c) plane.**
+  - 361/361 feasible in both trees: 0 gained, 0 lost, labels identical (304 H, 57 L).
+  - Relative ΔQ lies in [−4.60e-4, +5.58e-4], median +9.6e-5. Max |Δθ_U|/θ_U is 6.9e-5.
+- **(4) Transition** (`transition_audit.jl`, `TA_PAIR=fc`, Nx = 120):
+  - It converges in 23 iterations in both trees (final ‖Δθ‖∞ 7.277e-5; v47 7.278e-5).
+  - The terminal gap to z1 is 3.534021e-3 (v47 3.535302e-3).
+  - The per-date series move by at most 4.0e-4 relative (ur_U), 8.8e-5 (θ_U) and 5e-6 (θ_S).
+  - With `TA_NULL=true` the terminal gap is 3.358951e-7 (v47 3.358890e-7) after 1 iteration.
+- **(5) Gates** (v48 scratch):
+  - All changed files parse.
+  - `check_threading` -t 2: serial and threaded are bitwise equal at 1059.5806221932.
+  - `check_hire_margin`: OK, 0 disagreements at all four estimates.
+  - `check_dead_settings`: PASS. `check_output_tree`: PASS on a tree holding the four bundles.
+    The live `output/estimates/` fails rule 6 on its `.pre_migration` files, which predate
+    this change.
+  - `check_forwarding`: the pre-existing `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` finding.
+    `check_structure`: the same 7 files.
+  - `check_repo.sh --verify-only` exits 1 from that forwarding finding, as under v47.0.0.
+  - `check_version_sync` is in sync at 48.0.0.
+  - No optimiser or chain was run.
+
+### Settings
+None added, retired or re-defaulted.
+
+### Known gaps
+- **The unskilled wage histogram's range depends on the number of support points.** The range
+  is `quantile(all_wages, 0.002 / 0.998)` over unweighted points. Adding one support point per
+  row at the same mass therefore moves Q by up to 0.10 at the estimates. This is the "bins"
+  column above. The new support point is the model's own (a new hire is paid w_U(a_U,1)), but
+  the range rule should be a property of the distribution, not of how it is listed.
+- The `eU_surface` density-versus-mass weighting (reported against v22.0.0) is unchanged.
+  The tail enters the wage list as a density value and the atom as a mass.
+- **The `policy/` layer does not load at v47.0.0 or v48.0.0, for reasons that predate this
+  change.** `policy_params.jl:125` names the retired `RegimeParams`, and `policy_solver.jl:33`
+  reads `obj.wx`, which `compute_equilibrium_objects` does not return. Its unskilled
+  mean-wage loop still prices the top column at w_U(a_U, p_N). When the layer is revived it
+  should read `eU_entry` and `wU_entry`.
+- The top p-cell [p_N, 1] is still never split in the tail integral I or in any p-density.
+  Entry no longer reads the grid there, so the cell matters only through the λ_U redraw tail,
+  where it is ordinary quadrature.
+- No window has been re-estimated under v48.0.0.
+
+### Tried and rejected
+- **Splitting the top p-cell by (1 − p*)/(1 − p_N) instead.** Not implemented, by the theorist's
+  decision. It would still price entry at p_N, a point the model never uses. Evaluating at
+  p = 1 is the model's own object and makes S_U(a_U,1) → 0 continuously at a^h.
+
+---
+
+## v47.0.0 — 2026-10-01
+
+**MAJOR: unskilled free entry values a meeting only through the hired branch of the
+unemployed.** The expected value of a meeting is `Jbar / ũ_U`. Under v46.0.0 the numerator
+was `Σ_ij J_U(x_i,1) (u_ij + d u_S,ij)`, so in a cell that straddles a^h the never-hired part
+of the row's unemployed entered at the node's J_U. Those types produce no match when met, and
+their J_U is 0, as it already is for a node below a^h. The numerator now weights u_U by the
+hired branch's share of the row's unemployed, `hired_i = χ_i υʰ_i / usurv_i`
+(`unemployment_split_unskilled`). The seeker pool ũ_U is unchanged: never-hired types still
+search, are still met, and are still unemployed (the author's convention, untouched). This
+closes the v46.0.0 known gap "free entry prices the never-hired sliver of an open straddling
+node at that node's J". The layer is MAJOR because neither lower test holds. MINOR requires a
+run to reproduce the old numbers, and it does not: Q moves at 171 of 361 plane points and along
+b_U within 6e-5 relative of b̂_U at base_fc. The discretised free-entry condition is redefined,
+and re-estimation can move θ̂. The continuum free-entry equation in the notes is unchanged.
+
+**Comparability.** Every v46.0.0 number at the four stored estimates is reproduced
+**bitwise**: Q, and the moments behind it. In all four windows the straddling node lies below
+the point where J_U at the top p-node turns on, so J_U(x_k,·) = 0 there and the weight does not
+bite. Superseded:
+- any v46.0.0 Q or θ_U at a point whose straddling node has J_U > 0 (on the base_fc plane,
+  every point with χ_26 ≥ 0.518);
+- transition paths on a grid where that is the case (`transition_audit.jl` at its default
+  Nx = 120).
+
+No struct changed, and all bundles load.
+
+### What changed
+- `solver/unskilled.jl:498` `update_theta_unskilled(model; u_hired = nothing)`. The default
+  hired branch is `u_U .* hired`, from `unemployment_split_unskilled` at the installed p* and
+  θ_U, which are the values `uc.u` was built from (`solve_unskilled_block!:541`). The
+  numerator is `Σ J_i (u^h_ij + d u_S,ij)` (`:516`), and `ũ_U = Σ (u + d u_S)` is unchanged.
+  The `duS_carry` term is not weighted (zero in any stationary state). The corner-limit branch
+  reads the stationary limit composition, so its hired branch is the stationary split
+  whatever the caller passes. `global_residuals` R2 calls the same function with the default,
+  so the residual and the iteration test one condition.
+- `solver/unskilled.jl:408` `hired_unemployed(u, χ, τ, ℓ) = (u − (1−χ)(1−τ)ℓ)⁺`, the stock
+  form of the same split. This is the expression the transition's forward pass had inline,
+  hoisted so that both of its uses read one definition.
+- `transition/transition_solver.jl`:
+  - `_forward_pass!:190` calls `hired_unemployed`. The expression is identical, so the
+    arithmetic is unchanged.
+  - `_update_tightness!:481` passes the date's stock split as `u_hired`. Off a steady state
+    the row's unemployed are not at their stationary shares, and the stock split is the share
+    the forward pass actually hires at f_U, so free entry prices the matches that path makes.
+    At a converged stationary state the two forms agree to max|row − stock| / max u ≤ 1.2e-16
+    (all four estimates).
+- No other J-weighted meeting value over unskilled seekers exists. `equilibrium.jl` uses
+  `JU_frontier` only for the reported surfaces `SU1`, `EU1` and `JU_surface`. No moment reads
+  J_U. `policy_solver.jl` reports θ only.
+
+### Measured (scratch copies of v46.0.0 and v47.0.0, 1 thread each, bundle grids, `select_equilibrium`)
+- **Q at the estimates: bitwise unchanged.** base_fc 1059.3616874672787, crisis_fc
+  709.9846318828362, base_covid 2884.5949766504946, crisis_covid 1845.7773747608371.
+  `smm_objective` gives the same four values. At the straddling node J_U(x_k,·) = 0 exactly:
+  cell 26 (χ = 0.508852, hired = 0.2705 base_fc / 0.2780 crisis_fc) and cell 20 (χ = 0.511365,
+  hired = 0.3055 / 0.3194). So the meeting value Jbar is equal to 12 digits (24.919867743 at
+  base_fc).
+- **No straddling cell, 32 random points** (the v46.0.0 invariance set: seed 20261001,
+  t̂ + 0.03·N(0,1), a^h < x_1 or b_U/P_U exactly on a cell edge). The **full solve** is bitwise
+  at **32/32** in Q and θ_U, with identical labels. This is stronger than v46's formula-level
+  criterion. Here χ is not solved for in either tree, and `hired` is exactly 1.0 where χ = 1,
+  and J_U is 0 where χ = 0.
+- **Continuity along b_U at base_fc** (41 points over ±1e-4 relative, plus the 11-point
+  ladder around b_U* = P_U x_26):
+  - **The crossing a^h = x_26 is bitwise unchanged.** All ladder points are equal, and so is
+    every sweep point with s ≥ −5.5e-5. There is no step at the node in either tree.
+  - **The weight bites only for s ≤ −5.75e-5**, where Q falls by 2.0e-8 to 2.4e-7 relative.
+  - Away from the step below, max |second difference| is 1.23e-4 in both trees.
+- **The residual b_U step is diagnosed (it is not this margin, and it is unchanged).** The
+  v46.0.0 step between s = −5.75e-5 and −5.5e-5 (excess +0.02826 v46, +0.02826 v47) sits
+  exactly where J_U at node 26 turns on. The unskilled p grid is Gauss–Legendre (Np_U = 160),
+  so its top node is p_N = 1 − 5.612e-5, not 1. In `_soft_weight` the top cell [p_N, 1] is a
+  hard indicator: `j ≥ Np` returns 0, so it is never split. For a^h < x < a^h/p_N the type is
+  therefore hired (p* < 1, χ counts it) but has zero surplus at p_N, and J_U = 0.
+  - Predicted onset: s* = x_26 p_N P_U / b_U − 1 = −5.6444e-5.
+  - Measured: J_26 = 6.3e-7 at s = −5.645e-5 and 0 at −5.644e-5. Q is 1059.462176 and
+    1059.490359 at those two points (Δ −0.0282), with `emp_cm3_U` −0.03977580 → −0.03973408
+    and `emp_var_U` 0.29144084 → 0.29141210.
+  - J_U itself is continuous through the onset; the unskilled wage moments are not. See known
+    gaps.
+- **base_fc 19×19 (a_ℓ, c) plane:**
+  - 361/361 feasible in both trees: 0 gained, 0 lost, labels identical.
+  - 190 points are bitwise, and they are exactly those with χ_26 ≤ 0.508852.
+  - The other 171 (χ_26 ∈ [0.518169, 0.592524]) move by relative ΔQ in [−2.6e-5, +9.0e-6]
+    (median −1.4e-5), with max |Δθ_U|/θ_U 3.7e-6.
+- **Transition** (`transition_audit.jl`, Nx = 120):
+  - With `TA_NULL=true` (base_fc against itself) the terminal distribution gap is 3.358890e-7
+    (v46: 3.358897e-7), and u_U total is 0.042311 → 0.042311. The forward law and the
+    stationary KFE still agree.
+  - On the fc pair the per-date series move by at most 2.5e-5 relative (θ_U) and the
+    terminal gap to z1 is 3.535302e-3 (v46: 3.535293e-3). At Nx = 120 the straddling node is
+    open, so the endpoints themselves move (θ_U(z1) 0.226543 → 0.226541).
+- **Gates** (v47 scratch):
+  - Both changed files parse.
+  - `check_threading` -t 2: serial and threaded bitwise at 1059.3616874673.
+  - `check_hire_margin`: OK, 0 disagreements at all four estimates.
+  - `check_dead_settings` and `check_output_tree`: PASS.
+  - `check_forwarding`: the pre-existing `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` finding.
+    `check_structure`: the same 7 files.
+  - `check_repo.sh --verify-only` exits 1 from that forwarding finding, as under v46.0.0.
+  - `check_version_sync` is in sync at 47.0.0.
+  - No optimiser or chain was run.
+
+### Settings
+None added, retired or re-defaulted. `u_hired` is a keyword of `update_theta_unskilled`, not a
+setting. Its default is the stationary split, and only the transition passes it.
+
+### Known gaps
+- **The top p-cell [p_N, 1] is a hard indicator** (`grids.jl` `_soft_weight`, `j ≥ Np →
+  0`). This is the mechanism of the residual b_U step above.
+  - It also means the hireable-set lemma's entry point p = 1 is not on the grid. A type in
+    the band (a^h, a^h/p_N) is hired at f_U, yet its firm value is 0, so free entry gains
+    nothing from meeting it.
+  - Two fixes are candidates: split the top cell by (1 − p*)/(1 − p_N), or evaluate the
+    entry surplus at p = 1. Both would change Q at all four estimates. Neither is applied: it
+    is a decision for the theorist.
+- **No window has been re-estimated under v46 or v47.** At the stored points the two versions
+  agree, but within 6e-5 relative of b̂_U they do not, so a re-estimation can differ.
+- **The cross-market drain ignores χ** (unchanged from v46.0.0, inert in any stationary state).
+
+### Tried and rejected
+- **Applying the stationary row share `hired_i` inside the transition**, which would have
+  meant calling `unemployment_split_unskilled` at the date's p* and θ_U. Not used. Off a
+  steady state it weights a different mass from the one the forward pass hires, so free entry
+  would price matches the path does not make. The stock split equals the row share to 1e-16 at
+  every stationary state measured.
+
+---
+
+## v46.0.0 — 2026-10-01
+
+**MAJOR: the unskilled hiring margin is a covered fraction of the ability cell, not a node
+indicator.** A fresh unskilled match starts at p = 1, so a type is hired iff p*_U(a_U) < 1,
+and by the hireable-set lemma that holds iff a_U > a^h = b̃_U / P_U at every tightness. The
+code read the lemma's indicator per node, so a row moved wholesale between the hired and
+never-hired branches when a^h crossed a node. Each cell is now weighted by its hired
+fraction χ_i = clamp((xhi_i − a^h)/(xhi_i − xlo_i), 0, 1) on the midpoint intervals that τ_T
+and d use. This is the v39.0.0 pattern (OJS participation) applied to the third margin on the
+ability grid. The layer is MAJOR rather than MINOR: an equilibrium object is redefined, Q
+moves at every point where a cell straddles a^h (all four estimates and every plane point),
+and b̂_U at base_fc was pinned by a node location rather than by the data. The theorist has to
+be told, because the lemma enters the paper and b_U gains an identifying channel through the
+mass at the threshold.
+
+**Comparability.** None for Q, and the estimates must be re-run. Every stored Q and every
+downstream number at a window is superseded. The base_fc θ̂ in particular was parked on the
+node-26 lip and should not be reported. No struct changed: all four bundles load unchanged and
+re-evaluate under the new code. Never-hired types are still unemployed and still in the seeker
+pool and in measured unemployment (the author's convention). The free-entry formulas are
+unchanged.
+
+### What changed
+- `solver/grids.jl` — `fraction_above(xlo, xhi, x, a)`, the cell's quadrature of 1{ability ≥ a}.
+  `training_policy!` and `hire_fraction` share it, and the arithmetic is the expression
+  `training_policy!` had inline.
+- `solver/unskilled.jl`, new section "Hiring margin" before the stationary composition:
+  - `hire_fraction(model)` → χ over a_U cells, closed form `a^h = up.bU / up.PU`. It does not
+    interpolate p*_U.
+  - `unemployment_split_unskilled(pstar, f, model)` → per row `(χ, usurv, hired)`. Here
+    `usurv = χ υʰ + (1 − χ)`, with `υʰ = (δ+ν)/(f+δ+ν)` computed with f whatever the node's
+    classification, and `hired = χ υʰ / usurv` is the hired branch's share of the row's
+    unemployed.
+- `solver/unskilled.jl` `solve_stationary_unskilled!`: `u = W2 · usurv_i · (1 − τ)` replaces
+  the `f_hire = (p* < 1 − 1e-10) ? f : 0` gate. Employment is the residual
+  `W2(1−τ)χ(1−υʰ)`, so mass is conserved by construction.
+- `solver/equilibrium.jl`:
+  - The hiring atom of `eU_surface` at p = 1 is fed by `hired_U · u_row`, not the whole row.
+  - The unskilled duration survivor is the per-row mixture
+    `hired·e^{−(f_U+ν)t} + (1−hired)·e^{−νt}`, which replaces the per-node switch at the old
+    `:413`.
+  - The comment calling never-hired types the "non-searching mass" now says they are
+    unemployed and searching but never hired.
+  - Every other consumer of the hired set reads masses or the node's own p* (`sep_rate_U`,
+    `wchg_rate_U`, the wage surface), so the hired sliver of a node below a^h takes that node's
+    values (p* = 1), as a τ cell does.
+- `transition/transition_solver.jl` `_forward_pass!`: the never-hired slice
+  `(1−χ)(1−τ)ℓ` is wholly unemployed. Only the rest, `u_U^h = (u_U − (1−χ)(1−τ)ℓ)⁺`, leaves at
+  f_U, written as `fU_hire = f_U · u_U^h/u_U`. χ is computed once per pass from the post-switch
+  primitives. The law of motion in the file header is updated.
+- `gates/check_hire_margin.jl` (new), wired into `check_repo.sh` after `check_threading`. At
+  each stored estimate it checks that the solved classification `p*_U(x_i) < 1 − 1e-10` and
+  the closed form `x_i > a^h` agree. A disagreement within 1e-6 relative of a^h is reported
+  rather than failed, because there the closed form is exact and the node's classification is
+  rounding.
+
+### Measured (scratch copies of v45.1.0 and v46.0.0, 1 thread each, bundle grids 160/160/180, `select_equilibrium`)
+- **Q at the estimates, v45.1.0 → v46.0.0.** v45.1.0 reproduces each bundle's `loss_opt`.
+  Each window has one straddling cell:
+  - base_fc: 1046.760228531 → **1059.361687467**. Cell 26, χ = 0.508852, row mass 0.009502.
+    θ_U 0.458721 → 0.462099, and θ_U 0.465394 on the other side of the old lip. Unique root H.
+  - crisis_fc: 710.281317497 → 709.984631883. Same b_U and P_U as base_fc (both fixed), so
+    the same cell and χ.
+  - base_covid: 2834.326345368 → 2884.594976650. Cell 20, χ = 0.511365, row mass 0.008250.
+  - crisis_covid: 1816.503468941 → 1845.777374761. Same cell and χ.
+  - 33 of the 35 active moments move by more than 1e-9 relative at each estimate. The largest
+    are unskilled: at base_fc
+    `sep_rate_U` +1.25%, `theta_U` +0.74%, `jfr_U` +0.37% and `ur_U` −0.28%.
+- **Continuity along b_U at base_fc** (41 points over ±1e-4 relative):
+  - Under v45.1.0 Q steps by **−48.362** between s = −5e-6 and 0. Bisected to adjacent floats
+    b_U = 0.061827492366036539 | …546, it is 1095.107140 | 1046.760220, with θ_U 0.465394 |
+    0.458721.
+  - Under v46.0.0 the same two floats give 1059.3624075762166 | 1059.3624075762937 (Δ 7.7e-11),
+    with θ_U equal to 11 digits.
+  - The node crossing itself, a^h = x_26 = 0.0618274923722, is a kink: the slope is
+    −2.2717e3 to the left and −2.2467e3 to the right, per unit relative b_U. Q is piecewise
+    linear with max |second difference| 7.5e-6 away from the step below. θ_U moves at most
+    2.1e-6 between sweep points (v45.1.0: 6.7e-3).
+- **A second, smaller step survives and is not this margin.** Between s = −5.75e-5 and
+  −5.5e-5, Q rises +0.0225 against the local trend (excess +0.028 over one sweep step). It is
+  present in v45.1.0 at the same place (excess +0.030). It is carried by the unskilled
+  wage-distribution moments: `emp_cm3_U` +1.05e-3 relative across the step, `emp_var_U`
+  −9.9e-5. θ_S and the root label do not move. See known gaps.
+- **Invariance where no cell straddles a^h.** 32 random points, 8 per window, seed 20261001,
+  t̂ + 0.03·N(0,1). b_U is then set so that a^h < x_1 (χ ≡ 1, 16 points) or so that
+  b_U/P_U equals a cell edge exactly (χ ∈ {0,1} with both values present, 16 points).
+  - Formula level, bitwise: **32/32**. From each v45.1.0 converged state, both versions
+    re-derive u_U and t and then the objects, the moments and Q, and every array and Q is `==`.
+  - Full solve: 15/32 bitwise. The other 17 differ by at most 1.0e-12 relative (median
+    1.5e-14). θ_U differs by at most 2.4e-13 relative, and labels are identical.
+  - Why some full solves differ: instrumenting v45.1.0's gate shows the 17 are **exactly** the
+    points where the per-node gate disagreed with the closed form at a transient iterate. That
+    happened at 2 to 36 node-calls, all in the solve's first four stationary calls, from the
+    initial p*. On the 15 points with no transient disagreement Q is bitwise equal. The
+    difference is an iteration path to the same fixed point, not a different quadrature.
+- **base_fc 19×19 (a_ℓ, c) plane, offsets ±0.2 natural units:** 361/361 feasible under both
+  versions, so 0 gained and 0 lost, with identical labels. The straddling cell is 26
+  everywhere, with χ ∈ [0.4248, 0.5925]. The relative ΔQ has median −4.1% and lies in
+  [−9.9%, +7.0%].
+- **Mass at the estimate (base_fc).**
+  - max |e_U − W2(1−τ)χ(1−υʰ)| = 5.4e-20, and max |m_U − u − t − e| = 9.5e-20.
+  - Cell 26 holds e = 2.433e-4 and u = 5.015e-4, and 27.05% of its unemployed are in the hired
+    branch.
+  - The never-hired unemployed are 3.814e-3, which is 9.0% of u_U. The marginal mass below a^h
+    is 0.1170.
+- **Hiring-margin gate:** 0 disagreements at all four estimates. Along the b_U ladder, the node
+  within 1e-12 relative of a^h disagrees, which is reported as within precision. Under
+  v45.1.0 the misclassified band is 1.0e-10 wide.
+- **Transition.**
+  - `run_transition_simulation(:fc)` with `transition_main.jl`'s settings (grid 200, 240
+    steps, tol 1e-4) converges in 23 iterations (d = 7.18e-5); v45.1.0 does the same in 23
+    (7.19e-5).
+  - Inherited stocks at t = 0 match z₀ (ur_S exact). The terminal gaps to z₁ are θ_U 3.8e-4,
+    θ_S 4.5e-3, ur_U 6.9e-4 and ur_S 2.0e-2 relative, the same as v45.1.0's to two digits.
+  - `transition_audit.jl` with `TA_NULL=true` (base_fc against itself, cell 26 straddling)
+    gives a terminal distribution gap of 3.36e-7 (v45.1.0: 3.36e-7) and u_U total
+    0.042311 → 0.042311. The forward law with the χ split reproduces the stationary KFE.
+- **Gates:**
+  - Every changed file parses.
+  - `check_threading` -t 2: serial and threaded bitwise at 1059.3616874673.
+  - `check_hire_margin`: OK.
+  - `check_dead_settings` and `check_output_tree`: PASS.
+  - `check_forwarding`: 1 finding (`ROYSEARCH_MCMC_JAC_ALLOW_GAPS`). `check_structure`: the
+    same 7 files. Both are pre-existing.
+  - `check_repo.sh --verify-only` exits 1 under both versions, from that forwarding finding.
+  - `check_version_sync` is in sync at 46.0.0.
+  - No optimiser or chain was run.
+
+### Settings
+None added, retired or re-defaulted. There is no switch back to the node indicator. A
+formula-level `:indicator` path would reproduce v45.1.0 only where no cell straddles a^h, which
+the invariance test above already establishes.
+
+### Known gaps
+- **No window has been re-estimated under v46.** The four Q values above are evaluations at
+  v45-era points. The README equilibrium table (base_fc 1050.153253, crisis_fc 970.511766) was
+  already stale and is now superseded too.
+- **Free entry prices the never-hired sliver of an open straddling node at that node's J.**
+  The numerator `Σ J_i u_i` is unchanged, as instructed. For a node above a^h whose cell
+  straddles it, the never-hired part of the row enters at J_i > 0, although those types have
+  J = 0. The error is O(cell width²) and continuous across the crossing. The exact form
+  weights the numerator by `hired`, and it is a decision for the theorist.
+- **The cross-market drain ignores χ.** `hire_X = f_U·Σu_S^drain` (equilibrium) and
+  `d·f_U·u_S` (transition) let crossers at a_U ≤ a^h find unskilled jobs. This is inert in
+  any stationary state (d u_S ≡ 0, Prop. 1) and live only while the frontier moves.
+- **The residual b_U step (ΔQ ≈ +0.028) sits in the unskilled wage-moment layer**
+  (`emp_cm3_U`, `emp_var_U`) and is present in v45.1.0. Its mechanism (the wage-grid quantile
+  endpoints or the 1e-16 mass filter in `_wage_density` are the candidates) has not been
+  diagnosed.
+- **Pre-existing, found while testing, not fixed: `unpack_θ(…; constrained = true)` maps
+  the unskilled and skilled block parameters through `_to_constrained` a second time**
+  (`smm/smm_params.jl`, the disambiguation loop of step 3 ignores the flag). At the base_fc
+  θ, `select_equilibrium(θ; constrained = true)` returns Q = 1.13e6 with b_U read as 0.2099,
+  where the unconstrained path gives Q = 1046.76. This affects `MCMC_SPACE = :theta`
+  (`MCMC_main.jl:849`). The default `:t` is unaffected.
+
+### Tried and rejected
+- **Interpolating the raw p*_U to locate the threshold.** Not implemented. The closed form is
+  exact and needs no extrapolation below a^h. The lemma makes the threshold independent of
+  tightness, so p*_U adds no information.
+- **A bitwise full-solve invariance test.** Rejected as the criterion after measurement, not
+  on grounds. The 17/32 full-solve differences coincide one-for-one with transient gate
+  disagreements from the initial p*, so the criterion that can be bitwise is the formula-level
+  one, and it is: 32/32.
+
+---
+
+## v45.1.0 — 2026-09-27
+
+**MINOR: the skilled block's step test no longer counts p^oj_S for types that do not
+search on the job.** A type is inactive in a pass when its OJS participation is exactly 0
+before and after it. Its p^oj_S enters no object, because every consumer weights it by
+`_ojs_share = s_part × weight`. For high-ability types that p^oj_S sits on a plateau at the
+top of the p grid, where S^1 − S^0 is flat to about 1e-12 relative, so rounding decides the
+node and p^oj_S hops by 2e-4 to 8e-4 against a tolerance of 1e-6. Every iterate is computed
+and installed as before. Only the stopping decision changes. The layer is MINOR, not MAJOR:
+no estimate, label, root or feasible point changes, and Q moves only because a block may stop
+a pass earlier at the same tolerance (at most 4.9e-14 relative at the estimates, 3.2e-7 on
+the plane). It is not PATCH, because no stored Q is reproduced bit for bit.
+
+**Comparability.** Every v45.0.0 result is comparable, and no stored bundle is superseded.
+No struct changed. All four bundles load and round-trip under the new types.
+
+### What changed
+- `solver/skilled.jl:869-881` (`solve_skilled_block!`): `inactive[k]` is
+  `part_old[k] == 0.0 && s_part[k] == 0.0`, and `Δoj[k]` is 0 for such a type and
+  `|p^oj_k − p^oj_old,k|` otherwise. `dj`, the outlier list `out` (`:911`) and the allowance
+  residual `dR` (`:934`) read `Δoj`. The Δp*_S and Δs_part terms still cover every type, so a
+  type switching participation registers through Δs_part. `R1` in `global_residuals` already
+  skipped these types (`solver.jl:196`), so the block and the battery now read the same set.
+- `solver/skilled.jl:911-924`, the outlier allowance's anchors: the walk to the nearest
+  in-tolerance neighbour now also steps over inactive types, whose p^oj_S is not an
+  equilibrium object. A side with no anchor is the edge of the region where p^oj_S is defined,
+  which is either the grid edge or the participation frontier with only inactive types beyond
+  it. The interpolant is then the anchor on the other side. With no anchor on either side the
+  test falls back, as before.
+- `solver/skilled.jl:672-679`: the loop header now names Δs_part among the tested components
+  and states that Δp^oj_S is taken over participating types.
+- `README.md`, "What converged means": one sentence on the step test.
+
+### Measured (scratch copies, 2 threads, v45.0.0 and v45.1.0 loaded side by side in one process and interleaved per point)
+- **Q at the estimates, v45.0.0 → v45.1.0** (normal solve and selection; no value is
+  bitwise equal; label, tag and θ_S are unchanged, with |Δθ_S|/θ_S ≤ 3.7e-14):
+  - base_fc: 1048.744645932, relative change −3.9e-15, unique H, θ_S 1.210839. This is the live
+    bundle, an SMM checkpoint the author's run wrote at 07:51.
+  - crisis_fc: 970.511765754, −3.4e-14, "H of 2", θ_S 0.657687.
+  - base_covid: 2834.326345368, +4.8e-16, unique, θ_S 1.812483.
+  - crisis_covid: 1816.503468941, −4.9e-14, unique, θ_S 2.321072.
+  - base_fc v45-era θ̂ (candidate id 1, the plane centre): 1050.153252946, −6.5e-16, unique H.
+- **Coverage, base_fc 19×19 (a_ℓ, c) plane, offsets ±0.2 natural units around the v45-era
+  θ̂:** 360/361 under both versions, the same set, so 0 gained and 0 lost. The failing point is
+  still (a_ℓ −0.156, c −0.022), where the skilled block converges and the global loop does not.
+  On the 360 common points no Q is bitwise equal. The relative |ΔQ| has median 2.7e-14, 90th
+  percentile 2.8e-11, 99th 4.7e-9 and maximum 3.2e-7, with none above 1e-6. The maximum
+  relative |Δθ_S| is 3.1e-10, and label and tag are identical at all 360 points.
+- **Why no Q is bitwise equal.** A block that stops a pass earlier hands a different state to
+  the global loop, and a selection runs 60 to 120 skilled blocks, so one earlier stop anywhere
+  changes the last bits. The tolerance is unchanged, so the change is bounded by the
+  tolerance-level spread above.
+- **Skilled-block passes.**
+  - Normal solve, total over its block calls, v45.0.0 → v45.1.0: base_fc 95 → 90, crisis_fc
+    178 → 171, base_covid 77 → 71, crisis_covid 80 → 76, base_fc v45-era 92 → 87.
+  - Selection: 607 → 593, 356 → 344, 736 → 724, 692 → 682, 608 → 594.
+  - Plane: 92.1 → 84.3 per normal solve. Every one of the 361 points takes fewer passes, with a
+    per-point ratio of median 0.941 (10th percentile 0.824, 90th 0.948). Per selection, the
+    mean falls from 538.3 to 521.0.
+- **id168** (design candidate 168, nobody searching on the job):
+  - v45.0.0: 7 block calls of 42, 41, 36, 31, 25, 26 and 35 passes (236 in all). Calls 1 and 2
+    end on stall hand-back (d 1.8e-4 and 9.8e-5). Calls 3, 4, 6 and 7 end through the
+    allowance, anchored on inactive types. 6 of the 7 calls still have inactive movers above
+    tolerance at their last pass (6, 3, 1, 2, 0, 2, 2).
+  - v45.1.0: 7 calls of 20, 12, 9, 7, 4, 4 and 4 passes (60), all ending on the plain test.
+    The test counts 0 movers in every call. The inactive types still hopping at the last pass
+    (156, 68, 31, 31, 29, 29, 29) are the ones it now ignores.
+  - Q is 1850130.495337 → 1850130.495336 (−5.9e-13), unique U.
+- **Negative control:** 193 passes, over the normal solves and selections at the six points
+  above, on which at least one type switched participation. The count is identical in both
+  versions. On every one of them Δs_part ≥ 2.0e-2 and d ≥ 2.0e-2, and none was excused by the
+  allowance.
+  - Example: crisis_fc, normal solve, call 4. 13 switching passes (passes 3 to 18, up to 16
+    types in one pass) take the searching set from 56 types to 11, with Δs_part 0.21 to 1.0 on
+    those passes. The block converges at pass 32 (v45.0.0: 33).
+- **The allowance depended on inactive anchors.** Under v45.0.0 all 1180 allowance exits on
+  the plane had an inactive anchor: 637 in normal solves and 543 in selections. The frontier
+  type the allowance exists for borders the non-searching region, so its only in-tolerance
+  neighbour on that side was an inactive type. Under v45.1.0 the allowance still takes 1122
+  exits, none of them one-sided at the grid edge. The grid-edge extension exists in the code
+  but never fired.
+- **Runtime, the five estimate points, four ABBA repetitions (repetition spread median
+  4.1%).** v45.1.0/v45.0.0 per repetition:
+  - normal solve: median 0.998, range 0.94–1.12; means 3.705 s and 3.713 s.
+  - solve plus selection: median 0.996, range 0.97–1.05; means 11.958 s and 11.955 s.
+  - On the plane, solve plus selection: median ratio 0.993.
+  - The machine was shared with the author's base_fc SMM run.
+- **Gates:** `skilled.jl` parses clean. `check_threading` passes, with serial and two threaded
+  evaluations bitwise equal at 1048.7446459324. `check_dead_settings` and `check_output_tree`
+  pass. `check_forwarding` reports 1 finding (`ROYSEARCH_MCMC_JAC_ALLOW_GAPS`) and
+  `check_structure` 7, both pre-existing. `check_repo.sh --verify-only` passes. All gate logs
+  are identical to v45.0.0's. `check_version_sync` is in sync at 45.1.0.
+- **Entry path:** `smm_objective` → `select_equilibrium` runs at every point above. No
+  optimiser or chain was run.
+
+### Settings
+None added, retired or re-defaulted. `CONV_S_MAXOUT` and `tol_outer_S` are unchanged.
+
+### Known gaps
+- `transition/transition_values.jl:352` has its own backward-induction step test, and it also
+  counts Δp^oj_S for every type. It is outside this change, and whether it shows the same false
+  alarm has not been measured.
+- The allowance's stability test is nearly automatic once its anchors are fixed. An
+  interpolant between in-tolerance anchors, or a single in-tolerance anchor, moves by less than
+  tol by construction. So it binds only when the outlier set or the anchors change between
+  passes. This is true of v45.0.0 as well, and it is not changed here.
+- The README estimate table still shows base_fc at 1050.153253. The live bundle is now the
+  author's 07:51 SMM checkpoint (1048.744646), and the table was left for the author to update
+  when his run finishes.
+
+### Tried and rejected
+- **Anchors that step over inactive types, with no one-sided fallback** (the literal reading of
+  the brief). This removes the allowance: 0 exits against v45.0.0's 1180.
+  - Skilled passes rise from 92.1 to 98.4 per solve on the plane. At the estimates, crisis_fc
+    goes 178 → 218, base_fc 95 → 101 and crisis_covid 80 → 90.
+  - Q moves more: median 1.8e-10, maximum 1.1e-6 at (a_ℓ +0.044, c −0.133).
+  - It gains the one failing point, (a_ℓ −0.156, c −0.022), at Q 22756.961976, θ_S 1.279888,
+    unique H. That root is the genuine zero diagnosed on v43. The gain is a path effect: the
+    stricter test keeps the block iterating, so the global loop is handed a different state.
+    It is not a consequence of ignoring irrelevant cutoffs.
+- **Pinning p^oj_S = p*_S for inactive types** (the author's option 2). This was not
+  implemented: it changes every iterate after a type switches on, and it discards the peak
+  rule just below the switch.
+
+---
+
+
+## v45.0.0 — 2026-09-26
+
+**MAJOR: the skilled block is no longer Anderson-accelerated.** Its outer loop is a plain
+damped fixed-point iteration: cutoffs under-relaxed by `damp_pstar_S`, θ_S by the shipped
+adaptive free-entry weight. The equilibrium conditions, the detector and the selection rule
+are unchanged, so every estimate keeps its equilibrium. The layer is still MAJOR, because the
+feasible set of the objective changed. On the base_fc coverage plane, 18 of 361 parameter
+points go from Q = Inf to finite. One point changes root inside its H tooth, with Q moving
+1.1e-3 relative. And `damp_pstar_S`, a stored setting that no shipped path read, now drives
+the skilled map. A run under v45 does not reproduce v44's numbers beyond the four estimates,
+and an optimiser can now reach regions v44 scored as infeasible. The theorist has to be told.
+
+**Comparability.** The four estimates are comparable. Each keeps its root and label, with
+|ΔQ|/Q ≤ 1.3e-7 and |Δθ_S|/θ_S ≤ 1.7e-7, which is the difference between two iterations that
+stop at the same tolerance. No stored bundle is superseded by this version. The crisis_fc
+bundle is still owed its v44 re-estimate. No struct changed, and all four bundles load and
+round-trip. Standard errors and chains computed under v44 remain valid at their θ̂. A local
+design that reaches the band points recovered here would now score those points.
+
+### What changed
+- `solver/skilled.jl:669-677, 765-955`, `solve_skilled_block!`: the `Anderson1(1 + 2Nx)`
+  state, the raw-install branch and the joint `[θ_S; p*_S; gap]` update are deleted. What
+  remains is the former `use_anderson = false` branch: cutoffs blended by `damp_pstar_S`,
+  then θ_S by the adaptive weight (`w` halves on a sign reversal of the undamped target,
+  floor 0.1, otherwise ×1.2 back toward `DAMP_THETA_S[]`), unchanged. Under `θS_fixed`, θ_S is
+  set on entry and then again on every damped pass (`skilled.jl:849`). The unskilled block
+  (`unskilled.jl:496,499`) and the global loop (`solver.jl:308`) are untouched and keep
+  Anderson under `use_anderson`.
+- `solver/params.jl:51-56` (v44 numbering): `DAMP_POJ_S` is retired, together with its block
+  at the end of the skilled pass. It damped p^oj_S only for the Anderson branch, which
+  installed p^oj_S raw. Nothing assigned it, and at `1.0` the block was skipped, so this
+  changes no number.
+- `solver/params.jl:305-310`: the `use_anderson`, `damp_pstar_U` and `damp_pstar_S` field
+  comments now say which loops read them.
+- `solver/solver.jl:397-400`: the detector header no longer says the normal solve converges to
+  M "because skilled Anderson is a secant step". It records the measurement instead: a
+  restart at or next to M leaves for L or H. The M check itself is unchanged.
+
+### Measured (scratch copy, 2 threads; v44 and v45 loaded side by side in one process and interleaved per point)
+The author's base_fc SMM run was using the machine throughout, so absolute times are about
+2.5× the v44 entry's serial times. Compare v44 with v45 through the per-point ratios, not
+against earlier entries.
+
+- **Coverage, base_fc 19×19 (a_ℓ, c) plane, offsets ±0.2 natural units (Q finite after
+  selection):** v44 342/361, v45 360/361. Gained 18, lost 0. All 18 gained points are unique
+  L roots at θ_S 1.031–1.042, with nobody searching on the job. Under v44 each failed with
+  `converged_S = false`, and v45 solves them with 6–8 detector evaluations. The remaining
+  point, (a_ℓ −0.156, c −0.022), fails under both. In v44 the skilled block does not converge
+  there. In v45 it converges, but the global loop does not. This is the isolated free-entry
+  point diagnosed on v43. No start or tag changes on any of the 342 common points (v44 and v45
+  both: 263 unique, 79 "H of 2"). No normal solve on the plane ended at M in either version.
+- **Q at the estimates (v44 → v45):** base_fc 1050.153256439 → 1050.153252946
+  (−3.3e-9), unique H, θ_S 1.211645. crisis_fc 970.511641237 → 970.511765754 (+1.3e-7),
+  "H of 2", θ_S 0.657687. base_covid 2834.326345368 → 2834.326345368 (−1.3e-13), unique.
+  crisis_covid 1816.503405026 → 1816.503468941 (+3.5e-8), unique. **crisis_fc selects H.** Its
+  normal solve now lands on L (0.606479), as on v43 with skilled Anderson off. The detector
+  finds H with 12 evaluations where v44 used 23, because v44's normal solve sat on a tooth
+  crossing at 0.655916.
+- **|ΔQ|/Q on the 342 points feasible in both:** median 1.9e-8, 90th percentile 2.1e-7,
+  99th 8.6e-7, max 1.1e-3. Two points exceed 1e-6:
+  - (a_ℓ −0.044, c 0): 1.2e-6. Same unique H root, with θ_S equal to 1.9e-10, so this is the
+    same equilibrium and the difference is the tolerance-level spread of the non-θ states.
+  - (a_ℓ +0.156, c +0.133): 1.1e-3, Q 8251.691 → 8261.097. Label H in both, but a different
+    crossing. A fixed-θ sweep at step 1e-4 shows three crossings of D inside one OJS tooth,
+    the same map under both versions: 1.1425–1.1426 falling (attracting, 60 types
+    searching), 1.1430–1.1431 rising (repelling, 61 types), and 1.1433–1.1434 falling
+    (attracting, 61 types). v44 scored the **repelling** crossing (θ_S 1.143029). v45 scores
+    the inner attracting one (1.142571). Neither scores the outermost, because the tooth is
+    narrower than `EQ_PROBE`. See Known gaps.
+- **Runtime, 20 points (each window's estimate plus four joint ±5% draws), best of two
+  interleaved repetitions (repetition noise, median 5.7%):**
+  - normal solve: mean 2.99 s (v44), 3.05 s (v45); ratio v45/v44 median 1.02, range 0.83–1.36.
+  - solve plus detector: 9.73 s against 10.16 s; ratio median 1.05, range 0.75–1.22.
+  - detector alone: median ratio 1.09. The mean number of evaluations is unchanged (17.7
+    against 17.2; crisis_fc θ̂ drops from 23 to 12). Each fixed-θ evaluation now takes more
+    skilled passes (next item).
+  - On the plane, with both threads busy, the medians are 1.005 for the normal solve and 1.09
+    for solve plus detector.
+- **Skilled-block iterations at the estimates:**
+  - normal solve, total over the global passes (mean / max per call), v44 → v45: base_fc 80
+    (10.0/18) → 92 (11.5/25); crisis_fc 117 (13.0/43) → 178 (17.8/41), with one more global
+    pass (10 against 9); base_covid 69 (9.9/22) → 77 (11.0/27); crisis_covid 69 (9.9/19) → 80
+    (11.4/26). Global passes are otherwise equal, and unskilled iterations are equal except at
+    crisis_fc (81 → 91).
+  - fixed-θ evaluation (θ* × 0.98, 0.99, 1.01, 1.02): 22.4 against 32.5 skilled passes, max 23
+    against 35, with 5 global passes in both. The cutoffs converge at the geometric rate of
+    the 0.5 blend, where Anderson had extrapolated them.
+- **Fixed-θ path:** at all four estimates, `solve_model!(m; θS_fixed)` at θ* × {1, 0.99,
+  1.01} returns ok with θ_S held exactly (`===`). At θ* the residual D is 9e-12 to 2e-9, and
+  its sign off θ* is correct in all twelve cases.
+- **Middle root, crisis_fc at 0.995 k̂_S** (L 0.610612, M 0.636095, H 0.671231), restarting
+  the normal solve from the state solved at θ_S = θ0:
+  - θ0 = 0.636095 (M): v44 stays on M; v45 → L.
+  - θ0 = 0.638: v44 → M; v45 → H.
+  - θ0 = 0.634: both → L.
+- **Policy settings** (`policy_main.jl`, `damp_pstar_S = 1.00`, now live): converged at all
+  four estimates under v45, with the same θ_S as v44, and again at 0.50. The solve takes
+  0.85–1.14 s.
+- **Gates:**
+  - Changed files parse clean.
+  - `check_threading` passes: base_fc θ̂, serial and 2 threaded evaluations bitwise equal.
+  - `check_dead_settings` and `check_output_tree` pass.
+  - `check_forwarding` reports one finding (`ROYSEARCH_MCMC_JAC_ALLOW_GAPS`, an obsolete
+    registry row) and `check_structure` seven. Both logs are identical under v44, in files
+    this version does not touch.
+  - Bundle round-trip under the v45 types preserves `loss_opt` and θ̂ bitwise.
+- **Entry path:** `smm_objective` → `select_equilibrium` → `skilled_equilibria` runs at all four
+  estimates (the Q values above) and threaded (`check_threading`). No optimiser was run.
+
+### Settings
+None added and none re-defaulted. `DAMP_POJ_S` is retired (a module `Ref`, not a serialised
+field). `damp_pstar_S` moves from dead to live at its stored values: 0.50 in the bundles,
+`smm_main.jl` and `model_main.jl`, and 1.00 in `policy_main.jl` and `initialise_model`.
+`use_anderson` now covers the unskilled block and the global loop only. Both are recorded in
+`SETTINGS.md`.
+
+### Known gaps
+- **Tooth pairs narrower than `EQ_PROBE`.** At (a_ℓ +0.156, c +0.133) on the base_fc plane
+  one OJS tooth carries three crossings within 9e-4 in θ_S, so the probe 0.001 outward jumps
+  over the outermost one. v44 accepted the repelling crossing there, and v45 accepts the inner
+  attracting one. The author's rule that sub-cell structure is ignored covers this. It is
+  recorded because the Q difference between the two crossings is 1.1e-3 relative, and because
+  v44's choice was a repelling root.
+- `anderson_reg` is a `SimParams` field that no code reads, since `anderson1_update!` uses
+  its own 1e-12 guard. Retiring it needs a bundle migration and is not done here.
+- `damp_pstar_U` is read only when `use_anderson = false`, which no entry point selects.
+- `smm_main.jl` was not run end to end: the author runs estimations himself, and no optimiser
+  is started for a release gate. The SMM layer is unchanged in this version.
+- The timings were taken on a shared machine. The interleaved ratios are the comparison. The
+  absolute seconds are not a cost model.
+
+### Tried and rejected
+- `use_anderson = false` in every loop (v43): the plane collapses to 45/361 because the
+  unskilled block stops converging. Only the skilled block's accelerator is removed.
+- Keeping skilled Anderson behind a switch: rejected by the author, who wants fewer settings.
+  The removal leaves no toggle.
+
+---
+
+
+## v44.0.0 — 2026-09-26
+
+**MAJOR: the objective is scored at the best-fitting attracting skilled equilibrium.** Every
+converged solve is followed by a detector that finds every attracting equilibrium of the
+skilled market, one or the pair L and H, and Q is the lowest Q among those that pass the full
+residual battery. Where v43 scored whichever root the solver converged to, including the
+repelling middle root M and sub-cell roots made by one type entering on-the-job search, the
+estimate can move. The theorist has to be told.
+
+**Comparability.** A candidate with a single equilibrium keeps its v43 Q bit for bit: 387 of
+388 test points (below), including the base_fc, base_covid and crisis_covid estimates. The
+one change is the **crisis_fc estimate**: Q(θ̂) goes from 970.350485 to 970.511641. v43 had
+converged to a tooth crossing at θ_S = 0.655916, and v44 uses the outermost H crossing at
+0.657687; L at 0.606479 scores 1286.056069. `estimate_crisis_fc_diagonalW.jls` still loads,
+but its `loss_opt` is the v43 value and θ̂ was optimised under the v43 objective, so it should
+be re-estimated under v44. The other three bundles are not superseded. No struct changed, and
+every bundle loads. Reported standard errors change wherever the local design around θ̂
+crosses a fold: a design point is now scored on θ̂'s own branch or not at all. At base_fc,
+32 of the 240 design points (unique L, where θ̂ is H) leave the Ĝ regression.
+
+### What changed
+- `solver/skilled.jl:762`, `solver/solver.jl:133,223,246`: a keyword `θS_fixed` on
+  `solve_skilled_block!`, `solve_model!`, `_global_loop!` and `global_residuals` holds θ_S
+  fixed and solves every other object given it. Skilled free entry leaves `R2` in that case.
+  It is a keyword, not a `SimParams` field, because a field would break every serialised
+  bundle. Without it, the code path is operation-for-operation unchanged.
+- `solver/solver.jl:167`: `implied_cutoffs`, factored out of `cutoff_residual`, which now
+  calls it. It also returns the participation score M that locates the onset.
+- `solver/solver.jl:381-755`: `skilled_equilibria(model)`, the detector. The section header
+  states the two properties of D = ln(θ̃/θ) it relies on and the curves they were measured on.
+  It works in five steps. First, a step either side of the normal solve's root: a rise is M,
+  and one sign on both sides is a sub-cell root, which is moved to the step-resolved root the
+  signs point to. Second, the OJS onset, bracketed on the exact participation indicator to
+  0.02 in ln θ. Third, classification: nobody searching means L, beyond 1.08 × onset means H,
+  and otherwise curvature decides. Fourth, one jump to 1.08 × onset, past every measured dip,
+  then a walk to the top (from L) or the dip (from H). Fifth, only a missing attracting root
+  is located, by regula falsi, then certified with the full battery. Every root is probed
+  0.001 outward, so the outermost crossing of a tooth pair is used.
+- `smm/smm.jl:169,191,241`: `select_equilibrium(θ, spec; branch)` and
+  `select_equilibrium(model, spec; branch)` are the single path to "the equilibrium at θ".
+  `smm_objective` wraps them. `branch = :L/:H` holds one side of the fold, and a lone root
+  with no hump (`:U`) qualifies for either. The run report prints the selected root
+  (`smm.jl:2668`, `print_results`).
+- `mcmc/MCMC_main.jl:886`: the seed's label is held by every FD step, the preconditioning
+  design and the local design (`branch_hat`). Chain draws are scored as the chain scores
+  them. The `mom` contract in `mcmc_diagnostics.jl` states the requirement.
+- Consumers: `transition/transition_simulation.jl:146` (base and crisis steady states),
+  `plots_and_tables/transition.jl:177,412,944` (moment table, the legacy FD SE with the
+  optimum's branch held, x̄), and `solver/model_main.jl:339` (against the loaded bundle's
+  targets).
+
+### Measured (scratch copy, 4–10 threads; serial timings on 1)
+| case | detector | brute-force sweep, 0.25% grid | evaluations |
+|---|---|---|---|
+| crisis_fc k×1.012 | L 0.598699 | 1 root 0.598699 | 4 |
+| crisis_fc k̂ | L 0.606479, H 0.657687 | L 0.606479, M 0.651316, H 0.657721 | 23 |
+| crisis_fc k×0.995 | L 0.610612, H 0.671231 | L 0.610666, M 0.636193, H 0.671203 | 22 |
+| crisis_fc k×0.985 | H 0.683523 | 1 root 0.683528 | 17 |
+| crisis_fc k×0.995 from M (0.63609) | start = M; L 0.61061, H 0.67123 | — | 24 |
+| base_fc θ̂ | H 1.211645 (dip D = +0.0173) | 1 root 1.211755 | 19 |
+| base_fc k×1.02 | L 1.058814, H 1.189748 | L 1.058814, M 1.103517, H 1.189815 | 21 |
+| base_covid, crisis_covid θ̂ | U 1.812483, U 2.321072 | 1 root each | 24, 23 |
+
+- Detector vs sweep on 35 curves: the estimates, ten k_S scalings, 20 joint ±25% draws around
+  base_fc and crisis_fc, and the one multiple-equilibrium design point. Same count on 35 of
+  35; every root within 1.0e-4 in ln θ of the sweep's outermost crossing.
+- Bitwise Q against v43 on 388 points: the four estimates, 36 joint ±25% draws per window,
+  and the 240-point base_fc local design. 387 identical, including the 2 points infeasible in
+  both versions. The exception is crisis_fc θ̂. The one design point with two equilibria
+  (base_fc design 120: L 0.754963, H 0.837369) keeps its Q, because the normal solve's root
+  already scored lower. Detector evaluations: mean 22–25 per window, max 30; no incomplete
+  detection among converged solves.
+- Q at both roots: crisis_fc θ̂ L 1286.056069 / H 970.511641; crisis_fc k×0.995
+  L 1257.570885 / H 1034.115757; base_fc k×1.02 L 2783.663043 / H 1113.345265.
+- Branch holding: crisis_fc k×1.012 gives Q(:H) = Inf, Q(:L) = Q(:best); k×0.985 gives
+  Q(:L) = Inf; at base_fc θ̂, Q(:H) equals Q(:best) bitwise and Q(:L) = Inf.
+- Cost per candidate, serial: normal solve 1.16 s, selection 4.09 s (+2.93 s, ×3.6) with one
+  root (n = 35); 1.41 s → 5.24 s (+3.83 s, ×3.7) with two (n = 5). One evaluation takes
+  0.13–0.17 s, and the walk to the onset is most of the count.
+- `check_threading` passes, and so does an 8-thread repeat at crisis_fc k̂, k×0.995 and
+  base_fc k×1.02 (bitwise equal to serial). `check_dead_settings` and `check_output_tree`
+  pass. `check_forwarding` reports one finding and `check_structure` seven; both counts are
+  identical on v43, in files this version does not touch.
+- The transition stationary stage selects "unique" at base_fc and "H of 2" (θ_S 0.6577) at
+  crisis_fc.
+
+### Settings
+None added. The detector's constants (`EQ_STEP`, `EQ_PROBE`, `EQ_MAXEVAL`, `ONSET_*`,
+`solver.jl`) are properties of the measured curves, not run settings.
+
+### Known gaps
+- Where the normal solve fails, the detector does not run: the point stays infeasible, as in
+  v43. At base_fc k×1.04 the solve stalls on a sub-cell root at 1.1419, while the detector,
+  started from that state, finds the certified L at 1.037295 (sweep: 1.037295). Rescuing such
+  points would enlarge the feasible set, which is a decision for the theorist.
+- Assumptions A and B, the 1.058 dip bound and the curvature rule are measured, not proved.
+  A detection that exhausts `EQ_MAXEVAL` falls back to the normal solve's root with
+  `complete = false`; none occurred on the 388 points.
+- `model_main.jl` could not be run end to end in the test sandbox (Plots/GR failed to
+  precompile there). Its new block was exercised through `select_equilibrium(model, spec)`.
+- `policy/policy_solver.jl` calls a `solve_model` method with a `RegimeParams` argument that
+  no longer exists, so that path is stale independently of this change and was not routed.
+
+### Tried and rejected
+- Aiming onset jumps from the linear rule θ_on ≈ θ exp(−M/4515) alone: M is near-linear in
+  ln θ only close to the onset. Far from it, the uncapped secant jumped to θ_S = 37.7, where
+  the frozen solve fails, and landings short of the onset left walks of 200 evaluations. On
+  the 388 points this left 19 detections incomplete. Replaced by the bracket on participation.
+- Classifying a rise across θ* as M without checking signs: at base_fc k×1.04 a sub-cell root
+  rises while negative on both sides, and the search for a non-existent H ran to the cap.
+
+---
+
+## v43.0.0 — 2026-09-24
+
+**MAJOR: a market with no vacancies is scored.** When free entry closes a market (tightness at
+its floor, so no one is employed there even in the limit of its composition), its wage moments
+and both cross-market overlaps are now 0 rather than NaN, so the point returns a finite `Q`
+instead of `Inf`. The feasible set is larger; the theorist has to be told.
+
+**Comparability.** Every point that was finite under v42.0.0 is bitwise unchanged: `Q(θ̂)` in
+base_fc, base_covid and crisis_fc, and 240 of 240 local-design points. Stored bundles load and
+no stored output is superseded. The MCMC_main error for an unmeasurable FD column is reworded
+(it no longer points at the bundle's optimiser `converged` flag); no number changes.
+
+### What changed
+- `smm/moments.jl`: `_logwage_moments` returns eight zeros for an empty density; the overlaps
+  are 0 when either side has no wage distribution. `model_moments` header comment updated.
+- `smm/smm.jl`: `smm_objective` docstring states the convention; the finite-moment check stays,
+  for moments the equilibrium could not compute.
+- `mcmc/MCMC_main.jl`: FD error text.
+
+### Measured
+At base_covid:
+
+| point | v42 | v43 | skilled / unskilled mean log wage |
+|---|---|---|---|
+| `P_S × 0.07`, `× 0.005` (skilled closed: every cell drains) | Inf | 2.790e+07 | 0 / 6.268 |
+| `P_U × 0.05` (unskilled closed: no viable match) | Inf | 1.890e+07 | 6.690 / 0 |
+| `P_S × 0.1`, `P_U × 0.1` (open) | 1.202e+06, 1.070e+07 | unchanged | |
+
+`check_threading` and `check_dead_settings` pass.
+
+---
+
+## v42.0.0 — 2026-09-24
+
+**MAJOR: R1 tests where the cutoffs are, not the surplus at a node.** The equilibrium test
+now accepts every point it accepted before, at the same `Q`, plus points it used to reject
+for a reason that came from the grid. So the feasible set of the estimator is larger, and the
+theorist has to be told.
+
+**Comparability.** Every point that passed under v41.0.0 passes here. Its `Q` is bitwise equal
+except at 2 of 574 points tested, which the old test had stopped early (see below). Stored
+bundles load unchanged. `Q(θ̂)` is unchanged in every window tested. No stored output is
+superseded. A `:design` Jacobian is not comparable, because it now regresses on more
+feasible draws.
+
+### What changed
+
+**R1** (`solver/solver.jl:161` `cutoff_residual`, called from `global_residuals` at :128).
+- **New definition.** The skilled values are re-solved at the installed cutoffs and tightness,
+  on a copy of the skilled cache, so the state is only read. The cutoffs those values imply
+  are then compared with the installed cutoffs, in units of p:
+  - `p*_S` at every type;
+  - `p^oj` wherever `s_part > 0`.
+- **Tolerance.** `TOL_CUTOFF = 1e-6` (:92), the skilled block's own step tolerance.
+  `TOL_INDIFF` is retired.
+- **Old definition.** It read the stored surplus at the first p-node above each cutoff. At an
+  exact equilibrium that reports roughly the surplus slope times the distance from the cutoff
+  to the node. The node test was also blind to a misplaced cutoff (measured below).
+
+**The cutoff map** (`solver/skilled.jl:689` `cutoff_proposals!`). The per-type cutoff scan
+moved out of `solve_skilled_block!` unchanged. The block and R1 now read one routine. The
+block's unused locals went with it.
+
+**README** battery table updated.
+
+### Measured, not asserted
+
+R1 at θ̂ as a ratio to its gate, p grid ×1 / ×2 / ×4:
+
+| | node (v41) | cutoff (v42) |
+|---|---|---|
+| base_fc | 0.123 / 0.085 / 0.060 | 5.9e-6 / 1.6e-7 / 1.2e-7 |
+| base_covid | 0.033 / 0.020 / 0.010 | 1.9e-9 / 2.3e-9 / 2.9e-9 |
+
+The converged base_fc state, perturbed one object at a time:
+
+| perturbation | node R1 | cutoff R1 | R2 |
+|---|---|---|---|
+| none | 0.123 | 5.9e-6 | 2.6e-5 |
+| p\* +1 cell | 0.123 (**blind**) | 234 | 2.6e-5 |
+| p^oj +1 cell | 0.150 (**blind**) | 945 | 152 |
+| θ_S +5% | 0.123 | 1.9e4 | 4.8e4 |
+| θ_U +5% | 0.123 | 5.9e-6 | 4.8e4 |
+
+θ_U is correctly left to R2. The residual leaves the state bitwise untouched.
+
+Coverage against v41.0.0:
+
+| set | finite v41 | finite v42 | gained | lost | `Q` bitwise equal |
+|---|---|---|---|---|---|
+| local design, base_fc (120) | 112 | 120 | 8 | 0 | 112/112 |
+| local design, base_covid (120) | 120 | 120 | 0 | 0 | 120/120 |
+| 19×19 (a_ℓ, c) plane, base_fc | 342 | 342 | 0 | 0 | 340/342 |
+
+- **The two plane points that moved** (by 3.5e-07 and 3.7e-08 relative). The old R1 let the
+  global loop stop while the cutoff map was still moving: the cutoff R1 read 1.13 and 2.31 on
+  passes the node R1 accepted. They now take 9 and 11 passes instead of 8.
+- **Everybody trains, base_covid** (`c − 16`, `b_S = 5…30 b_U`, shipped grid). This corner was
+  rejected everywhere by R1 (1.6 to 35) and now converges at every step, with Rmax ≤ 2.5e-07.
+- **`P_S × 0.1`**: gained.
+- **Nobody trains** (`c` path): unchanged.
+- `JAC_ONLY :fd`, base_fc: 23 of 23 coordinates in 278 solves, 2 not converged. The table is
+  identical to v41.0.0.
+- `JAC_ONLY :design`: 598 of 600 feasible, against 549.
+- `check_threading`: threaded `Q` is bitwise equal to serial. `check_dead_settings` passes.
+
+### Known gaps
+- **Markets with no vacancies** (`P_S × 0.05`, `P_S × 0.005`). They converge and now pass R1,
+  but still return `Inf`: no one is employed even in the limit, so the wage moments are
+  undefined. This is unchanged from v41.0.0, and it is a question for the model.
+- **The plane's 19 failures** are the same 19 under both forms of R1. They lie on a diagonal
+  band at high a_ℓ (rows 14 to 18) and are not R1. Not diagnosed.
+- `check_forwarding`: the one finding is the pre-existing obsolete row
+  `ROYSEARCH_MCMC_JAC_ALLOW_GAPS`.
+
+### Tried and rejected
+- **The surplus read at the installed cutoff**, re-solved and linearly interpolated between
+  nodes. This keeps the surplus-based reading adopted in v40.0.0 while removing the node. It
+  failed the base_covid estimate itself (R1 = 1.23).
+  - It lost 90 of 112 base_fc design points and 113 of 120 base_covid points.
+  - It lost every corner step on all three walks.
+  - It was as blind as the node form to a moved `p*` or `p^oj`.
+  - Linear interpolation of a curved surplus still carries a grid error at its own zero.
+- **Keeping the node reading and scaling `TOL_INDIFF` by cell width.** Not run. That would
+  make the gate depend on the grid, and it would stay blind to a misplaced cutoff.
+
+---
+
+## v41.0.0 — 2026-09-24
+
+**MAJOR: corner equilibria are equilibria.** A converged equilibrium in which nobody trains,
+everybody trains, or a market holds no one used to be rejected with `Q = Inf` by two guards in
+`smm_objective`. It is now scored. Its within-market moments are read at the **limit of the
+market's composition as it empties**. The theorist has to be told, because the feasible set of
+the estimator is larger.
+
+**Comparability.** Every interior point is bit-identical to v40.1.0: the estimates, the
+standard errors, and every stored `Q`. Stored bundles load unchanged. Only points that v40.1.0
+rejected as corners can now return a finite `Q`. No stored output is superseded.
+
+### What changed
+
+**The limit composition** (`solver/unskilled.jl:218`, `marginal_training_cells`). Markets empty
+through the training margin. The last cells to leave a market are therefore the first to come
+back: for the skilled market, the cells with the largest training gain `Utr(a_S) − U^search(a_U)`;
+for the unskilled labour force, the cells with the smallest. The limit is a unit mass on those
+cells, with ties shared in proportion to `W2`. The model's own stationary formulas turn it into
+a composition, so it is weighted exactly as a small positive mass would be:
+- the skilled side goes through `_mS_from_t` and the drain split;
+- the unskilled side goes through `solve_stationary_unskilled!`.
+
+The training value `T − c` now has one home, `training_value!` (`unskilled.jl:197`), which
+replaces three copies of the loop.
+
+**Free entry at an empty market** (`skilled.jl:536` `skilled_stayer_columns`,
+`unskilled.jl:425`). A vacancy in a market that holds no one is priced at the limit
+composition. This rule applies only once the solve has converged at a corner:
+- `solve_model!` (`solver/solver.jl:199`) runs the unchanged loop (`_global_loop!`);
+- if the result is a corner (`market_empty`), it continues from that state under the limit
+  rule (`Model.corner_limit`, `params.jl:374`).
+
+The reason for this order is below: applying the limit rule during iteration loses interior
+points.
+
+**Equilibrium objects** (`solver/equilibrium.jl:58`). Rates, wage densities, survivors,
+unemployment rates and job-finding rates are ratios over a market's own mass. They are now
+computed from the market's composition: its masses when it is open, the limit when it is not.
+Aggregates and the returned mass arrays keep the true masses, which are zero for an empty
+market. The corner-zeroing block and its dead `agg_eU_raw`/`agg_eS_raw` are gone.
+`EMPTY_MASS = 1e-12` (`grids.jl:254`) is the single threshold.
+
+**Moments** (`smm/moments.jl:501`). All empty-market placeholders are removed:
+- `ur_S = 1`, `jfr = 0`, wages `= 0`, `θ = 1e14`, overlaps, LTU share and survivors `= 0`.
+
+Moments are read as the equilibrium objects define them. A wage distribution with no one
+employed even in the limit has no moments: `_logwage_moments` returns NaN (`moments.jl:413`).
+
+**Objective** (`smm/smm.jl:194`). Both guards are removed: the empty-employment guard and the
+degenerate-τ guard. They are replaced by one rule: a point whose scored moments are not all
+finite returns `Inf`.
+
+**Also in this version** (made earlier on 2026-09-24, unversioned until now):
+- `local_design` (`mcmc/mcmc_diagnostics.jl:916`): a coordinate within one step of a bound
+  steps inward only. Interior coordinates keep bit-identical draws.
+- `MCMC_main.jl:1166`: the design regression runs only when something reads it (`:design`, or
+  a chain's draws). The FD line reports the number of candidates that did not converge.
+
+### Measured, not asserted
+- Serial `Q(θ̂)` matches v40.1.0 to the last digit: base_fc 1050.1532564386 and base_covid
+  2834.3263453681.
+- Over 240 local-design points (120 per window, same draws):
+  - finite: 112/120 in base_fc and 120/120 in base_covid, identical to v40.1.0;
+  - every finite `Q` is bitwise equal: 232/232;
+  - none lost and none gained.
+- `check_threading`: threaded `Q` is bitwise equal to serial. `check_dead_settings` passes.
+- `MCMC_main` JAC_ONLY `:fd`: 23 of 23 coordinates in 278 solves, 2 not converged. The table
+  is identical to the v40.1.0 run.
+- `MCMC_main` JAC_ONLY `:design`: 549 of 600 feasible, up from 321 before the `local_design`
+  change.
+- **Nobody trains, base_covid, walking `c` upward.** Every point converges, and `Q` and every
+  moment are continuous through the corner. The training share falls 3.3e-05 → 1.6e-07 →
+  9.5e-11 → exactly 0 (from `c + 11`). `θ_S`, `jfr_S`, `ur_S` and `mean_wage_S` are 3.427,
+  0.3756, 0.02057 and 7.60 on both sides. `Q` is 5.629e+05 on both sides. v40.1.0 returned
+  `Inf` from `c + 11`.
+- **Everybody trains, unskilled limit** (base_covid, `c − 16`, `b_S/b_U` from 12 to 20,
+  Np_S ×4). The unskilled moments are continuous through the corner:
+  - `θ_U` 2.195 → 2.733 → 2.808;
+  - mean log wage 7.18 → 7.38 → 7.41;
+  - `sep_rate_U` 0.0123 → 0.0139 → 0.0142.
+
+### Known gaps
+- **The everybody-trains corner is still unreachable at shipped settings, because R1 fails
+  it.** This is a solver test, not a guard. At the default Np_S, R1 is 2.55 at `b_S = 8 b_U`
+  and 35.3 at `30 b_U`. At Np_S ×4 it is 0.69 and 0.96 at 8 and 12, which pass, and 2.97 to
+  9.24 from 16 upward. R1 halves with every refinement at every corner point probed, which is
+  the same grid effect as at the interior. It also grows as the market empties. Not yet
+  diagnosed.
+- **A market with no vacancies has no wages.** At `P_S × 0.05`, and at `P_U × 0.01` in the
+  unskilled market, free entry drives tightness to its floor and no one is employed, even in
+  the limit. The wage moments are undefined and the point returns `Inf`. This is the only
+  corner still rejected, and it is a question for the model, not the code.
+- `check_forwarding`: the one finding is the pre-existing obsolete row
+  `ROYSEARCH_MCMC_JAC_ALLOW_GAPS`, which is untouched.
+
+### Tried and rejected
+- **Pricing free entry at the limit composition from the first iteration.** The skilled
+  market is empty on the first passes of an interior solve, because `m_S` has not yet received
+  the training flow. In 18 of 95 calls at the base_fc estimate, the limit rule changed the path
+  the iteration took:
+  - `Q(θ̂)` moved 6.2e-09 relative;
+  - no interior `Q` of 232 stayed bitwise equal;
+  - 5 of 240 interior points were lost, 4 of them to the skilled block failing to converge.
+
+  Gating the rule on the training flow `t` instead of `m_S` changed nothing, because `t` is
+  already positive when `m_S` is still zero. The iteration keeps its population-weighted rule,
+  and the limit is reached by continuation from a converged corner.
+
+---
+
+## v40.1.0 — 2026-09-23
+
+**MINOR: the solver's two `@threads :static` loops are rewritten as a chunked
+`@sync`/`@spawn` fan-out with task-local scratch. Every converged result reproduces
+bitwise; what changed is that a threaded evaluation now returns a number at all.**
+
+**v40.0.0 could not run a threaded evaluation.** That is the plain statement this entry
+exists to make. Its serial path was exact — `Q(θ̂)` = 1071.2814042604 on `base_fc`, the
+number every v40.0.0 report quotes — but a solve called from inside any
+`Threads.@threads` loop raised `@threads :static cannot be used concurrently or nested`,
+`smm_objective` caught it and returned `Inf`, and the caller read a solver that cannot
+nest as a parameter point that has no equilibrium. Every caller that evaluates the
+criterion at more than one point at a time does so with `@threads`, so the whole
+estimation path above a single solve was disabled: the ΔQ=1 width measurement
+(`smm.jl:_feasible_widths`) returned 0 of 23 measurable coordinates, the adaptive-FD
+Jacobian (`mcmc_diagnostics.jl:295`) 0 of 23 columns in 814 solves, and the DE at
+`pop_size` = 240 would have handed over an all-`Inf` population. SA was unaffected only
+because it evaluates serially — and therefore ran **detuned**, on the uniform 0.01 step
+fallback rather than on measured per-coordinate widths.
+
+The regression was invisible because every test that certified v40.0.0 ran serially.
+`code/gates/check_threading.jl` is the gate that does not; see below.
+
+**Where `:static` came from, and why this supersedes rather than reverts.** `:static` is not
+committed anywhere: `git` HEAD has 0 occurrences in both `unskilled.jl` and `skilled.jl`
+against 1 each in the working tree, while the `threadid()`-indexed scratch it was protecting
+dates from 2026-03-08 (`6267519`, `Svec_tls` and `dU_tls`) and the threaded DE population
+loop from 2026-04-01 and 2026-08-16 (`a7997c5`, `412f80e`). So `:static` was added by the
+recent uncommitted determinism work, and `skilled.jl:312–313` said so in its own words:
+":static so the id is stable for a whole chunk and no two tasks share a slot." That fix
+closed a **real race** — dynamic scheduling letting two tasks share a `threadid()` slot and
+corrupt a reduction — by forbidding concurrency, and since nothing in its acceptance test
+ran two solves at once, the cost was never measured. The history the author now has is
+therefore: from March until the determinism fix, parallel evaluation worked *with* a latent
+race, so the earlier DE and Sobol runs were not corrupted by this defect because it did not
+yet exist; from the determinism fix onward, all parallel evaluation returned `Inf`.
+
+This change is not a workaround for `:static`. It **supersedes the determinism fix's
+remedy** with a better one and does not revert it: task-local scratch removes the shared
+slot entirely, so there is no race to protect against *and* no concurrency prohibition. The
+invariant that fix was protecting — no two tasks writing one buffer — is now guaranteed **by
+construction** rather than by scheduling discipline. Each of the two prior states was
+defective in one direction (a race, then an inability to run in parallel); this one is
+neither.
+
+The acceptance criterion is the author's: *the model solve should be identical when run by
+itself and while running others.* Held to **bitwise** identity, not finiteness and not
+agreement to a tolerance — battery items 1, 2 and 6 below, all of which compare with `===`.
+
+### Comparability
+
+**Every stored v40.0.0 result stands and is directly comparable.** The criterion is
+unchanged: `Q(θ̂)` on `base_fc` is bitwise identical, and the 19×19 `(a_ℓ, c)` coverage
+plane reproduces 356 of 361 with the *same five* infeasible points and every finite `Q`
+equal to the v40.0.0 reference at the precision that reference stores. No parameter,
+state, moment, or equilibrium object changed; no struct gained, lost, or reordered a
+field, so **no bundle migration is owed** and every existing `.jls` still loads.
+
+One consequence is not a comparability break but should be stated: an SA run launched
+under v40.0.0 was walking on the uniform 0.01 step fallback, and the same run under
+v40.1.0 walks on measured widths (median 0.005322, range 0.000781‥0.2). The criterion is
+the same function; the *search path* through it is not, so a v40.0.0 SA trace is not
+reproducible under v40.1.0. That is optimiser behaviour, not an estimator change.
+
+### What changed
+
+- `code/solver/grids.jl:26` — **new** `index_chunks(N, [nch])`, the single definition of the
+  work partition, with the reason the fan-out is `@spawn` and not `@threads :static` stated
+  once where the partition lives rather than twice at the call sites.
+- `code/solver/unskilled.jl:204,228` — the `Svec_tls` thread-local vector is gone; the
+  surplus loop over `aU` is a `@sync`/`@spawn` fan-out over `chunks`, allocating its `Svec`
+  scratch **inside** the task.
+- `code/solver/skilled.jl:312,333,406,410` — `tailEo_tls`/`tailEs_tls` become task-local
+  allocations; `dU_tls`/`dS_tls` become `dU_ch`/`dS_ch`, one slot per **chunk**, written once
+  per chunk from task-local accumulators and reduced with `maximum` in chunk-index order.
+- `Threads.threadid()` no longer appears anywhere in `code/solver/`. `@threads :static`
+  no longer appears as code anywhere in `code/`.
+- The other eight plain `@threads` loops in those two files nest correctly and are untouched.
+- `code/gates/check_threading.jl` — **new gate**. Runs a solve inside
+  `Threads.@threads for i in 1:2` and fails unless the result is finite **and** bitwise
+  equal to the serial value. Wired into `check_repo.sh` with `-t 2`; listed in `README.md`
+  and as step 5 of the release gate in `SETTINGS.md`.
+- `code/mcmc/mcmc_diagnostics.jl:255` — the `centre_ok` docstring attributed `base_fc`'s
+  infeasible centre to "`converged_S` depends on the reduction order in `skilled.jl`". That
+  diagnosis was wrong and the behaviour it described is gone; it now records the actual cause.
+
+### Measured, not asserted
+
+Acceptance battery, `base_fc` at its stored optimum, 6 threads unless stated, run from a
+scratch copy of the tree.
+
+| # | check | v40.0.0 | v40.1.0 |
+|---|---|---|---|
+| 1 | threaded vs serial, **bitwise**, at θ̂ and `a_ℓ` +0.1%/+1%/+10% of box | `Inf` threaded | **4/4 bitwise equal** |
+| 2 | the DE pattern: 9 points in ONE `@threads` loop | 0 of 9 finite | **9/9 finite, max rel err 0.000e+00** |
+| 3 | `@threads for i in 1:1` containing a solve (minimal repro) | `Inf` | **finite, equals serial** |
+| 4 | `_feasible_widths` — the SA/NM proposal scale | **0/23** measurable | **23/23** in 552 solves |
+| 5 | `jacobian_adaptive_fd` | **0/23** columns in 814 solves | **23/23 in 274 solves**, `centre_ok=true` |
+| 6 | same solve 3× | identical | identical |
+| 6 | `-t 1` vs `-t 6` | — | identical, 1071.2814042604 |
+| 7 | 19×19 `(a_ℓ, c)` coverage plane | 356/361 | **356/361, same 5 points, every finite `Q` equal** |
+| 8 | `check_threading.jl` on the fixed tree / on the v40.0.0 loops | — | **exit 0 / exit 1** with the nesting finding |
+
+Item 1, the four points: θ̂ 1071.2814042604; `a_ℓ` +0.1% 1110.8649498833; +1%
+4672.9884962874; +10% 75395.6474190237 — serial and threaded agree to the last bit at all
+four. Item 2's nine points likewise, `===` on every one.
+
+Item 5's **274 solves against v40.0.0's 814** is itself a check: with a solve that works,
+phase 1 predicts its step immediately instead of halving down to `h_lo`. `rank(Ĵ)` = 23 of
+23 at pinv tolerance 2.11e-06 (`s_max` 4.12e+08, `s_min` 6.28e-05), so the retained-variance
+fraction is 1.0000 for every coordinate and no standard error rests on a truncated
+direction. Both CH identities hold exactly, 0 of 23 violations each: `se_bound ≥ se_curv`,
+and `|t|_bound ≤ |t|_curv`. The four coordinates clearing `|t|` = 2 on the bound:
+
+| | θ̂ | se(bound) | se(curv) | `|t|`(bound) |
+|---|---|---|---|---|
+| `μ_U` | 0.444905 | 0.0035242 | 0.00293386 | 126.2 |
+| `μ_S` | 0.256265 | 0.00510723 | 0.00185311 | 50.18 |
+| `λ_S` | 0.130263 | 0.00350488 | 0.00349699 | 37.17 |
+| `ξ_S` | 0.00509751 | 0.000154584 | 7.10502e-05 | 32.98 |
+
+The full 23-row table ships beside this entry as `se_table_base_fc.csv`; it was written to a
+scratch directory, not into `output/estimates/`, because a live estimation held that tree
+while the battery ran. Every other coordinate
+has `|t|`(bound) below 2 — `c` is closest at 1.876, `k_U` the furthest at 0.003705 on an
+`se`(bound) of 201.5 — which is a statement about what 35 moments can separate, not about
+this fix.
+
+**Why the chunked reduction is at least as reproducible as the one it replaces.** The
+partition is a function of `Nx` alone, so the grouping of terms does not depend on how the
+scheduler assigned work — where a `threadid()`-indexed reduction grouped them differently
+at a different thread count. Measured: `-t 1` and `-t 6` give the same `Q(θ̂)` to the last
+bit, and three repeats at 6 threads are identical. This is the property that mattered:
+dropping `:static` without the chunk rewrite would have traded a loud `Inf` for a silent
+schedule-dependent number.
+
+**Gates.** `check_dead_settings` PASS (177 keyword arguments, 4 files).
+`check_forwarding` reports the single pre-existing finding v40.0.0 already records — the
+obsolete `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` registry row — and nothing new.
+`check_structure` reports the same seven pre-existing net-depth entries as v40.0.0, none of
+them in `code/solver/` and none of them a file touched here. All changed files parse with
+zero `:error`/`:incomplete` nodes; the solver + SMM + MCMC chain loads in driver order and
+`index_chunks` resolves. `check_version_sync` in sync at 40.1.0 across one declaration and
+three readers.
+
+### Settings
+
+None added, retired, or re-defaulted. `_WIDTH_CAP` = 0.20 and `WIDTH_DQ` = 1.0 are
+unchanged — the widths they govern are simply measurable again.
+
+### Known gaps
+
+- **Not run: an optimiser, a chain, the transition path, or the policy entry point.** The
+  brief excluded them and a live SMM run was using the tree. `smm_main.jl` and
+  `MCMC_main.jl` are covered by parse plus a driver-order load, not by a run. In particular
+  the DE has not been run at `pop_size` = 240; what is measured is that its *pattern* — N
+  points in one `@threads` loop — now returns N finite values equal to their serial ones.
+- The battery ran on `base_fc` only. The two loops are window-independent, but the
+  coverage plane, the widths and the Jacobian are `base_fc` numbers.
+- Item 6 was measured at `-t 1` against `-t 6`, not `-t 9`: the run was capped at 6 threads
+  to leave the machine to a live estimation.
+- The 19×19 plane's definition still lives only in this file (v40.0.0 recorded the same
+  gap) and in the verification harness, not in a shipped script. Reconstructed here from the
+  v40.0.0 entry — offsets `LinRange(-0.2, 0.2, 19)` in natural units on both coordinates,
+  mapped back through the box transform — and it reproduces that entry point-for-point,
+  which is evidence the reconstruction is the plane that was measured. Shipping it as a
+  script is still open.
+- `unpack_θ`'s `constrained = true` path remains broken and untouched (see v40.0.0).
+
+### Tried and rejected
+
+- **Simply dropping `:static`, keeping the `threadid()` scratch.** Rejected without
+  measuring, because it is precisely the state the determinism fix was written to escape:
+  `threadid()`-indexed scratch is safe only while the id is pinned for a chunk, so under the
+  dynamic scheduler two tasks can land on one buffer and the loops return a *silently wrong*
+  number instead of a loud `Inf` — strictly worse. `compute_Jbar_skilled`
+  (`skilled.jl:568`) carries the note from the last time this was diagnosed: `J̄_S` differed
+  in its last bits run to run, which at a sensitivity of ~2e4 on `U_S` made the
+  feasible/infeasible verdict itself depend on the schedule. Removing the shared slot is
+  what makes dropping `:static` safe; dropping it alone is not.
+- **Serialising the nine `@threads` call sites instead of fixing the two loops** —
+  `candidates.jl:182`, `smm.jl:591`, `1404`, `1760`, `1806`, `1926`, `2100`,
+  `MCMC_main.jl:1014`, `1174`. Measured to work: a serial `jacobian_adaptive_fd` gives the
+  same 23 of 23 in 274 solves and the same `se`(bound) values to six significant figures, so
+  it is a correct fallback and was held in reserve. Rejected because the chunked rewrite
+  passed the whole battery: serialising the call sites leaves the defect in the solver and
+  costs the DE its outer parallelism — 240 sequential solves per generation at
+  `pop_size` = 240, where a single solve's internal threading does not recover the loss.
+- **Hoisting the per-chunk scratch out of the iteration loop** (one buffer array indexed by
+  chunk, allocated once per call). Equally safe by construction, since a chunk index is
+  unique to one task where a thread id is not. Not adopted: the measured cost of allocating
+  inside the task is not visible against the solve — items 4 and 5 run at 552 solves in 222s
+  and 274 solves in 122s on 6 threads — and allocating where it is used is the form that
+  cannot be made unsafe by a later edit.
+
+---
+
+## v40.0.0 — 2026-09-23
+
+**MAJOR: the global loop now converges on the equilibrium conditions instead of on the step
+between iterates.** Three solver changes ship together, and each was measured on the same
+19×19 (`a_ℓ`, `c`) plane at `base_fc`. The layer is MAJOR on two independent rows of the
+test: a numerical control was **removed from a serialised struct** (`SimParams.tol_global`),
+and the solver's acceptance region changed, so `Q` moves at points where the two criteria
+disagree — for reasons that are not optimiser noise. The theorist has to be told, because
+the headline is that **v39.3.0 could not reproduce its own `base_fc` estimate**: `Q` at the
+stored θ̂ returned `Inf`, and under this version it returns 1071.281404.
+
+**Comparability: every stored estimate is preserved, and `Q` at each θ̂ is now finite and
+within 1.7e-05 relative of the value the bundle recorded.** No θ moves. The four canonical
+bundles were migrated in this pass and reproduce their extract-time reference exactly.
+What is superseded is any *coverage* or *convergence-flag* claim made under v39.3.0: a
+parameter point that v39.3.0 reported as non-converged may converge here, which is the
+intended effect. The two `tol_global` rungs in `README.md`'s probe crosswalk are marked as
+produced under the retired criterion.
+
+### What changed
+
+**1. The equilibrium residual battery replaces the global step test.** `solver.jl:124`
+adds `global_residuals`, four components each returned as a **ratio to its own internal
+tolerance**, gated at `Rmax < 1` (`solver.jl:285`, `:295`; stall rule `:314`).
+
+- `R1` indifference at the installed cutoffs relative to the surplus sup, as two-sided
+  complementary slackness: the equality only where the cutoff is interior, and `max(0, −S)`
+  at the grid floor. At the `base_fc` estimate `p*_S` sits at the floor for **159 of 160**
+  types, so testing the equality there would read the bottom-node surplus as an error when
+  nothing is indifferent.
+- `R2` free entry in **both** markets, as `|update_theta_j(model) − θ_j|/θ_j`. Those
+  functions return the tightness the condition implies, so this is the equation and not a
+  step between iterates.
+- `R3` the training choice, τ recomputed by `training_policy!`.
+- `R5` the education margin, `T` recomputed by `training_frontier!`. R1–R3 are all
+  satisfied by the degenerate state where nobody trains; `R5` is the only component
+  coupling the two markets and is what rules that state out.
+
+Tolerances are internal constants, not settings — `TOL_INDIFF` = 1e-3, `TOL_RELATIVE` =
+1e-6, `TOL_POLICY` = 1e-6 (`solver.jl:93`). **There is no `R4`**: the population adding-up
+residual would go there and is vacuous, since (E5) defines `m_U := ℓ − m_S`; it reads
+exactly zero everywhere and can detect no non-convergence.
+
+**2. `conv_S` uses interpolate-and-persist instead of the sup-norm** (`skilled.jl:882`).
+The sup-norm let one ability type at the participation frontier veto the other 159: that
+type's `p^oj` level is stable to five decimals while its per-iteration increment amplifies.
+Where between 1 and `CONV_S_MAXOUT` = 2 types exceed `tol_outer_S` and the rest are inside
+it, each outlier's cutoff is replaced by a linear interpolation in ability from its nearest
+in-tolerance neighbours, that value is required to be stable across consecutive passes
+(`skilled.jl:898`), and convergence is judged on the sup-norm over the remaining types. Any
+other count falls back to the plain sup-norm. **The interpolation decides convergence only
+and never writes `sc.poj`** — installing it would mean the moments were computed from a
+cutoff no equilibrium condition was ever checked against.
+
+**3. Adaptive under-relaxation on skilled free entry** (`skilled.jl:812`). The weight halves
+on a sign reversal in the undamped target (floor 0.1) and relaxes back by ×1.2 toward
+`DAMP_THETA_S[]`, which becomes a **ceiling** rather than the weight. State is local to
+`solve_skilled_block!` (`skilled.jl:688`), deliberately: a module-level `Ref` carrying it
+between solves would make results depend on the order in which draws are evaluated.
+
+**4. `tol_global` retired from `SimParams`** (`params.jl:298`). With `Rmax` a ratio gated at
+1 there is no threshold for it to carry, and a stored `1e-4` must not silently come to mean
+something new. Construction sites updated in `params.jl`, `solver/model_main.jl`,
+`smm/smm_main.jl`, `policy/policy_main.jl`, `transition/transition_simulation.jl`. The
+global verbose trace now prints the four components rather than `ΔU_S`/`Δm_S`, which
+nothing gated on.
+
+**5. `ojs_continuity_probe.jl` precision rungs repointed to the block tolerances**
+(`:98`). Its `jump`, `crossing` and `jacobian` modes varied `tol_global`; the global loop no
+longer has a tolerance to vary, so `PROBE_TOL` and the rungs now move `tol_inner` and
+`tol_outer_{U,S}` together, which is what sets how precisely a solve is resolved. Default
+is `bundle` (the bundle's own values) and the CSV tag names the rung.
+
+### Measured, not asserted
+
+**`Q` at θ̂, all four windows** — `Inf` at `base_fc` before, finite everywhere after:
+
+| window | stored `loss_opt` | v39.3.0 | v40.0.0 | rel. gap to stored |
+|---|---|---|---|---|
+| `base_fc` | 1071.280270 | **Inf** | 1071.281404 | 1.1e-06 |
+| `crisis_fc` | 713.209187 | not measured | 713.208772 | 5.8e-07 |
+| `base_covid` | 2834.373205 | not measured | 2834.326345 | 1.7e-05 |
+| `crisis_covid` | 1816.503256 | not measured | 1816.503405 | 8.2e-08 |
+
+**Why v39.3.0 returned `Inf` at its own estimate.** Traced pass by pass: `θ_U` and `θ_S` are
+pinned to four decimals from pass 4 and `Δm_S` reaches 1e-13, while `ΔU_S` oscillates
+between 1.0e-05 and 2.1e-04 against an **absolute** `tol_global` = 1e-4 — a relative 8e-10
+on a `U_S` of order 2.5e+05. `conv_streak` = 4 never completes and the stall rule stops the
+solve at pass 13 with `d` = 1.912e-04. The battery reads `Rmax` = 0.1834 at that same state
+and converges at pass 8.
+
+**The battery's separation, at the `base_fc` estimate.** Each break perturbs the converged
+state off one condition and fires on that component and no other:
+
+| state | `Rmax` | `R1` | `R2` | `R3` | `R5` |
+|---|---|---|---|---|---|
+| equilibrium | **0.1834** | 0.1834 | 3.31e-05 | 0 | 6.58e-06 |
+| `θ_S` × 1.05 | 4.762e+04 | 0.1834 | **4.762e+04** | 0 | 6.58e-06 |
+| `θ_U` × 1.05 | 4.762e+04 | 0.1834 | **4.762e+04** | 0 | 6.58e-06 |
+| τ shifted one ability cell | 1.000e+06 | 0.1834 | 3.31e-05 | **1.000e+06** | 6.58e-06 |
+
+5.4 orders between the equilibrium and the free-entry breaks, 6.7 to the τ break.
+
+**`R1`'s three grid floors, relative to the surplus sup**, which is why the OJS margin is
+read only where the participation fraction is strictly interior: `S = 0` crossings floor at
+**2.3e-07**, interior OJS crossings at **1.8e-04**, fully-participating OJS crossings at
+**1.8e-03**. One tolerance cannot straddle 2.3e-07 and 1.8e-03. At this estimate 81 of 160
+types have `s_part` = 0, 78 have `s_part` = 1, and the single interior type is what `R1`
+reads — so `Rmax` = 0.1834 is that one type's crossing.
+
+**Coverage, 19×19 = 361 points, `base_fc`.** Offsets of ±0.2 in natural units on both
+`a_ℓ` and `c`, 19 per axis (`LinRange(-0.2, 0.2, 19)`, step 0.02222), mapped back through
+the box transform so every other coordinate stays bit-exact: `a_ℓ ∈ [0.868, 1.268]`,
+`c ∈ [10.861, 11.261]`.
+
+| version | finite | note |
+|---|---|---|
+| v40.0.0 | **356 of 361** | 5 failures, all at the high-`a_ℓ` edge (rows 18–19) |
+| v39.3.0, same plane | 270 of 361 | failures concentrated at low `a_ℓ`: 11, 6, 9, 6, 8, 8 in rows 1–6 |
+
+**On this plane v40.0.0 is a strict improvement: 86 points gained, 0 lost.** Its finite set
+is a superset of v39.3.0's — all five points it fails are also failures under v39.3.0 —
+so nothing that solved before stops solving. The two versions fail in different regions:
+v39.3.0's failures mass at low `a_ℓ` (11 of 19 in row 1), which v40.0.0 clears entirely,
+and the five that remain sit at the high-`a_ℓ` edge where v39.3.0 also loses 6.
+
+**Bundle migration.** All four rebuilt and installed, each reproducing the reference `Q`
+recorded at extract time at **Δ = 0.000e+00**, `dropped` = `sim.tol_global` (plus
+`bundle_sim.tol_global` for three), `unrecorded` = 0 — no field was reconstructed from a
+default. `verify` passes on all four. Originals at `*.jls.pre_migration`.
+
+**Gates.** `check_forwarding`, `check_dead_settings` and `check_structure` are
+**byte-identical before and after**: one pre-existing `check_forwarding` finding (the
+obsolete `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` registry row) and the same seven pre-existing
+`check_structure` net-depth reports, none in `code/solver/`. All 12 touched files parse; the
+solver and SMM chain loads; `smm_objective` at θ̂ reproduces post-migration.
+
+### Settings
+
+`tol_global` **retired** from `SimParams` — see `SETTINGS.md`. It was never env-settable and
+has no `SETTINGS_REGISTRY` row, so no `LEGACY_ENV_KEYS` entry is owed.
+
+`DAMP_THETA_S` **re-defined from a weight to a ceiling**, value unchanged at 0.9;
+`SETTINGS.md`'s entry is extended for the adaptive schedule and for the contraction
+condition below. `PROBE_TOL` **re-defined** from the global tolerance to the block
+tolerance, default `1e-4` → `0` meaning the bundle's own. `CONV_S_MAXOUT` = 2 and
+`TOL_INDIFF`/`TOL_RELATIVE`/`TOL_POLICY` are internal constants, deliberately **not**
+settings: they are properties of the conditions and of the grid, and a run that could vary
+them could pass a state no equilibrium condition certifies.
+
+### Known gaps
+
+- **Under-relaxation cannot stabilise the oscillating roots, and the adaptive schedule
+  therefore SELECTS an equilibrium on the multiplicity band.** The skilled outer map's slope
+  in θ_S is `(1/η_S)·dlnJ̄_S/dlnθ_S`, contracting iff `dlnJ̄_S/dlnθ_S < η_S = 0.5`; on the
+  ridge that measures 0.52–0.90, i.e. slope `b` = 1.04–1.80, and the damped slope
+  `1 + w(b−1) > 1` for every `w ∈ (0,1]`. A shorter step lets the iteration be repelled from
+  the unstable root onto a different, stable one. Of the 3 points adaptive damping recovers
+  over fixed `w` = 0.9, two are genuine numerics and one is a re-rooting: `a_ℓ+0.2000
+  c−0.0333` gives `θ_S` 1.099861 adaptive against 1.012626 at `w` = 0.5, relative Δθ_S
+  7.9e-02 and Δ`Q` 4.3e-02. The other two agree to 2.2e-09 and 1.3e-07. **θ̂ and the controls
+  are on the same root under both weights** (`Q` agreeing to 2.1e-11), so no reported
+  estimate is branch-dependent and no published number moves. The band is ~50 of 361 points
+  (13.9%) and carries `Q` ≥ 6210 against 1071 at θ̂, so no optimum lies in it — but a chain
+  walks through it, so the selection is not purely academic.
+- **`R1` does not check the OJS margin for fully-participating types.** Their crossings
+  floor at 1.8e-03, a decade above `TOL_INDIFF`; reading them would fail every solve and
+  loosening the tolerance to admit them would cost the `S = 0` half four decades of
+  sensitivity. Whether the OJS crossing needs a tolerance of its own is a specification
+  question, not a porting one, and is left open.
+- **The `conv_S` stability test matches interpolants by position.** An outlier set that
+  changes between passes while keeping its size is compared type-against-type. The residual
+  battery is the backstop: a block exiting on that shows up as `R1` or `R2` above 1 in the
+  global loop, so the state is not certified as converged.
+- **The v39.3.0 coverage baseline does not reproduce at 348 of 361, and the ladder's lower
+  rungs are not all the shipped configuration.** Measured here on the plane above, raw
+  v39.3.0 gives **270 of 361** (74.8%), not 348. The tree used for that
+  arm is a faithful v39.3.0 — `params.jl` differs only by `tol_global`, `grids.jl`,
+  `unskilled.jl` and `equilibrium.jl` are byte-identical, every damping and participation
+  constant is equal, and `Q` at θ̂ reproduces `Inf` — so the arm is not the discrepancy.
+  Two things are: **the plane's definition is recorded nowhere in the tree**, so the
+  reconstruction above may not be the plane the ladder was measured on; and the working
+  record of the ladder is internally inconsistent about the **worker-firm rule**, which
+  shipped v39.3.0 applies unconditionally at both `Smax_j` sites. One account has the 348
+  arm run without that rule and adding it to the battery arm costing 33 points (351 → 318);
+  another has every rung run with it. On the first reading the shipped v39.3.0
+  configuration was never measured at all, and 348 is an envelope-rule arm. The top rung is
+  unaffected — v40.0.0 reproduces 356 of 361 exactly, and that arm is unambiguously the
+  shipped configuration. The improvement itself is not in doubt — on a common plane it is
+  270 → 356 with nothing lost — so what is open is the ladder's *lower rungs*, not the
+  verdict. Defining the plane in a shipped script, and re-measuring those rungs in the
+  shipped configuration, are both left open.
+- The four migrated bundles carry `provenance.version` = "39.3.0", the value of the
+  constant at write time: the release gate requires the migration to pass before a version
+  number is assigned, so the rebuild necessarily ran before the bump. The `migrated_from`
+  trail plus this entry identify it as the v40.0.0 migration. Nothing reads that field for
+  control flow.
+- Not run: an optimiser, a chain, the transition path, or the policy entry point.
+  `transition_simulation.jl`, `policy_main.jl`, `MCMC_main.jl` and `mcmc_diagnostics.jl`
+  are covered by parse plus the shared `SimParams` constructor, not by a run.
+- `unpack_θ`'s `constrained = true` path is **broken, pre-existing, and untouched**: step 3
+  re-applies `_to_constrained` unconditionally (`smm_params.jl:1077`), so every
+  block-shared parameter is transformed twice and `Q` at θ̂ returns `Inf` on that path
+  against 1071.281404 on the standard one. It is the path `MCMC_SPACE = :theta` uses. Not
+  fixed here because it is outside these three changes and fixing it would move a sampling
+  path this pass does not test.
+
+### Tried and rejected
+
+- **A population adding-up component as a fifth residual.** It is construction under (E5),
+  reads exactly 0 everywhere, and cannot detect non-convergence. A vacuous component is not
+  free: it is somewhere for an arithmetic slip to hide.
+- **A population-weighted MEAN over the boundary for `conv_S`**, in place of
+  interpolate-and-persist. It scores higher on coverage (355 of 361 against 353 for the
+  interpolation alone), and it is wrong: `wa_S` is the Beta ability marginal with a minimum
+  of 2.96e-09, so 20 of 160 types can move their cutoff by more than 1e-2 undetected. It was
+  caught passing two points with `Rmax` = 3811 and 3658.
+- **A fixed `DAMP_THETA_S` = 0.5.** Measured at 348 of 361, a regression against 353 at the
+  fixed 0.9 — it fixes the oscillating minority and costs the contracting majority.
+- **Reading the OJS indifference for every searching type** (participation fraction > 0
+  rather than strictly interior). Measured: `R1` = 1.8188 at the `base_fc` equilibrium
+  against 0.1834, i.e. above the gate, so no solve would converge. The exclusion is the
+  grid, not slackness.
+- **Deferring the relative-norm fix to its own version**, which the superseded comment at
+  `solver.jl` proposed. The battery makes it moot: normalising the step by the sup of its
+  own iterate would still be a step test on a map that is not a contraction.
+
+---
+
+## v39.3.0 — 2026-09-23
+
+**MINOR: a bundle now records the version that produced its estimate, and the dead
+`anderson_m` is gone.** Neither change touches the model. `Q` at every window's θ̂ is
+reproduced **exactly** — `Δ = 0.000e+00` on all four bundles, not within tolerance — θ is
+bit-identical, and the 66-point `base_fc` identification grid is unchanged to the last
+printed digit. The four stored estimates were migrated in the same pass and no result
+moves.
+
+**Why MINOR and not MAJOR, since a stored bundle no longer loads.** The layer test is
+whether a run under the new version reproduces the old numbers, and it does, bitwise. The
+MAJOR row that looks close — "a state, a parameter, or an equilibrium object added,
+removed or redefined" — does not apply: `anderson_m` is neither a state nor a model
+parameter nor an equilibrium object, but a numerical control that no code path read, and
+`migrated_from` is metadata about the file. Nothing in the paper changes and the theorist
+has nothing to be told. The bundle break is a **compatibility** event, which is what the
+comparability field below is for, not a layer escalation — the precedent is v19.6.0, which
+changed the bundle shape outright (schema 1 → 2) plus the filename, and is MINOR on
+exactly this reasoning.
+
+**Comparability: every estimate is preserved and comparable; every bundle file written
+before this version must be migrated to be read.** The four canonical estimates were
+carried across and are unchanged. A pre-v39.3.0 bundle raises
+`TypeError: in new, expected Float64, got a value of type Int64` — the loud failure, because
+`anderson_m::Int` sat immediately before `anderson_reg::Float64`, so the positional read
+lands an `Int` in a `Float64` slot. To carry one across: run `migrate_bundles.jl extract`
+under the code that wrote it, then `rebuild` under this code. The `candidates_*.jls` banks
+are **unaffected** and still load — they carry no `SimParams` — so `INIT_MODE = :clusters`
+needs nothing.
+
+### Provenance: `migrated_from`
+
+`rebuild` overwrites `provenance.version` with the running version, so migrating erased
+which code produced each estimate — the one thing provenance exists to record, and needed
+for the replication package. `RunProvenance` gains `migrated_from :: Vector{String} =
+String[]`, appended last (`smm_params.jl:362`): each migration **appends** the version the
+bundle arrived with, so a twice-migrated bundle carries both hops in order and an
+estimated bundle carries an empty vector. `version` keeps its meaning — the code that last
+WROTE the file — and the two are now separately recoverable.
+
+**`BUNDLE_SCHEMA` stays at 2**, and the docstring that said otherwise is corrected
+(`smm_params.jl:338`). The bundle's top-level field set is unchanged — `schema, stage,
+result, spec, provenance, sim, se, se_source, mcmc, tag` — and a file whose *inner* structs
+moved fails to deserialise before `schema` can be read, so bumping the number would help no
+reader. The old text claimed a `@kwdef` default keeps old bundles loadable when a field is
+added; it does not. `Serialization` fills fields positionally and never calls the
+constructor, so an addition raises `EOFError` exactly as a removal raises `TypeError`.
+
+`Vector{String}` was checked against how provenance is consumed before it was chosen.
+There are three readers and no table, caption or figure among them: `bundle_summary`
+(`bundle.jl:213`, the one line printed wherever a bundle is opened, called at
+`MCMC_main.jl:1903`), the write-time banner at `smm_main.jl:1257` which prints a
+provenance it just built, and `migrate_bundles.jl verify`. A vector therefore costs no
+reader a reshape, and the two that read a stored file were updated so the field prints:
+`bundle_summary` appends ` from=38.0.0` (hops joined by `→`) after `v=`, and `verify`
+gained a `from=` column. `rebuild` prints `estimate from:` per window.
+
+### The `anderson_m` purge — six sites
+
+The field (`solver/params.jl:310`) and five `SimParams` constructions:
+`solver/params.jl:441` in `initialise_model`, `solver/model_main.jl:164`,
+`smm/smm_main.jl:149`, `policy/policy_main.jl:202`,
+`transition/transition_simulation.jl:132`. `grep -rn anderson_m --include=*.jl code/`
+returns nothing. It was dead: `Anderson1` / `anderson1_update!` (`grids.jl:416-447`) is
+hardcoded memory-1, so a run at `anderson_m = 3` is bitwise identical to shipped. The
+historical notebooks under `code/notebooks/` still contain the name; they are frozen
+records of earlier model versions and were left alone.
+
+### Measured, not asserted
+
+Proven end to end in a scratch tree before the live tree was touched, then re-measured
+live. Live rebuild:
+
+| window | stored `loss_opt` | reference `Q` at extract | rebuilt `Q` | Δ | `migrated_from` | d |
+|---|---:|---:|---:|---:|:--|---:|
+| `base_fc` | 1071.079481 | 1071.280270 | 1071.280270 | **0.000e+00** | 38.0.0 | 23 |
+| `crisis_fc` | 713.207566 | 713.209187 | 713.209187 | **0.000e+00** | 34.0.0 | 18 |
+| `base_covid` | 2834.373205 | 2834.373205 | 2834.373205 | **0.000e+00** | 34.0.0 | 23 |
+| `crisis_covid` | 1816.503262 | 1816.503256 | 1816.503256 | **0.000e+00** | 34.0.0 | 18 |
+
+The free sets are **not** uniform — 23, 18, 23, 18 — and the provenance versions differ,
+which is exactly the information `migrated_from` preserves and the reason nothing in the
+migration path may hardcode `d`. Nothing does: `from_neutral` matches by field NAME, and
+both widths rebuilt from the same code path.
+
+- `_load_smm_bundle` on each rebuilt bundle: **`max|Δθ| = 0`** on all four.
+- `stage` survives: `base_fc` is still `:mcmc_checkpoint`, not an estimate. `tag` is
+  preserved with ` | migrated` appended, so `"CHECKPOINT g=289"` reads
+  `"CHECKPOINT g=289 | migrated"` — the generation is still legible and the file still
+  fails `bundle_is_final`.
+- `sim` payload survives where it existed (absent on `base_fc`, present on the other three).
+- `unrecorded` is **empty on all four**: no struct gained a field, so nothing was
+  reconstructed from a default. `dropped` names `sim.anderson_m`, and
+  `bundle_sim.anderson_m` on the three that carry a top-level `sim`.
+- The four unmigrated originals are refused under the new structs with the `TypeError`
+  above, and `read_bundle` returns `nothing` for each rather than a half-built bundle.
+- `smm_objective` at θ̂ for `base_fc`: **1071.280270**, unchanged.
+- The coarse 6-parameter × 11-offset `base_fc` grid (`a_ℓ`, `A`, `μ_S`, `k_S`, `c`, `ξ_U`;
+  offsets ±0.02 … ±0.30 applied to the unconstrained coordinate): **66/66 finite, 0
+  failures, 0 isolated**, before and after, and all 66 `Q` values agree to every printed
+  digit.
+- Gates: all nine changed files parse; `check_dead_settings` PASS (177 keyword arguments,
+  4 files); `check_forwarding` reports one finding, the pre-existing obsolete
+  `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` registry row already carried in the v37.1.0–v37.3.0
+  entries; `check_structure`'s 7 `UNBALANCED` files are all pre-existing and none is a file
+  this version touched; `check_output_tree` reports the four new `.pre_migration` files
+  under rule 6, which is the gate noticing debris that is being kept deliberately.
+
+### The ten historical `base_fc` snapshots — carried in a second pass
+
+The first pass migrated the four canonical estimates and left the ten `base_fc` snapshots
+(`_backup_Q*`, `_postmean`, `_rejected_Q*`, `_pre_xiU_restore_Q*`) unreadable. That was a
+replication-package regression, not housekeeping debris: `_backup_Q1074.224541` is the only
+readable copy of the v35 `base_fc` estimate and `_postmean` the only copy of the chain's
+posterior mean. **All ten are now carried and load under v39.3.0.** `candidates_*.jls` were
+never affected — they carry no `SimParams`.
+
+The route is the neutral intermediate's own property: it holds no struct identity, so it
+crosses code versions. `extract` ran under the pre-v39.3.0 structs in an out-of-tree copy
+and `rebuild` under the live ones; the live `code/` was never reverted, not even briefly.
+
+A snapshot is not an estimate, so the acceptance test is **not** a re-solve. Several of
+these are deliberately bad points — `Q = 27002.469793` (rejected), `Q = 23552.793052`, a
+posterior mean — and re-solving would measure specification drift since they were written,
+not the struct carry. The invariant applied instead is *same values in, same values out,
+new struct shape*: `loss_opt` and `theta_opt` are carried, never recomputed, and compared
+bit-for-bit. **`max|Δθ| = 0` and `loss_opt` bit-identical on all ten**, with `stage` and
+`tag` preserved exactly — and, unlike the four, **no ` | migrated` appended to the tag**,
+because these files are identified by their tags.
+
+| file | d | stage | `migrated_from` | `loss_opt`, unchanged |
+|---|---:|---|:--|---:|
+| `_backup_Q1074.224541` | 23 | `smm` | 35.1.0 | 1074.224541 |
+| `_backup_Q23552.793052` | 20 | `smm` | 28.0.0 | 23552.793052 |
+| `_backup_Q488.548412` | 23 | `mcmc_aborted` | 20.0.0 | 488.548412 |
+| `_backup_Q490.550869` | 23 | `mcmc` | 20.0.0 | 490.550869 |
+| `_backup_Q497.786594` | 23 | `smm_checkpoint` | 19.5.0 | 497.786594 |
+| `_backup_Q970.339482` | 23 | `smm` | 22.0.0 | **968.097038** |
+| `_backup_QInf` | 23 | `smm` | 34.0.0 | **1073.220950** |
+| `_postmean` | 23 | `mcmc_postmean` | 20.0.0 | 486.500699 |
+| `_pre_xiU_restore_Q4960.615185` | 20 | `smm` | 28.0.0 | 4960.615185 |
+| `_rejected_Q27002.469793` | 23 | `smm` | 35.1.0 | 27002.469793 |
+
+Each carries **its own** recorded version in `migrated_from`, not `base_fc`'s — six
+distinct versions (19.5.0, 20.0.0, 22.0.0, 28.0.0, 34.0.0, 35.1.0) across the ten, which is
+the whole point of the field. `unrecorded` is empty on all ten: only `anderson_m` was dropped, and no struct
+gained a field any of them lacked, so nothing was reconstructed from a default. The two
+`mcmc` stages carried their `se` payload through (`se=chain`). Free-set widths are 23 on
+eight and **20** on two, handled by the same name-matched path.
+
+**Two filenames disagree with their contents, and did before this pass:**
+`_backup_Q970.339482` stores `loss_opt = 968.097038` and `_backup_QInf` stores
+`1073.220950`, not `Inf`. The values are carried as found; the filenames are simply not a
+reliable index of what is inside.
+
+`.pre_migration` backups written for all ten and kept, so `output/estimates/` now holds 14
+of them.
+
+**Correction to the v36.0.0 entry.** It points a reader at `.migration/` for the readable
+record of the v35 `base_fc` point at `Q = 1074.224541`. That has not been true since the
+`extract` run of 2026-09-22 overwrote those intermediates (recorded in v39.2.0), and
+`.migration/` is now empty because this version's migration consumed it. The v35 point is
+readable at `output/estimates/estimate_base_fc_diagonalW_backup_Q1074.224541.jls` —
+provenance `migrated_from = 35.1.0`, stage `smm`, 23 free parameters,
+`loss_opt = 1074.224541` — which the v37.2.0 acceptance test used and which is now carried
+to v39.3.0 shape. That same entry's "the four stored bundles are NOT migrated and must not
+be" stands as written: it forbids laundering a *respecification* as a migration, which is a
+different operation from this version's struct carry at `Δ = 0`.
+
+### Settings
+
+`anderson_m` retired — graveyard entry in `SETTINGS.md`. It was never env-settable and had
+no `SETTINGS_REGISTRY` row, so no `LEGACY_ENV_KEYS` entry is owed. No setting added and no
+default moved.
+
+`SETTINGS.md` also corrects a false sentence in the `DAMP_THETA_S` entry, which claimed the
+damper "changes the solver's fixed point" and so contradicted the `DAMP_THETA_U` entry
+twenty lines above. Under-relaxation leaves the fixed point algebraically invariant —
+measured at `2.7e-10` relative on `Q` at θ̂ between `w = 0.9` and `w = 0.5`. What it does do
+is **select among** fixed points where the skilled free-entry locus has more than one root:
+on a 19×19 (`a_ℓ`, `c`) plane at `base_fc`, `w = 0.9` against `w = 0.5` recovers 13, loses
+17 and re-roots 20, with `Q` moving up to `8.3e-02` relative and `θ_S` up to `0.134`, and
+three re-rooted points solve under both values with both states satisfying all three
+adding-up identities to machine zero. The value stays at `0.9`; this is documentation only.
+
+### Known gaps
+
+- **The ten historical `base_fc` snapshots in `output/estimates/` were not migrated and no
+  longer load** — the `_backup_Q*`, `_postmean`, `_rejected_Q*` and `_pre_xiU_restore_Q*`
+  files. They are superseded debris already listed for cleanup in the v19.6.0 entry, they
+  are not in `MIG_WINDOWS`, and nothing reads them. Recovery, if one is ever wanted: check
+  the pre-v39.3.0 code out of git, run `extract` naming that file, then `rebuild` here.
+  All 18 tracked `.jls` are committed at `599d219` and the four migrated ones were verified
+  byte-identical to their HEAD blobs before the run, so `git checkout` restores any of them.
+- `output/smm/warmstart_*.json` still record `sim.anderson_m` in their field dumps. They are
+  reports from a past verification session, no code reads them, and they are left as the
+  historical record they are.
+- The `.pre_migration` backups are kept, at
+  `output/estimates/estimate_{base_fc,crisis_fc,base_covid,crisis_covid}_diagonalW.jls.pre_migration`.
+  They are the only readable copy of the pre-migration files outside git.
+- Not run: an optimiser, a chain, or the transition path. `transition_simulation.jl:132` was
+  edited and is covered by parse plus the shared `SimParams` constructor, not by a
+  transition run.
+
+### Tried and rejected
+
+- **Migrating the two changes as two passes.** Both touch structs inside the serialised
+  bundle, so each pass would rewrite all four bundles and stamp its own hop into
+  `migrated_from`, leaving the four estimates carrying a spurious intermediate version.
+  One extract → edit → rebuild cycle rewrites them once.
+- **Making `anderson_m` a module-level `Ref` instead of deleting it**, on the
+  `DAMP_THETA_S` pattern. Rejected: that pattern exists to keep a *live* knob out of the
+  serialised struct, and this one is read by nothing. A `Ref` would preserve a switch that
+  cannot change a result.
+
+---
+
+## v39.2.0 — 2026-09-22
+
+**MINOR: the global loop's stall-out detector no longer fires on a converged residual.**
+One condition added at `solver.jl`. No stored result changes — `Q` is reproduced **bitwise**
+on all 24 control points and at θ̂ — and three parameter points that returned `Q = Inf` now
+return a finite value. The rule can only let the loop run longer; it cannot cause a
+different state to be accepted, which is why the reproduction is exact rather than
+approximate.
+
+**The defect.** `conv_streak = 4` requires four **consecutive** passes with `d < tol_global`,
+while the stall-out rule fires from pass `global_B + global_K + 1 = 13` whenever the last
+`global_K` passes have not beaten the best-so-far. A residual that has already reached
+tolerance stops improving — that is what convergence is — so the two rules were in direct
+conflict, and the stall-out won because it fires first. Traced at `a_ℓ-0.200 c+0.022`:
+
+```
+pass     6        7        8        9        10       11       12       13
+dU     8.72e-05 8.11e-05 4.38e-06 1.35e-04 1.42e-04 2.02e-05 1.90e-05 2.69e-05
+<tol   YES      YES      YES      no       no       YES      YES      YES
+streak 0        1        2        3        0        0        1        2
+```
+
+`streak` is the count **entering** each test, before that pass's increment. It reaches 3 of
+the 4 required at pass 8 — one pass short — and pass 9's excursion above tolerance resets it
+to zero; it rebuilds to 2 entering pass 13, and the stall-out fires there. So the loop
+stopped from a state **inside** its own tolerance, having twice come within one pass of the
+required streak. `min(dU)` over the run was 4.38e-06, twenty-three times below tolerance.
+
+**What it recovers, and what it does not.** On the 16 residual failures of the 19×19
+`a_ℓ × c` plane: 3 recovered, 0 of 24 controls lost, `Q` unchanged on every control to the
+last bit. The remaining 13 need more than extra passes — the residual oscillates in and out
+of tolerance with a period shorter than the four-pass streak, so extra budget alone never
+completes it.
+
+**The scale defect behind that oscillation is measured but NOT fixed here.** `d = max(dU, dM)`
+compares two absolute sup-norms against one threshold, and the two objects differ by nine
+orders of magnitude: `|U_S| ≈ 2.5e+05` makes `tol_global = 1e-4` a **relative 3.9e-10** on
+`U_S` — nine significant digits of pass-to-pass agreement — while `|m_S| ≈ 2.6e-04` makes the
+same threshold a **relative 0.4**, no constraint at all. Across eight traced points and
+100+ passes, **`dM` bound on zero of them**: the global test is `dU < 1e-4` alone. Under a
+relative norm the binding component flips — `dU_rel` spans 1.2e-11 to 1.3e-08 while `dM_rel`
+reaches 2.8e-05 — so the absolute form tests the wrong one of the two.
+
+Four arms were measured on the same 16 failures and 24 controls:
+
+| arm | recovered of 16 | controls with `Q` moved | worst relative move |
+|---|---|---|---|
+| shipped | 0 | — | — |
+| **stall guard (this version)** | **3** | **0 of 24** | **0** |
+| guard + relative 1e-6 | 6 | 3 of 24 | 2.4e-07 |
+| guard + relative 1e-5 | 6 | 12 of 24 | 3.9e-07 |
+| guard + relative 1e-4 | 7 | 19 of 24 | 4.6e-07 |
+
+`Q` at θ̂ is 1071.280270 under every arm. The arms are **not nested**: the relative norm at
+1e-6 and 1e-5 loses `a_ℓ+0.233 c+0.133`, which the guard alone recovers, because `m_S`
+becomes binding there.
+
+**The recovery classes partition exactly, which is the evidence the diagnosis is right.**
+Attributing all 16 failures: `conv_U` false at 0, `conv_global` false at 16, `conv_S` false at
+9. The criterion fix recovers **7 of the 7** points where both blocks converged and **0 of the
+9** where the skilled block failed. So the global criterion owns precisely the pure-global
+failures, and the remaining 9 are a skilled-block defect with its own cause.
+
+**`migrate_bundles.jl rebuild` was broken and is now repaired.** It had never run, and there
+were two independent fatals on the one path — which is itself the evidence. `write_bundle`
+was not in the include chain (it lives at `bundle.jl:107`), and the install step did
+`mv(p * ".new", p)` against a filename the tool never writes, since `rebuild` stages under
+`.migration/`. Both fixed, and `bundle.jl` joins the include chain.
+
+A first reading of this reported that `from_neutral` and `to_PU_numeraire` were undefined.
+**That was wrong.** Both are defined inside the `elseif MODE == "rebuild"` branch of the tool
+itself, at `HEAD:169` and `HEAD:196`; the grep behind the claim excluded `migrate_bundles.jl`
+from its own search path, so it looked everywhere except the file that holds them. `rebuild`
+reaches the `write_bundle` call only after both have executed.
+
+**`to_PU_numeraire` is deleted rather than repaired.** `P_U` is pinned at 1 wherever it is set
+(`FIX_PARAMS` `smm_main.jl:270`, `DEFAULT_PARAMS` `smm_main.jl:326`, `ParamSpec` init
+`smm_params.jl:638`) and `PU_free = false` in all four bundles, so its guard returned early
+every time. The decisive reason is not that it was inert: a struct migration's invariant is
+*same θ, same code, same `Q`*, and that function deliberately **moves θ**. It is a
+reparametrisation, and running one under cover of a struct change would relabel an estimate
+while the gate printed OK.
+
+**The acceptance test is fixed in the same pass, and it would have rejected half the
+bundles.** It gated on `abs(Q1 - Q0) < 1e-6 * max(1, abs(Q0))` with `Q0` the **stored**
+`loss_opt`, which is the right reference only when no respecification has happened since the
+bundle was written. Measured against the four on disk:
+
+| window | stored `loss_opt` | `Q` at that θ now | gap | old tolerance | old gate |
+|---|---:|---:|---:|---:|:--|
+| `base_fc` | 1071.079481 | 1071.280270 | 2.01e-01 | 1.07e-03 | **reject** |
+| `crisis_fc` | 713.207566 | 713.209187 | 1.62e-03 | 7.13e-04 | **reject** |
+| `base_covid` | 2834.373205 | 2834.373205 | 0 | 2.83e-03 | pass |
+| `crisis_covid` | 1816.503262 | 1816.503256 | 6.00e-06 | 1.82e-03 | pass |
+
+`extract` now evaluates `Q` at the bundle's own θ under pre-edit code and records it beside
+the intermediate; `rebuild` gates on that, with a documented `loss_opt` fallback so
+intermediates written by the older tool remain usable. The invariant is *same θ, same code,
+same `Q`, before and after the edit*.
+
+**Proven on the `anderson_m` purge, both directions, in a scratch tree.** Removal: all four
+windows rebuild with **Δ = 0 exactly**, `_load_smm_bundle` returns `max|Δθ| = 0`, and the
+unmigrated originals are correctly refused under the new struct with a `TypeError` — the loud
+failure, because `anderson_m::Int` sits before `anderson_reg::Float64`. Addition: proven
+separately with a field inserted **mid-struct**, all 22 carried fields exact, the new one at
+its declared default and named in `unrecorded`.
+
+Two things the purge inventory had missed. `anderson_m` has **six** sites, not four —
+`params.jl:441` inside `initialise_model` was not on the list. And the four bundles are not
+uniform: `base_fc` is `stage = :mcmc_checkpoint`, `tag = "CHECKPOINT g=289"`, while the other
+three carry a top-level `SimParams`. `rebuild` hardcoded `stage = :smm` and passed no
+payload, so migrating as written would have flipped `bundle_is_final` (`bundle.jl:200`) and
+let a table caption a mid-chain checkpoint at generation 289 as a finished estimate, and
+would have dropped a `sim` that `transition/plots_and_tables.jl` reads unguarded. Both now
+travel through.
+
+**`anderson_m` is confirmed dead and its removal is staged, not applied.** `Anderson1` /
+`anderson1_update!` (`grids.jl:393-424`) is hardcoded memory-1, so a run at `anderson_m = 3`
+is bitwise identical to shipped — max absolute difference 0.0 across every field and all 200
+iterations at both test points. It is `SimParams` field 10 of 23 and `SMMSpec` carries `sim`,
+so removal rewrites every stored bundle; with the migration path now working and proven at
+Δ = 0 that is cheap, and the patch is ready as a separate change.
+
+It is held for one reason, which is not the migration: `rebuild` overwrites
+`provenance.version`, stamping `39.2.0` over the `34.0.0` and `38.0.0` the four bundles
+carry. That erases which code produced each estimate, which is exactly what provenance
+exists to record, and it matters more for the replication package than one dead `Int`
+matters. The fix is a `migrated_from` field on `RunProvenance` — a struct change of its own,
+and one that should go in before any bundle is migrated rather than after.
+
+**Correction to the v36.0.0 entry.** That entry states the four version-neutral intermediates
+in `.migration/` carry `base_fc` 1074.224541. **They no longer do** — an `extract` run on
+2026-09-22 overwrote them with the current bundles, and `base_fc` now reads 1071.079481, the
+author's own improved point. The other three are unchanged in content: `crisis_fc`
+713.207566, `base_covid` 2834.373205, `crisis_covid` 1816.503262, identical to the values
+that entry records. The v35 `base_fc` point is recoverable from git at `645c3e0`.
+
+**Global-loop acceleration measured, and kept.** `use_anderson` is one flag read in five
+places, so a global-scoped switch was added in a scratch tree to isolate the global loop. Over
+17 points: **153 global passes with acceleration against 160 without**, a 4.4% saving, feasible
+17/17 either way, winning on 7 points, losing on 1 (`a_ℓ-0.100 c-0.061`, 12 against 9) and
+tying on 9. Kept on that evidence.
+
+**A claim from the v39.0.0 work is withdrawn.** That the global test measures the accelerator's
+step rather than the fixed-point residual is true, and immaterial: over 77 passes with both
+quantities read in the Anderson vector's own units, the ratio is min 0.971, median 1.000, max
+1.04, and at `tol_global = 1e-4` the two criteria **agree on all 77** — 35 converged each, zero
+disagreements. At memory-1 the correction is about 3% of the step. The first divergence figure
+reported for this compared an unscaled step against a scaled residual and so measured `s_U`,
+the Anderson scaling constant, not a divergence. No fix was made: it changes no decision, and
+the quantity is being replaced.
+
+**Why the relative norm is not in this version.** It would need its tolerance retuned in the
+same change, and reading the stored `sim.tol_global` relatively makes a bundle's own recorded
+tolerance mean something 2.6e+06 times looser than when it was written. The clean form is a
+separate module-level tolerance on the `DAMP_THETA_S` pattern with `sim.tol_global` declared
+`:inert`, and it moves `Q` in the seventh significant digit on most points — below the
+solver's own accuracy, but it is a change to reported numbers and belongs in its own version,
+taken deliberately before a re-estimation rather than folded into a bug fix.
+
+---
+
+## v39.1.0 — 2026-09-22
+
+**MINOR: the unskilled free-entry map is under-relaxed, as the skilled one already was.**
+`const DAMP_THETA_U = Ref(0.9)`. No stored result changes — `Q` at every point that already
+solved is reproduced to between 1.1e-10 and 4.1e-07 relative — but a contiguous band of
+parameter points that previously returned `Q = Inf` now returns a finite value, so a
+re-estimation can reach points the optimiser could not price before.
+
+**The defect.** `unskilled.jl` iterated `θ_U = update_theta_unskilled(model)` **raw**, while
+`skilled.jl:757-761` has under-relaxed its own free entry since the knob was introduced —
+and that code's own comment states the reason: *"the damped map is what both the Anderson and
+the plain branch iterate on, so acceleration sees a contraction the raw map is not."* The
+argument was never carried across to the unskilled block.
+
+**Measured, on the `a_ℓ` line at `base_fc` under `OJS_PARTICIPATION = :fraction`**, which is
+where v39.0.0 left a contiguous band of failures:
+
+| w | points solving, of 9 |
+|---|---|
+| 1.00 (shipped) | 4 |
+| **0.90** | **9** |
+| 0.50 | 8 |
+
+**θ_U ran an exact period-8 orbit**, and the mechanism is visible in one column of the trace:
+at the floor `θ_U = 1e-14` the job-finding rate is 4.4e-08, so essentially nobody is hired, an
+unfilled vacancy is worth everything, and free entry answers with the ceiling. The descent
+from the ceiling then takes seven iterations — 82.1, 52.0, 2.3e-04, 1.64, 0.541, 0.217,
+0.0822 — and the eighth lands back on the floor. At `a_ℓ-0.35` the shipped solver terminates
+with `θ_U` **exactly 100.00000**, the clamp ceiling, against a sane tightness of 0.379 at the
+estimate. The outer-U residual is of order 1e+02, not 1e-03: this was never a grid-scale
+limit cycle like the skilled one, and no amount of iteration budget would have closed it —
+the block stalled out and handed back on all 13 global passes, 41 iterations each.
+
+**The recovered band is smooth, which is the evidence it was never a real feature of the
+objective.** `Q` along `a_ℓ` from −0.40 to 0: 139098.7, 103668.1, 75274.4, 47835.7, 30453.8,
+17071.0, 11014.6, 7815.0, 1071.3 — monotone, with `θ_U` monotone beside it (0.180, 0.201,
+0.225, 0.263, 0.298, 0.337, 0.362, 0.379, 0.458). Five of those nine were `Inf` before.
+
+**Why this is MINOR and the participation change was MAJOR.** Under-relaxation leaves the
+fixed point of the map exactly invariant — `w·g(x) + (1−w)·x = x` iff `g(x) = x` — so it
+cannot move an equilibrium. The measurement confirms it: across w = 1.0, 0.9 and 0.5, `Q` at
+the four points all three solve agrees to 1.1e-10 at the widest offset and 4.2e-10 at θ̂.
+This also corrects a loose sentence in `SETTINGS.md`, which said of `DAMP_THETA_S` that "it
+changes the solver's fixed point" — it does not; it changes which fixed point a path reaches
+when there is more than one, and how fast.
+
+**Second change, same two lines.** The Anderson branch installed `max(x_new[1]·s_θ, 1e-14)`,
+with no upper bound, while `update_theta_unskilled` clamps its own answer to `[1e-14, 100]`.
+Anderson extrapolates, so the installed `θ_U` left the range its own solve is restricted to —
+measured at 107.6 and 182.3. The installed value now carries the same bracket.
+
+**Not changed, deliberately.** `s_θ = max(|θ_raw|, |θ_old|, 1.0)` is still frozen at the
+first outer iteration (`unskilled.jl:406-409`). At a point where iteration 1 is anomalous —
+θ_raw = 82.1 in the failing band — the scale is ~200× a sane tightness, which compresses the
+θ component of the Anderson vector and makes the acceleration nearly blind to the one
+coordinate that was diverging. With the map damped this no longer bites, and re-scaling
+mid-run would change the accelerator's history in a way that needs its own measurement.
+Recorded here so it is not rediscovered as a new defect.
+
+**Gate.** Both changed files parse. `DAMP_THETA_U` is never assigned at runtime, as with
+`DAMP_THETA_S`. `SETTINGS.md` gains entries for `DAMP_THETA_U` and for v39.0.0's
+`OJS_PARTICIPATION`, which had been documented in `params.jl` and the changelog but not
+there.
+
+---
+
+## v39.0.0 — 2026-09-22
+
+**MAJOR: on-the-job-search participation is a covered fraction of the ability cell, not a
+node indicator.** An equilibrium object is redefined — the searching set in ability is now
+represented by a per-cell weight rather than a per-node 0/1 — so the allocation changes and
+no estimate under v38 or earlier is comparable.
+
+**Comparability.** None for `Q`, and the estimates must be re-run. At the stored `base_fc`
+point `Q` moves 1071.219979 → **1071.280269** (+0.060291, +5.63e-05 relative), and every
+mover is a skilled-market moment: `ur_S` +0.281, `usurv27_S` −0.270, `usurv53_S` −0.193,
+`usurv5_S` +0.140, `jfr_S` +0.133, with Σ|ΔQ| = 1.561 against a net of 0.060 — the moments
+largely offset. **Bundles still deserialise**: the new field is on `SkilledCache`, which
+`SMMSpec` does not hold (it carries `free, fixed, moments, sim, run, W, q_scale`), verified by
+loading `estimate_base_fc_diagonalW.jls` under the new structs. `OJS_PARTICIPATION[] =
+:indicator` reproduces every v38.3.0 number exactly and is kept permanently for that purpose.
+
+**Why.** The participation score is `M(aS) = max_{p ≥ p*_S} (S¹ − S⁰)(aS, p)`: on-the-job
+search pays for `aS` at some acceptable quality iff `M(aS) > 0`. Under the node rule a type
+sitting where `M` crosses zero switches its whole OJS margin between consecutive outer
+iterations, `p^oj` collapses onto `p*_S`, and the outer map is discontinuous there whatever
+crossing rule is used inside the searching region. On a finite ability grid a "type" is a
+CELL of positive width carrying Gauss-weighted mass, so the correct weight is the fraction of
+the cell on which `M > 0` and the node indicator is the approximation to it — the v22.0.0
+covered-fraction pattern the training frontier, the drain and the tail integrals already
+carry, applied one level up.
+
+**Measured, at `base_fc`, shipped grid (Nx = 160, Np_U = 160, Np_S = 180):**
+
+- From the identical frozen global-pass-2 state the indicator runs a closed **period-4** orbit
+  for 200 outer iterations (lag-4 recurrence 3.331e-15) while the fraction **converges in 13**
+  to `d` = 3.346e-07 against `tol_outer_S` = 1e-6.
+- The 24-point audit (6 parameters × 4 offsets in the unconstrained vector) goes **19/24 →
+  24/24**. Nothing is lost.
+- At the fixed point exactly **one ability cell of 160 is fractional** — type 82,
+  `aS` = 0.511246, weight 0.086222 — with 78 cells at 1 and 81 at 0. At the cycling state
+  that same cell's weight is 0.458271.
+- **One type switches on, zero switch off.** Mass-weighted OJS participation moves
+  0.0290818 → 0.0291256, **+0.150% relative**.
+- Soundness at all 25 points: `U_S⁰` monotone in ability (min increment 59.47), adding-up
+  `|mU + mS − pop|` **exactly 0.0**, `min(p^oj − p*_S)` = +4.44e-05 > 0, `sep_rate_S` ≥ 0.0051,
+  `ee_rate_S` ≥ 0 and zero only where the margin is shut under both encodings.
+
+**Changed, by subsystem.**
+
+- `solver/grids.jl` — `_pos_share`, the one-dimensional covered-fraction primitive behind
+  `_soft_oj_weight`, written separately so it applies on the ABILITY grid too; `_ojs_share`,
+  the product of the participation weight and the p-coverage, which is now what every
+  consumer of the OJS margin calls.
+- `solver/params.jl` — `OJS_PARTICIPATION` (`:fraction` | `:indicator`);
+  `SkilledCache.s_part` and its default of ones.
+- `solver/skilled.jl` — `ojs_participation!`, the weight as a covered fraction of the node's
+  midpoint interval, each half-cell scored against its own neighbour. The outer loop records
+  the score `M` and the node attaining it; **where `M ≤ 0` the cutoff is that peak node**
+  rather than the scan's fall-through, because as `M` falls to zero the searching interval
+  collapses onto the peak — the fall-through instead shut the margin outright and jumped
+  `p^oj` by four to six cells. The weight joins the convergence test as `Δpart`, identically
+  zero under `:indicator`, and the outer-S trace names it.
+- `solver/equilibrium.jl`, `policy/policy_solver.jl`, `plots_and_tables/model.jl` — the wage
+  split, the EE flow and the wage surface read `_ojs_share`; `s_part` is exported on the
+  equilibrium objects.
+- `transition/` — `TransitionPath.s_part` (Nx, Nt), written at the terminal date from the
+  stationary weight, computed in the backward induction from the same score, and installed on
+  the forward pass. **The backward induction computes the weight in a second pass after the
+  per-type loop**, because a cell's weight depends on its NEIGHBOURS' scores and the per-type
+  loop is `@threads`.
+- `tools/ojs_continuity_probe.jl` — reports `n_part_straddle` beside `n_straddle`. They are
+  counted apart deliberately: a p-straddle is a cell the CUTOFF cuts, a participation straddle
+  is an ability cell the searching FRONTIER cuts, and only the second can switch a whole type's
+  margin, so only the second admits a limit cycle.
+
+**Determinism, shipped unconditionally and independent of the above.** `compute_Jbar_skilled`
+accumulated into `threadid()`-indexed slots while `@threads` schedules dynamically, so `J̄_S`
+was grouped differently from run to run. That is invisible at a well-conditioned point and
+decisive at a marginal one — `dU_S/dθ_S ≈ 2e+04` and the global residual is a sup-norm on
+`U_S` — which made the **feasible/infeasible verdict itself depend on the schedule**: two
+identical solves at 8 threads diverged from pass 2 with a maximum relative residual gap of
+2.8e-05, while 1 thread was bit-identical. Now accumulated per `aS` node and reduced in index
+order. Separately, the two loops that index scratch buffers by `threadid()`
+(`skilled.jl` inner loop, `unskilled.jl` surplus loop) are annotated `:static`, because under
+dynamic scheduling a migrated task can **alias another task's buffer** — a race, not a
+reordering. Cost: three repeats of `smm_objective` at `θ̂` now return
+1071.2802693076353 bit-identically at 8 threads; measured overhead is inside the run-to-run
+spread.
+
+**Gate.** Every changed file parses (`Meta.parseall`, no `:error`/`:incomplete`). The solver
+path loads and runs against real data in a scratch depot. `check_version_sync` in sync on one
+declaration with three readers. `estimate_base_fc_diagonalW.jls` loads unchanged and
+`:indicator` reproduces its `Q` to the printed digit. `:fraction` reproduces the test-5 value
+to 3.1e-07, i.e. the precision that value was reported at — two independent implementations,
+one in a scratch tree and one here, agreeing.
+
+**Settings.** `OJS_PARTICIPATION` added, default `:fraction`. Nothing retired. The bundle's
+stored `loss_opt` = 1071.079481 predates `POJ_CROSSING = :last` and is not the `Q` at its own
+`theta_opt` under either encoding — that mismatch is from v38.3.0 and is resolved by
+re-estimating, not by this entry.
+
+**Known gaps.**
+
+- **No window has been re-estimated under v39.** Every stored estimate is an estimate of the
+  previous allocation. The `base_fc` and `base_covid` numbers above are evaluations at a v38
+  point, not optima.
+- **Participation is now the slowest outer coordinate**, tail contraction ratio 0.9434 per
+  iteration. It is not binding at `tol_outer_S` = 1e-6 — the block's worst iteration count
+  over the audit actually FELL, 42 → 38 — but it would dominate at a tighter tolerance.
+- **The global convergence test is still absolute and still has the defect.**
+  `tol_global` = 1e-4 on a `U_S` of order 1e+05 is a relative 4e-10, against a residual floor
+  of `tol_outer_S · dU_S/dθ_S` ≈ 2e-02 — two decades ABOVE the tolerance, so a block converged
+  to eight digits cannot pass it. LMR's relative form (`solver.f90:264-270`) is the fix and is
+  documented in place at the test, but it REINTERPRETS the stored `sim.tol_global`: read
+  relatively, 1e-4 is 2.6e+06 times looser than it is now. Deferred to its own version where
+  the tolerance is retuned against the measured floor rather than inherited. Three of the five
+  v38.3.0 audit failures were this defect and are recovered here for a different reason — the
+  discontinuity the global loop inherited through the training flow is gone.
+- **Two audit points need `Np_S` ≥ 360 under the previous encoding.** At the shipped grid the
+  skilled free-entry residual crossed zero by a JUMP of 8.7e-04 and 1.1e-03 rather than by a
+  zero, because `J̄_S` reads the firm-value tail at a hard cell index while weighting the
+  margin smoothly; at `Np_S` = 360 the jump collapses to 2e-16 and 8e-16 and both solve.
+  Interpolating the tail at the cutoff — the same pattern a third time — is what would make
+  the refinement unnecessary, and it is NOT in this version: which of the two cutoffs carries
+  the jump has not been measured, and the fix should not be written against a reading of two
+  lines. See "tried and rejected" for why this is not the participation margin.
+- `anderson_m` remains dead: acceleration is hardcoded memory-1 (`Anderson1`,
+  `grids.jl:393-424`), so a run at `anderson_m = 3` is bitwise identical to shipped across 200
+  iterations. Removing it breaks bundle deserialisation, so it is a purge with a migration
+  attached.
+
+**Tried and rejected — nine routes, each with the measurement that killed it.** Recorded so
+none is re-proposed.
+
+1. **The cycle is a U↔S feedback, a block handing over an unconverged iterate.** Refuted.
+   Freezing all three coupling channels (`f_U`, `E_U(·,1)`, the training flow `m_S`) does not
+   stop the cycling, and the mechanism is never exercised: at `μ_S+0.03` BOTH blocks report
+   convergence at every one of 60 global passes in 4 outer iterations with residuals ≤ 2.6e-08
+   and the global loop still never converges. Where a cycle survives, one channel carries it —
+   the training flow — with a period-doubling ladder 4 → 9 → 24 → converged, and the basin is
+   irrelevant (90/100 cells of a frozen-state × start-state grid converge; the 10 failures are
+   the frozen state at every start state).
+2. **Under-relaxing `p^oj`.** Refuted at ω = 0.5, 0.25 and 0.05 — all worse. The increment
+   autocorrelation is −0.148, nowhere near the −1 an over-relaxation cycle requires.
+3. **A quadratic in-cell crossing** (`POJ_CROSSING_C1`). Measured no-op, |ΔQ| ≤ 4.2e-09 over
+   25 points. `find_poj_from_diff_grid` already interpolates inside the bracketing cell.
+4. **Consistent `smooth_pos` scoring in the scan** (`POJ_SCORE = :smooth`). Measured no-op:
+   `smooth_pos` is strictly increasing, so the crossing stays in the same cell.
+5. **An a-priori conditioning predictor** `κ = |diff| / (input residual × |S|)`. Refuted. It
+   separates cycling from converging points ex post but has no discriminating power in advance
+   and the ordering is inverted at early passes, because its denominator is dominated by the
+   per-iteration move of `θ_S` — an OUTPUT of the same loop whose cutoff is flipping.
+6. **Tightening input precision.** Refuted. Sweeping `tol_inner` 1e-7 → 1e-13 and
+   `tol_outer_U` 1e-6 → 1e-12 leaves every recorded input residual unchanged to 9 significant
+   digits, and the period, the iteration count and the exit reason identical.
+7. **"An exact orbit means the inputs have converged; a decaying envelope means they have
+   not."** Refuted. There is no independent input state: `f` is a deterministic function of
+   `θ_S` (|Δlog f|/|Δlog θ_S| = 0.500) and the inner loop converges at all 200 outer
+   iterations. What separated two recorded figures was the PERIOD against the recording
+   window — a period-22 orbit recorded over 1.9 periods falls two decades within a period and
+   resets, which reads as a decaying trend. It never flattens. The installer sets the
+   attractor (period 4 at amplitude 2.58e-03 accelerated, period 2 at 1.80e-03 damped Picard,
+   period 2 at 1.35e-01 undamped — a 52× spread) but no arm decays.
+8. **A cycle detector.** Rejected on grounds, not measurement. A cycle in the iterates is not
+   the defect, and a detector on orbit geometry has no economic content; every fix here is a
+   statement about the model or the discretisation.
+9. **A degenerate corner with an inactive skilled market at the two hardest points.** Refuted.
+   The free-entry residual `F = [q_S J̄_S − k_S π̄_S]/(k_S π̄_S)` changes sign exactly twice over
+   eight decades of `θ_S`, and only the second is a root: the first is the market-activation
+   discontinuity where `F` leaps from −1 to +1.1e+03 between adjacent points. Below
+   `θ_S` = 1.1095e-04 the drain fraction is identically 1, `J̄_S` = 0, and `F` = −1 exactly —
+   free entry fails at the corner by the MAXIMUM amount, not by zero. The root exists at all
+   four points tested.
+
+---
+
 ## v38.3.0 — 2026-09-22
 
 **MINOR: the SMM header stops reporting parameter counts, which were duplicated and wrong.**
@@ -629,6 +4545,12 @@ intermediates are in `.migration/` with the `Q` values they carried — `base_fc
 `crisis_fc` 713.207566, `base_covid` 2834.373205, `crisis_covid` 1816.503262. They are the
 readable record of the v35 point and the source of the v36 seed; `rebuild` was deliberately not
 run.
+
+> **Corrected in v39.3.0.** Those intermediates no longer hold the v35 point — an `extract`
+> run on 2026-09-22 overwrote them and v39.3.0's migration consumed `.migration/` entirely.
+> The readable record of `base_fc` at `Q = 1074.224541` is
+> `output/estimates/estimate_base_fc_diagonalW_backup_Q1074.224541.jls`, carried to v39.3.0
+> struct shape with `migrated_from = 35.1.0` and its `loss_opt` bit-identical.
 
 **What changed.**
 

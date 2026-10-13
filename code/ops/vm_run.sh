@@ -8,10 +8,7 @@ WINDOW="${ROYSEARCH_WINDOW:-base_covid}"
 BRANCH="vm-${WINDOW//_/-}"
 
 # ── run settings ────────────────────────────────────────────────────────────
-export ROYSEARCH_INIT_MODE=default        # base_covid's old bundle is on a stale
-                                          # spec (b_T was free); warmstart gives
-                                          # start Q=Inf. default seeds from the
-                                          # base_fc optimum on the P_U=1 ray.
+export ROYSEARCH_INIT_MODE=warmstart      # start from the best stored point (smm_main.jl §8a)
 export ROYSEARCH_DE_ADAPT_FCR=true        # f and cr from the generator's yield
 export ROYSEARCH_DE_GEN_PER_K=60          # 60 draws per sparsity: 3x headroom over
                                           # 240 slots, which is what keeps the
@@ -27,7 +24,6 @@ LOG="output/logs/${WINDOW}_vm.log"
 # Fires however the script ends: clean exit, julia crash, or kill.
 finish () {
     git add -A output/estimates output/logs 2>/dev/null
-    git add -f "output/tables/smm_estimates_${WINDOW}_diagonalW.csv" 2>/dev/null
     git -c user.name="RoySearch VM" -c user.email="vm@roysearch.local" \
         commit -q -m "${WINDOW} estimate" 2>/dev/null
     git push -q -u origin "$BRANCH" && echo "PUSHED to $BRANCH"

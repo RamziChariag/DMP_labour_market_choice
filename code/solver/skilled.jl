@@ -8,7 +8,7 @@
 # The directed-search choice reads DIFFERENT abilities on its two
 # branches (notes eq:dpolicy):
 #   U_S^(0)(aS) = (b_S + κ_S β_S I_S(aS)) / (r + ν)          stay skilled
-#   U_S^(1)(aU) = (b_S + f_U E_U(aU,1)) / (r + ν + f_U)      cross to U
+#   U_S^(1)(aU) = (b_S + κ_U E_U(aU,1)) / (r + ν + κ_U)      cross to U
 #   d(aU,aS)    = fraction of cell (aU,aS) with U_S^(1)(aU) > U_S^(0)(aS)
 # The employed surplus uses U_S^(0)(aS) as the outside option: the
 # non-draining fraction 1−d, which carries all the employed mass, has
@@ -21,7 +21,7 @@
 # trained mass m_S(aU,aS):
 #   the 1−d part:  u_S = û(aS) m_S,  e_S(p) = ê(aS,p) m_S
 #   the d part:    u_S = m_S,        e_S ≡ 0     (these seek in U, not S)
-# where m_S(aU,aS) = φ t(aU,aS) / (ν + d f_U) is supplied by the global
+# where m_S(aU,aS) = φ t(aU,aS) / (ν + d κ_U) is supplied by the global
 # loop.  Free-entry aggregation reduces to a 1D sum over aS weighted by
 # the non-draining column masses (1−d)·m_S.
 #
@@ -174,6 +174,39 @@ end
 
 
 # ---------------------------------------------------------------------------
+# OJS participation weight on the ability grid.
+#
+# M(aS) = max_{p >= p*_S} (S^1 − S^0)(aS, p) is the participation score: on-the-job
+# search pays for aS at some acceptable match quality iff M(aS) > 0, so the searching
+# set in ability is {M > 0} and its frontier is a zero of M.  The weight of ability
+# cell k is the fraction of the cell that set covers — the ability-grid analogue of the
+# p-coverage _soft_oj_weight returns, with the cell taken as the node's midpoint
+# interval, the convention drain_fraction! and the training frontier both use.
+#
+# Each half-cell is scored against its own neighbour, so a frontier anywhere inside the
+# cell is located from the two nodes bracketing it; mass is uniform within the cell, the
+# assumption every other covered fraction in the solver makes.  At the ends of the grid
+# the missing half takes the node's own sign.
+# ---------------------------------------------------------------------------
+function ojs_participation!(part::AbstractVector{Float64},
+                            M::AbstractVector{Float64},
+                            x::AbstractVector{Float64})
+    Nx = length(x)
+    xlo, xhi = node_midpoint_intervals(x)
+    @inbounds for k in 1:Nx
+        wl = x[k] - xlo[k];  wr = xhi[k] - x[k]
+        sl = k > 1  ? _pos_share(M[k - 1], M[k], x[k - 1], x[k], xlo[k], x[k]) :
+                      (M[k] > 0.0 ? 1.0 : 0.0)
+        sr = k < Nx ? _pos_share(M[k], M[k + 1], x[k], x[k + 1], x[k], xhi[k]) :
+                      (M[k] > 0.0 ? 1.0 : 0.0)
+        part[k] = wl + wr > 1e-14 ? (wl * sl + wr * sr) / (wl + wr) :
+                                    (M[k] > 0.0 ? 1.0 : 0.0)
+    end
+    return part
+end
+
+
+# ---------------------------------------------------------------------------
 # Cross-market drain d(aU,aS): the POPULATION FRACTION of cell (aU,aS) that
 # abandons skill and searches in the unskilled market, from U_S^(1)(aU) >
 # U_S^(0)(aS) (notes eq:dpolicy).
@@ -262,7 +295,7 @@ end
 # directed-search policy d(aU,aS) — a by-product of the value iteration,
 # no separate fixed point.
 # ---------------------------------------------------------------------------
-function skilled_inner_loop!(model::Model; fU::Float64, EU1::AbstractVector{Float64})
+function skilled_inner_loop!(model::Model; κU::Float64, EU1::AbstractVector{Float64})
     cp = model.common;  gp = model.grids;  sp = model.skl_par
     sg = model.skl_grids;  pre = model.skl_pre;  sc = model.skl_cache;  sim = model.sim
 
@@ -272,14 +305,18 @@ function skilled_inner_loop!(model::Model; fU::Float64, EU1::AbstractVector{Floa
     β  = sp.β;  λ = sp.λ;  σ = sp.σ * exp(cp.A);  ξ = sp.ξ
     μ  = sp.μ;  η = sp.η
 
-    f   = jobfinding_rate(sc.θ, μ, η)              # κ_S
+    κ   = meeting_rate(sc.θ, μ, η)                  # κ_S
     wΓo = pre.γvals   .* sg.wp                      # offer  ∫·dΓ_o
     wΓs = pre.γs_vals .* sg.wp                      # shock  ∫·dΓ_s
 
-    tailEo_tls = [zeros(Float64, Np) for _ in 1:Threads.nthreads()]   # offer tail
-    tailEs_tls = [zeros(Float64, Np) for _ in 1:Threads.nthreads()]   # shock tail
-    dU_tls     = zeros(Float64, Threads.nthreads())
-    dS_tls     = zeros(Float64, Threads.nthreads())
+    # Fixed partition of the aS grid, with one residual slot per CHUNK.  The tail scratch
+    # pair is allocated inside each task rather than held here, so no two tasks can alias
+    # it; see `index_chunks` for why this is a @spawn fan-out and not `@threads :static`.
+    # Computed once per call: at fixed Nx the partition never changes, so the residual
+    # reduction groups the same terms on every run and every thread count.
+    chunks = index_chunks(Nx)
+    dU_ch  = zeros(Float64, length(chunks))
+    dS_ch  = zeros(Float64, length(chunks))
 
     αS = sim.damp_inner_S
     B  = sim.inner_B;  K = sim.inner_K
@@ -287,73 +324,90 @@ function skilled_inner_loop!(model::Model; fU::Float64, EU1::AbstractVector{Floa
     status = :maxit;  n_inner = 0;  streak = 0
     denom_nb = max(1.0 - β, 1e-14)
 
-    # Cross branch U_S^(1)(aU) is fixed within the block (reads f_U, E_U(aU,1)).
+    # Cross branch U_S^(1)(aU) is fixed within the block (reads κ_U, E_U(aU,1)).
     @inbounds for i in 1:Nx
-        sc.U1[i] = (bS + fU * EU1[i]) / (r + ν + fU)
+        sc.U1[i] = (bS + κU * EU1[i]) / (r + ν + κU)
     end
 
     for it in 1:sim.maxit_inner
-        fill!(dU_tls, 0.0);  fill!(dS_tls, 0.0)
+        @sync for (c, rng) in enumerate(chunks)
+            Threads.@spawn begin
+                tailEo = zeros(Float64, Np)                # offer tail (poaching, unemployed search)
+                tailEs = zeros(Float64, Np)                # shock tail (λ_S redraw option value)
+                dU_loc = 0.0;  dS_loc = 0.0                # chunk-local max residuals
+                for k in rng                               # k indexes the skilled aptitude aS
+                    @inbounds begin
+                        aS      = gp.x[k]
+                        PSeff   = PS * aS                  # A P_S aS (linear loading)
+                        pstar   = clamp01(sc.pstar[k])
+                        poj     = clamp01(sc.poj[k])
+                        part    = sc.s_part[k]
+                        j0      = pcut_index(sg.p, pstar)
+                        j0_soft = max(j0 - 1, 1)
 
-        @threads for k in 1:Nx                     # k indexes the skilled aptitude aS
-            tid    = Threads.threadid()
-            tailEo = tailEo_tls[tid]               # offer tail (poaching, unemployed search)
-            tailEs = tailEs_tls[tid]               # shock tail (λ_S redraw option value)
-            @inbounds begin
-                aS      = gp.x[k]
-                PSeff   = PS * aS                  # A P_S aS (linear loading)
-                pstar   = clamp01(sc.pstar[k])
-                j0      = pcut_index(sg.p, pstar)
-                j0_soft = max(j0 - 1, 1)
+                        # Tail integrals I_S(aS) = ∫_{p*}^1 S^max dΓ, one per distribution.
+                        # Stored J0/J1 carry the soft weight, so /(1−β) recovers ω·S.
+                        # The destination is valued under the SAME search rule the firm prices and
+                        # the distributions flow, `_ojs_share(part, ·)`.  A pointwise max here would
+                        # be the notes' s* = 1{S¹ ≥ S⁰} read node by node — identical on the exact
+                        # solution, but NOT on a finite grid: γ_o has a pole at p = 0 whenever
+                        # a_Γ < 1, and the pointwise test picks up a spurious sign change in the
+                        # first cell or two.  Measured at the base_fc estimate: the spurious lower
+                        # crossing tracks the cell width (15.93× over a 15.9× refinement at one
+                        # type, exactly 1.00 cells from the floor at every resolution) while the
+                        # upper crossing is stable to 1.1%, as stable as the 76 single-crossing
+                        # types.  The cutoff form reads only the stable boundary, so it is the
+                        # better approximation to s*, not a departure from it.
+                        acco = 0.0;  accs = 0.0
+                        for j in Np:-1:1
+                            s_j        = _ojs_share(part, sg.p[j], poj, sg.p, j, Np)
+                            Smax_j     = (s_j * sc.J1[k, j] + (1.0 - s_j) * sc.J0[k, j]) / denom_nb
+                            acco      += Smax_j * wΓo[j];  tailEo[j] = acco
+                            accs      += Smax_j * wΓs[j];  tailEs[j] = accs
+                        end
+                        I_o = tailEo[j0_soft]              # offer: fresh-meeting search option
+                        I_s = tailEs[j0_soft]              # shock: λ_S redraw option
 
-                # Tail integrals I_S(aS) = ∫_{p*}^1 S^max dΓ, one per distribution.
-                # Stored J0/J1 carry the soft weight, so /(1−β) recovers ω·S.
-                acco = 0.0;  accs = 0.0
-                for j in Np:-1:1
-                    Smax_j     = max(sc.J0[k, j], sc.J1[k, j]) / denom_nb
-                    acco      += Smax_j * wΓo[j];  tailEo[j] = acco
-                    accs      += Smax_j * wΓs[j];  tailEs[j] = accs
-                end
-                I_o = tailEo[j0_soft]              # offer: fresh-meeting search option
-                I_s = tailEs[j0_soft]              # shock: λ_S redraw option
+                        # Stay-skilled unemployment value (self-referential via the
+                        # OFFER integral — an unemployed worker meets fresh offers).
+                        U0_raw   = (bS + κ * β * I_o) / (r + ν)
+                        U0_old   = sc.U0[k]
+                        U0_new   = U0_old + αS * (U0_raw - U0_old)
+                        sc.U0[k] = U0_new
+                        dU_loc = max(dU_loc, abs(U0_new - U0_old))
 
-                # Stay-skilled unemployment value (self-referential via the
-                # OFFER integral — an unemployed worker meets fresh offers).
-                U0_raw   = (bS + f * β * I_o) / (r + ν)
-                U0_old   = sc.U0[k]
-                U0_new   = U0_old + αS * (U0_raw - U0_old)
-                sc.U0[k] = U0_new
-                dU_tls[tid] = max(dU_tls[tid], abs(U0_new - U0_old))
+                        base = r + ν + λ + ξ               # ϱ_S
+                        for j in 1:Np
+                            pj  = sg.p[j]
+                            ω_j = _soft_weight(pj, pstar, sg.p, j, Np)
+                            if ω_j <= 0.0
+                                sc.E0[k, j] = U0_new;  sc.E1[k, j] = U0_new
+                                sc.J0[k, j] = 0.0;     sc.J1[k, j] = 0.0
+                                continue
+                            end
+                            # No-search surplus (eq SS0): the λ_S redraw reads the SHOCK integral.
+                            S0 = smooth_pos((PSeff * pj - (r + ν) * U0_new + λ * I_s) / base)
+                            # OJS surplus (eq SS1): λ_S redraw → shock integral; the
+                            # poaching gain and outflow hazard → OFFER tail.
+                            tail_mass_j = pre.tail_weights[j]
+                            tail_Emax_j = tailEo[max(j, j0_soft)]
+                            S1 = smooth_pos((PSeff * pj - (r + ν) * U0_new - σ + λ * I_s +
+                                             κ * β * tail_Emax_j) / (base + κ * tail_mass_j))
 
-                base = r + ν + λ + ξ               # ϱ_S
-                for j in 1:Np
-                    pj  = sg.p[j]
-                    ω_j = _soft_weight(pj, pstar, sg.p, j, Np)
-                    if ω_j <= 0.0
-                        sc.E0[k, j] = U0_new;  sc.E1[k, j] = U0_new
-                        sc.J0[k, j] = 0.0;     sc.J1[k, j] = 0.0
-                        continue
+                            E0_old = sc.E0[k, j];  E1_old = sc.E1[k, j]
+                            sc.E0[k, j] = U0_new + β * ω_j * S0
+                            sc.E1[k, j] = U0_new + β * ω_j * S1
+                            sc.J0[k, j] = (1.0 - β) * ω_j * S0
+                            sc.J1[k, j] = (1.0 - β) * ω_j * S1
+                            dS_loc = max(dS_loc, abs(sc.E0[k,j]-E0_old), abs(sc.E1[k,j]-E1_old))
+                        end
                     end
-                    # No-search surplus (eq SS0): the λ_S redraw reads the SHOCK integral.
-                    S0 = smooth_pos((PSeff * pj - (r + ν) * U0_new + λ * I_s) / base)
-                    # OJS surplus (eq SS1): λ_S redraw → shock integral; the
-                    # poaching gain and outflow hazard → OFFER tail.
-                    tail_mass_j = pre.tail_weights[j]
-                    tail_Emax_j = tailEo[max(j, j0_soft)]
-                    S1 = smooth_pos((PSeff * pj - (r + ν) * U0_new - σ + λ * I_s +
-                                     f * β * tail_Emax_j) / (base + f * tail_mass_j))
-
-                    E0_old = sc.E0[k, j];  E1_old = sc.E1[k, j]
-                    sc.E0[k, j] = U0_new + β * ω_j * S0
-                    sc.E1[k, j] = U0_new + β * ω_j * S1
-                    sc.J0[k, j] = (1.0 - β) * ω_j * S0
-                    sc.J1[k, j] = (1.0 - β) * ω_j * S1
-                    dS_tls[tid] = max(dS_tls[tid], abs(sc.E0[k,j]-E0_old), abs(sc.E1[k,j]-E1_old))
                 end
+                dU_ch[c] = dU_loc;  dS_ch[c] = dS_loc
             end
         end
 
-        d = max(maximum(dU_tls), maximum(dS_tls))
+        d = max(maximum(dU_ch), maximum(dS_ch))
         resid[it] = d;  n_inner = it
         if d < sim.tol_inner
             streak += 1
@@ -371,7 +425,7 @@ function skilled_inner_loop!(model::Model; fU::Float64, EU1::AbstractVector{Floa
         sc.U[j] = sc.U0[j]                         # employed outside option (1D in aS)
     end
 
-    return (f = f, status = status, converged = (status === :converged), iters = n_inner)
+    return (κ = κ, status = status, converged = (status === :converged), iters = n_inner)
 end
 
 
@@ -389,12 +443,13 @@ function solve_stationary_skilled!(model::Model)
     sp = model.skl_par;    cp = model.common
     Nx = length(model.grids.x);  Np = length(sg.p)
     ν = cp.ν;  λ = sp.λ;  ξ = sp.ξ
-    f = jobfinding_rate(sc.θ, sp.μ, sp.η)
+    κ = meeting_rate(sc.θ, sp.μ, sp.η)
 
     @threads for k in 1:Nx
         @inbounds begin
             pstar   = clamp01(sc.pstar[k])
             poj     = clamp01(sc.poj[k])
+            part    = sc.s_part[k]
             j0      = pcut_index(sg.p, pstar)
             j0_soft = max(j0 - 1, 1)
 
@@ -410,9 +465,9 @@ function solve_stationary_skilled!(model::Model)
                 ω_j = _soft_weight(pj, pstar, sg.p, j, Np)
                 ω_arr[j] = ω_j
                 ω_j <= 0.0 && continue
-                s_j = _soft_oj_weight(pj, poj, sg.p, j, Np)
+                s_j = _ojs_share(part, pj, poj, sg.p, j, Np)
 
-                # f·γ terms read the OFFER density; both λ·γ terms read the SHOCK
+                # κ·γ terms read the OFFER density; both λ·γ terms read the SHOCK
                 # density (the −λ·γ outflow from the α-basis and the +λ·γ inflow to
                 # the β-basis are the same redraw event, so they must share γ_s and
                 # net to zero mass at δ = 1).
@@ -425,9 +480,9 @@ function solve_stationary_skilled!(model::Model)
                 # above that ratio, and tail_weights[j] counts the source cell in
                 # both directions and is 1.39% off.
                 acc_mass = j < Np ? pre.tail_weights[j + 1] : 0.0
-                a_j = ν + λ + ξ + s_j * f * acc_mass
-                num_α = (f * γoj - λ * γsj) + f * γoj * CumAlpha   # unit-mass forcing: κ û γ term
-                num_β = (λ * γsj) * 1.0     + f * γoj * CumBeta    # m_S = 1 in the unit problem
+                a_j = ν + λ + ξ + s_j * κ * acc_mass
+                num_α = (κ * γoj - λ * γsj) + κ * γoj * CumAlpha   # unit-mass forcing: κ û γ term
+                num_β = (λ * γsj) * 1.0     + κ * γoj * CumBeta    # m_S = 1 in the unit problem
                 if a_j < 1e-14
                     α_coef[j] = 0.0;  β_coef[j] = 0.0
                 else
@@ -463,12 +518,28 @@ end
 # The 2D→1D reduction that makes free-entry aggregation O(N²).  Linear in d, so
 # a fractional drain splits each cell's mass rather than assigning it wholly.
 # ---------------------------------------------------------------------------
-function nondrain_column_mass(sc::SkilledCache, Nx::Int)
+function nondrain_column_mass(d::AbstractMatrix{Float64}, mS::AbstractMatrix{Float64})
+    Nx = size(mS, 2)
     mcol0 = zeros(Float64, Nx)
     @inbounds for j in 1:Nx, i in 1:Nx
-        mcol0[j] += (1.0 - sc.d[i, j]) * sc.m_S[i, j]
+        mcol0[j] += (1.0 - d[i, j]) * mS[i, j]
     end
     return mcol0
+end
+
+# ---------------------------------------------------------------------------
+# The skilled seekers' composition by aS: the non-draining column mass or, when the
+# market holds none, its limit as the market empties — the admissible cells with the
+# largest training gain (marginal_training_cells), carried through the model's own
+# m_S(t) so the drain split weights them exactly as it would a small positive mass.
+# ---------------------------------------------------------------------------
+function skilled_stayer_columns(model::Model, d::AbstractMatrix{Float64},
+                                mS::AbstractMatrix{Float64})
+    mcol0 = nondrain_column_mass(d, mS)
+    sum(mcol0) > EMPTY_MASS && return mcol0
+    cp = model.common;  uc = model.unsk_cache;  up = model.unsk_par
+    w  = marginal_training_cells(model; entering = true, admit = d .< 1.0)
+    return nondrain_column_mass(d, _mS_from_t(w, d, cp.φ, cp.ν, meeting_rate(uc.θ, up.μ, up.η)))
 end
 
 
@@ -507,24 +578,31 @@ function compute_Jbar_skilled(model::Model)
     gp = model.grids;  sg = model.skl_grids;  pre = model.skl_pre;  sc = model.skl_cache
     Nx = length(gp.x);  Np = length(sg.p)
     wΓ = pre.γvals .* sg.wp
-    mcol0 = nondrain_column_mass(sc, Nx)
+    mcol0 = model.corner_limit ? skilled_stayer_columns(model, sc.d, sc.m_S) :
+                                 nondrain_column_mass(sc.d, sc.m_S)
 
-    num_tls = zeros(Float64, Threads.nthreads())
-    den_tls = zeros(Float64, Threads.nthreads())
+    # Accumulated PER aS NODE and reduced in index order rather than into thread-local
+    # slots: @threads schedules dynamically, so a threadid()-indexed sum groups the terms
+    # differently from run to run and J̄_S differs in its last bits.  That is invisible at
+    # a well-conditioned point and decisive at a marginal one, because U_S = U_S(θ_S) has
+    # a sensitivity of ~2e4 and the global residual is a sup-norm on U_S — which made the
+    # feasible/infeasible verdict itself depend on the schedule.
+    num_by_k = zeros(Float64, Nx)
+    den_by_k = zeros(Float64, Nx)
 
     @threads for k in 1:Nx
-        tid = Threads.threadid()
         @inbounds begin
             mk = mcol0[k]
             mk <= 0.0 && continue
             pstar   = clamp01(sc.pstar[k])
             poj     = clamp01(sc.poj[k])
+            part    = sc.s_part[k]
             j0_soft = max(pcut_index(sg.p, pstar) - 1, 1)
 
             tailJ = zeros(Float64, Np)
             acc = 0.0
             for j in Np:-1:1
-                s_j = _soft_oj_weight(sg.p[j], poj, sg.p, j, Np)
+                s_j = _ojs_share(part, sg.p[j], poj, sg.p, j, Np)
                 acc += (s_j * sc.J1[k, j] + (1.0 - s_j) * sc.J0[k, j]) * wΓ[j]
                 tailJ[j] = acc
             end
@@ -535,17 +613,17 @@ function compute_Jbar_skilled(model::Model)
             seeker_e = 0.0
             num_k    = sc.u_frac[k] * tailJ[j0_soft]
             for j in 1:Np
-                s_j = _soft_oj_weight(sg.p[j], poj, sg.p, j, Np)
+                s_j = _ojs_share(part, sg.p[j], poj, sg.p, j, Np)
                 s_j <= 0.0 && continue
                 seeker_e += s_j * sc.e_frac[k, j] * sg.wp[j]
                 num_k    += s_j * sc.e_frac[k, j] * sg.wp[j] * tailJ[max(j, j0_soft)]
             end
-            den_tls[tid] += mk * (sc.u_frac[k] + seeker_e)
-            num_tls[tid] += mk * num_k
+            den_by_k[k] = mk * (sc.u_frac[k] + seeker_e)
+            num_by_k[k] = mk * num_k
         end
     end
 
-    num = sum(num_tls);  den = max(sum(den_tls), 1e-14)
+    num = sum(num_by_k);  den = max(sum(den_by_k), 1e-14)
 
     # Early-iteration fallback: before m_S has settled, weight the firm-value
     # tails by the non-draining marginal ℓ so free entry gets a non-trivial signal.
@@ -558,9 +636,10 @@ function compute_Jbar_skilled(model::Model)
             end
             j0_soft = max(pcut_index(sg.p, clamp01(sc.pstar[k])) - 1, 1)
             poj     = clamp01(sc.poj[k])
+            part    = sc.s_part[k]
             acc = 0.0
             for j in Np:-1:j0_soft
-                s_j = _soft_oj_weight(sg.p[j], poj, sg.p, j, Np)
+                s_j = _ojs_share(part, sg.p[j], poj, sg.p, j, Np)
                 acc += (s_j * sc.J1[k, j] + (1.0 - s_j) * sc.J0[k, j]) * wΓ[j]
             end
             num += ell * acc
@@ -574,7 +653,8 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Free-entry tightness update for the skilled market.
+# Free entry in the skilled market: the tightness a vacancy cost implies, and
+# its inverse.
 #   q_S(θ_S) = k_S π̄_S / J̄_S   (k_S in months of average skilled output)
 # ---------------------------------------------------------------------------
 function update_theta_skilled(model::Model)
@@ -586,19 +666,49 @@ function update_theta_skilled(model::Model)
     return clamp(θ_raw, 1e-14, 100.0)
 end
 
+"""
+    vacancy_cost_skilled(model) → k_S
+
+The vacancy cost free entry implies at the installed tightness and composition, the
+inverse of `update_theta_skilled`: k_S = q_S(θ_S) J̄_S / π̄_S.  Zero where a meeting is
+worth nothing.
+"""
+function vacancy_cost_skilled(model::Model)
+    sp = model.skl_par
+    Jbar = compute_Jbar_skilled(model)
+    (Jbar < 1e-12 || !isfinite(Jbar)) && return 0.0
+    return q_from_theta(model.skl_cache.θ, sp.μ, sp.η) * Jbar / mean_output_S(model)
+end
+
 
 # ---------------------------------------------------------------------------
 # Outer loop on (θ_S, p*_S, p^oj_S)
 #
-# Per iteration: inner values (updates d) → cutoffs from raw surpluses →
-# per-aS stationary shapes → free-entry tightness → joint Anderson(m=1)
-# on [θ_S; p*_S; gap] with gap = p^oj − p*.  Convergence on
-# (Δθ_S, Δp*_S, Δp^oj_S).
+# Per iteration: inner values (updates d) → cutoffs from raw surpluses, installed
+# under-relaxed by damp_pstar_S → per-aS stationary shapes → free-entry tightness,
+# under-relaxed by the adaptive weight.  A plain damped fixed-point iteration with no
+# acceleration: an Anderson step on the joint [θ_S; p*_S; gap] takes its mixing weight
+# mostly from the cutoff components, which in the base_fc multiplicity band reverses the
+# θ_S step on about half the passes and can carry the iteration onto the repelling root
+# (SETTINGS.md).  Convergence on (Δθ_S, Δp*_S, Δp^oj_S, Δs_part), Δp^oj_S over the types
+# that participate in OJS, with the outlier allowance below.
 # ---------------------------------------------------------------------------
-function solve_skilled_block!(model::Model; fU::Float64, EU1::AbstractVector{Float64})
-    cp = model.common;  gp = model.grids;  sg = model.skl_grids
-    sc = model.skl_cache;  sim = model.sim;  sp = model.skl_par;  pre = model.skl_pre
 
+# How many ability types the convergence test will treat as outliers before falling back
+# to the plain sup-norm.  A CONSTANT, not a setting: at 1 or 2 the boundary has a few
+# types whose increment amplifies while their level is stable, which is the case the
+# allowance is for; letting a run raise it would let a genuinely drifting frontier pass.
+const CONV_S_MAXOUT = 2
+# ---------------------------------------------------------------------------
+# The cutoff map: the cutoffs the stored surpluses imply.  p*_S is the linearly
+# interpolated zero of the raw S^max, p^oj_S a crossing of S^1 − S^0 above it, and Mscore
+# the participation score.  A function of the stored state alone, so the block's
+# iteration and the equilibrium residual (global_residuals) read one map.
+# ---------------------------------------------------------------------------
+function cutoff_proposals!(pst_prop::AbstractVector{Float64}, poj_prop::AbstractVector{Float64},
+                           Mscore::AbstractVector{Float64}, model::Model, κ::Float64)
+    cp = model.common;  gp = model.grids;  sg = model.skl_grids
+    sc = model.skl_cache;  sp = model.skl_par;  pre = model.skl_pre
     Nx = length(gp.x);  Np = length(sg.p)
     denom_nb = max(1.0 - sp.β, 1e-14)
     r  = cp.r;  ν = cp.ν
@@ -607,21 +717,98 @@ function solve_skilled_block!(model::Model; fU::Float64, EU1::AbstractVector{Flo
     wΓo = pre.γvals   .* sg.wp                      # offer  ∫·dΓ_o
     wΓs = pre.γs_vals .* sg.wp                      # shock  ∫·dΓ_s
 
-    aa_joint = Anderson1(1 + 2 * Nx)
+    @threads for k in 1:Nx
+        @inbounds begin
+            aS = gp.x[k];  PSeff = PS * aS;  U0k = sc.U0[k]
+            poj_prev = clamp01(sc.poj[k]);  part_prev = sc.s_part[k]
+            j0_prev = pcut_index(sg.p, clamp01(sc.pstar[k]))
+            j0_soft = max(j0_prev - 1, 1)
+
+            # Same search rule as the value block and the firm side.  The cutoffs are
+            # located FROM these tails, so a pointwise max here would search for a new
+            # boundary under a rule the rest of the block does not use.
+            tailEo = zeros(Float64, Np);  tailEs = zeros(Float64, Np)
+            acco = 0.0;  accs = 0.0
+            for j in Np:-1:1
+                s_j    = _ojs_share(part_prev, sg.p[j], poj_prev, sg.p, j, Np)
+                Smax_j = (s_j * sc.J1[k, j] + (1.0 - s_j) * sc.J0[k, j]) / denom_nb
+                acco += Smax_j * wΓo[j];  tailEo[j] = acco
+                accs += Smax_j * wΓs[j];  tailEs[j] = accs
+            end
+            I_s = tailEs[j0_soft]              # shock: λ_S redraw option value
+
+            Smax_raw = zeros(Float64, Np);  diff_raw = zeros(Float64, Np)
+            base = r + ν + λ + ξ
+            for j in 1:Np
+                pj = sg.p[j]
+                # λ_S redraw → shock integral; OJS poaching gain/outflow → offer tail.
+                raw_S0 = (PSeff * pj - (r + ν) * U0k + λ * I_s) / base
+                tail_mass_j = pre.tail_weights[j]
+                tail_Emax_j = tailEo[max(j, j0_soft)]
+                raw_S1 = (PSeff * pj - (r + ν) * U0k - σ + λ * I_s +
+                          κ * β * tail_Emax_j) / (base + κ * tail_mass_j)
+                Smax_raw[j] = max(raw_S0, raw_S1)
+                diff_raw[j] = POJ_SCORE[] === :smooth ?
+                              smooth_pos(raw_S1) - smooth_pos(raw_S0) :
+                              raw_S1 - raw_S0
+            end
+            pst_prop[k] = clamp01(find_cutoff_from_j0(sg.p, Smax_raw, j0_prev))
+
+            # The participation score and the node attaining it.  As M falls to 0 the
+            # searching interval {p : diff > 0} collapses onto that peak, so the peak
+            # is the limit of the crossing — and it is the cutoff the searching branch
+            # of a straddling cell must use, where the scan, finding no crossing at
+            # all, would otherwise shut the margin outright and jump p^oj by cells.
+            jpk = j0_prev
+            for j in (j0_prev + 1):Np
+                diff_raw[j] > diff_raw[jpk] && (jpk = j)
+            end
+            Mscore[k] = diff_raw[jpk]
+
+            poj_prop[k] = max(pst_prop[k],
+                              OJS_PARTICIPATION[] === :fraction && Mscore[k] <= 0.0 ?
+                              sg.p[jpk] :
+                              clamp01(find_poj_from_diff_grid(sg.p, diff_raw, pst_prop[k])))
+        end
+    end
+    return nothing
+end
+
+
+# `θS_fixed` imposes the skilled tightness instead of solving free entry for it: the block
+# then solves every other skilled object conditional on that θ_S, which is one evaluation
+# of the skilled free-entry map (skilled_equilibria, solver.jl).
+function solve_skilled_block!(model::Model; κU::Float64, EU1::AbstractVector{Float64},
+                              θS_fixed::Union{Nothing,Float64} = nothing)
+    gp = model.grids;  sc = model.skl_cache;  sim = model.sim
+    Nx = length(gp.x)
+    θS_fixed === nothing || (sc.θ = θS_fixed)
+
     pst_prop = zeros(Float64, Nx)
     poj_prop = zeros(Float64, Nx)
+    Mscore    = zeros(Float64, Nx)     # participation score max_{p >= p*_S} (S^1 − S^0)
+    part_prop = ones(Float64, Nx)
 
     streak = 0;  diverge_streak = 0
     oB = sim.outer_B;  oK = sim.outer_K
     outer_resid = Vector{Float64}(undef, sim.maxit_outer)
 
+    # Adaptive free-entry weight, and the previous pass's interpolated boundary values for
+    # the convergence test.  Both are LOCAL to this call: carrying either between solves
+    # in a module-level Ref would make a result depend on the order in which parameter
+    # draws are evaluated, which is the defect class of the thread-nondeterminism bug.
+    w_θ_ad   = DAMP_THETA_S[]
+    sgn_prev = 0
+    itp_prev = Float64[]
+
     for it in 1:sim.maxit_outer
         θ_old     = sc.θ
         pstar_old = copy(sc.pstar)
         poj_old   = copy(sc.poj)
+        part_old  = copy(sc.s_part)
 
-        inner = skilled_inner_loop!(model; fU = fU, EU1 = EU1)
-        f = inner.f;  inner_conv = inner.converged
+        inner = skilled_inner_loop!(model; κU = κU, EU1 = EU1)
+        κ = inner.κ;  inner_conv = inner.converged
 
         if inner.status === :diverged
             diverge_streak += 1
@@ -634,89 +821,59 @@ function solve_skilled_block!(model::Model; fU::Float64, EU1::AbstractVector{Flo
         end
 
         # Cutoffs from raw (unclamped) surpluses.
-        @threads for k in 1:Nx
-            @inbounds begin
-                aS = gp.x[k];  PSeff = PS * aS;  U0k = sc.U0[k]
-                j0_prev = pcut_index(sg.p, clamp01(sc.pstar[k]))
-                j0_soft = max(j0_prev - 1, 1)
+        cutoff_proposals!(pst_prop, poj_prop, Mscore, model, κ)
 
-                tailEo = zeros(Float64, Np);  tailEs = zeros(Float64, Np)
-                acco = 0.0;  accs = 0.0
-                for j in Np:-1:1
-                    Smax_j = max(sc.J0[k, j], sc.J1[k, j]) / denom_nb
-                    acco += Smax_j * wΓo[j];  tailEo[j] = acco
-                    accs += Smax_j * wΓs[j];  tailEs[j] = accs
-                end
-                I_s = tailEs[j0_soft]              # shock: λ_S redraw option value
+        # Type-level OJS participation.  A function of the current iterate, like the cutoff
+        # proposals, and installed undamped, so that :indicator and :fraction differ only in
+        # the participation encoding.
+        OJS_PARTICIPATION[] === :fraction && ojs_participation!(part_prop, Mscore, gp.x)
+        copyto!(sc.s_part, part_prop)
 
-                Smax_raw = zeros(Float64, Np);  diff_raw = zeros(Float64, Np)
-                base = r + ν + λ + ξ
-                for j in 1:Np
-                    pj = sg.p[j]
-                    # λ_S redraw → shock integral; OJS poaching gain/outflow → offer tail.
-                    raw_S0 = (PSeff * pj - (r + ν) * U0k + λ * I_s) / base
-                    tail_mass_j = pre.tail_weights[j]
-                    tail_Emax_j = tailEo[max(j, j0_soft)]
-                    raw_S1 = (PSeff * pj - (r + ν) * U0k - σ + λ * I_s +
-                              f * β * tail_Emax_j) / (base + f * tail_mass_j)
-                    Smax_raw[j] = max(raw_S0, raw_S1)
-                    diff_raw[j] = POJ_SCORE[] === :smooth ?
-                                  smooth_pos(raw_S1) - smooth_pos(raw_S0) :
-                                  raw_S1 - raw_S0
-                end
-                pst_prop[k] = clamp01(find_cutoff_from_j0(sg.p, Smax_raw, j0_prev))
-                poj_prop[k] = max(pst_prop[k], clamp01(find_poj_from_diff_grid(sg.p, diff_raw, pst_prop[k])))
-            end
-        end
-
-        # Install cutoffs for the stationary solve.
-        if sim.use_anderson
-            @inbounds for k in 1:Nx
-                sc.pstar[k] = pst_prop[k]
-                sc.poj[k]   = max(pst_prop[k], poj_prop[k])
-            end
-        else
-            damp = sim.damp_pstar_S
-            @inbounds for k in 1:Nx
-                sc.pstar[k] = clamp01(damp * pst_prop[k] + (1.0 - damp) * pstar_old[k])
-                sc.poj[k]   = max(sc.pstar[k], clamp01(damp * poj_prop[k] + (1.0 - damp) * poj_old[k]))
-            end
+        # Install the under-relaxed cutoffs for the stationary solve; p^oj_S is kept at or
+        # above p*_S after the blend.
+        damp = sim.damp_pstar_S
+        @inbounds for k in 1:Nx
+            sc.pstar[k] = clamp01(damp * pst_prop[k] + (1.0 - damp) * pstar_old[k])
+            sc.poj[k]   = max(sc.pstar[k], clamp01(damp * poj_prop[k] + (1.0 - damp) * poj_old[k]))
         end
 
         solve_stationary_skilled!(model)
 
-        # Under-relaxed free entry: the damped map is what both the Anderson and
-        # the plain branch iterate on, so acceleration sees a contraction the raw
-        # map is not (DAMP_THETA_S in params.jl).
-        w_θ   = DAMP_THETA_S[]
-        θ_raw = max(w_θ * update_theta_skilled(model) + (1.0 - w_θ) * θ_old, 1e-14)
-
-        if sim.use_anderson
-            gap_old  = poj_old  .- pstar_old
-            gap_prop = poj_prop .- pst_prop
-            x_old = vcat([θ_old], pstar_old, gap_old)
-            f_raw = vcat([θ_raw], pst_prop,  gap_prop)
-            x_new = anderson1_update!(aa_joint, x_old, f_raw)
-            sc.θ = max(x_new[1], 1e-14)
-            @inbounds for k in 1:Nx
-                pstar_new   = clamp01(x_new[1 + k])
-                gap_new     = clamp(x_new[1 + Nx + k], 0.0, 1.0)
-                sc.pstar[k] = pstar_new
-                sc.poj[k]   = clamp01(pstar_new + gap_new)
+        # Under-relaxed free entry (DAMP_THETA_S in params.jl).
+        #
+        # The weight ADAPTS, with DAMP_THETA_S as the ceiling it relaxes back toward: on a
+        # sign reversal in the undamped target the step is halved, and absent one it
+        # lengthens back.
+        #
+        # What the shorter step does is NOT stabilise the oscillating root.  This map's
+        # slope in θ_S is (1/η_S)·dlnJ̄_S/dlnθ_S, so it contracts iff dlnJ̄_S/dlnθ_S < η_S
+        # = 0.5; on the ridge that quantity measures 0.52 to 0.90, i.e. slope b = 1.04 to
+        # 1.80, and the DAMPED slope is 1 + w(b−1) > 1 for every w in (0,1].  No
+        # under-relaxation can stabilise a root with b > 1.  What a shorter step does there
+        # is let the iteration be repelled from the unstable root and settle on a different,
+        # stable one — so on the multiplicity band the schedule SELECTS an equilibrium.
+        #
+        # The fixed 0.9 is correct where the estimates live: at θ̂ the skilled free-entry
+        # residual contracts geometrically, 2.1e-04 → 3.6e-07 → 3.2e-08, no reversal occurs
+        # and the weight simply stays at the ceiling.  θ̂ and the controls land on the SAME
+        # root under w = 0.9 and w = 0.5 (Q agreeing to 2.1e-11), so no reported estimate is
+        # branch-dependent.  A FIXED 0.5 instead of the ceiling costs coverage (348 of 361
+        # against 353 at the fixed 0.9); see SETTINGS.md on DAMP_THETA_S for the band.
+        #
+        # With θ_S imposed there is no free-entry step: θ_S is held at θS_fixed on every
+        # pass and only the cutoffs iterate.
+        sc.θ = if θS_fixed === nothing
+            T_θ = update_theta_skilled(model)
+            sgn = sign(T_θ - θ_old)
+            if sgn_prev != 0 && sgn != 0 && sgn != sgn_prev
+                w_θ_ad = max(0.5 * w_θ_ad, 0.1)
+            else
+                w_θ_ad = min(1.2 * w_θ_ad, DAMP_THETA_S[])
             end
+            sgn_prev = sgn
+            max(w_θ_ad * T_θ + (1.0 - w_θ_ad) * θ_old, 1e-14)
         else
-            sc.θ = θ_raw
-        end
-
-        # Under-relax the p^oj iterate (DAMP_POJ_S in params.jl).  Applied after
-        # whichever branch installed it, so the accelerated and the plain map are
-        # damped identically; w = 1 leaves both untouched.
-        w_oj = DAMP_POJ_S[]
-        if w_oj < 1.0
-            @inbounds for k in 1:Nx
-                sc.poj[k] = max(sc.pstar[k],
-                                clamp01(w_oj * sc.poj[k] + (1.0 - w_oj) * poj_old[k]))
-            end
+            θS_fixed
         end
 
         if !isfinite(sc.θ) || any(!isfinite, sc.pstar) || any(!isfinite, sc.poj)
@@ -724,14 +881,86 @@ function solve_skilled_block!(model::Model; fU::Float64, EU1::AbstractVector{Flo
             return (converged = false, rejected = false)
         end
 
+        # A type with zero OJS participation before and after the pass is INACTIVE, and its
+        # p^oj_S enters no object: every consumer weights it by _ojs_share = s_part × weight
+        # (grids.jl), which is exactly 0 there.  Its p^oj_S is then the peak of S^1 − S^0,
+        # which for high ability lies on a plateau at the top of the p grid, flat to 1e-12
+        # relative, so rounding moves it between nodes by far more than tol.  Its Δp^oj_S
+        # therefore counts as zero, as in R1 (global_residuals); its Δp*_S and Δs_part still
+        # count, so a type switching participation on or off registers through Δs_part.
+        inactive = [part_old[k] == 0.0 && sc.s_part[k] == 0.0 for k in 1:Nx]
+        Δoj = [inactive[k] ? 0.0 : abs(sc.poj[k] - poj_old[k]) for k in 1:Nx]
+
         dθ = abs(sc.θ - θ_old)
         dp = supnorm(sc.pstar, pstar_old)
-        dj = supnorm(sc.poj, poj_old)
-        d  = max(dθ, dp, dj)
+        dj = maximum(Δoj)
+        ds = supnorm(sc.s_part, part_old)        # identically 0 under :indicator
+        d  = max(dθ, dp, dj, ds)
+
+        # Outlier allowance on the boundary.  The plain sup-norm lets ONE ability type at
+        # the participation frontier veto the other 159: measured there, that type's p^oj
+        # LEVEL is stable to five decimals while its per-iteration INCREMENT amplifies, so
+        # the sup-norm reports divergence for a boundary that has already settled.  Where
+        # at most CONV_S_MAXOUT types are above tolerance and the rest are below it, each
+        # outlier's cutoff is replaced by a linear interpolation in ability between its
+        # anchors, that interpolated value is required to be stable from one pass to the
+        # next, and convergence is judged on the sup-norm over the remaining types.  Any
+        # other count falls back to the plain sup-norm.
+        #
+        # The interpolation decides CONVERGENCE ONLY and never writes sc.poj: installing it
+        # would mean the moments are computed from a cutoff no equilibrium condition was
+        # ever checked against.  The anchors are the nearest in-tolerance ACTIVE types on
+        # each side: an inactive type's p^oj_S is not an equilibrium object, so the walk
+        # steps over it.  A side with no anchor is the edge of the region where p^oj_S is
+        # defined — the grid edge, or the participation frontier with only inactive types
+        # beyond it, which is where the frontier type above sits — and the interpolant is
+        # then the anchor on the other side.  With no anchor on either side the test falls
+        # back rather than anchoring on the outlier itself.  dθ is a scalar and never the
+        # binding component, so it always stands.
+        #
+        # The stability test matches the previous pass's interpolants by position, so an
+        # outlier SET that changes between passes while keeping its size is compared
+        # type-against-type; the global residual battery is the backstop that catches a
+        # block which exits on that (solver.jl, global_residuals).
+        tol = sim.tol_outer_S
+        out = [k for k in 1:Nx if max(Δoj[k], abs(sc.s_part[k] - part_old[k])) > tol]
+        if 1 <= length(out) <= CONV_S_MAXOUT
+            itp = Float64[]
+            for k in out
+                lo = k - 1;  while lo >= 1  && (lo in out || inactive[lo]);  lo -= 1;  end
+                hi = k + 1;  while hi <= Nx && (hi in out || inactive[hi]);  hi += 1;  end
+                if lo < 1 && hi > Nx
+                    itp = Float64[]
+                    break
+                end
+                push!(itp, lo < 1  ? sc.poj[hi] :
+                           hi > Nx ? sc.poj[lo] :
+                           sc.poj[lo] + (sc.poj[hi] - sc.poj[lo]) *
+                                        (gp.x[k] - gp.x[lo]) / (gp.x[hi] - gp.x[lo]))
+            end
+            stable = length(itp) == length(out) && length(itp_prev) == length(itp) &&
+                     all(abs(itp[i] - itp_prev[i]) < tol for i in eachindex(itp))
+            itp_prev = itp
+            if stable
+                dR = 0.0
+                @inbounds for k in 1:Nx
+                    k in out && continue
+                    dR = max(dR, abs(sc.pstar[k]  - pstar_old[k]),
+                                 Δoj[k],
+                                 abs(sc.s_part[k] - part_old[k]))
+                end
+                d = max(dθ, dR)
+            end
+        else
+            itp_prev = Float64[]
+        end
         outer_resid[it] = d
 
         if sim.verbose >= 2 && (it == 1 || it % sim.verbose_stride == 0)
-            @printf("  [outer S it=%d]  maxΔ=%.3e  (Δθ=%.3e  Δp*=%.3e  Δpoj=%.3e)  θ_S=%.4f\n", it, d, dθ, dp, dj, sc.θ)
+            # d is the gated residual and nout the number of types the allowance excused,
+            # so d sits BELOW the component maxima whenever nout > 0.
+            @printf("  [outer S it=%d]  d=%.3e  (Δθ=%.3e  Δp*=%.3e  Δpoj=%.3e  Δpart=%.3e)  nout=%d  θ_S=%.4f\n",
+                    it, d, dθ, dp, dj, ds, length(out), sc.θ)
         end
 
         if d < sim.tol_outer_S
