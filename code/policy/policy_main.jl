@@ -15,7 +15,7 @@
 #
 # User-configurable options:
 #   BASELINE_WINDOW   :base_fc   or  :base_covid
-#   W_COND_TARGET     weight-matrix mode (must match SMM run)
+#   WEIGHTING         ROYSEARCH_WEIGHTING, read as in smm_main.jl (must match the SMM run)
 #   INTENSITIES       subsidy levels to evaluate
 #   Nx, Np_U, Np_S    grid sizes (match SMM estimation)
 #
@@ -41,9 +41,6 @@
 # Which baseline to use for the counterfactuals
 const BASELINE_WINDOW = :base_fc
 const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
-
-# Weight-matrix mode (must match the SMM estimation)
-const W_COND_TARGET = 1e8     # 0.0 = diagonal, 1.0 = compressed, 2.0 = equal, >2.0 = full
 
 # Education-subsidy intensities (Section 6.2)
 const INTENSITIES_EDUC = [0.10, 0.25, 0.50]
@@ -144,14 +141,8 @@ flush(stdout)
 # 7. Determine weight-matrix suffix and file path
 # ═══════════════════════════════════════════════════════════
 
-function _w_suffix(cond_target::Float64)
-    cond_target == 0.0 && return "_diagonalW"
-    cond_target == 1.0 && return "_compressedW"
-    cond_target == 2.0 && return "_equalW"
-    return "_fullW"
-end
-
-const W_SUFFIX = _w_suffix(W_COND_TARGET)
+const WEIGHTING = run_weighting()
+const W_SUFFIX  = weighting_suffix(WEIGHTING)
 
 baseline_jls = estimate_path(BASELINE_WINDOW, W_SUFFIX; point = POINT_ESTIMATE)
 

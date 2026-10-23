@@ -47,10 +47,6 @@ end
 if !@isdefined(PLOTS_DIR)
     const PLOTS_DIR = joinpath(OUTPUT_DIR, "plots")
 end
-if !@isdefined(W_SUFFIX)
-    # Default to equal-W when invoked standalone
-    const W_SUFFIX = "_equalW"
-end
 
 # ═══════════════════════════════════════════════════════════
 # Packages
@@ -59,6 +55,13 @@ end
 print("Loading panel packages... "); flush(stdout)
 
 using LinearAlgebra
+using SparseArrays
+using Random
+using Distributions
+using FastGaussQuadrature
+using Interpolations
+using Parameters
+using Base.Threads
 using Plots
 using LaTeXStrings
 using Serialization
@@ -72,19 +75,25 @@ using Dates
 println("done."); flush(stdout)
 
 # ═══════════════════════════════════════════════════════════
-# TransitionResult struct
+# Solver, SMM layer and transition types
 #
-# Load TransitionParams and TransitionResult from transition_params.jl
-# only if the orchestrator hasn't already.  We need a stub for `Model`
-# to avoid a load error from the TransitionPath constructor signature —
-# it is never called here.
+# Loaded here only when the file runs standalone; transition_main.jl has loaded them. The
+# transition file holds both endpoint models, the SMM layer supplies the weighting suffix
+# and the data standard errors, and it reads the solver's duration thresholds.
 # ═══════════════════════════════════════════════════════════
 
-if !isdefined(Main, :TransitionResult)
-    if !isdefined(Main, :Model)
-        struct Model end
+if !@isdefined(solve_model)
+    for f in ("grids", "params", "unskilled", "skilled", "solver", "equilibrium")
+        include(joinpath(CODE_DIR, "solver", f * ".jl"))
     end
-    include(joinpath(TRANSITION_DIR, "transition_params.jl"))
+end
+if !@isdefined(MOMENT_NAMES)
+    include(joinpath(CODE_DIR, "smm", "settings.jl"))
+    include(joinpath(CODE_DIR, "smm", "moments.jl"))
+end
+isdefined(Main, :TransitionResult) || include(joinpath(TRANSITION_DIR, "transition_params.jl"))
+if !@isdefined(W_SUFFIX)
+    const W_SUFFIX = weighting_suffix(run_weighting())
 end
 
 # ═══════════════════════════════════════════════════════════
@@ -142,27 +151,29 @@ end
 """
     episode_calendar(scenario) → EpisodeCalendar
 
-Return the calendar for :fc or :covid.
+Return the calendar for a transition pair of paths.jl (PAIRS). A counterfactual pair runs
+on its parent's calendar (`data_window`), to its own crisis window.
 """
 function episode_calendar(scenario::Symbol) :: EpisodeCalendar
-    if scenario == :fc
+    String(scenario) in PAIRS ||
+        error("Unknown scenario: $scenario. Must be one of :" * join(PAIRS, ", :") * ".")
+    crisis = Symbol("crisis_", scenario)
+    if data_window(crisis) === :crisis_fc
         # FC: Jan 2003 – Jun 2009, switch Jan 2008
         start_d  = Date(2003, 1, 1)
         switch_d = Date(2008, 1, 1)
         end_d    = Date(2009, 6, 1)
         return EpisodeCalendar(start_d, switch_d, end_d,
-                               :base_fc, :crisis_fc,
+                               :base_fc, crisis,
                                60, 18)
-    elseif scenario == :covid
+    else
         # COVID: Jan 2015 – Dec 2021, switch Mar 2020
         start_d  = Date(2015, 1, 1)
         switch_d = Date(2020, 3, 1)
         end_d    = Date(2021, 12, 1)
         return EpisodeCalendar(start_d, switch_d, end_d,
-                               :base_covid, :crisis_covid,
+                               :base_covid, crisis,
                                60, 22)
-    else
-        error("Unknown scenario: $scenario. Must be :fc or :covid.")
     end
 end
 
@@ -186,27 +197,13 @@ end
 # ═══════════════════════════════════════════════════════════
 
 """
-    load_sigma_ses(; window, derived_dir) → Dict{Symbol, Float64}
+    load_data_ses(; window, derived_dir) → Dict{Symbol, Float64}
 
-Load sigma_{window}.csv, return Dict mapping MOMENT_NAME → standard error
-(= sqrt(diagonal element)).  The CSV is a K×K covariance matrix with
-column names matching moment names.
+Dict mapping each moment to its data standard error, the sampling SD σ̂_k of
+`load_sampling_variances` — the one the diagonal weighting divides by.
 """
-function load_sigma_ses(; window::Symbol, derived_dir::String) :: Dict{Symbol,Float64}
-    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-    if !isfile(sigma_file)
-        @warn "sigma file not found: $sigma_file — SE bands will be suppressed for $window"
-        return Dict{Symbol,Float64}()
-    end
-    df  = CSV.read(sigma_file, DataFrame)
-    col_names = Symbol.(names(df))
-    Σ   = Matrix{Float64}(df)
-    se  = Dict{Symbol,Float64}()
-    for (j, nm) in enumerate(col_names)
-        se[nm] = sqrt(max(Σ[j, j], 0.0))
-    end
-    return se
-end
+load_data_ses(; window::Symbol, derived_dir::String) :: Dict{Symbol,Float64} =
+    Dict(nm => sqrt(max(v, 0.0)) for (nm, v) in load_sampling_variances(; window, derived_dir))
 
 """
     load_moments_values(; window, derived_dir) → Dict{Symbol, Float64}
@@ -749,7 +746,7 @@ end
 Generate and save the 3×2 transition dynamics panel for the given scenario.
 
 Arguments:
-  scenario  :fc or :covid
+  scenario  a transition pair of paths.jl (PAIRS), e.g. :fc, :fc_cf1, :fc_cf2
   point     :smm or :mcmc, the estimates the transition was solved at
   suffix    weight-matrix suffix string (default W_SUFFIX)
 """
@@ -782,8 +779,8 @@ function make_transition_panel(;
     # ── Load moments and SEs ─────────────────────────────────────────────
     base_moms  = load_moments_values(; window=cal.base_window,   derived_dir=DERIVED_DIR)
     crisis_moms= load_moments_values(; window=cal.crisis_window, derived_dir=DERIVED_DIR)
-    base_ses   = load_sigma_ses(; window=cal.base_window,   derived_dir=DERIVED_DIR)
-    crisis_ses = load_sigma_ses(; window=cal.crisis_window, derived_dir=DERIVED_DIR)
+    base_ses   = load_data_ses(; window=cal.base_window,   derived_dir=DERIVED_DIR)
+    crisis_ses = load_data_ses(; window=cal.crisis_window, derived_dir=DERIVED_DIR)
 
     # ── Load monthly CPS data ─────────────────────────────────────────────
     cps_monthly = load_cps_monthly(cal, DERIVED_DIR)
@@ -843,7 +840,7 @@ function make_transition_panel(;
 
     # ── Save ──────────────────────────────────────────────────────────────
     mkpath(PLOTS_DIR)
-    label   = scenario == :fc ? "fc" : "covid"
+    label   = String(scenario)
     out_file= joinpath(PLOTS_DIR, "transition_panel_$(label)$(transition_tag(suffix, point)).png")
     savefig(fig, out_file)
     @printf("  Saved: %s\n", out_file)
@@ -1076,7 +1073,7 @@ function make_model_decomposition_panel(;
               link   = :none)
 
     mkpath(PLOTS_DIR)
-    label    = scenario == :fc ? "fc" : "covid"
+    label    = String(scenario)
     out_file = joinpath(PLOTS_DIR, "model_transition_$(label)$(transition_tag(suffix, point)).png")
     savefig(fig, out_file)
     @printf("  Saved: %s\n", out_file)

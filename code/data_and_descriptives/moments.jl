@@ -158,16 +158,19 @@ end
 
 function _fill_transition_moments!(moments::Dict{Symbol, Float64},
                                     trans_w::DataFrame)
-    # jfr_j, sep_rate_j: n_pairs-weighted mean across month-pairs in window.
+    # jfr_j, sep_rate_j: ratio of totals over the window's month-pairs, total weighted
+    # flow (U→E, E→U) over total weighted at-risk pool (U, E). This is the same
+    # construction as θ_j (_compute_tightness): the model's rates are stationary flows
+    # over stationary stocks, and averaging monthly ratios over a window in which the
+    # pool moves weights the months with the smallest pool most.
     for sk_val in (false, true)
         rows = filter(r -> Bool(r.skilled) == sk_val, trans_w)
         isempty(rows) && continue
         jfr_name = sk_val ? :jfr_S      : :jfr_U
         sep_name = sk_val ? :sep_rate_S : :sep_rate_U
-        valid_jfr = filter(isfinite, Float64.(rows.jfr))
-        valid_sep = filter(isfinite, Float64.(rows.sep))
-        moments[jfr_name] = isempty(valid_jfr) ? NaN : mean(valid_jfr)
-        moments[sep_name] = isempty(valid_sep) ? NaN : mean(valid_sep)
+        wu = sum(Float64.(rows.w_u)); we = sum(Float64.(rows.w_e))
+        moments[jfr_name] = wu > 0 ? sum(Float64.(rows.w_ue)) / wu : NaN
+        moments[sep_name] = we > 0 ? sum(Float64.(rows.w_eu)) / we : NaN
     end
 end
 
@@ -268,7 +271,7 @@ function _compute_wage_moments_per_year(asec_w::DataFrame)::Dict{Symbol, Float64
     return moments
 end
 
-function _compute_tightness_per_month(jolts_w::DataFrame, cps_w::DataFrame)::Dict{Symbol, Float64}
+function _compute_tightness(jolts_w::DataFrame, cps_w::DataFrame)::Dict{Symbol, Float64}
     moments = Dict{Symbol, Float64}()
 
     # The unemployment counts in the denominators of θ_U and θ_S must be the SAME
@@ -307,22 +310,27 @@ function _compute_tightness_per_month(jolts_w::DataFrame, cps_w::DataFrame)::Dic
         )
     end
 
-    theta_U_vals = Float64[]
-    theta_S_vals = Float64[]
+    # θ_j is the RATIO OF MEANS over the window: mean V_j over mean U_j, on the months
+    # where both are observed. The model's θ_j is a stationary V/U, one stock over
+    # another, and its counterpart is the ratio of the window's average stocks. V/U is
+    # convex in U, so the mean of the monthly ratios lies above that ratio, by more the
+    # more U moves within the window (2020–22: 2.32 against 1.71 in the skilled market).
+    sV_U = 0.0; sU_U = 0.0; n_U = 0
+    sV_S = 0.0; sU_S = 0.0; n_S = 0
 
     for row in eachrow(jolts_w)
         yr = Int(row.YEAR); mo = Int(row.MONTH)
         (U_U, U_S) = get(monthly_U, (yr, mo), (NaN, NaN))
         if isfinite(U_U) && U_U > 0 && isfinite(row.V_U)
-            push!(theta_U_vals, row.V_U / U_U)
+            sV_U += row.V_U; sU_U += U_U; n_U += 1
         end
         if isfinite(U_S) && U_S > 0 && isfinite(row.V_S)
-            push!(theta_S_vals, row.V_S / U_S)
+            sV_S += row.V_S; sU_S += U_S; n_S += 1
         end
     end
 
-    moments[:theta_U] = isempty(theta_U_vals) ? NaN : mean(filter(isfinite, theta_U_vals))
-    moments[:theta_S] = isempty(theta_S_vals) ? NaN : mean(filter(isfinite, theta_S_vals))
+    moments[:theta_U] = n_U == 0 ? NaN : sV_U / sU_U
+    moments[:theta_S] = n_S == 0 ? NaN : sV_S / sU_S
     return moments
 end
 
@@ -455,10 +463,10 @@ function make_moments()
             end
         end
 
-        # E. Tightness (JOLTS, per-month theta then average)
+        # E. Tightness (JOLTS V over CPS U, ratio of window means)
         jolts_w = filter(r -> r.window == wname, jolts_m)
         if nrow(jolts_w) > 0 && nrow(cps_w) > 0
-            merge!(moments, _compute_tightness_per_month(jolts_w, cps_w))
+            merge!(moments, _compute_tightness(jolts_w, cps_w))
         else
             moments[:theta_U] = NaN
             moments[:theta_S] = NaN

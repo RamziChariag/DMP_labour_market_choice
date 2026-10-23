@@ -218,8 +218,8 @@ Base.@kwdef struct SMMRunParams
     sa_parallel_steps :: Int    = 100         # parallel SA steps before pruning to the best chain
     sa_seed           :: Int    = 20240601    # base seed for parallel SA chains (replicability)
 
-    # Weight-matrix mode (see load_weight_matrix): 0.0 diagonal-σ, 2.0 equal weights
-    w_cond_target :: Float64 = 2.0
+    # The objective's weighting, :diagonal or :equal (run_weighting, load_weight_matrix)
+    weighting :: Symbol = :diagonal
 
     # Wage-reliability calibration knob. σ_w is NOT a free parameter: it is
     # calibrated externally from λ_w via σ_{w,j}² = (1−λ_w)·Var̂[log w_j]
@@ -465,7 +465,8 @@ Holds everything the SMM estimation needs.
 
 Fields
   free     vector of ParamSpec (parameters to estimate)
-  fixed    NamedTuple of pinned parameter values
+  fixed    NamedTuple of pinned parameter values; in a counterfactual window also the
+           record of its paired base estimate (`PAIRED_BASE`)
   moments  NamedTuple from load_data_moments() — (value, weight) pairs
   sim      SimParams — solver settings
   run      SMMRunParams — grid sizes, optimiser settings, weighting
@@ -553,11 +554,6 @@ function build_smm_spec(
             k => (k in skip_moments ? (value = v.value, weight = 0.0) : v)
             for (k, v) in pairs(moments)
         )
-        active_skipped = intersect(skip_moments, keys(moments))
-        if !isempty(active_skipped)
-            @printf("SMMSpec: skip_moments zeroed weights for (%d): %s\n",
-                    length(active_skipped), join(string.(active_skipped), ", "))
-        end
     end
 
     # Resolve the weight matrix.  Active moments are those with
@@ -642,7 +638,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:common, :b_ℓ,    0.0500,    4.0000,  "worker type shape b_ℓ"),
 
         # ρ_x: must be highly negative for the estimate to be stable
-        ParamSpec(:common, :ρ_x,   -0.98000,    -0.20000,  "ability correlation ρ_x"),
+        ParamSpec(:common, :ρ_x,   -0.90000,    -0.10000,  "ability correlation ρ_x"),
 
         # Common block — training cost coeff and aggregate scale
         ParamSpec(:common, :c,      6.00000,   15.00000,  "training cost coeff c"),
@@ -706,8 +702,8 @@ end
 # The vacancy costs, estimated through the tightnesses: every evaluation computes them
 # (solve_at_tightness!) and every table lists them beside the free parameters, keyed
 # (block, :k) and labelled here, in months of the mean output of a new match.
-const VACANCY_COSTS = ((:unsk, "unskilled vacancy cost k_U (months of new-match U output)"),
-                       (:skl,  "skilled vacancy cost k_S (months of new-match S output)"))
+const VACANCY_COSTS = ((:unsk, "unskilled vacancy cost k_U"),
+                       (:skl,  "skilled vacancy cost k_S"))
 
 # The joint ability distribution.  A crisis window holds it at the estimate of its
 # paired baseline window, since the ability composition of prime-age workers does
@@ -715,6 +711,20 @@ const VACANCY_COSTS = ((:unsk, "unskilled vacancy cost k_U (months of new-match 
 # every window.  A tuple, so iteration order (the field order of the pinned block,
 # which enters the candidate-cache key) is fixed.
 const ABILITY_PARAMS = ((:common, :a_ℓ), (:common, :b_ℓ), (:common, :ρ_x))
+
+# What a window holds at its paired base estimate: a crisis window the ability
+# distribution, a counterfactual window (paths.jl) the training cost c as well.
+base_held_params(window) =
+    is_counterfactual(window) ? (ABILITY_PARAMS..., (:common, :c)) : ABILITY_PARAMS
+
+# The entry of `SMMSpec.fixed` under which a counterfactual window records the base estimate
+# its base-held parameters, and under cf1 its held choices, come from: `window`, `point`,
+# `file` (relative to the project root) and its `sha256`, `holds_choices`, the decoded point
+# (`common`, `unsk`, `skl`, `tight`) and the `sim` it is solved under. Carried in the spec,
+# so every evaluation of the spec, in any entry point, solves the restricted model. It is
+# not a parameter value: the pinned values are `pinned_values(spec.fixed)`.
+const PAIRED_BASE = :paired_base
+pinned_values(fixed::NamedTuple) = Base.structdiff(fixed, NamedTuple{(PAIRED_BASE,)})
 
 # ============================================================
 # Fixed-key convention
@@ -1092,12 +1102,13 @@ function print_spec(spec::SMMSpec)
                 padr(ps.block, 8), padr(param_symbol(ps), 8), ps.lb, ps.ub, ps.init)
     end
 
-    if length(spec.fixed) > 0
+    pinned = pinned_values(spec.fixed)
+    if length(pinned) > 0
         @printf("\n╠══════════════════════════════════════════════════════╣\n")
         @printf("║  Fixed parameters (%d)                                ║\n",
-                length(spec.fixed))
+                length(pinned))
         @printf("╠══════════════════════════════════════════════════════╣\n")
-        for (k, v) in pairs(spec.fixed)
+        for (k, v) in pairs(pinned)
             @printf("  %s = %.6f\n", padr(fixed_symbol(k), 20), v)
         end
     end
@@ -1108,8 +1119,7 @@ function print_spec(spec::SMMSpec)
     @printf("\n╠══════════════════════════════════════════════════════╣\n")
     @printf("║  Active moments (%2d)                                 ║\n", length(active_moments))
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    is_equal_weight = (spec.run.w_cond_target == 2.0)
-    if is_equal_weight
+    if spec.run.weighting === :equal
         @printf("  (Weighting: equal weights — W = Diagonal(weight/m̂²), relative-deviation loss)\n")
         @printf("  (Q divided by q_scale = %.6e for display)\n\n", spec.q_scale)
         @printf("  %-22s  %10s  %10s\n", "moment", "target", "weight")
@@ -1118,7 +1128,7 @@ function print_spec(spec::SMMSpec)
             @printf("  %-22s  %10.4f  %10.2f\n", k, v.value, v.weight)
         end
     else
-        @printf("  (Weighting: matrix W — raw deviations g'Wg)\n")
+        @printf("  (Weighting: diagonal — W = Diagonal(1/σ̂²_samp), raw deviations g'Wg)\n")
         @printf("  (Q divided by q_scale = %.6e for display)\n\n", spec.q_scale)
         @printf("  %-22s  %10s  %12s\n", "moment", "target", "W diag wt")
         @printf("  %s\n", "─"^48)
@@ -1175,7 +1185,7 @@ function print_spec(spec::SMMSpec)
             spec.run.nm_rate_span)
     @printf("  DE:   population — %d draws at each k=1:%d at %.2f×measured width; slots and f,cr from yield\n",
             spec.run.de_gen_per_k, length(spec.free), spec.run.de_local_sigma)
-    if spec.run.w_cond_target == 2.0
+    if spec.run.weighting === :equal
         @printf("  W:    equal weights — Diagonal(weight/m̂²) (cond(W)=%.2e)\n", cond(spec.W))
     else
         @printf("  W:    diagonal-σ — Diagonal(1/σ̂²_samp) (cond(W)=%.2e)\n", cond(spec.W))

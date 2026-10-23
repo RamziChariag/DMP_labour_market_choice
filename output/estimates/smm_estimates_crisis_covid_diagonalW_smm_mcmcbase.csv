@@ -1,0 +1,39 @@
+block,name,label,estimate,lb,ub,fixed,symbol
+common,c,training cost coeff c,10.32456615,6.00000000,15.00000000,false,c
+common,A,aggregate production scale A,7.60665118,4.00000000,10.00000000,false,A
+unsk,bU,unskilled outside flow b_U,0.02987752,0.00000000,0.20000000,false,b_U
+skl,bS,skilled outside flow b_S,0.18144487,0.00000000,0.50000000,false,b_S
+skl,PS,skilled productivity P_S,1.42441804,1.00001600,5.00000000,false,P_S
+unsk,α_U,unskilled damage shape α_U,1.22203143,0.10000000,6.00000000,false,α_U
+unsk,μ,unskilled matching eff μ_U,0.33103986,0.00010000,2.00000000,false,μ_U
+skl,μ,skilled matching eff μ_S,0.28698750,0.00010000,2.00000000,false,μ_S
+unsk,λ,unskilled damage rate λ_U,0.26114104,0.00010000,0.55000000,false,λ_U
+skl,λ,skilled quality shock λ_S,0.25088252,0.00010000,0.50000000,false,λ_S
+unsk,tight,unskilled tightness θ_U,0.83349341,0.05000000,3.00000000,false,θ_U
+skl,tight,skilled tightness θ_S,1.71348531,0.10000000,5.00000000,false,θ_S
+skl,σ,OJS flow cost σ_S,0.14159485,0.00000000,0.50000000,false,σ_S
+unsk,k,unskilled vacancy cost k_U,0.72959269,,,false,k_U
+skl,k,skilled vacancy cost k_S,0.48181491,,,false,k_S
+fixed,r,r,0.00416667,,,true,r
+fixed,ν,ν,0.00335677,,,true,ν
+fixed,φ,φ,0.02083333,,,true,φ
+fixed,a_ℓ,a_ℓ,1.00000000,,,true,a_ℓ
+fixed,b_ℓ,b_ℓ,1.00000000,,,true,b_ℓ
+fixed,ρ_x,ρ_x,-0.42103508,,,true,ρ_x
+fixed,bT,bT,0.00000000,,,true,b_T
+fixed,skl_δ,skl_δ,1.00000000,,,true,skl_δ
+fixed,skl_η,skl_η,0.50000000,,,true,η_S
+fixed,skl_β,skl_β,0.50000000,,,true,skl_β
+fixed,PU,PU,1.00000000,,,true,P_U
+fixed,unsk_η,unsk_η,0.50000000,,,true,η_U
+fixed,a_Γ,a_Γ,1.00000000,,,true,a_Γ
+fixed,unsk_β,unsk_β,0.50000000,,,true,unsk_β
+fixed,b_Γ,b_Γ,1.00000000,,,true,b_Γ
+fixed,skl_ξ,skl_ξ,0.00000000,,,true,skl_ξ
+fixed,unsk_ξ,unsk_ξ,0.00000000,,,true,unsk_ξ
+fixed,unsk_σ_w,unsk_σ_w,0.24878381,,,true,σ_wU
+fixed,skl_σ_w,skl_σ_w,0.23759152,,,true,σ_wS
+
+# Q = 1.9449546239e+03
+# converged = true
+# iterations = 104

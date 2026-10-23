@@ -104,13 +104,13 @@ function tau_report(θ_unc :: AbstractVector{Float64}, spec :: SMMSpec)
     # same number that decides each cell rather than a proxy for it.
     xg      = model.grids.x
     Nx      = length(xg)
-    net_T   = obj.net_T                     # −c(aS) + T(aS), indexed by aS
+    net_T   = obj.net_T                     # −c(aS) + T(aU,aS)
     Usearch = obj.Usearch                   # indexed by aU
 
     gap_pos =  Inf     # smallest margin among cells currently ON  (τ = 1)
     gap_neg = -Inf     # largest  margin among cells currently OFF (τ = 0), i.e. closest to switching on
     for j in 1:Nx, i in 1:Nx
-        g = net_T[j] - Usearch[i]
+        g = net_T[i, j] - Usearch[i]
         if g >= 0.0
             gap_pos = min(gap_pos, g)
         else

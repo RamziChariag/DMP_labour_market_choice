@@ -59,11 +59,9 @@ end
 assert_no_legacy_env()
 
 const WINDOW   = Symbol(get(ENV, "ROYSEARCH_WINDOW", "base_fc"))
-# W_COND_TARGET is set in the entry points (smm_main.jl:420, MCMC_main.jl:488), not in
-# settings.jl, so a tool that does not include an entry point cannot derive the suffix. The
-# other four tools in this directory hardcode "_diagonalW"; this one at least lets the caller
-# override, so an equalW run can be audited without editing the file.
-const W_SUFFIX = get(ENV, "ROYSEARCH_W_SUFFIX", "_diagonalW")
+# The weighting of the entry points (run_weighting, moments.jl): an equalW run is audited
+# under the same ROYSEARCH_WEIGHTING it was estimated under.
+const W_SUFFIX = weighting_suffix(run_weighting())
 # The base point: the SMM estimate, or the chain's, whose widths a chain table needs; the
 # two differ and the difference is itself worth seeing.
 const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls

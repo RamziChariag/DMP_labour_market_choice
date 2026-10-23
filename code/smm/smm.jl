@@ -125,7 +125,7 @@ active_moment_keys(spec::SMMSpec) =
 
 Single weighted-loss path for every weighting scheme.  The deviation
 vector is in RAW moment units (no |m̂_k| division); all per-moment
-scaling and cross-moment weighting live entirely in `W`:
+scaling lives entirely in `W`:
 
   • Equal weight (relative):  W = Diagonal(weight_k / m̂_k²)
         ⟹ g' W g = Σ_k weight_k · (g_k / m̂_k)²
@@ -177,6 +177,34 @@ end
 
 const _NO_EQUILIBRIUM = (Q = Inf, moments = nothing, model = nothing, label = :none, eq = nothing)
 
+# The held choices of a cf1 spec, keyed by its base file's checksum and the grid: solved once
+# per process and grid, then read by every evaluation and every thread.
+const _HELD_CHOICES = Dict{Tuple{String,Int,Int,Int},HeldChoices}()
+const _HELD_LOCK    = ReentrantLock()
+
+"""
+    held_choices(spec; Nx, Np_U, Np_S) → HeldChoices or nothing
+
+The education choices a cf1 window holds (`spec.fixed`'s `PAIRED_BASE` record, with
+`holds_choices`): those of the base stationary equilibrium, its paired base estimate solved
+under the current code on this grid.  `nothing` for every other spec.  The base solve
+failing is an error, not an infeasible point: without it the restricted model is undefined.
+"""
+function held_choices(spec::SMMSpec; Nx::Int = spec.run.Nx, Np_U::Int = spec.run.Np_U,
+                      Np_S::Int = spec.run.Np_S)
+    pb = get(spec.fixed, PAIRED_BASE, nothing)
+    (pb === nothing || !pb.holds_choices) && return nothing
+    return lock(_HELD_LOCK) do
+        get!(_HELD_CHOICES, (pb.sha256, Nx, Np_U, Np_S)) do
+            model, sr = solve_model(pb.common, pb.unsk, pb.skl, pb.sim; Nx = Nx, Np_U = Np_U,
+                                    Np_S = Np_S, tightness = pb.tight)
+            sr.ok || error("held_choices: the base estimate $(pb.file) does not solve on the " *
+                           "grid (Nx, Np_U, Np_S) = ($Nx, $Np_U, $Np_S)")
+            HeldChoices(model)
+        end
+    end
+end
+
 """
     equilibrium_at(θ_unc, spec; Nx, Np_U, Np_S, constrained, sim) → NamedTuple
 
@@ -203,10 +231,11 @@ function equilibrium_at(
     none = (Q = Inf, moments = nothing, model = nothing, k = (U = NaN, S = NaN))
     # constrained = true: θ_unc is θ itself, not the unconstrained t. See unpack_θ.
     cp, up, sp, tight = unpack_θ(θ_unc, spec; constrained = constrained)
+    held = held_choices(spec; Nx = Nx, Np_U = Np_U, Np_S = Np_S)
     local model, m_model
     try
         model, solve_result = solve_model(cp, up, sp, sim; Nx = Nx, Np_U = Np_U, Np_S = Np_S,
-                                          tightness = tight)
+                                          tightness = tight, held = held)
         solve_result.ok || return none
         m_model = model_moments(compute_equilibrium_objects(model))
     catch
@@ -328,8 +357,9 @@ second method takes a `D` measured elsewhere (MCMC_main reads it off the Jacobia
 function attracting_check(θ_unc::AbstractVector{Float64}, spec::SMMSpec)
     cp, up, sp, tight = unpack_θ(θ_unc, spec)
     grid = (Nx = spec.run.Nx, Np_U = spec.run.Np_U, Np_S = spec.run.Np_S)
+    held = held_choices(spec; grid...)
     function lnk(tt)
-        model, sr = solve_model(cp, up, sp, spec.sim; grid..., tightness = tt)
+        model, sr = solve_model(cp, up, sp, spec.sim; grid..., tightness = tt, held = held)
         sr.ok || return (NaN, NaN)
         return (log(model.unsk_par.k), log(model.skl_par.k))
     end
@@ -2785,9 +2815,10 @@ function print_results(res::SMMResult; why::AbstractString = "", k = nothing)
         @printf("  %s%s%20.5f\n", padr(:unsk, 12), padr("k_U", 20), k.U)
         @printf("  %s%s%20.5f\n", padr(:skl, 12),  padr("k_S", 20), k.S)
     end
-    if length(res.spec.fixed) > 0
+    pinned = pinned_values(res.spec.fixed)
+    if length(pinned) > 0
         @printf("\n  Fixed:\n")
-        for (k, v) in pairs(res.spec.fixed)
+        for (k, v) in pairs(pinned)
             # 4 + 30 + 20 = 54 as well, so the fixed values right-align on the same edge as
             # the estimates above them despite the deeper indent.
             @printf("    %s%20.5f\n", padr(fixed_symbol(k), 30), v)
@@ -2853,7 +2884,7 @@ function save_results(res::SMMResult, path::String; k)
             @printf(io, "%s,k,%s,%.8f,,,false,%s\n", blk, label, blk === :unsk ? k.U : k.S,
                     blk === :unsk ? "k_U" : "k_S")
         end
-        for (key, v) in pairs(res.spec.fixed)
+        for (key, v) in pairs(pinned_values(res.spec.fixed))
             @printf(io, "fixed,%s,%s,%.8f,,,true,%s\n", key, key, v, fixed_symbol(key))
         end
         @printf(io, "\n# Q = %.10e\n", res.loss_opt)

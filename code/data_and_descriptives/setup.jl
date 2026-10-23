@@ -237,9 +237,7 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 # Closed-form sampling-variance helpers (pure functions of the data).
 #
-# These live here rather than in sampling_variances.jl because sigma.jl needs the
-# identical set; setup.jl is included first by data_processing_main.jl, so one
-# definition serves every consumer and the two copies cannot drift apart.
+# setup.jl is included first by data_processing_main.jl; sampling_variances.jl uses them.
 # ─────────────────────────────────────────────────────────────────────────────
 
 function _kish_prop_var(w::Vector{Float64}, denom::AbstractVector{Bool},

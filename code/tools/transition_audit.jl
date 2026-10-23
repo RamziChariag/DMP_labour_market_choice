@@ -8,9 +8,9 @@
 # can return a sequence of steady states. Three properties separate the two,
 # and this script measures all three on the base→crisis pair.
 #
-#   (i)   The mass-weighted cross-market flow ∬ d κ_U u_S is identically zero
-#         at BOTH stationary endpoints by self-selection (notes,
-#         prop:ss-crossflow). If it is also zero along the whole path, either
+#   (i)   The mass-weighted cross-market flow ∬ d κ_U h u_S, zero at a
+#         stationary endpoint where no trained worker gains by crossing, as at
+#         every stored estimate. If it is also zero along the whole path, either
 #         the path is not transitory or the channel is directional and cannot
 #         fire on this pair — the frontier-floor series tells them apart.
 #   (ii)  The interior distributions must differ from BOTH endpoints'
@@ -121,7 +121,7 @@ col_marg(M) = vec(sum(M, dims = 1))
 # training gain the solver builds.  Compared against the path's date-1 value it
 # says how far the training frontier jumps at the switch date.
 function stationary_floor(eq)
-    us = eq.Usearch[1];  Utr = eq.net_T;  x = eq.xg;  Nx = length(x)
+    us = eq.Usearch[1];  Utr = eq.net_T[1, :];  x = eq.xg;  Nx = length(x)
     Utr[Nx] < us  && return x[Nx]
     Utr[1]  >= us && return x[1]
     j0 = 2

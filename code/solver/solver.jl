@@ -13,23 +13,24 @@
 #   skilled_equilibria(model)
 #       → every attracting skilled equilibrium at the parameters of a converged Model.
 #
-# Global fixed point on the link variables (U_S, m_S), both Anderson(m=1)
-# accelerated.  U_S(aS) is one-dimensional in the skilled aptitude; the
+# Global fixed point on the link variables (U_S^(0), m_S), both Anderson(m=1)
+# accelerated.  U_S^(0)(aS) is one-dimensional in the skilled aptitude; the
 # trained mass m_S(aU,aS) is two-dimensional on the copula grid.  The
 # remaining link objects are derived deterministically each pass:
 #   κ_U         = θ_U q_U(θ_U)                     from the unskilled solve
 #   E_U(aU,1)   = U^search(aU) + β_U S_U(aU,1)     from the frontier surplus
-#   d(aU,aS) u_S(aU,aS)                            from the skilled solve
-#   m_S(aU,aS)  = φ t(aU,aS) / (ν + d(aU,aS) κ_U)
+#   U_S^(1), T, τ, d and the training-slice match   from the career choices
+#   m_S(aU,aS)  = φ t(aU,aS) / (ν + k(aU,aS))       k the crossing hire rate
+#   d(aU,aS) u_S(aU,aS) = d m_S                     the cross-market seekers
 #
 # Per global iteration:
 #   A. Solve the unskilled block with the carried d·u_S.
 #   B. Form κ_U and E_U(·,1).
-#   C. Build m_S using sc.d (from the previous pass) and set sc.m_S.
-#   D. Solve the skilled block (inner loop updates sc.d).
-#   E. Recompute m_S using the updated sc.d.
-#   F. Anderson on the joint [U_S; vec(m_S)] with per-block scaling.
-#   G. Write back: sc.U ← new U_S; sc.m_S ← new m_S; uc.duS_carry ← d·u_S.
+#   C. Career choices at the installed U_S^(0); masses; install m_S.
+#   D. Solve the skilled block.
+#   E. Career choices at the new U_S^(0); masses.
+#   F. Anderson on the joint [U_S^(0); vec(m_S)] with per-block scaling.
+#   G. Write back: sc.U ← new U_S^(0); sc.m_S ← new m_S; uc.duS_carry ← d·m_S.
 #   H. Evaluate the equilibrium residual battery; the pass converges when it is
 #      inside tolerance on every component (global_residuals below).
 ############################################################
@@ -59,22 +60,25 @@ SolveResult(cU::Bool, cS::Bool, cG::Bool) = SolveResult(cU, cS, cG, cU && cS && 
 # solve_model — allocate grids and caches from parameter blocks, then solve
 # ---------------------------------------------------------------------------
 """
-    solve_model(common, unsk_par, skl_par, sim; Nx, Np_U, Np_S, tightness = nothing)
-        → (Model, SolveResult)
+    solve_model(common, unsk_par, skl_par, sim; Nx, Np_U, Np_S, tightness = nothing,
+                held = nothing) → (Model, SolveResult)
 
 With `tightness = nothing` the vacancy costs `unsk_par.k`, `skl_par.k` are given and the
 global loop solves for the tightnesses (`solve_model!`).  With
 `tightness = (U = θ_U, S = θ_S)` the tightnesses are given and the vacancy costs are
 computed from free entry (`solve_at_tightness!`); the blocks' `k` are then not read.
+`held` holds the education choices at those of another equilibrium (`HeldChoices`).
 """
 function solve_model(common::CommonParams, unsk_par::UnskilledParams,
                      skl_par::SkilledParams, sim::SimParams;
                      Nx::Int = 200, Np_U::Int = 200, Np_S::Int = 200,
-                     tightness::Union{Nothing,NamedTuple} = nothing)
+                     tightness::Union{Nothing,NamedTuple} = nothing,
+                     held::Union{Nothing,HeldChoices} = nothing)
     grids   = build_common_grids(common, Nx)
     pU, wpU = build_gl_grid(Np_U);  u_grids = UnskilledGrids(p = pU, wp = wpU)
     pS, wpS = build_gl_grid(Np_S);  s_grids = SkilledGrids(p = pS, wp = wpS)
-    model   = build_model(common, grids, unsk_par, u_grids, skl_par, s_grids, sim; Nx, Np_S)
+    model   = build_model(common, grids, unsk_par, u_grids, skl_par, s_grids, sim; Nx, Np_S,
+                          held = held)
     result  = tightness === nothing ? solve_model!(model) :
                                       solve_at_tightness!(model, tightness.U, tightness.S)
     return model, result
@@ -82,14 +86,14 @@ end
 
 
 # ---------------------------------------------------------------------------
-# m_S(aU,aS) = φ t(aU,aS) / (ν + d(aU,aS) κ_U)
+# m_S(aU,aS) = φ t(aU,aS) / (ν + k(aU,aS)), k the rate at which the cell's trained
+# are hired into the unskilled market (crossing_rates)
 # ---------------------------------------------------------------------------
-function _mS_from_t(t::Matrix{Float64}, d::Matrix{Float64},
-                    φ::Float64, ν::Float64, κU::Float64)
+function _mS_from_t(t::Matrix{Float64}, k::Matrix{Float64}, φ::Float64, ν::Float64)
     mS = similar(t)
-    @inbounds for k in eachindex(t)
-        denom = ν + clamp(d[k], 0.0, 1.0) * κU
-        mS[k] = denom > 1e-14 ? max(φ * t[k] / denom, 0.0) : 0.0
+    @inbounds for c in eachindex(t)
+        denom = ν + k[c]
+        mS[c] = denom > 1e-14 ? max(φ * t[c] / denom, 0.0) : 0.0
     end
     return mS
 end
@@ -127,8 +131,9 @@ scale and `Rmax < 1` is the convergence gate.
   R5  the education margin.  R1–R3 are all satisfied by the degenerate state where nobody
       trains and the skilled market is empty — free entry closes on the ℓ-weighted
       fallback, there is no mass to misclassify, and the identities hold trivially.  R5 is
-      the training frontier the current `U_S` implies against the one the state holds, and
-      it is the only component coupling the two markets.
+      the training value the current U_S = max{U_S^(0), U_S^(1)} implies against the one
+      the state holds, U_S^(1) re-evaluated at the installed T (implied_training_value),
+      and it is the only component coupling the two markets.
 
 There is no R4.  The population adding-up residual would go there, and it is deliberately
 absent: (E5) DEFINES `m_U := ℓ − m_S` and `e_U := m_U − u_U − t`, so every distributional
@@ -136,14 +141,15 @@ identity holds by construction, reads exactly zero everywhere, and can detect no
 non-convergence at all.  A vacuous component is not free — it is somewhere for an
 arithmetic slip to hide.
 
-R3 and R5 call `training_policy!` and `training_frontier!`, the same implementations the
-iteration uses: a residual built from a second copy of a formula tests the copy.
+R3 and R5 call `training_choice!` and the career choices' own `crossing_value`, the
+implementations the iteration uses: a residual built from a second copy of a formula tests
+the copy.  Where the model holds its choices (`Model.held`) the training choice is not a
+condition of the state, and R3 reads zero.
 
 With `θS_fixed` the skilled tightness is imposed rather than solved for (solve_model!), so
 skilled free entry is not a condition of that state and R2 reads the unskilled market only.
 """
 function global_residuals(model::Model; θS_fixed::Union{Nothing,Float64} = nothing)
-    cp = model.common;  gp = model.grids
     uc = model.unsk_cache;  sc = model.skl_cache;  up = model.unsk_par
 
     R1 = cutoff_residual(model)
@@ -155,13 +161,12 @@ function global_residuals(model::Model; θS_fixed::Union{Nothing,Float64} = noth
     θS_fixed === nothing &&
         (R2 = max(R2, abs(update_theta_skilled(model) - sc.θ) / max(sc.θ, 1e-14)))
 
-    Utr   = training_value!(similar(uc.Usearch), model)
-    τ_imp = similar(uc.τT)
-    training_policy!(τ_imp, Utr, uc.Usearch, gp.x)
+    τ_imp = training_choice!(similar(uc.τT), model)
     R3 = maximum(abs, τ_imp .- uc.τT)
 
-    T_imp = similar(uc.T)
-    training_frontier!(T_imp, sc.U, up.bT * exp(cp.A), cp.φ, cp.r, cp.ν)
+    κU    = meeting_rate(uc.θ, up.μ, up.η)
+    EU1   = uc.Usearch .+ up.β .* (uc.Jfrontier ./ max(1.0 - up.β, 1e-14))
+    T_imp = implied_training_value(model, κU, EU1)
     R5 = maximum(abs, T_imp .- uc.T) / max(maximum(abs, uc.T), 1e-14)
 
     r1 = R1 / TOL_CUTOFF;  r2 = R2 / TOL_RELATIVE
@@ -181,10 +186,9 @@ function implied_cutoffs(model::Model)
     m = Model(common = model.common, grids = model.grids,
               unsk_par = up, unsk_grids = model.unsk_grids, unsk_cache = uc,
               skl_par = model.skl_par, skl_grids = model.skl_grids, skl_pre = model.skl_pre,
-              skl_cache = deepcopy(sc), sim = model.sim, corner_limit = model.corner_limit)
-    κU  = meeting_rate(uc.θ, up.μ, up.η)
-    EU1 = uc.Usearch .+ up.β .* (uc.Jfrontier ./ max(1.0 - up.β, 1e-14))
-    inner = skilled_inner_loop!(m; κU = κU, EU1 = EU1)
+              skl_cache = deepcopy(sc), sim = model.sim, corner_limit = model.corner_limit,
+              held = model.held)
+    inner = skilled_inner_loop!(m)
 
     Nx  = length(sc.pstar)
     pst = zeros(Float64, Nx);  poj = zeros(Float64, Nx);  M = zeros(Float64, Nx)
@@ -250,10 +254,10 @@ there.  Given both tightnesses the stationary state is unique and needs no itera
 between the markets, because the dependence between the blocks runs one way:
   1. the unskilled block at θ_U: values, the hiring margin and the reservation qualities.
      U^search(a_U) does not read U_S (training enters only the choice τ), so these are final;
-  2. the skilled block at θ_S, with κ_U and E_U(a_U,1) from step 1: values, cutoffs, OJS
-     participation and the drain d;
-  3. the training frontier and choice τ at the solved U_S, then the masses, which are
-     linear given every policy: u_U and t in closed form, m_S = φ t / (ν + d κ_U);
+  2. the skilled block at θ_S: the stay-skilled values, cutoffs and OJS participation;
+  3. the career choices at the solved U_S^(0), with κ_U and E_U(a_U,1) from step 1:
+     U_S^(1), T, τ, the drain d and the training-slice match (career_choices!), then the
+     masses, which are linear given every policy (stationary_masses);
   4. k_U = q_U(θ_U) J̄_U / (π̄_U ũ_U) and k_S = q_S(θ_S) J̄_S / π̄_S from the same
      free-entry objects `update_theta_*` read (`vacancy_cost_unskilled/skilled`), installed
      in `model.unsk_par` / `model.skl_par`.  A market that holds no one is priced at the
@@ -263,28 +267,23 @@ condition, so the residual battery applies unchanged and is the convergence gate
 entry holds to rounding by construction, and R1, R3, R5 check the rest.
 """
 function solve_at_tightness!(model::Model, θU::Float64, θS::Float64)::SolveResult
-    cp = model.common;  gp = model.grids;  up = model.unsk_par
-    uc = model.unsk_cache;  sc = model.skl_cache
+    up = model.unsk_par;  uc = model.unsk_cache;  sc = model.skl_cache
     model.corner_limit = false
 
-    res_U = solve_unskilled_block!(model; US_in = sc.U, θU_fixed = θU)
+    res_U = solve_unskilled_block!(model; US_in = skilled_unemployment_value(model), θU_fixed = θU)
     res_U.rejected && return SolveResult(false, false, false)
     (any(!isfinite, uc.Usearch) || any(!isfinite, uc.pstar)) && return SolveResult(false, false, false)
 
     κU  = meeting_rate(θU, up.μ, up.η)
     EU1 = uc.Usearch .+ up.β .* (uc.Jfrontier ./ max(1.0 - up.β, 1e-14))
-    res_S = solve_skilled_block!(model; κU = κU, EU1 = EU1, θS_fixed = θS)
+    res_S = solve_skilled_block!(model; θS_fixed = θS)
     res_S.rejected && return SolveResult(false, false, false)
-    (any(!isfinite, sc.U) || any(!isfinite, sc.pstar) || any(!isfinite, sc.d) ||
-     any(!isfinite, sc.u_frac)) && return SolveResult(false, false, false)
+    (any(!isfinite, sc.U) || any(!isfinite, sc.pstar) || any(!isfinite, sc.u_frac)) &&
+        return SolveResult(false, false, false)
 
-    training_frontier!(uc.T, sc.U, up.bT * exp(cp.A), cp.φ, cp.r, cp.ν)
-    training_policy!(uc.τT, training_value!(similar(uc.Usearch), model), uc.Usearch, gp.x)
-    solve_stationary_unskilled!(uc.u, uc.t, gp.copula.W2, uc.τT, uc.pstar, κU, model)
-    sc.m_S = _mS_from_t(uc.t, sc.d, cp.φ, cp.ν, κU)
-    @inbounds for k in eachindex(sc.m_S)
-        uc.duS_carry[k] = max(clamp(sc.d[k], 0.0, 1.0) * sc.m_S[k], 0.0)
-    end
+    career_choices!(model, κU, EU1)
+    any(!isfinite, sc.U1) && return SolveResult(false, false, false)
+    install_stationary_masses!(model, κU)
 
     model.corner_limit = market_empty(model)
     model.unsk_par = _with_k(up, vacancy_cost_unskilled(model))
@@ -319,7 +318,7 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
 
     aa = Anderson1(Nx + Nx * Nx)
 
-    # First-pass m_S uses d ≡ 0 ⇒ (φ/ν) t.
+    # First-pass m_S: nobody crosses, so (φ/ν) t.
     sc.m_S .= (φ / ν) .* uc.t
     mS_cur = copy(sc.m_S)
 
@@ -334,7 +333,7 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
         mS_old = copy(mS_cur)
 
         # A. Unskilled block with carried d·u_S.
-        res_U = solve_unskilled_block!(model; US_in = sc.U)
+        res_U = solve_unskilled_block!(model; US_in = skilled_unemployment_value(model))
         res_U.rejected && return SolveResult(false, false, false)
         last_conv_U = res_U.converged
         if !isfinite(uc.θ) || any(!isfinite, uc.t) || any(!isfinite, uc.Usearch) || any(!isfinite, uc.pstar)
@@ -347,23 +346,26 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
         SU1 = uc.Jfrontier ./ max(1.0 - βU, 1e-14)
         EU1 = uc.Usearch .+ βU .* SU1
 
-        # C. m_S using the previous-pass d; install for the skilled solve.
-        sc.m_S = _mS_from_t(uc.t, sc.d, φ, ν, κU)
+        # C. Career choices at the installed U_S^(0); install m_S for the skilled solve.
+        career_choices!(model, κU, EU1)
+        sc.m_S = stationary_masses(model, κU).mS
 
-        # D. Skilled block; inner loop updates sc.d.
-        res_S = solve_skilled_block!(model; κU = κU, EU1 = EU1, θS_fixed = θS_fixed)
+        # D. Skilled block.
+        res_S = solve_skilled_block!(model; θS_fixed = θS_fixed)
         res_S.rejected && return SolveResult(false, false, false)
         last_conv_S = res_S.converged
         if !isfinite(sc.θ) || any(!isfinite, sc.U) || any(!isfinite, sc.pstar) ||
-           any(!isfinite, sc.d) || any(!isfinite, sc.u_frac)
+           any(!isfinite, sc.u_frac)
             sim.verbose >= 1 && @printf("[global]  NaN/Inf in skilled block at it=%d — aborting\n", it)
             return SolveResult(false, false, false)
         end
 
         US_raw = copy(sc.U)
 
-        # E. m_S using the just-updated d.
-        mS_raw = _mS_from_t(uc.t, sc.d, φ, ν, κU)
+        # E. Career choices and masses at the new U_S^(0).
+        career_choices!(model, κU, EU1)
+        ms     = install_unskilled_masses!(model, κU)
+        mS_raw = ms.mS
 
         if it == 1
             s_U = max(maximum(abs, US_raw), 1.0)

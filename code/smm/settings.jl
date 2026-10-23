@@ -59,15 +59,17 @@ documentation into a gate.
 const SETTINGS_REGISTRY = [
     # ── smm_main.jl: window, weighting and seeding ──────────────────────────
     SettingDecl(:WINDOW,        "smm_main.jl:top level",       :live,
-                "estimation window; must be a key of data/derived/windows.json"),
+                "estimation window; a key of data/derived/windows.json, or a counterfactual " *
+                "window of paths.jl (COUNTERFACTUALS), estimated on its parent's data"),
     SettingDecl(:CRISIS_BASE,   "smm_main.jl:§6", :inert,
                 "read only for a crisis window, and the shipped WINDOW is a base window: " *
                 ":smm holds the ability distribution at the base SMM estimate, :mcmc at the " *
                 "base chain's estimate and writes estimate_<crisis>_smm_mcmcbase.jls"),
     SettingDecl(:INIT_MODE,     "smm_main.jl:top level",       :live,
                 ":default, :warmstart or :clusters — selects how the optimiser is seeded"),
-    SettingDecl(:W_COND_TARGET, "smm_params.jl:load_weight_matrix", :live,
-                "0.0 diagonal-σ, 2.0 equal weights; also selects the bundle suffix"),
+    SettingDecl(:WEIGHTING,     "moments.jl:load_weight_matrix", :live,
+                ":diagonal, W = Diagonal(1/σ̂²) from the sampling variances, or :equal; " *
+                "also selects the bundle suffix, _diagonalW or _equalW"),
     SettingDecl(:LAMBDA_W,      "moments.jl:calibrate_sigma_w", :live,
                 "wage-reliability knob; σ_w is calibrated from it, never estimated"),
     SettingDecl(:USE_AS_SEED,           "smm_main.jl:top level", :live,

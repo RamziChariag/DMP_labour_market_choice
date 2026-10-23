@@ -55,13 +55,17 @@
 # `vacancy_costs` holds the vacancy costs at the estimate. They are estimated parameters,
 # but the optimiser's coordinates are the tightnesses and the solve computes the costs from
 # free entry, so they are not in θ and are stored here: `(k = (U, S), se, post)`, with `se`
-# their delta-method standard errors (`(curvature, bound, chain)`, each `(U, S)`) and `post`
+# their delta-method standard errors (keyed as the parameters' `se`, each `(U, S)`) and `post`
 # the chain's posterior summary, each `nothing` when the writer did not produce it. `attracting` is
 # the free-entry slope check at the estimate, `(D, market, joint)` (smm.jl,
 # `attracting_check`), or `nothing`.
 #
-# `se` is a NamedTuple of columns (e.g. `(jinv = [...], bound = [...])`) or `nothing`, and
-# `se_source` names how they were produced. An ABORTED chain still yields Jacobian-based
+# `se` is a NamedTuple of columns or `nothing`, and `se_source` names how they were produced.
+# The first column is the sandwich, keyed by its bread: `(sandwich, bound, chain)` with the
+# chain's covariance as bread (se_source :chain_bread_fd or :chain_bread_design), and
+# `(curvature, bound, chain)` with J⁻¹ = (Ĝ′WĜ)⁻¹ (se_source :jacobian_fd or
+# :jacobian_design), which is what the chain-free pass and an aborted chain carry; the
+# suffix is MCMC_JAC_METHOD, how Ĝ was measured. An ABORTED chain still yields Jacobian-based
 # standard errors, so the refusal to report belongs at the table, not here: a bundle that
 # discards a computed number destroys information, while a table that prints one without its
 # caveat misleads. Both failures are avoidable; only one is avoidable here.
@@ -223,20 +227,39 @@ bundle_is_final(b) = b.stage in (:smm, :mcmc, :mcmc_aborted)
 
 _major(v::AbstractString) = tryparse(Int, first(split(v, '.')))
 
-"""
-    require_current_major(b, path)
+# How closely a bundle written by another MAJOR version must reproduce its stored Q under
+# this code to be read as an estimate: rounding, not a change in the model's equilibrium.
+const REPRODUCE_RTOL = 1.0e-10
 
-Stop unless the bundle at `path` was written by this MAJOR version. A MAJOR bump moves Q at
-every point, so an estimate written under another one is not an estimate under this code;
-such a file is read only as a warm start, which re-evaluates it.
 """
-function require_current_major(b, path::AbstractString)
+    require_current_estimate(b, path) -> evaluation or nothing
+
+Stop unless the bundle at `path` is an estimate under this code. One written by this MAJOR
+version is. One written by another is if its stored parameter vector still scores its
+stored Q: the point is re-evaluated with the bundle's own spec (`equilibrium_at`) and
+accepted when that Q is finite and within `REPRODUCE_RTOL` of the stored one, since a MAJOR
+change that leaves the estimate's equilibrium where it was does not move the estimate.
+Nothing is written; the bundle's provenance stays as written. Returns the evaluation when
+one was made, `nothing` otherwise.
+"""
+function require_current_estimate(b, path::AbstractString)
     p = hasproperty(b, :provenance) ? b.provenance : nothing
     v = p === nothing ? "?" : p.version
-    _major(v) == _major(ROYSEARCH_VERSION) || error(
-        "$(basename(path)) was written by v$v; v$(ROYSEARCH_VERSION) reads estimates of " *
-        "its own MAJOR version only — re-estimate this window first.")
-    return nothing
+    _major(v) == _major(ROYSEARCH_VERSION) && return nothing
+    Q_stored = b.result === nothing ? NaN : b.result.loss_opt
+    ev  = (b.result === nothing || b.spec === nothing) ? nothing :
+          equilibrium_at(b.result.theta_opt, b.spec)
+    Q   = ev === nothing ? NaN : ev.Q
+    rel = abs(Q / Q_stored - 1.0)
+    if isfinite(Q) && rel <= REPRODUCE_RTOL
+        @printf("%s: written by v%s, Q reproduces under v%s (rel %.1e); accepted\n",
+                basename(path), v, ROYSEARCH_VERSION, rel)
+        flush(stdout)
+        return ev
+    end
+    error("$(basename(path)) was written by v$v; v$(ROYSEARCH_VERSION) reads estimates of " *
+          "its own MAJOR version only — re-estimate this window first. " *
+          @sprintf("Q stored %.10f, Q under v%s %.10f.", Q_stored, ROYSEARCH_VERSION, Q))
 end
 
 """

@@ -38,20 +38,23 @@ const REPORTED_SERIES = (:θU, :θS, :ur_U, :ur_S, :ur_total, :skilled_share,
                          :training_share, :mean_wage_U, :mean_wage_S)
 const LOG_SERIES      = (:mean_wage_U, :mean_wage_S)
 
-_scenario_windows(scenario::Symbol) =
-    scenario === :fc    ? (:base_fc, :crisis_fc) :
-    scenario === :covid ? (:base_covid, :crisis_covid) :
-    error("Unknown scenario: $scenario. Must be :fc or :covid.")
+# A scenario is a transition pair of paths.jl (PAIRS): from the base window to `crisis_<pair>`.
+function _scenario_windows(scenario::Symbol)
+    String(scenario) in PAIRS ||
+        error("Unknown scenario: $scenario. Must be one of :" * join(PAIRS, ", :") * ".")
+    wc = Symbol("crisis_", scenario)
+    return (PAIR_BASE[wc], wc)
+end
 
 """
     crisis_window_months(window) -> (months, ym_start, ym_end, label)
 
 The crisis window's length in months, from `data/derived/windows.json`, the list every
-other layer uses.
+other layer uses (a counterfactual window's is its parent's, `data_window`).
 """
 function crisis_window_months(window::Symbol)
     w  = JSON3.read(read(joinpath(PROJECT_ROOT, "data", "derived", "windows.json"), String))
-    wd = w.windows[window]
+    wd = w.windows[data_window(window)]
     ys, ms = divrem(wd.ym_start, 100);  ye, me = divrem(wd.ym_end, 100)
     return (months = 12 * (ye - ys) + (me - ms) + 1, ym_start = wd.ym_start,
             ym_end = wd.ym_end, label = String(wd.label))
@@ -62,8 +65,8 @@ end
 
 The estimate a window is read at: `:smm` the SMM estimate, `estimate_<window><W>_smm.jls`;
 `:mcmc` the chain's, `estimate_<window><W>_mcmc.jls` (the posterior mean of the retained
-draws). Both windows of a pair are read at the same `point`. The bundle must come from this
-MAJOR version, and a chain's from a chain that did not abort.
+draws). Both windows of a pair are read at the same `point`. The bundle must be an estimate
+under this code (`require_current_estimate`), and a chain's from a chain that did not abort.
 """
 function point_estimate(window::Symbol, w_suffix::String, point::Symbol)
     point in (:smm, :mcmc) || error("POINT_ESTIMATE must be :smm or :mcmc, got :$point.")
@@ -72,7 +75,7 @@ function point_estimate(window::Symbol, w_suffix::String, point::Symbol)
     b = read_bundle(file)
     (b === nothing || b.result === nothing || b.spec === nothing) &&
         error("$window: $(basename(file)) is unreadable or carries no result/spec.")
-    require_current_major(b, file)
+    require_current_estimate(b, file)
     b.stage === :mcmc_aborted && error(
         "$window: the chain behind $(basename(file)) aborted; its draws are not a " *
         "stationary sample, so the file holds no estimate.")
@@ -83,7 +86,8 @@ end
     check_pair(base, crisis, wb, wc)
 
 A transition runs on one grid and one population, so the two windows must share the grid
-sizes of their runs, the ability distribution and the demographic and training rates.
+sizes of their runs, the ability distribution and the demographic and training rates, and a
+counterfactual crisis window the training cost it holds at the base estimate.
 """
 function check_pair(base, crisis, wb::Symbol, wc::Symbol)
     rb = base.bundle.spec.run;  rc = crisis.bundle.spec.run
@@ -92,11 +96,11 @@ function check_pair(base, crisis, wb::Symbol, wc::Symbol)
               "$((rb.Nx, rb.Np_U, rb.Np_S)) against $((rc.Nx, rc.Np_U, rc.Np_S)).")
     cb, _, _ = unpack_θ(base.θ, base.bundle.spec)
     cc, _, _ = unpack_θ(crisis.θ, crisis.bundle.spec)
-    for f in (:a_ℓ, :b_ℓ, :ρ_x, :r, :ν, :φ)
+    for f in (last.(base_held_params(wc))..., :r, :ν, :φ)
         getfield(cb, f) == getfield(cc, f) ||
             error("$wb and $wc are not a pair: $f = $(getfield(cb, f)) in the base point and " *
-                  "$(getfield(cc, f)) in the crisis point. The crisis window must hold the ability " *
-                  "distribution at the base estimate it was paired with.")
+                  "$(getfield(cc, f)) in the crisis point. The crisis window must hold " *
+                  "$(join(last.(base_held_params(wc)), ", ")) at the base estimate it was paired with.")
     end
     return (Nx = rb.Nx, Np_U = rb.Np_U, Np_S = rb.Np_S)
 end

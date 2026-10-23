@@ -12,5 +12,5 @@ skl,λ,skilled quality shock λ_S,0.25001123,NaN,0.00129441,0.00176142,NaN,NaN,N
 unsk,tight,unskilled tightness θ_U,1.05121439,NaN,0.00416992,0.00417036,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,θ_U,0,252.094409,252.067965,3.39394708e-01
 skl,tight,skilled tightness θ_S,2.32081219,NaN,0.01650073,0.01658274,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,θ_S,0,140.649028,139.953506,4.53226977e-01
 skl,σ,OJS flow cost σ_S,0.10253555,NaN,0.00490796,0.01820441,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,σ_S,0,20.891679,5.632457,2.05071094e-01
-unsk,k,unskilled vacancy cost k_U (months of new-match U output),0.59279073,NaN,0.00755709,0.03059067,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_U,0,78.441631,19.378157,NaN
-skl,k,skilled vacancy cost k_S (months of new-match S output),0.33892099,NaN,0.00305848,0.01107920,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_S,0,110.813427,30.590748,NaN
+unsk,k,unskilled vacancy cost k_U,0.59279073,NaN,0.00755709,0.03059067,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_U,0,78.441631,19.378157,NaN
+skl,k,skilled vacancy cost k_S,0.33892099,NaN,0.00305848,0.01107920,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,k_S,0,110.813427,30.590748,NaN

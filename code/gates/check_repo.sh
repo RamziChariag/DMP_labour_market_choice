@@ -45,12 +45,12 @@ for f in "${GLOBAL_INPUTS[@]}"; do
     else printf "  MISSING %s\n" "$f"; missing=1; fi
 done
 for w in "${WINDOWS[@]}"; do
-    for stem in moments sigma sampling_var moment_scales; do
+    for stem in moments sampling_var; do
         f="data/derived/${stem}_${w}.csv"
         [ -f "$f" ] || { printf "  MISSING %s\n" "$f"; missing=1; }
     done
 done
-[ "$missing" -eq 0 ] && echo "  all per-window moment/sigma/variance/scale files present"
+[ "$missing" -eq 0 ] && echo "  all per-window moment and sampling-variance files present"
 
 # A warmstart scores every stored point that can start a window (smm_main.jl §8a); with
 # none it starts from DEFAULT_PARAMS, which is a different (and slower) starting point.

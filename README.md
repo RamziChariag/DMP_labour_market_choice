@@ -25,8 +25,9 @@ julia --project=. -t auto code/smm/smm_main.jl
 ```
 
 Settings come from `ROYSEARCH_*` environment variables, resolved and logged by
-`code/smm/settings.jl`; every key is declared in `SETTINGS_REGISTRY`. The window list
-lives only in `data/derived/windows.json`.
+`code/smm/settings.jl`; every key is declared in `SETTINGS_REGISTRY`. The data windows live
+only in `data/derived/windows.json`; the four counterfactual windows, which are estimated on
+their parent crisis window's data, are declared in `COUNTERFACTUALS` (`code/paths.jl`).
 
 ## Starting values and the parameter box
 
@@ -48,7 +49,8 @@ the bounds), and a prior optimum reused as a start is carried over as θ, not as
 
 From v57.0.0 each estimate has a file of its own in `output/estimates/`, named by
 `estimate_path(window, W; point)` in `code/paths.jl`, and no run writes into another's
-file (`<w>` a window, `W` the weighting suffix, `_diagonalW`):
+file (`<w>` a window, `W` the weighting suffix: `_diagonalW` under `WEIGHTING = :diagonal`, the
+default, `_equalW` under `:equal`; see `SETTINGS.md`):
 
 | file | written by | read by |
 |---|---|---|
@@ -60,9 +62,10 @@ file (`<w>` a window, `W` the weighting suffix, `_diagonalW`):
 | `candidates_<w>W_smm.jls`, `candidates_<w>W_smm_mcmcbase.jls` | `INIT_MODE = :clusters`, tagged like the run's bundle | the next `:clusters` run of the same configuration |
 | `estimate_<w>W.jls` (untagged) | versions before v57.0.0 | the warm start only |
 
-A reader of an estimate stops, in one line, on a file written by another MAJOR version: a
-MAJOR bump moves Q at every point. Only the warm start reads such a file, and it re-scores
-it. The other files versions before v57.0.0 left in `output/estimates/`
+A reader of an estimate accepts a file written by another MAJOR version only if its stored
+point still scores its stored Q under this code (relative 1e-10, `require_current_estimate`):
+it re-evaluates the point, prints one line saying so, and rewrites nothing. Otherwise it stops
+in one line with both values of Q. The warm start reads any such file, and re-scores it. The other files versions before v57.0.0 left in `output/estimates/`
 (`estimate_<w>W_postmean.jls`, the `_backup_Q` copies and the untagged candidate banks) are
 read by nothing.
 
@@ -110,6 +113,37 @@ lowest; with none readable it starts from `DEFAULT_PARAMS`. A base window's cand
 its `_smm` file and the untagged file; a crisis window's are its own output file, its other
 SMM file (`_smm` or `_smm_mcmcbase`), the untagged crisis file and the base point. A crisis
 window's ability distribution is the base point's whichever candidate wins.
+
+## Counterfactual windows
+
+Each crisis window is estimated twice more under a restriction. The four windows are
+declared once, in `COUNTERFACTUALS` (`code/paths.jl`), each with its parent crisis window:
+
+| window | parent | restriction |
+|---|---|---|
+| `crisis_fc_cf1`, `crisis_covid_cf1` | `crisis_fc`, `crisis_covid` | the training choice τ and the choice of market d held, at every type and every solve, at their values in the base stationary equilibrium; the training cost c held at the base estimate |
+| `crisis_fc_cf2`, `crisis_covid_cf2` | `crisis_fc`, `crisis_covid` | the training cost c held at the base estimate; τ and d chosen |
+
+Common to all four: the data are the parent's (`data_window`: `moments_<parent>.csv`,
+`sampling_var_<parent>.csv`, the parent's `windows.json` entry, ν, φ, r and σ_w); the base
+estimate is the parent's, at the point `CRISIS_BASE` selects, and ρ_x and c are held there
+(`base_held_params`, `code/smm/smm_params.jl`), so 12 parameters are free; `training_share`
+and `skilled_share` are held out of the objective (`WINDOW_SKIP_MOMENTS`, `smm_main.jl`), 33
+moments are targeted, and both stocks are still computed and listed with the skipped
+moments. The spec records the base estimate under `spec.fixed.paired_base` (`PAIRED_BASE`):
+its window, point, file (from the project root) and SHA-256, and the decoded point. A cf1
+evaluation reads its held choices from that record (`held_choices`, `code/smm/smm.jl`): the
+base point is solved once per grid under the current code and its τ, d and the node choices
+behind them (`HeldChoices`, `code/solver/params.jl`) are carried by the model (`Model.held`),
+so every reader of a cf1 bundle, in every entry point, solves the restricted model. At the
+base estimate on the base data the cf1 model reproduces the base equilibrium, every moment
+and Q bit for bit.
+
+Every file is named by the window (`estimate_crisis_fc_cf1_diagonalW_smm_mcmcbase.jls`) and
+is written exactly as a crisis window's: `smm_main.jl` writes `_smm` (`CRISIS_BASE = :smm`) or
+`_smm_mcmcbase` (`:mcmc`); `MCMC_main.jl` seeds a chain from `_smm_mcmcbase` and checks ρ_x
+and c against the base chain's estimate. The warm start reads the window's own output file
+if there is one, else the parent's SMM estimate at the same point, on the 12 free parameters.
 
 ## Verification
 
@@ -189,14 +223,15 @@ and tables. Its settings are the constants in its section 1:
 
 | setting | meaning |
 |---|---|
-| `SCENARIOS` | `[:fc]`, `[:covid]` or both |
+| `SCENARIOS` | any of the transition pairs `PAIRS` (`code/paths.jl`), three per event: `:fc`, `:covid` run to the crisis estimate, `:fc_cf1`, `:covid_cf1` to the cf1 estimate, `:fc_cf2`, `:covid_cf2` to the cf2 estimate; default `[:fc, :covid]` |
 | `POINT_ESTIMATE` | `:smm` reads both windows of each pair at their SMM estimates, `estimate_<w>W_smm.jls`; `:mcmc` at their chains' estimates, `estimate_<w>W_mcmc.jls` (the posterior mean of the retained draws), and stops for a window whose chain aborted or never ran |
 | `TR_T_MAX`, `TR_N_STEPS` | the fine time grid (120 months in half-month steps) |
 | `TR_TOL`, `TR_MAXIT`, `TR_DAMP` | the outer loop on the tightness paths: tolerance on max over dates of \|ln θ^new − ln θ\|, iteration cap, damping |
 
 The grids are each bundle's own estimation grid (`spec.run`); the run stops if the two windows
 differ in the grid or in the ability distribution and demographic rates, which a crisis window
-holds at its paired baseline, or if either file was written by another MAJOR version. The tables
+holds at its paired baseline (and a counterfactual window the training cost too), or if either file is not an estimate under this code (written by
+another MAJOR version and its Q does not reproduce). The tables
 phase reads the transition files of the `POINT_ESTIMATE` it runs under, stops on one that records
 another point, and reads the two estimate files each records, so it reports exactly the points
 the paths were solved at. Each endpoint is the solve at its window's tightnesses
@@ -205,10 +240,13 @@ are computed there; along the path the costs switch at date 0 and the tightness 
 θ_S(t) are solved from free entry at every date. The horizon is not a setting: it doubles from
 120 months, with a geometric tail beyond the fine grid, until no reported series moves by more
 than 1e-3 of its scale over the first 36 months, and neither mean log wage by more than 1e-3 in
-log units (`solve_with_horizon`, `transition_simulation.jl`); every trial is recorded.
+log units (`solve_with_horizon`, `transition_simulation.jl`); every trial is recorded. A cf1
+scenario runs under the cf1 model on the whole path: its endpoint model carries the held
+choices, so at every date τ and d are the held arrays and every envelope over training or over
+the market is the held branch (`transition_values.jl`, `_d_matrix` in `transition_solver.jl`).
 
 The output is `output/transition/transition_{scenario}{W}_{point}.jls`, one NamedTuple (`schema =
-2`): version and provenance; scenario, point, bundle files and the point of each window; both
+2`), the same field set for every scenario: version and provenance; scenario, point, bundle files and the point of each window; both
 windows' parameters; settings, horizon and the horizon trials; the crisis window (its length in
 months from `windows.json` and a per-date marker); `result` (the `TransitionResult` the panels
 plot; its mean wages are mean log wages, the units of the data moments they are plotted against);
@@ -219,7 +257,11 @@ training and on-the-job-search choices change direction; and both endpoint model
 equilibrium objects. Every table and plot of the run ends in the same `{W}_{point}`
 (`model_fit_A_diagonalW_smm.tex`, `transition_panel_covid_diagonalW_mcmc.png`), so the runs at the
 two points sit side by side; `transition_file` and `read_transition` (`transition_params.jl`) name
-and read the file.
+and read the file. The data standard error printed under each data moment of the model-fit tables
+(`model_fit_A`, `model_fit_B`, `make_model_fit_tables` in `plots_and_tables/transition.jl`) and
+drawn as the panels' bands is the moment's sampling SD σ̂_k, the square root of its entry in
+`data/derived/sampling_var_{window}.csv` (`load_sampling_variances`, `code/smm/moments.jl`), the
+same σ̂_k the diagonal weighting divides by.
 
 ## The tightnesses as parameters
 
@@ -258,17 +300,24 @@ properties of that map the detector relies on.
 `code/mcmc/MCMC_main.jl` runs after an estimation and takes its point from the window's SMM
 estimate, `output/estimates/estimate_{window}{W}_smm.jls`, except a chain on a crisis window,
 which starts from `estimate_{window}{W}_smm_mcmcbase.jls` (the MCMC path above). It never
-moves an SMM estimate. Two routes to Ĵ, one flag:
+moves an SMM estimate. Every standard error is a sandwich, Var ≈ B Ĝ′WΩWĜ B, with Ĝ = ∂g/∂θ
+by adaptive finite differences (`MCMC_JAC_METHOD = :fd`; `:design` regresses it on a cloud of
+points) and B the inverse curvature of Q/2, the bread. Two routes, one flag:
 
-| route | how to run it | Ĵ from | cost |
+| route | how to run it | bread B, and where Ĝ is measured | cost |
 |---|---|---|---|
-| chain-free | `ROYSEARCH_MCMC_JAC_ONLY=true` | Ĝ′WĜ, Ĝ by adaptive finite differences at θ̂ (`MCMC_JAC_METHOD = :fd`) or regressed on a `local_design` around it (`:design`) | under `:fd`, 168 solves at base_covid's 14 free parameters (12 each), more where a step is re-tuned |
-| DE-MC chain (**the default**) | `ROYSEARCH_MCMC_JAC_ONLY=false` | Cov(chain), plus the posterior SD | N·gens solves |
+| chain-free | `ROYSEARCH_MCMC_JAC_ONLY=true` | J⁻¹ = (Ĝ′WĜ)⁻¹, Ĝ at θ̂ | under `:fd`, 168 solves at base_covid's 14 free parameters (12 each), more where a step is re-tuned |
+| DE-MC chain (**the default**) | `ROYSEARCH_MCMC_JAC_ONLY=false` | P, the covariance of the kept draws in θ, Ĝ at the chain estimate θ̄; plus the posterior SD | N·gens solves |
 
-Both follow Chernozhukov–Hong (2003) Thm 4, which needs no information equality and no
-chain. The reported column is **`se_bound`**: the sharp bound over every Ω consistent
-with the estimated sampling variances, so it holds for the true Ω whatever it is.
-`se_curvature` is `sqrt(diag(pinv(Ĵ)))`, exact only under W = Ω⁻¹.
+J⁻¹ is the Gauss–Newton curvature: it drops the residual × second-derivative term of Q's
+curvature, which is not small when Q is far above its degrees of freedom. The chain samples
+exp(−Q/2) itself, so P integrates the true curvature over the cloud; an aborted chain falls
+back to the chain-free columns. Two columns come from each bread: the sandwich at Ω = W⁻¹
+(uncorrelated moment errors), **`se_sandwich`** = `sqrt(diag(P Ĝ′WĜ P))` on the chain route
+and `se_curvature` = `sqrt(diag(J⁻¹))` on the chain-free route; and **`se_bound`** =
+Σᵢ|(B Ĝ′W)ₖᵢ| σ̂ᵢ, the sharp bound over every Ω consistent with the estimated sampling
+variances, so it holds for the true Ω whatever it is (`se_bound_diagonal`,
+`code/mcmc/mcmc_diagnostics.jl`). Every |t| is |estimate|/se at the reported estimate.
 
 The vacancy costs are not coordinates of the parameter vector, so their standard errors
 are the delta method's, from the same evaluations: every Jacobian step also returns k, and
@@ -279,7 +328,7 @@ prior is `MCMC_PRIOR`'s over the parameter vector, so flat in θ_U and θ_S.
 
 | object | file | notes |
 |---|---|---|
-| per-parameter estimates and standard errors | `output/estimates/mcmc_results_{window}{W}_smm.csv` (chain-free), `mcmc_results_{window}{W}_mcmc.csv` (chain) | 20 columns; `post_mean`, `q025/q500/q975`, `rhat`, `ess`, `edge_frac`, `spread_growth` and `se_chain` are NaN on the chain-free route, which has no draws; the rows `k` of each block follow the free parameters, with the box-dependent columns NaN; the console table's \|t\|(bnd) is `abs_t_bound` on both routes |
+| per-parameter estimates and standard errors | `output/estimates/mcmc_results_{window}{W}_smm.csv` (chain-free), `mcmc_results_{window}{W}_mcmc.csv` (chain) | 20 columns; `post_mean`, `q025/q500/q975`, `rhat`, `ess`, `edge_frac`, `spread_growth` and `se_chain` are NaN on the chain-free route, which has no draws; the rows `k` of each block follow the free parameters, with the box-dependent columns NaN; columns 6 and 18 are `se_sandwich` and `abs_t_sandwich` on the chain route and `se_curvature` and `abs_t_curvature` without a usable chain; `abs_t_*` are the console's \|t\|(sandw.) or \|t\|(J⁻¹) and \|t\|(bnd) |
 | chain, per-draw moments, Ĝ and its per-moment R² (`G_R2`) | `output/chains/chain_{window}{W}.jls` | chain route only; the chain-free route writes nothing here, so it can never overwrite a real chain with a stub |
 | the chain's estimate: the posterior mean θ̄, with every standard error, the diagnostics and the seed's file name (`mcmc.seed`) | `output/estimates/estimate_{window}{W}_mcmc.jls` | chain route only, written when Q(θ̄) is finite; stage `:mcmc`, or `:mcmc_aborted`, which every reader refuses; read under `POINT_ESTIMATE = :mcmc` and by a crisis window under `CRISIS_BASE = :mcmc` |
 | standard errors of the SMM estimate | `output/estimates/estimate_{window}{W}_smm.jls` | chain-free route only: `se`, `se_source` and the vacancy costs' errors are added; point, stage and `sim` are left as `smm_main.jl` wrote them |

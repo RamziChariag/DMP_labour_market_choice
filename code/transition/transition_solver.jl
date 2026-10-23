@@ -77,8 +77,9 @@ end
 
 Masses at every date start at z₀ (date 0⁻, spec B1), tightness at z₁ (the spec's first
 guess), values at date N at z₁.  z₀'s unskilled employment is spread over quality at z₀'s
-own stationary shape: the atom κ u^h/(λ_U+ξ_U+ν) at p = 1 and the redraws over the
-accepted part of G, which is a fixed point of the law of motion at z₀'s rates.
+own stationary shape, slice by slice: the atom of the slice's hires/(λ_U+ξ_U+ν) at p = 1
+and the redraws over the accepted part of G, which is a fixed point of the law of motion
+at z₀'s rates.
 """
 function _init_path!(path::TransitionPath, model_z0::Model, model_z1::Model)
     Nt  = length(path.tgrid)
@@ -92,15 +93,21 @@ function _init_path!(path::TransitionPath, model_z0::Model, model_z1::Model)
     wG0  = build_unskilled_G_weights(model_z0.unsk_grids.p, model_z0.unsk_grids.wp, up0.α_U)
 
     d0  = clamp.(sc0.d, 0.0, 1.0)
-    mS0 = _mS_from_t(uc0.t, d0, cp.φ, cp.ν, κ_U0)
+    mS0 = copy(sc0.m_S)
+    k0  = crossing_rates(model_z0, d0)
+    out = up0.λ + up0.ξ + cp.ν
     uS0 = similar(mS0)
     @inbounds for j in 1:Nx, i in 1:Nx
         uS0[i, j] = d0[i, j] * mS0[i, j] + (1.0 - d0[i, j]) * sc0.u_frac[j] * mS0[i, j]
-        e   = max(W2[i, j] - mS0[i, j] - uc0.u[i, j] - uc0.t[i, j], 0.0)
+        et  = uc0.et[i, j]
+        e   = max(W2[i, j] - mS0[i, j] - uc0.u[i, j] - uc0.t[i, j] - et, 0.0)
         uh  = hired_unemployed(uc0.u[i, j], χ0[i], clamp(uc0.τT[i, j], 0.0, 1.0), W2[i, j])
-        atom = min(κ_U0 * uh / (up0.λ + up0.ξ + cp.ν), e)
+        atom = min((κ_U0 * uh + k0.ks[i, j] * mS0[i, j]) / out, e)
         _unskilled_p_shape!(view(path.eU0p, i, j, :), atom, e - atom, clamp01(uc0.pstar[i]),
                             model_z0.unsk_grids.p, wG0)
+        atom_t = min(k0.kt[i, j] * mS0[i, j] / out, et)
+        _unskilled_p_shape!(view(path.eUt0p, i, j, :), atom_t, et - atom_t,
+                            clamp01(uc0.pstar_t[i, j]), model_z0.unsk_grids.p, wG0)
     end
 
     path.θU .= model_z1.unsk_cache.θ
@@ -111,12 +118,15 @@ function _init_path!(path::TransitionPath, model_z0::Model, model_z1::Model)
         path.uS[:, :, n]  .= uS0
         path.mS[:, :, n]  .= mS0
         path.eUs[:, :, n] .= dropdims(sum(path.eU0p, dims = 3), dims = 3)
+        path.eUt[:, :, n] .= dropdims(sum(path.eUt0p, dims = 3), dims = 3)
         path.eS[:, :, n]  .= sc0.e_frac
     end
     path.τT0 .= uc0.τT
     path.uU0 .= uc0.u
     path.tU0 .= uc0.t
     path.pU0 .= uc0.pstar
+    path.pUt0 .= uc0.pstar_t
+    path.χUt0 .= uc0.χ_t
     path.pS0 .= sc0.pstar
     path.χU0 .= χ0
 
@@ -159,9 +169,20 @@ function _end_below!(e::AbstractVector{Float64}, pold::Float64, pnew::Float64,
     return ended
 end
 
-# Share of a cell's crossers that the training frontier encloses.  The crossing set is the
-# lower part of the cell in aS and the training set the upper part, so it is their overlap.
-@inline _enclosed_crossers(d::Float64, τ::Float64) = d > 0.0 ? max(d + τ - 1.0, 0.0) / d : 0.0
+"""
+    _crosser_hire_shares(path, χU, d, n) → (h, ω)
+
+Per cell at date n, the share ω of its crossers the training frontier encloses
+(`enclosed_crossers`) and their hired share h = (1−ω) χ + ω χ_t: the searching slice's
+row share χ and the training slice's own.
+"""
+function _crosser_hire_shares(path::TransitionPath, χU::Vector{Float64}, d::Matrix{Float64},
+                              n::Int)
+    Nx = length(χU)
+    ω = [enclosed_crossers(d[i, j], clamp(path.τT[i, j, n], 0.0, 1.0)) for i in 1:Nx, j in 1:Nx]
+    h = [(1.0 - ω[i, j]) * χU[i] + ω[i, j] * path.χUt[i, j, n] for i in 1:Nx, j in 1:Nx]
+    return (h = h, ω = ω)
+end
 
 """
     _redraw_weights!(ω, pstar, p, wG, α) -> (wsum, G)
@@ -221,15 +242,17 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
     wG = build_unskilled_G_weights(ug.p, ug.wp, up.α_U)
 
     uU = copy(path.uU0);  tU = copy(path.tU0)
-    Es = copy(path.eU0p);  Et = zeros(Float64, Nx, Nx, NpU + 1)
+    Es = copy(path.eU0p);  Et = copy(path.eUt0p)
     uS = copy(path.uS[:, :, 1]);  mS = copy(path.mS[:, :, 1]);  eS = copy(path.eS[:, :, 1])
-    τprev = copy(path.τT0);  pUs_prev = repeat(path.pU0, 1, Nx);  pUt_prev = ones(Nx, Nx)
+    τprev = copy(path.τT0);  pUs_prev = repeat(path.pU0, 1, Nx);  pUt_prev = copy(path.pUt0)
+    χt_prev = copy(path.χUt0)
     pS_prev = copy(path.pS0)
     uS_n = similar(uS);  mS_n = similar(mS);  tU_n = similar(tU)
     mv_s = zeros(Float64, NpU + 1);  mv_t = zeros(Float64, NpU + 1)
 
     for n in 1:Nt
-        d = _d_matrix(path, model, n)
+        d  = _d_matrix(path, model, n)
+        hX = _crosser_hire_shares(path, χU, d, n)
 
         # ── Reallocation at date n (spec L6) ─────────────────────────────
         # Each moved or remaining mass is judged against the cutoff it was accepted under
@@ -241,12 +264,15 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
             σ  = sweep_share(τ0, τ);  ς = return_share(τ0, τ)
             ps = path.pUs[i, j, n];  pt = path.pUt[i, j, n]
             es = view(Es, i, j, :);  et = view(Et, i, j, :)
-            # The atom of the searching slice is the hired share χ of the row (S_U(a,1) ≥ 0
-            # exactly above a^h), which moves only when the primitives switch; in the
-            # training slice it is kept while that slice's raw surplus at p = 1 is
-            # non-negative, and ends the first date it is not.
+            # The atom of each slice is its hired share: the row's χ in the searching slice
+            # (S_U(a,1) ≥ 0 exactly above a^h), which moves only when the primitives switch,
+            # and χ_t in the training slice, which moves with the slice's own surplus.  A
+            # share below the one an atom was formed under ends the matches it no longer
+            # covers: `kt` for the training slice's own atom, `km` for the searching slice's
+            # atom the frontier moves into it.
             ks = n == 1 && path.χU0[i] > 0.0 ? min(χU[i] / path.χU0[i], 1.0) : 1.0
-            kt = path.SUt1[i, j, n] >= 0.0 ? 1.0 : 0.0
+            kt = χt_prev[i, j] > 0.0 ? min(path.χUt[i, j, n] / χt_prev[i, j], 1.0) : 1.0
+            km = χU[i] > 0.0 ? min(path.χUt[i, j, n] / χU[i], 1.0) : 1.0
 
             if σ == 0.0 && ς == 0.0            # no slice moves: only the cutoffs can end matches
                 e_s = _end_below!(es, pUs_prev[i, j], ps, ug.p, ks)
@@ -259,7 +285,7 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
                 e_s = _end_below!(es, pUs_prev[i, j], ps, ug.p, ks) +
                       _end_below!(mv_t, pUt_prev[i, j], ps, ug.p, ks)
                 e_t = _end_below!(et, pUt_prev[i, j], pt, ug.p, kt) +
-                      _end_below!(mv_s, pUs_prev[i, j], pt, ug.p, kt)
+                      _end_below!(mv_s, pUs_prev[i, j], pt, ug.p, km)
                 es .+= mv_t;  et .+= mv_s
             end
             uU[i, j] += e_s;  tU[i, j] += e_t
@@ -298,8 +324,8 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
         κS = meeting_rate(path.θS[n], model.skl_par.μ, model.skl_par.η)
         for _ in 1:nsub
             copyto!(uS_n, uS);  copyto!(mS_n, mS);  copyto!(tU_n, tU)
-            _advance_unskilled_cells!(uU, tU, Es, Et, uS_n, d, κU, χU, path, model, wG, n, dt)
-            _advance_skilled_masses!(uS, mS, tU_n, uS_n, mS_n, d, κU, κS, χU, model,
+            _advance_unskilled_cells!(uU, tU, Es, Et, uS_n, d, κU, χU, hX, path, model, wG, n, dt)
+            _advance_skilled_masses!(uS, mS, tU_n, uS_n, mS_n, d, κU, κS, hX.h, model,
                                      view(path.pstar_S, :, n), dt)
             _advance_skilled_shape!(eS, uS_n, mS_n, mS, d, κS, model, view(path.pstar_S, :, n),
                                     view(path.poj, :, n), view(path.s_part, :, n), dt)
@@ -307,23 +333,25 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
 
         copyto!(τprev, view(path.τT, :, :, n))
         copyto!(pUs_prev, view(path.pUs, :, :, n));  copyto!(pUt_prev, view(path.pUt, :, :, n))
+        copyto!(χt_prev, view(path.χUt, :, :, n))
         copyto!(pS_prev, view(path.pstar_S, :, n))
     end
     return nothing
 end
 
 """
-    _advance_unskilled_cells!(uU, tU, Es, Et, uS, d, κU, χU, path, model, wG, n, dt)
+    _advance_unskilled_cells!(uU, tU, Es, Et, uS, d, κU, χU, hX, path, model, wG, n, dt)
 
 One explicit step of every cell's unskilled stocks at date n's rates: births split by τ,
-hires out of the hired branch of u_U and out of the crossers, each slice's quality measure,
+hires out of the hired branch of u_U and out of the crossers (each slice at its own hired
+share, `_crosser_hire_shares`), each slice's quality measure,
 and each slice's separations, into u_U from the searching slice and into training from the
 training slice.  Rows are independent, so they are threaded.
 """
 function _advance_unskilled_cells!(uU::Matrix{Float64}, tU::Matrix{Float64},
                                    Es::Array{Float64,3}, Et::Array{Float64,3},
                                    uS::Matrix{Float64}, d::Matrix{Float64}, κU::Float64,
-                                   χU::Vector{Float64}, path::TransitionPath, model::Model,
+                                   χU::Vector{Float64}, hX, path::TransitionPath, model::Model,
                                    wG::Vector{Float64}, n::Int, dt::Float64)
     Nx = size(uU, 1);  ug = model.unsk_grids;  NpU = length(ug.p)
     up = model.unsk_par;  ν = model.common.ν;  φ = model.common.φ
@@ -338,15 +366,15 @@ function _advance_unskilled_cells!(uU::Matrix{Float64}, tU::Matrix{Float64},
             τ  = clamp(path.τT[i, j, n], 0.0, 1.0)
             hU = κU * hired_unemployed(uU[i, j], χU[i], τ, W2[i, j])
             # Crossers hired into unskilled jobs join the slice of their type.
-            hX = d[i, j] * κU * χU[i] * uS[i, j]
-            ωX = _enclosed_crossers(d[i, j], τ)
+            ωX = hX.ω[i, j];  mX = d[i, j] * κU * uS[i, j]
+            hs = (1.0 - ωX) * χU[i] * mX;  ht = ωX * path.χUt[i, j, n] * mX
             ps = path.pUs[i, j, n]
             ps == ps_row || (rs = _redraw_weights!(ws, ps, ug.p, wG, up.α_U);  ps_row = ps)
-            Ds = _advance_unskilled!(view(Es, i, j, :), hU + (1.0 - ωX) * hX, ws, rs, wG,
+            Ds = _advance_unskilled!(view(Es, i, j, :), hU + hs, ws, rs, wG,
                                      up.λ, up.ξ, ν, dt)
             et = view(Et, i, j, :)
             Dt = (ωX == 0.0 && sum(et) == 0.0) ? 0.0 :
-                 _advance_unskilled!(et, ωX * hX, wt,
+                 _advance_unskilled!(et, ht, wt,
                                      _redraw_weights!(wt, path.pUt[i, j, n], ug.p, wG, up.α_U),
                                      wG, up.λ, up.ξ, ν, dt)
             uU[i, j] += dt * ((1.0 - τ) * ν * W2[i, j] + Ds - hU - ν * uU[i, j])
@@ -383,18 +411,18 @@ function _end_skilled_below!(eS::Matrix{Float64}, uS::Matrix{Float64}, mS::Matri
 end
 
 """
-    _advance_skilled_masses!(uS, mS, tU, uS_n, mS_n, d, κU, κS, χU, model, pstar, dt)
+    _advance_skilled_masses!(uS, mS, tU, uS_n, mS_n, d, κU, κS, h, model, pstar, dt)
 
 One step of `u_S` and `m_S` from the date-n stocks: training completions in, the
 destruction hazard on the employed, and the outflow branched on the crossing choice.  The
 destruction hazard uses the SHOCK mass below reservation and the hiring outflow the
 OFFER mass above it (`_skilled_margin_masses`); a crosser leaves at the unskilled hiring
-rate of her cell, κ_U χ.
+rate of her cell, κ_U h (`_crosser_hire_shares`).
 """
 function _advance_skilled_masses!(uS::Matrix{Float64}, mS::Matrix{Float64}, tU::Matrix{Float64},
                                   uS_n::Matrix{Float64}, mS_n::Matrix{Float64},
                                   d::Matrix{Float64}, κU::Float64, κS::Float64,
-                                  χU::Vector{Float64}, model::Model,
+                                  h::Matrix{Float64}, model::Model,
                                   pstar::AbstractVector{Float64}, dt::Float64)
     Nx = size(uS, 1);  cp = model.common;  sp = model.skl_par
     acc_o, below_s = _skilled_margin_masses(model, pstar)
@@ -402,7 +430,7 @@ function _advance_skilled_masses!(uS::Matrix{Float64}, mS::Matrix{Float64}, tU::
         hire_S = κS * acc_o[j]
         δS_end = sp.ξ + sp.λ * below_s[j]
         for i in 1:Nx
-            cross = d[i, j] * κU * χU[i] * uS_n[i, j]
+            cross = d[i, j] * κU * h[i, j] * uS_n[i, j]
             uS[i, j] = uS_n[i, j] + dt * (cp.φ * tU[i, j] + δS_end * (mS_n[i, j] - uS_n[i, j]) -
                                           (cp.ν + (1.0 - d[i, j]) * hire_S) * uS_n[i, j] - cross)
             mS[i, j] = mS_n[i, j] + dt * (cp.φ * tU[i, j] - cp.ν * mS_n[i, j] - cross)
@@ -506,11 +534,13 @@ end
 """
     _d_matrix(path, model, n) -> Matrix
 
-The date-n crossing fraction from the date-n branch values (`_crossing_fraction!`).
+The date-n crossing fraction from the date-n branch values (`drain_fraction!`), or the held
+d where the model holds its choices (`Model.held`).
 """
 _d_matrix(path::TransitionPath, model::Model, n::Int) =
-    _crossing_fraction!(zeros(Float64, length(model.grids.x), length(model.grids.x)),
-                        view(path.U1, :, :, n), view(path.U0, :, :, n), model.grids.x)
+    model.held !== nothing ? copy(model.held.d) :
+    drain_fraction!(zeros(Float64, length(model.grids.x), length(model.grids.x)),
+                    view(path.U1, :, :, n), view(path.U0, :, :, n), model.grids.x)
 
 
 # ════════════════════════════════════════════════════════════
@@ -524,9 +554,9 @@ The tightness free entry implies at every date (spec F1–F3): θ_j = (μ_j 𝒥
 η_j = 1/2, from the date's values and its masses after the reallocation.
 
 Unskilled: a vacancy meets every seeker in `u_U + d u_S` and is filled by those of them an
-unskilled match forms with, the hired branch `u_U^h` and the crossers' share χ, at the
-firm value `(1−β_U) S(a,1)` of the slice the hire joins: the searching slice, and for the
-crossers the frontier encloses (`_advance_unskilled_cells!`) the training slice.  Skilled: `compute_Jbar_skilled`
+unskilled match forms with, the hired branch `u_U^h` and the crossers' hired share of the
+slice they join (`_crosser_hire_shares`), at the firm value `(1−β_U) S(a,1)` of that slice:
+the searching slice, and for the crossers the frontier encloses the training slice.  Skilled: `compute_Jbar_skilled`
 on the date's composition, with the destination values of the path installed as both
 firm values, `J = (1−β_S)·ω[s S¹ + (1−s) S⁰]⁺`, the object `skilled_inner_loop!` hands it.
 """
@@ -545,11 +575,11 @@ function _free_entry_tightness(path::TransitionPath, model::Model)
             u  = path.uU[i, j, n];  uS = path.uS[i, j, n]
             τ  = clamp(path.τT[i, j, n], 0.0, 1.0)
             uh = hired_unemployed(u, χU[i], τ, W2[i, j])
-            ωX = _enclosed_crossers(d[i, j], τ)
-            cross = χU[i] * d[i, j] * uS
+            ωX = enclosed_crossers(d[i, j], τ)
             Useek += u + d[i, j] * uS
-            Jnum  += (1.0 - up.β) * path.SUs1[i, j, n] * (uh + (1.0 - ωX) * cross)
-            ωX > 0.0 && (Jnum += (1.0 - up.β) * max(path.SUt1[i, j, n], 0.0) * ωX * cross)
+            Jnum  += (1.0 - up.β) * path.SUs1[i, j, n] * (uh + (1.0 - ωX) * χU[i] * d[i, j] * uS)
+            ωX > 0.0 && (Jnum += (1.0 - up.β) * max(path.SUt1[i, j, n], 0.0) * ωX *
+                                 path.χUt[i, j, n] * d[i, j] * uS)
         end
         θU[n] = (Jnum < 1e-14 || Useek < 1e-14) ? 1e-14 :
                 clamp(theta_from_q(k_π * Useek / Jnum, up.μ, up.η), 1e-14, 100.0)
@@ -693,7 +723,7 @@ function _build_result(path::TransitionPath, model_z1::Model, tp::TransitionPara
         ffl_p[n] = _frontier_floor(path, model_z1, n)
         drg_p[n] = sum(dmat .* W2)
         dms_p[n] = sum(dmat .* (@view path.mS[:, :, n]))
-        dfl_p[n] = κU_p[n] * sum(dmat .* χU .* (@view path.uS[:, :, n]))
+        dfl_p[n] = κU_p[n] * sum(dmat .* _crosser_hire_shares(path, χU, dmat, n).h .* (@view path.uS[:, :, n]))
 
         agg_uU = sum(@view path.uU[:, :, n]);  agg_tU = sum(@view path.tU[:, :, n])
         agg_uS = sum(@view path.uS[:, :, n]);  agg_mS = sum(@view path.mS[:, :, n])
@@ -748,9 +778,9 @@ end
 
 Lowest point of the training frontier at date n: the skilled ability at which the least
 unskilled-able worker is indifferent between training and search, the crossing of
-`−c(aS) + T` against the searching slice's value in the bottom aU row, by the
-interpolation `_training_fraction!` uses.  Returns the grid ends when the frontier leaves
-the grid.
+`−c(aS) + T` against the searching slice's value in the bottom aU row: its first crossing,
+on the line through the two nodes that bracket it.  Returns the grid ends when the frontier
+leaves the grid.
 """
 function _frontier_floor(path::TransitionPath, model::Model, n::Int)
     x = model.grids.x;  Nx = length(x)
@@ -803,6 +833,7 @@ function path_statistics(path::TransitionPath, model::Model)
         κU = meeting_rate(path.θU[n], up.μ, up.η);  κS = meeting_rate(path.θS[n], sp.μ, sp.η)
         prob_κU = -expm1(-κU)
         d  = _d_matrix(path, model, n)
+        hX = _crosser_hire_shares(path, χU, d, n).h
         acc_o, below_s = _skilled_margin_masses(model, view(path.pstar_S, :, n))
         m0 = nondrain_column_mass(d, view(path.mS, :, :, n))
         # Probability-weighted masses of each moment's universe: (Σ prob × mass, Σ mass).
@@ -813,7 +844,7 @@ function path_statistics(path::TransitionPath, model::Model)
             hired = hired_unemployed(uU, χU[i], τ, W2[i, j])
             hires_U[n] += κU * hired;  pU += prob_κU * hired;  mU += uU
             cross = d[i, j] * uS
-            hires_X[n] += κU * χU[i] * cross;  pS += χU[i] * prob_κU * cross;  mSu += cross
+            hires_X[n] += κU * hX[i, j] * cross;  pS += hX[i, j] * prob_κU * cross;  mSu += cross
             stay = uS - cross
             hires_S[n] += κS * acc_o[j] * stay;  pS += -expm1(-κS * acc_o[j]) * stay;  mSu += stay
             for (pc, e, rec) in ((path.pUs[i, j, n], path.eUs[i, j, n], sep_U),

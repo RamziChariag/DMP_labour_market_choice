@@ -791,17 +791,19 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
         # dropped here: at d = 23 they are two unlabelled 23-number rows per block that no
         # decision is taken on, and the estimator writes the same quantities to
         # mcmc_results_<window><suffix>_mcmc.csv with labels, quantiles and standard errors. What
-        # is kept is the part that cannot be recovered afterwards — the five-way breakdown of
-        # WHY proposals were accepted or rejected, which is the reason to watch a live run.
+        # is kept is the part that cannot be recovered afterwards — the breakdown of WHY
+        # proposals were accepted or rejected, which is the reason to watch a live run.
         if lmr_print > 0 && (g % lmr_print == 0 || g == gens)
             lo = max(1, g - retain_len + 1)          # their cyclical buffer, L generations
             n_buf = N * (g - lo + 1)
             share(v) = count(==(Int8(v)), @view outcome[:, lo:g]) / n_buf
             @printf("\n ---------- gen %d, last %d generations ----------\n",
                     g, g - lo + 1)
-            @printf(" accept  strong %.4f   equal %.4f   weak %.4f\n",
-                    share(3), share(2), share(1))
-            @printf(" reject  weak   %.4f   outside prior %.4f\n", share(0), share(-1))
+            # Two of the five outcomes are not printed. "equal" (Δ = 0 exactly) cannot occur
+            # with a continuous criterion, and a candidate outside the prior box is already
+            # reported on the progress line as box=, which appears only when it is nonzero.
+            @printf(" accept  strong %.4f   weak %.4f\n", share(3), share(1))
+            @printf(" reject  weak   %.4f\n", share(0))
             @printf(" logπ over the population: min %.6e  median %.6e  max %.6e\n",
                     minimum(lp), median(lp), maximum(lp))
             # A replacement marks the replaced chain's whole trailing window, so counting

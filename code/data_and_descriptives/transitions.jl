@@ -97,24 +97,25 @@ function make_transitions()
         neff_jfr = sum(wu) > 0 ? sum(wu)^2 / sum(abs2, wu) : 0.0
         neff_sep = sum(we) > 0 ? sum(we)^2 / sum(abs2, we) : 0.0
 
+        # The weighted at-risk pools and flows are kept so a window rate can be formed as
+        # a ratio of totals (moments.jl), the same construction as the tightness targets.
         push!(results, (year=g.year_t[1], month=g.month_t[1], skilled=sk,
                          window=win,
                          jfr=jfr, sep=sep, nu=nu,
-                         n_pairs=nrow(g), neff_jfr=neff_jfr, neff_sep=neff_sep))
+                         n_pairs=nrow(g), neff_jfr=neff_jfr, neff_sep=neff_sep,
+                         w_u=denom_jfr, w_ue=numer_jfr, w_e=denom_sep, w_eu=numer_sep))
     end
     rates = DataFrame(results)
 
-    # Window averages
+    # Window averages: total flow over total at-risk pool across the window's months.
     window_rates = NamedTuple[]
     for gk in groupby(filter(r -> r.window != :none, rates), [:window, :skilled])
         g = DataFrame(gk)
-        valid_jfr    = filter(isfinite, g.jfr)
-        valid_sep    = filter(isfinite, g.sep)
         valid_nu     = filter(isfinite, g.nu)
         push!(window_rates, (
             window=g.window[1], skilled=g.skilled[1],
-            mean_jfr=isempty(valid_jfr) ? NaN : mean(valid_jfr),
-            mean_sep=isempty(valid_sep) ? NaN : mean(valid_sep),
+            mean_jfr=sum(g.w_u) > 0 ? sum(g.w_ue) / sum(g.w_u) : NaN,
+            mean_sep=sum(g.w_e) > 0 ? sum(g.w_eu) / sum(g.w_e) : NaN,
             mean_nu=isempty(valid_nu)   ? NaN : mean(valid_nu),
             n_months=nrow(g),
         ))

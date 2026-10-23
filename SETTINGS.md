@@ -160,12 +160,28 @@ surface changes, and its "effective value" column must come from an actual run.
 
 ## Settings that choose a file
 
-Two settings say which estimate a run reads or writes rather than how it computes. They
-exist because from v57.0.0 each estimate has a file of its own (`estimate_path`,
-`code/paths.jl`; the file table in `README.md`).
+Four settings say which estimate a run reads or writes. They exist because from v57.0.0
+each estimate has a file of its own (`estimate_path`, `code/paths.jl`; the file table in
+`README.md`).
 
+- **`WINDOW`** (`smm_main.jl`, `MCMC_main.jl`). The window a run estimates: a data window of
+  `data/derived/windows.json` (`base_fc`, `crisis_fc`, `base_covid`, `crisis_covid`) or a
+  counterfactual window of `COUNTERFACTUALS` (`code/paths.jl`: `crisis_fc_cf1`,
+  `crisis_covid_cf1`, `crisis_fc_cf2`, `crisis_covid_cf2`), which is estimated on its parent
+  crisis window's data and names every file it writes. The window carries the whole
+  counterfactual: there is no other setting for it.
+
+- **`WEIGHTING`** (`:diagonal` or `:equal`, default `:diagonal`). The objective's weighting:
+  `:diagonal` is W = Diagonal(1/σ̂²_k) from `sampling_var_<w>.csv`, `:equal` the
+  relative-deviation loss Diagonal(weight_k/m̂_k²). It also names every estimate, chain and
+  transition file, `…_diagonalW…` or `…_equalW…`. One reader, `run_weighting`
+  (`code/smm/moments.jl`), serves every entry point (`smm_main.jl`, `MCMC_main.jl`,
+  `transition_main.jl`, `policy_main.jl`, the tables and panels, the gates and `width_audit.jl`),
+  so they cannot disagree on which files they read. The run records it in
+  `SMMRunParams.weighting`. Any other value stops the run.
 - **`CRISIS_BASE`** (`smm_main.jl`, directly below `WINDOW`; `:smm` or `:mcmc`, default
-  `:smm`). A crisis window holds the ability distribution at its base window's SMM
+  `:smm`). A crisis window (a counterfactual one included, which holds the training cost
+  there too) holds the ability distribution at its base window's SMM
   estimate (`:smm`, writing `estimate_<crisis>W_smm.jls`) or at the base chain's estimate
   (`:mcmc`, writing `estimate_<crisis>W_smm_mcmcbase.jls`, the crisis chain's seed). A
   base window never reads it, so it can stay set while the window changes, and the

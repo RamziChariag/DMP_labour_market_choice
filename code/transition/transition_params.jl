@@ -132,6 +132,7 @@ mutable struct TransitionPath
     pUt   :: Array{Float64,3}         # (Nx,Nx,Nt) reservation of the training slice's matches
     SUs1  :: Array{Float64,3}         # (Nx,Nx,Nt) searching slice's entry surplus S(a,1) ≥ 0
     SUt1  :: Array{Float64,3}         # (Nx,Nx,Nt) training slice's raw surplus at p = 1 (its positive part continues)
+    χUt   :: Array{Float64,3}         # (Nx,Nx,Nt) hired share of the training slice's meetings
     zUs   :: Array{Float64,3}         # (Nx,Nx,Nt) flow value of unemployment, searching slice
     zUt   :: Array{Float64,3}         # (Nx,Nx,Nt) flow value of unemployment, training slice
     pureU :: Array{Bool,3}            # (Nx,Nx,Nt) the searching slice keeps searching at every later date
@@ -167,7 +168,10 @@ mutable struct TransitionPath
     uU0  :: Matrix{Float64}           # (Nx,Nx)
     tU0  :: Matrix{Float64}           # (Nx,Nx)
     eU0p :: Array{Float64,3}          # (Nx,Nx,NpU+1) unskilled employment by p, atom at p = 1 last
+    eUt0p :: Array{Float64,3}         # (Nx,Nx,NpU+1) the same, training slice
     pU0  :: Vector{Float64}           # (Nx) base unskilled reservation, the support of eU0p
+    pUt0 :: Matrix{Float64}           # (Nx,Nx) base training-slice reservation, the support of eUt0p
+    χUt0 :: Matrix{Float64}           # (Nx,Nx) base hired share of the training slice
     pS0  :: Vector{Float64}           # (Nx) base skilled reservation, the support of eS at 0⁻
     χU0  :: Vector{Float64}           # (Nx) base hired fraction χ by aU row, the support of the p = 1 atom
 
@@ -199,11 +203,12 @@ function allocate_path(model::Model, tp::TransitionParams)
     return TransitionPath(
         tgrid, zeros(Nt), zeros(Nt),
         z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z3(Nx, NpU, Nt),
-        t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), b3(),
+        t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), t3(), b3(),
         z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt), z2(Nx, Nt),
         z3(Nx, NpS, Nt), z3(Nx, NpS, Nt), z3(Nx, NpS, Nt), t3(), t3(), b3(),
         t3(), t3(), t3(), t3(), t3(), t3(), z3(Nx, NpS, Nt), z3(Nx, NpU + 1, Nt), z3(Nx, NpU + 1, Nt),
-        z2(Nx, Nx), z2(Nx, Nx), z2(Nx, Nx), z3(Nx, Nx, NpU + 1), zeros(Nx), zeros(Nx), zeros(Nx),
+        z2(Nx, Nx), z2(Nx, Nx), z2(Nx, Nx), z3(Nx, Nx, NpU + 1), z3(Nx, Nx, NpU + 1),
+        zeros(Nx), z2(Nx, Nx), z2(Nx, Nx), zeros(Nx), zeros(Nx),
         zeros(Nt), zeros(Nt), zeros(Nt), zeros(Nt), zeros(Nt),
     )
 end
@@ -267,10 +272,10 @@ struct TransitionResult
     #   d_region  ∬ d ℓ      — is the active side of F_d a non-empty region?
     #   d_mass    ∬ d m_S    — does any skilled mass sit on it?
     #   d_flow    κ_U ∬ d u_S — does anyone actually cross?
-    # The flow is identically zero at both stationary endpoints by self-selection
-    # (notes, prop:ss-crossflow) and positive only while the frontier is in
-    # motion, so reading it alone cannot tell an inert solver from a channel that
-    # is directionally unable to fire on this pair.
+    # The flow is zero at a stationary endpoint where no trained worker gains by
+    # crossing, as at every stored estimate, and positive there only where one does,
+    # so reading it alone cannot tell an inert solver from a channel that is
+    # directionally unable to fire on this pair.
     frontier_floor :: Vector{Float64}
     d_region       :: Vector{Float64}
     d_mass         :: Vector{Float64}

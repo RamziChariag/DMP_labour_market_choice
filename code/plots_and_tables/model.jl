@@ -77,8 +77,9 @@ function fig_unskilled_values(obj)
     x_bar_idx = findfirst(τ_x .> 0.5)
     x_bar = isnothing(x_bar_idx) ? NaN : xg[x_bar_idx]
 
+    # One ability on the axis: the training option of the type with a_U = a_S = x.
     p2 = plot(xg, obj.Usearch, label=L"U_U^{\rm search}(x)", color=_C1)
-    plot!(p2, xg, obj.net_T,   label=L"-c(x) + T(x)",        color=_C2)
+    plot!(p2, xg, diag(obj.net_T), label=L"-c(x) + T(x)",    color=_C2)
     plot!(p2, xg, obj.Usearch,      label=L"U_U(x)=\max",         color=:black, ls=:dash, lw=2.2)
 
     if !isnan(x_bar)

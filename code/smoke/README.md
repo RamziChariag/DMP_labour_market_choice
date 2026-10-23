@@ -14,7 +14,7 @@ Set `JULIA=/path/to/julia` if `julia` is not on the PATH.
 
 ## Requirements
 
-`smm_main.jl` with its shipped `W_COND_TARGET = 0.0` and `USE_AS_SEED = true`. The
+`smm_main.jl` with its shipped `WEIGHTING = :diagonal` and `USE_AS_SEED = true`. The
 runner sets `ROYSEARCH_WINDOW=crisis_covid` and `ROYSEARCH_INIT_MODE` to the test's
 mode. Needs `data/derived/` and the paired baseline bundle
 `output/estimates/estimate_base_covid_diagonalW_smm.jls` written by the current major

@@ -1,23 +1,29 @@
 # LMR-MATCHED as of v19.8.0. Every value below is theirs, sourced to their code, so a
 # table produced here is produced under their procedure. Deviations are marked DEVIATION.
 ############################################################
-# smm/MCMC_main.jl — standalone standard-error script (DE-MC)
+# mcmc/MCMC_main.jl — standalone standard-error script (DE-MC)
 #
 # Runs AFTER an SMM estimation. It does NOT touch smm_main.jl / smm.jl.
-# It loads the saved SMM optimum for (WINDOW, W_COND_TARGET) and runs a
-# Differential-Evolution MCMC (smm/demc.jl) on the log quasi-posterior
-#       logπ(θ) = −½ · g(θ)′W g(θ)  +  log|dθ/dt|
-# With cond_target = 0.0 the first term is Σ_k ((data_k − model_k)/σ̂_k)², LMR's
+# It loads the saved SMM optimum for (WINDOW, WEIGHTING) and runs a
+# Differential-Evolution MCMC (mcmc/demc.jl) on the log quasi-posterior, in the
+# unconstrained coordinate t of each parameter, θ = lb + (ub − lb)/(1 + e^(−t)):
+#       logπ(t) = −½ · g(θ(t))′W g(θ(t))
+# that is, a flat prior on t over |t| ≤ MCMC_T_BOX (MCMC_PRIOR = :flat_t, LMR's
+# convention). MCMC_PRIOR = :flat_theta adds log|dθ/dt|, a flat prior on θ; see the
+# comment at MCMC_PRIOR below for why :flat_t is the default.
+# Under the diagonal weighting, g′Wg is Σ_k ((data_k − model_k)/σ̂_k)², LMR's
 # 1/SD² scheme (objective_function_mod.f90), which also fixes the temperature:
 # the sampling variances put g′Wg on an n·g′Ω̂_d⁻¹g footing, so the chain's
 # dispersion has standard-error units without a separate scale factor.
-# The log-Jacobian is what makes the target proper in the sampler's coordinates.
+# The box on t is what makes the target proper.
 #
-# Intervals follow Chernozhukov–Hong (2003) Theorem 4, which needs no
-# information equality: Ĵ⁻¹ = n·Cov(chain) combined with an Ω̂. Since Ω is not
-# credibly estimable across four sources at three frequencies, the reported
-# companion column is the sharp upper bound over every Ω consistent with the
-# estimated sampling variances — see `se_bound_diagonal`.
+# Standard errors are sandwiches, Var(θ̂) ≈ B Ĝ′W Ω W Ĝ B, with Ĝ = ∂g/∂θ and B the inverse
+# curvature of Q/2. On the chain path B is the covariance of the kept draws, P, and Ĝ is
+# measured at the reported estimate θ̄; without a usable chain (JAC_ONLY, an aborted run) B is
+# J⁻¹ = (Ĝ′WĜ)⁻¹ and Ĝ is measured at θ̂. The sandwich column takes Ω = W⁻¹; since Ω is not
+# credibly estimable across four sources at three frequencies, the bound column is the sharp
+# upper bound over every Ω consistent with the estimated sampling variances — see
+# `se_bound_diagonal`.
 #
 # It reads one SMM estimate and never writes an SMM file, except that the chain-free pass
 # adds its standard errors to the SMM bundle it read (point, stage and sim unchanged):
@@ -25,7 +31,8 @@
 #   seed          base window: estimate_{window}{W}_smm.jls (both routes); crisis window:
 #                 estimate_{window}{W}_smm.jls (JAC_ONLY), or for a chain
 #                 estimate_{window}{W}_smm_mcmcbase.jls, which must hold the ability
-#                 distribution of the base window's estimate_{base}{W}_mcmc.jls
+#                 distribution (a counterfactual window: and the training cost) of the
+#                 base window's estimate_{base}{W}_mcmc.jls
 #   JAC_ONLY      output/estimates/mcmc_results_{window}{W}_smm.csv, and the standard
 #                 errors into the seed bundle
 #   chain         output/estimates/estimate_{window}{W}_mcmc.jls   the chain's estimate
@@ -90,11 +97,10 @@ println("done.")
 # (settings.jl) reads them and records each resolution for the [env] block below.
 assert_no_legacy_env()
 
-WINDOW        = env_setting(:WINDOW, :base_fc)            # window to compute SEs for
-W_COND_TARGET = env_setting(:W_COND_TARGET, 0.0)          # 0.0 = diagonal-σ, 2.0 = equal weights.
+WINDOW        = env_setting(:WINDOW, :crisis_fc_cf1)            # window to compute SEs for
+WEIGHTING     = run_weighting()                            # :diagonal or :equal (moments.jl).
                                   # Selects BOTH the estimation bundle to load and
-                                  # the weighting the chain targets — same meaning
-                                  # and same admissible values as in smm_main.jl.
+                                  # the weighting the chain targets, as in smm_main.jl.
                                   # The held-out moment set is taken from the
                                   # bundle, so there is no SKIP_MOMENTS here.
 
@@ -623,10 +629,7 @@ CORNER_PARAMS    = env_setting(:CORNER_PARAMS, Symbol[])
 
 derived_dir = joinpath(PROJECT_ROOT, "data", "derived")
 
-_w_suffix(ct::Float64) = ct == 0.0 ? "_diagonalW" :
-                         ct == 2.0 ? "_equalW" :
-                         error("W_COND_TARGET must be 0.0 (diagonal-σ) or 2.0 (equal weights); got $ct.")
-W_SUFFIX = _w_suffix(W_COND_TARGET)
+W_SUFFIX = weighting_suffix(WEIGHTING)
 
 @printf("Window: %s   weighting: %s\n", WINDOW, W_SUFFIX)
 print_env_settings()
@@ -643,22 +646,23 @@ seed_jls   = estimate_path(WINDOW, W_SUFFIX; point = SEED_POINT)
 isfile(seed_jls) || error(
     "No estimate at $seed_jls — run smm_main.jl on $WINDOW" *
     (SEED_POINT === :smm_mcmcbase ? " with ROYSEARCH_CRISIS_BASE=mcmc" : "") *
-    " (W_COND_TARGET=$W_COND_TARGET) first.")
+    " (WEIGHTING=$WEIGHTING) first.")
 bundle = read_bundle(seed_jls)
 (bundle === nothing || bundle.result === nothing || bundle.spec === nothing) &&
     error("Could not read $seed_jls.")
-require_current_major(bundle, seed_jls)
+require_current_estimate(bundle, seed_jls)
 if SEED_POINT === :smm_mcmcbase
     # The base chain's estimate may have been re-run since the crisis SMM estimate was
-    # made from it, so the two are compared rather than trusted.
+    # made from it, so the parameters held at it (the ability distribution, and in a
+    # counterfactual window the training cost) are compared rather than trusted.
     base_jls = estimate_path(PAIR_BASE[WINDOW], W_SUFFIX; point = :mcmc)
     base_b   = read_bundle(base_jls)
-    ability(b) = (blocks = unpack_θ(b.result.theta_opt, b.spec);
-                  [_baseline_param_value(blk, nm, blocks...) for (blk, nm) in ABILITY_PARAMS])
-    (base_b !== nothing && base_b.result !== nothing && ability(base_b) == ability(bundle)) ||
-        error("$(basename(seed_jls)) does not hold the ability distribution of " *
-              "$(basename(base_jls)): run smm_main.jl on $WINDOW with " *
-              "ROYSEARCH_CRISIS_BASE=mcmc first.")
+    base_held(b) = (blocks = unpack_θ(b.result.theta_opt, b.spec);
+                    [_baseline_param_value(blk, nm, blocks...) for (blk, nm) in base_held_params(WINDOW)])
+    (base_b !== nothing && base_b.result !== nothing && base_held(base_b) == base_held(bundle)) ||
+        error("$(basename(seed_jls)) does not hold the parameters of " *
+              "$(basename(base_jls)) a $WINDOW run holds there: run smm_main.jl on $WINDOW " *
+              "with ROYSEARCH_CRISIS_BASE=mcmc first.")
 end
 @printf("Seed: %s\n", basename(seed_jls))
 
@@ -675,7 +679,7 @@ BUNDLE_SKIP = Symbol[k for k in keys(spec0.moments) if spec0.moments[k].weight <
 #    the estimation spec, so θ0 is valid and the model is solved identically.
 # ========================================================================
 W_chain = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
-                               cond_target=W_COND_TARGET, skip_moments=BUNDLE_SKIP)
+                               weighting=WEIGHTING, skip_moments=BUNDLE_SKIP)
 spec = build_smm_spec(
     spec0.moments, spec0.sim;
     fixed        = spec0.fixed,
@@ -693,7 +697,7 @@ K, d     = length(MOM_KEYS), length(spec.free)
 
 # σ̂ over the active moments, in the SAME order as MOM_KEYS and spec.W. Needed for
 # the Ω-free bound; available only under the diagonal-σ weighting.
-σ̂ = W_COND_TARGET == 0.0 ? [1.0 / sqrt(spec.W[i, i]) for i in 1:K] : fill(NaN, K)
+σ̂ = WEIGHTING === :diagonal ? [1.0 / sqrt(spec.W[i, i]) for i in 1:K] : fill(NaN, K)
 
 # CORNER_PARAMS resolved to one flag per free parameter, HERE — immediately after the free
 # set is known — so a misspelled key fails at startup instead of after ~600 solves.
@@ -1169,105 +1173,6 @@ n_kept     = size(res.draws, 2)
 # so its MCMC_JAC_DRAWS solves are skipped.
 need_reg = MCMC_JAC_METHOD === :design || chain_ok
 
-# The active moments at t, then the vacancy costs, NaN where the point is infeasible. The
-# costs ride on every evaluation the moments take, so their derivatives — and through the
-# delta method their standard errors and the attracting check — cost no solve of their own.
-function moments_and_k(t)
-    ev = equilibrium_at(collect(float.(t)), spec)
-    isfinite(ev.Q) || return fill(NaN, K + 2)
-    return vcat([getproperty(ev.moments, m) for m in MOM_KEYS], ev.k.U, ev.k.S)
-end
-
-if need_reg
-    Xj = if use_design
-        local_design(θ0, spec.free; n = MCMC_JAC_DRAWS, rng = MersenneTwister(MCMC_SEED + 1))
-    else
-        sel = n_kept <= MCMC_JAC_DRAWS ? collect(1:n_kept) :
-                 round.(Int, range(1, n_kept; length = MCMC_JAC_DRAWS))
-        res.draws[:, sel]
-    end
-    MK = Matrix{Float64}(undef, K + 2, size(Xj, 2))
-    @printf("Storing moments at %d %s for Ĝ... ", size(Xj, 2),
-            use_design ? "local-design points" : "thinned draws"); flush(stdout)
-    @threads for i in axes(Xj, 2)
-        @views MK[:, i] .= moments_and_k(Xj[:, i])
-    end
-    keep    = vec(all(isfinite, MK; dims = 1))
-    Msel    = MK[1:K, keep]
-    draws_J = Xj[:, keep]
-    Ĝk_reg, _ = jacobian_from_draws(draws_J, MK[K+1:K+2, keep], spec.free)
-    @printf("%d feasible.\n", size(Msel, 2)); flush(stdout)
-
-    # The screen pre-pass above already produced Ĝ from a local design around the seed. When
-    # the chain is the source of the draws we still want the chain-based Ĝ, so recompute;
-    # when the design is the source, the pre-pass Ĝ is the same object and is reused.
-    Ĝ_reg, R2 = (need_pre && use_design && Ĝ_pre !== nothing) ?
-                    (Ĝ_pre, fill(NaN, K)) : jacobian_from_draws(draws_J, Msel, spec.free)
-else
-    Msel, draws_J = Matrix{Float64}(undef, K, 0), Matrix{Float64}(undef, d, 0)
-    Ĝ_reg, R2     = nothing, fill(NaN, K)
-    Ĝk_reg        = nothing
-end
-if MCMC_JAC_METHOD === :fd
-    print("Adaptive-FD Ĝ: per-coordinate step + Richardson... "); flush(stdout)
-    # Keyed on the objective, not on the buffer: smm_objective writes moments_out only after
-    # its guards, so an unwritten buffer would hand back whatever was in that memory. Filled
-    # with NaN rather than undef so a partial write could never masquerade as a moment either.
-    # fd.n_eval counts every ladder solve, converged or not, but not which failed; the failures
-    # are counted here. The centre solve is excluded from both, and reported on its own below.
-    n_fail = Threads.Atomic{Int}(0)
-    function mom_at(t)
-        mk = moments_and_k(t)
-        isfinite(mk[1]) || t == θ0 || Threads.atomic_add!(n_fail, 1)
-        return mk
-    end
-    Ĝmk, fd = jacobian_adaptive_fd(θ0, spec.free, σ̂, mom_at; n_carried = 2)
-    global Ĝ, Ĝk = Ĝmk[1:K, :], Ĝmk[K+1:K+2, :]
-    @printf("%d of %d coordinates in %d solves, %d not converged.\n",
-            count(fd.ok), d, sum(fd.n_eval), n_fail[])
-    flush(stdout)
-    # No fallback. A column the ladder cannot measure used to be filled from the regression,
-    # which produced a matrix whose header said "adaptive FD" while most of it was the old
-    # object at rel_step = 0.05, and then printed a table and wrote a CSV from it with nothing
-    # marking which column came from where. A Jacobian assembled from two estimators is not a
-    # Jacobian. Either every column is measured the same way or the run stops and says which
-    # coordinates defeated it; MCMC_JAC_METHOD = :design asks for the all-regression object
-    # explicitly and gets it whole.
-    if !all(fd.ok)
-        error("adaptive-FD Ĝ could not measure $(count(.!fd.ok)) of $d columns: " *
-              join(param_symbol.(spec.free[.!fd.ok]), ", ") *
-              ". The model did not converge at enough of the finite-difference steps around θ̂ " *
-              "in these coordinates to form a derivative. No standard error is reported rather " *
-              "than one built from mixed sources. " *
-              "Set ROYSEARCH_MCMC_JAC_METHOD=design for the pre-v35 regression Jacobian.")
-    end
-else
-    global Ĝ, Ĝk, fd = Ĝ_reg, Ĝk_reg, nothing
-end
-se_bnd, se_curv = se_bound_diagonal(Ĝ, spec.W, σ̂)
-
-# The vacancy costs are estimated through the tightnesses, so their standard errors are the
-# delta method's: their gradient in the parameter vector (natural units, the rows of Ĝk) is the combination
-# se_bound_diagonal is evaluated at. The SMM covariance does not depend on the coordinates it
-# is expressed in, so these are the errors a k-coordinate estimation would report.
-k_hat            = seed_eq.k
-se_bnd_k, se_curv_k = se_bound_diagonal(Ĝ, spec.W, σ̂, Matrix(Ĝk'))
-
-# The attracting check off the same columns: D_ij = ∂ln k_i/∂ln θ_j needs the two tightness
-# columns of Ĝk, and costs no solve where both tightnesses are estimated.
-let jU = findfirst(ps -> (ps.block, ps.name) == (:unsk, :tight), spec.free),
-    jS = findfirst(ps -> (ps.block, ps.name) == (:skl,  :tight), spec.free)
-    global attract = if jU === nothing || jS === nothing
-        attracting_check(θ0, spec)
-    else
-        θU = _to_constrained(θ0[jU], spec.free[jU].lb, spec.free[jU].ub)
-        θS = _to_constrained(θ0[jS], spec.free[jS].lb, spec.free[jS].ub)
-        attracting_check([Ĝk[1, jU] * θU / k_hat.U  Ĝk[1, jS] * θS / k_hat.U;
-                          Ĝk[2, jU] * θU / k_hat.S  Ĝk[2, jS] * θS / k_hat.S])
-    end
-end
-isempty(attracting_line(attract)) || println(attracting_line(attract))
-
 # Posterior SD of the pooled post-burn-in draws, in constrained units: the
 # quasi-posterior standard error, and what LMR report (read_MCMC_chain.m takes std()
 # of the pooled chain). Unlike the two Ĵ-based columns it never differentiates Q, so
@@ -1375,6 +1280,123 @@ k_post = !draws_ok ? nothing :
          q500 = nt(median), q975 = nt(x -> quantile(x, 0.975)))
     end
 
+# The bread of the sandwich. Its true object is the inverse curvature of Q/2, and Ĵ = Ĝ'WĜ is
+# only its Gauss–Newton part: it drops the residual × second-derivative term, which is not
+# small when Q is far above its degrees of freedom. A point Hessian of Q does not replace it,
+# because Q is not quadratic at the scale of one standard error and its second differences
+# change with the step. The chain integrates the curvature over the cloud it samples, so on
+# the chain path the bread is P, the covariance of the kept draws in θ, and Ĝ is measured at
+# θ̄, the estimate the table reports. Without a usable chain the bread is J⁻¹ and Ĝ sits at θ̂.
+θ̄_t = draws_ok ?
+    [_to_unconstrained(θ̄_con[k], spec.free[k].lb, spec.free[k].ub) for k in 1:d] : fill(NaN, d)
+P   = chain_ok ?
+    cov([_draw_to_θ(res.draws[k, t], spec.free[k].lb, spec.free[k].ub)
+         for t in axes(res.draws, 2), k in 1:d]) : nothing
+θ_G = chain_ok ? θ̄_t : θ0
+
+# The active moments at t, then the vacancy costs, NaN where the point is infeasible. The
+# costs ride on every evaluation the moments take, so their derivatives — and through the
+# delta method their standard errors and the attracting check — cost no solve of their own.
+function moments_and_k(t)
+    ev = equilibrium_at(collect(float.(t)), spec)
+    isfinite(ev.Q) || return fill(NaN, K + 2)
+    return vcat([getproperty(ev.moments, m) for m in MOM_KEYS], ev.k.U, ev.k.S)
+end
+
+if need_reg
+    Xj = if use_design
+        local_design(θ0, spec.free; n = MCMC_JAC_DRAWS, rng = MersenneTwister(MCMC_SEED + 1))
+    else
+        sel = n_kept <= MCMC_JAC_DRAWS ? collect(1:n_kept) :
+                 round.(Int, range(1, n_kept; length = MCMC_JAC_DRAWS))
+        res.draws[:, sel]
+    end
+    MK = Matrix{Float64}(undef, K + 2, size(Xj, 2))
+    @printf("Storing moments at %d %s for Ĝ... ", size(Xj, 2),
+            use_design ? "local-design points" : "thinned draws"); flush(stdout)
+    @threads for i in axes(Xj, 2)
+        @views MK[:, i] .= moments_and_k(Xj[:, i])
+    end
+    keep    = vec(all(isfinite, MK; dims = 1))
+    Msel    = MK[1:K, keep]
+    draws_J = Xj[:, keep]
+    Ĝk_reg, _ = jacobian_from_draws(draws_J, MK[K+1:K+2, keep], spec.free)
+    @printf("%d feasible.\n", size(Msel, 2)); flush(stdout)
+
+    # The screen pre-pass above already produced Ĝ from a local design around the seed. When
+    # the chain is the source of the draws we still want the chain-based Ĝ, so recompute;
+    # when the design is the source, the pre-pass Ĝ is the same object and is reused.
+    Ĝ_reg, R2 = (need_pre && use_design && Ĝ_pre !== nothing) ?
+                    (Ĝ_pre, fill(NaN, K)) : jacobian_from_draws(draws_J, Msel, spec.free)
+else
+    Msel, draws_J = Matrix{Float64}(undef, K, 0), Matrix{Float64}(undef, d, 0)
+    Ĝ_reg, R2     = nothing, fill(NaN, K)
+    Ĝk_reg        = nothing
+end
+if MCMC_JAC_METHOD === :fd
+    print("Adaptive-FD Ĝ: per-coordinate step + Richardson... "); flush(stdout)
+    # Keyed on the objective, not on the buffer: smm_objective writes moments_out only after
+    # its guards, so an unwritten buffer would hand back whatever was in that memory. Filled
+    # with NaN rather than undef so a partial write could never masquerade as a moment either.
+    # fd.n_eval counts every ladder solve, converged or not, but not which failed; the failures
+    # are counted here. The centre solve is excluded from both, and reported on its own below.
+    n_fail = Threads.Atomic{Int}(0)
+    function mom_at(t)
+        mk = moments_and_k(t)
+        isfinite(mk[1]) || t == θ_G || Threads.atomic_add!(n_fail, 1)
+        return mk
+    end
+    Ĝmk, fd = jacobian_adaptive_fd(θ_G, spec.free, σ̂, mom_at; n_carried = 2)
+    global Ĝ, Ĝk = Ĝmk[1:K, :], Ĝmk[K+1:K+2, :]
+    @printf("%d of %d coordinates in %d solves, %d not converged.\n",
+            count(fd.ok), d, sum(fd.n_eval), n_fail[])
+    flush(stdout)
+    # No fallback. A column the ladder cannot measure used to be filled from the regression,
+    # which produced a matrix whose header said "adaptive FD" while most of it was the old
+    # object at rel_step = 0.05, and then printed a table and wrote a CSV from it with nothing
+    # marking which column came from where. A Jacobian assembled from two estimators is not a
+    # Jacobian. Either every column is measured the same way or the run stops and says which
+    # coordinates defeated it; MCMC_JAC_METHOD = :design asks for the all-regression object
+    # explicitly and gets it whole.
+    if !all(fd.ok)
+        error("adaptive-FD Ĝ could not measure $(count(.!fd.ok)) of $d columns: " *
+              join(param_symbol.(spec.free[.!fd.ok]), ", ") *
+              ". The model did not converge at enough of the finite-difference steps around " *
+              (chain_ok ? "θ̄" : "θ̂") * " " *
+              "in these coordinates to form a derivative. No standard error is reported rather " *
+              "than one built from mixed sources. " *
+              "Set ROYSEARCH_MCMC_JAC_METHOD=design for the pre-v35 regression Jacobian.")
+    end
+else
+    global Ĝ, Ĝk, fd = Ĝ_reg, Ĝk_reg, nothing
+end
+# se_sw is the sandwich at Ω = W⁻¹ under the bread P on the chain path, which is se(J⁻¹)
+# when the bread is J⁻¹; se_bnd is its bound over every Ω with the same diagonal.
+se_bnd, se_sw = se_bound_diagonal(Ĝ, spec.W, σ̂; bread = P)
+
+# The vacancy costs are estimated through the tightnesses, so their standard errors are the
+# delta method's: their gradient in the parameter vector (natural units, the rows of Ĝk) is the combination
+# se_bound_diagonal is evaluated at. The SMM covariance does not depend on the coordinates it
+# is expressed in, so these are the errors a k-coordinate estimation would report.
+k_hat            = seed_eq.k
+se_bnd_k, se_sw_k = se_bound_diagonal(Ĝ, spec.W, σ̂, Matrix(Ĝk'); bread = P)
+
+# θ̂'s attracting check off the same columns: D_ij = ∂ln k_i/∂ln θ_j needs the two tightness
+# columns of Ĝk, and costs no solve where both tightnesses are estimated and Ĝ is measured at
+# θ̂. On the chain path Ĝ is measured at θ̄, so θ̂'s check is solved directly.
+let jU = findfirst(ps -> (ps.block, ps.name) == (:unsk, :tight), spec.free),
+    jS = findfirst(ps -> (ps.block, ps.name) == (:skl,  :tight), spec.free)
+    global attract = if chain_ok || jU === nothing || jS === nothing
+        attracting_check(θ0, spec)
+    else
+        θU = _to_constrained(θ0[jU], spec.free[jU].lb, spec.free[jU].ub)
+        θS = _to_constrained(θ0[jS], spec.free[jS].lb, spec.free[jS].ub)
+        attracting_check([Ĝk[1, jU] * θU / k_hat.U  Ĝk[1, jS] * θS / k_hat.U;
+                          Ĝk[2, jU] * θU / k_hat.S  Ĝk[2, jS] * θS / k_hat.S])
+    end
+end
+isempty(attracting_line(attract)) || println(attracting_line(attract))
+
 # cov(Θ) is singular with fewer draws than parameters, so the cross-check is only
 # meaningful when the chain supplied the design.
 jgap    = chain_ok && size(draws_J, 2) > d ?
@@ -1385,6 +1407,16 @@ jgap    = chain_ok && size(draws_J, 2) > d ?
 # ========================================================================
 rhat, ess = draws_ok ? split_rhat_ess(res.chain, res.burn) :
                        (fill(NaN, d), fill(NaN, d))
+# The vacancy costs are not coordinates of the chain: free entry gives them at each kept
+# draw, and k_draws holds them in the column order of res.draws, which is
+# reshape(chain[:, :, burn+1:end], d, :), chain fastest. Laid back out as chain × generation
+# they get the same split R̂ and ESS as the coordinates, on the same kept generations.
+# rhat_all and ess_all are the table's R̂ column and its ESS, the 14 coordinates then k_U, k_S.
+rhat_k, ess_k = draws_ok && size(k_draws, 2) == size(res.draws, 2) &&
+                    size(res.draws, 2) % size(res.chain, 2) == 0 ?
+                split_rhat_ess(reshape(k_draws, 2, size(res.chain, 2), :), 0) :
+                (fill(NaN, 2), fill(NaN, 2))
+rhat_all, ess_all = vcat(rhat, rhat_k), vcat(ess, ess_k)
 blo, bhi  = draws_ok ? boundary_mass(res.draws, spec.free) :
                        (fill(NaN, d), fill(NaN, d))
 sgrow     = draws_ok ? spread_growth(res.chain, res.burn) : fill(NaN, d)
@@ -1411,9 +1443,9 @@ if MCMC_JAC_METHOD === :fd
     # solver rejects is a different object from one expanded about an equilibrium, and the
     # regression route never said so.
     fd.centre_ok ||
-        @printf("      NOTE: Q(θ̂) is not finite at %d threads, so Ĝ is centred on a point the \
-solver rejects. The differences themselves are unaffected — only θ̂ ± h is evaluated.\n",
-                Threads.nthreads())
+        @printf("      NOTE: Q(%s) is not finite at %d threads, so Ĝ is centred on a point the \
+solver rejects. The differences themselves are unaffected — only %s ± h is evaluated.\n",
+                chain_ok ? "θ̄" : "θ̂", Threads.nthreads(), chain_ok ? "θ̄" : "θ̂")
     all(fd.tuned) ||
         @printf("      %d coordinate(s) off the target band (‖Δm/σ̂‖ outside [%.2f, %.1f]): %s\n",
                 count(.!fd.tuned), fd.target_sd / 3, fd.target_sd * 3,
@@ -1438,9 +1470,11 @@ solver rejects. The differences themselves are unaffected — only θ̂ ± h is 
     # The regression Ĝ on the same seed, priced in the units that matter. Printed every run
     # because it is the only place the cost of the method choice is visible.
     if Ĝ_reg !== nothing
-        sb_r, sc_r = se_bound_diagonal(Ĝ_reg, spec.W, σ̂)
+        # Both bounds under the bread J⁻¹, so the ratio prices the Jacobian alone.
+        sb_r, _ = se_bound_diagonal(Ĝ_reg, spec.W, σ̂)
+        sb_f, _ = se_bound_diagonal(Ĝ, spec.W, σ̂)
         @printf("      vs design regression (R² median %.3f): se(bound) median ratio FD/reg = %.2f\n",
-                isempty(R2f) ? NaN : median(R2f), median(se_bnd ./ sb_r))
+                isempty(R2f) ? NaN : median(R2f), median(sb_f ./ sb_r))
     end
 else
     @printf("  Ĝ: %d×%d design regression from %d draws, moment R² min=%.3f median=%.3f\n",
@@ -1450,8 +1484,11 @@ end
 # The table fixes the box width, so it is laid out first. The chain path adds se(chain)
 # beside the estimate, its |t| beside se(bound), and each coordinate's R̂ last, ticked where
 # it meets MCMC_RHAT_MAX (the two blanks after R̂ hold the ✓); the edge test rides in the flag.
+# The sandwich column is named by its bread: sandw. with the chain's covariance, J⁻¹ without.
+sw  = chain_ok ? "sandw." : "J⁻¹"
 hdr = draws_ok ?
-    "  block   param     estimate  se(chain)    se(J⁻¹)   se(bound) |t|(chain)  |t|(J⁻¹)   |t|(bnd)       R̂" * "  " :
+    "  block   param     estimate  se(chain)" * lpad("se($sw)", 11) * "   se(bound) |t|(chain)" *
+    lpad("|t|($sw)", 12) * "   |t|(bnd)       R̂" * "  " :
     "  block   param     estimate    se(J⁻¹)   se(bound)  |t|(J⁻¹)   |t|(bnd)"
 box_w = textwidth(hdr) + 4              # + room for the trailing RAIL / edge flag
 box_rule(l, r) = println(l, "═"^box_w, r)
@@ -1465,7 +1502,7 @@ box_rule("╠", "╣")
 if !MCMC_JAC_ONLY
     # A run that exhausts the cap has NOT met the stopping criteria: say so, and let the
     # attained R̂/ESS line below carry what was actually reached.
-    @printf("  gens=%d/%d %s  burn=%d  kept=%d  accept=%.3f\n",
+    @printf("  gens=%d/%d %s  burn=%d  chains=%d  accept=%.3f\n",
             res.gens, res.gens_requested,
             # abort_why distinguishes the two abort paths, which call for opposite fixes:
             # :drift means re-seed from theta_best, :acceptance means rescale the proposal.
@@ -1479,7 +1516,7 @@ if !MCMC_JAC_ONLY
             res.gens < res.gens_requested        ? "(criteria met, stopped early)" :
             MCMC_CHECK_EVERY > 0                 ? "(BUDGET EXHAUSTED — criteria not met)" :
                                                    "(no stopping test)",
-            res.burn, n_kept, res.accept)
+            res.burn, size(res.chain, 2), res.accept)
     # The Jacobian term is unbounded below, so a climb from it only locates a rail.
     # Under :flat_t there is no Jacobian in the target, so the whole drift is ΔQ by
     # construction and the split has only one live component. Passing equal log-Jacobians
@@ -1507,14 +1544,14 @@ if !MCMC_JAC_ONLY
     # A replacement inside the retained sample means those draws are not from the target,
     # so report the boundary rather than only the count.
     if res.n_replaced > 0
-        @printf("  stuck-chain replacements: %d, last at g=%d (burn=%d)%s\n",
-                res.n_replaced, res.last_replace, res.burn,
+        @printf("  stuck-chain replacements: %d, last at g=%d%s\n",
+                res.n_replaced, res.last_replace,
                 res.last_replace > res.burn ? "  ← INSIDE the retained sample" : "")
     end
     # The attained extremes against the gates: R̂ max is the worst of the table's R̂ column,
-    # and ESS has no column.
+    # vacancy costs included, and ESS has no column.
     # max and min propagate NaN, so the case with no finite entry is handled outside them.
-    let r = filter(isfinite, rhat), e = filter(isfinite, ess)
+    let r = filter(isfinite, rhat_all), e = filter(isfinite, ess_all)
         draws_ok && @printf("  R̂ max=%.3f (gate ≤ %.2f)  ESS min=%.0f (gate ≥ %.0f%s)\n",
                             isempty(r) ? NaN : maximum(r), MCMC_RHAT_MAX,
                             isempty(e) ? NaN : minimum(e),
@@ -1525,9 +1562,6 @@ if !MCMC_JAC_ONLY
             MCMC_SPACE === :theta ? "−½·g'Wg on the θ box" :
                 (_USE_LOGJAC ? "−½·g'Wg + log|dθ/dt|" : "−½·g'Wg"),
             MCMC_SPACE, MCMC_PRIOR)
-    @printf("  Ĵ from %s%s\n",
-            use_design ? "local design (Ĵ = Ĝ'WĜ; CH Thm 4 needs no chain)" : "chain covariance",
-            chain_ok ? @sprintf("; cross-check |log10(diag ratio)| median = %.2f", jgap) : "")
     box_rule("╠", "╣")
 end
 println(hdr)
@@ -1553,10 +1587,13 @@ open(out_csv, "w") do io
     #                    re-deriving the suffix.
     #   corner_declared  0/1 from CORNER_PARAMS. With the shipped empty default every other
     #                    field is byte-identical to before it existed.
-    #   abs_t_curvature  |θ̂|/se_curvature and |θ̂|/se_bound, both formed against θ̂. The
-    #   abs_t_bound      console's |t|(bnd) is abs_t_bound on every path; its |t|(chain) and
-    #                    |t|(J⁻¹) are formed against the reported estimate, which is the
-    #                    posterior mean once a chain converges.
+    #   se_curvature     the sandwich and its bound, named by the bread as the console's
+    #   se_bound         columns are: se_sandwich and abs_t_sandwich on the chain path (bread
+    #                    P, Ĝ at θ̄), se_curvature and abs_t_curvature without a usable chain
+    #                    (bread J⁻¹, Ĝ at θ̂). Same position either way.
+    #   abs_t_curvature  |estimate|/se_curvature and |estimate|/se_bound, formed against the
+    #   abs_t_bound      reported estimate: θ̄ on the chain path, θ̂ otherwise. They are the
+    #                    console's |t| columns on every path.
     #                    A row is emitted for every free parameter, including one sitting on
     #                    a box bound where no two-sided interval exists: the LaTeX table
     #                    drops those, so the CSV has to stay complete rather than pre-filter.
@@ -1569,10 +1606,11 @@ open(out_csv, "w") do io
     #                    rail_frac = 1e-4 has its derivative measured across one ten-thousandth
     #                    of its box and contributes a column to Ĵ = Ĝ'WĜ that is small,
     #                    noisy, and able to dominate the inverse.
-    println(io, "block,name,label,point_estimate,post_mean,se_curvature,se_bound,q025,q500,q975,rhat,ess,edge_frac,spread_growth,se_chain,symbol,corner_declared,abs_t_curvature,abs_t_bound,rail_frac")
+    sw_col = chain_ok ? "sandwich" : "curvature"
+    println(io, "block,name,label,point_estimate,post_mean,se_$(sw_col),se_bound,q025,q500,q975,rhat,ess,edge_frac,spread_growth,se_chain,symbol,corner_declared,abs_t_$(sw_col),abs_t_bound,rail_frac")
     for (k, ps) in enumerate(spec.free)
         # Quantiles and the posterior mean require a stationary chain; without one
-        # the se columns still stand (they come from Ĵ), so those are reported and
+        # the se columns still stand (they come from Ĝ), so those are reported and
         # these are left blank rather than computed from a non-stationary walk.
         dk = draws_ok ?
              [_draw_to_θ(res.draws[k, t], ps.lb, ps.ub) for t in 1:n_kept] :
@@ -1583,13 +1621,13 @@ open(out_csv, "w") do io
         edge = blo[k] + bhi[k]
         # The reported SE is the chain's when there is one: it is the only column that
         # survives a non-differentiable objective. Otherwise fall back to the two
-        # Ĵ-based columns and say so in the footer.
-        se_rep = draws_ok ? se_chain[k] : se_curv[k]
-        # |t|(chain) and |t|(J⁻¹) are formed against the REPORTED estimate. Deliberately
-        # still chain_ok and not draws_ok, so an ABORTED run reports θ̂ rather than the
-        # posterior mean — with se_rep now being se(chain), the pairing on that path is
-        # θ̂ ± the spread of draws around θ̂, which is what the chain measured (it was
-        # seeded there).
+        # Ĝ-based columns and say so in the footer.
+        se_rep = draws_ok ? se_chain[k] : se_sw[k]
+        # All three |t| are formed against the REPORTED estimate, the point the sandwich and
+        # its bound are measured at. Deliberately still chain_ok and not draws_ok, so an
+        # ABORTED run reports θ̂ rather than the posterior mean — with se_rep now being
+        # se(chain), the pairing on that path is θ̂ ± the spread of draws around θ̂, which is
+        # what the chain measured (it was seeded there).
         #
         # This is not the "width of one point, location of another" error the old comment
         # here warned about; it is the correction for it. On base_fc the coordinate-wise
@@ -1600,38 +1638,36 @@ open(out_csv, "w") do io
         # would put a parameter vector in the table that the model cannot be evaluated at.
         est_rep = chain_ok ? pmean : pe
         tstat   = se_rep > 0 ? abs(est_rep) / se_rep : NaN
-        # The ratio against the bound is formed at θ̂ on every path, so the column is the
-        # JAC_ONLY one and the CSV's abs_t_bound. se(J⁻¹) is the sandwich at zero
-        # cross-moment correlation and se(bound) its supremum over every Ω with the same
-        # diagonal, so a coordinate that clears a threshold on |t|(bnd) clears it whatever
-        # the correlation structure.
-        tstat_b = _abs_t(pe, se_bnd[k])
+        # se(bound) is the supremum of the sandwich over every Ω with the same diagonal, so a
+        # coordinate that clears a threshold on |t|(bnd) clears it whatever the correlation
+        # structure of the moment errors.
+        tstat_s = _abs_t(est_rep, se_sw[k])
+        tstat_b = _abs_t(est_rep, se_bnd[k])
         # A railed coordinate is flagged ahead of edge because it invalidates its own
         # interval outright: asymptotic normality needs an interior point.
         rail   = _rail_frac(pe, ps.lb, ps.ub)
         flag   = rail < RAIL_TOL ? " RAIL" :
                  edge > 0.01     ? " edge" : ""
-        tstat_c = _abs_t(est_rep, se_curv[k])
         if draws_ok
-            @printf("  %s%s%9.5f %10.5f %10.5f %11.5f %10.2f %9.2f %10.2f %7.3f%s%s\n",
+            @printf("  %s%s%9.5f %10.5f %10.5f %11.5f %10.2f %11.2f %10.2f %7.3f%s%s\n",
                     padr(ps.block, 8), padr(param_symbol(ps), 9),
-                    est_rep, se_chain[k], se_curv[k], se_bnd[k], tstat, tstat_c, tstat_b,
+                    est_rep, se_chain[k], se_sw[k], se_bnd[k], tstat, tstat_s, tstat_b,
                     rhat[k], rhat[k] <= MCMC_RHAT_MAX ? " ✓" : "  ", flag)
         else
             @printf("  %s%s%9.5f %10.5f %11.5f %9.2f %10.2f%s\n",
                     padr(ps.block, 8), padr(param_symbol(ps), 9),
-                    est_rep, se_curv[k], se_bnd[k], tstat_c, tstat_b, flag)
+                    est_rep, se_sw[k], se_bnd[k], tstat_s, tstat_b, flag)
         end
         @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f,%.1f,%.6f,%.6f,%.8f,%s,%d,%.6f,%.6f,%.8e\n",
                 ps.block, ps.name, ps.label, pe, pmean,
-                se_curv[k], se_bnd[k],
+                se_sw[k], se_bnd[k],
                 q(0.025), q(0.500), q(0.975),
                 rhat[k], ess[k], edge, sgrow[k], se_chain[k], param_symbol(ps),
-                CORNER_FLAG[k], _abs_t(pe, se_curv[k]), _abs_t(pe, se_bnd[k]), rail)
+                CORNER_FLAG[k], tstat_s, tstat_b, rail)
     end
     # The vacancy costs, estimated through the tightnesses: θ̂'s costs with their
-    # delta-method standard errors, and the chain's summary of each draw's costs. They have
-    # no box, so no rail, edge or R̂.
+    # delta-method standard errors, and the chain's summary of each draw's costs, with their
+    # R̂ and ESS (rhat_k, ess_k). They have no box, so no rail or edge.
     for (i, (blk, label)) in enumerate(VACANCY_COSTS)
         sym   = blk === :unsk ? "k_U" : "k_S"
         dk    = draws_ok ? filter(isfinite, k_draws[i, :]) : Float64[]
@@ -1640,21 +1676,25 @@ open(out_csv, "w") do io
         sech  = isempty(dk) ? NaN : std(dk)
         pe    = i == 1 ? k_hat.U : k_hat.S
         est_rep = chain_ok ? pmean : pe
-        se_rep  = draws_ok ? sech : se_curv_k[i]
+        se_rep  = draws_ok ? sech : se_sw_k[i]
+        tstat_s = _abs_t(est_rep, se_sw_k[i])
+        tstat_b = _abs_t(est_rep, se_bnd_k[i])
         if draws_ok
-            @printf("  %s%s%9.5f %10.5f %10.5f %11.5f %10.2f %9.2f %10.2f\n",
-                    padr(blk, 8), padr(sym, 9), est_rep, sech, se_curv_k[i], se_bnd_k[i],
-                    _abs_t(est_rep, se_rep), _abs_t(est_rep, se_curv_k[i]), _abs_t(pe, se_bnd_k[i]))
+            @printf("  %s%s%9.5f %10.5f %10.5f %11.5f %10.2f %11.2f %10.2f %7.3f%s\n",
+                    padr(blk, 8), padr(sym, 9), est_rep, sech, se_sw_k[i], se_bnd_k[i],
+                    _abs_t(est_rep, se_rep), tstat_s, tstat_b,
+                    rhat_k[i], rhat_k[i] <= MCMC_RHAT_MAX ? " ✓" : "  ")
         else
             @printf("  %s%s%9.5f %10.5f %11.5f %9.2f %10.2f\n",
-                    padr(blk, 8), padr(sym, 9), est_rep, se_curv_k[i], se_bnd_k[i],
-                    _abs_t(est_rep, se_curv_k[i]), _abs_t(pe, se_bnd_k[i]))
+                    padr(blk, 8), padr(sym, 9), est_rep, se_sw_k[i], se_bnd_k[i],
+                    tstat_s, tstat_b)
         end
         @printf(io, "%s,k,%s,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f,%.1f,%.6f,%.6f,%.8f,%s,%d,%.6f,%.6f,%.8e\n",
-                blk, label, pe, pmean, se_curv_k[i], se_bnd_k[i], q(0.025), q(0.500), q(0.975),
-                NaN, NaN, NaN, NaN, sech, sym, 0, _abs_t(pe, se_curv_k[i]), _abs_t(pe, se_bnd_k[i]), NaN)
+                blk, label, pe, pmean, se_sw_k[i], se_bnd_k[i], q(0.025), q(0.500), q(0.975),
+                rhat_k[i], ess_k[i], NaN, NaN, sech, sym, 0, tstat_s, tstat_b, NaN)
     end
 end
+
 box_rule("╚", "╝")
 
 # A rail is not one row's problem. mcmc_diagnostics.jl caps the FD step at the distance to
@@ -1678,13 +1718,12 @@ let rails = [(param_symbol(ps), _rail_frac(_draw_to_θ(θ0[k], ps.lb, ps.ub), ps
 end
 
 if draws_ok
-    # Q at the mean beside Q at the seed; the best visited point's Q is on its own line
-    # (§8). The mean is an average over the basin, not a competitor in a minimisation, so
-    # its Q normally sits above the seed's.
-    θ̄_t = [_to_unconstrained(θ̄_con[k], spec.free[k].lb, spec.free[k].ub) for k in 1:d]
+    # Q at the estimate (the mean of the kept draws), at the seed and at the best point the
+    # chain visited. The mean is an average over the basin, not a competitor in a
+    # minimisation, so its Q normally sits above the seed's; the best visited point is a
+    # record of where the chain went, never the estimate.
     Q_mean = smm_objective(θ̄_t, spec)
-    println("\n  estimate = mean of the pooled post-burn-in draws; se(chain) = their SD")
-    @printf("  Q(θ̄)=%.4f   Q(θ̂)=%.4f\n", Q_mean, Q_seed)
+    @printf("\n  Q(θ̄)=%.4f   Q(θ̂)=%.4f   Q(θ_best)=%.4f\n", Q_mean, Q_seed, Q_best)
 else
     if MCMC_JAC_ONLY
         println("\n  se(J⁻¹) assumes uncorrelated moment errors. se(bound) holds for any moment")
@@ -1792,7 +1831,7 @@ MCMC_JAC_ONLY || open(chain_jls, "w") do io
                    accept     = res.accept,
                    burn       = res.burn,
                    window     = WINDOW,
-                   w_cond_target = W_COND_TARGET,
+                   weighting  = WEIGHTING,
                    seed_jls   = seed_jls,
                    # The spec is what makes theta_best USABLE rather than merely recorded.
                    # smm_objective(theta, spec) needs the whole object — fixed parameters,
@@ -1822,9 +1861,6 @@ if MCMC_CHECKPOINT && Q_best < Q_ckpt[] - PROMOTE_MIN_DQ
     promote!(collect(res.theta_best), Q_best, Q_ckpt[]; label = "END")
     Q_ckpt[] = Q_best
 end
-MCMC_JAC_ONLY ||     # no chain, no visited points
-    @printf("\n  best visited point: Q %.6e (seed %.6e) → %s\n", Q_best, Q_seed,
-            basename(chain_jls) * (Q_ckpt[] < Q_seed ? ", " * basename(best_jls) : ""))
 
 # ========================================================================
 # 9. Where the standard errors go
@@ -1841,16 +1877,20 @@ MCMC_JAC_ONLY ||     # no chain, no visited points
 #   stage          :mcmc, or :mcmc_aborted when the chain hit the acceptance floor or the
 #                  drift abort: those draws are not a stationary sample, so no consumer
 #                  takes the file as an estimate
-#   se             curvature and bound from Ĵ = Ĝ'WĜ at θ̂ (CH Thm 4, so they do not depend
-#                  on the chain converging) and chain, the posterior SD
+#   se             sandwich and bound with the chain's covariance as bread and Ĝ at θ̄, and
+#                  chain, the posterior SD; an aborted chain's carries curvature and bound
+#                  from Ĵ = Ĝ'WĜ at θ̂ instead. se_source names the bread
 #   mcmc           the diagnostics a footnote needs, and `seed`, the file the chain started from
 #   vacancy_costs  at the posterior mean, with the delta-method errors and the chain's summary
 #   attracting     the free-entry slope check at the posterior mean
-se_record = (curvature = se_curv, bound = se_bnd, chain = se_chain)
+# The sandwich column is keyed by its bread, as in the CSV: sandwich (P) or curvature (J⁻¹).
+se_names  = (chain_ok ? :sandwich : :curvature, :bound, :chain)
+se_source = chain_ok ? Symbol("chain_bread_", MCMC_JAC_METHOD) : Symbol("jacobian_", MCMC_JAC_METHOD)
+se_record = NamedTuple{se_names}((se_sw, se_bnd, se_chain))
 k_record  = (k  = k_hat,
-             se = (curvature = (U = se_curv_k[1], S = se_curv_k[2]),
-                   bound     = (U = se_bnd_k[1],  S = se_bnd_k[2]),
-                   chain     = k_post === nothing ? nothing : k_post.sd),
+             se = NamedTuple{se_names}(((U = se_sw_k[1],  S = se_sw_k[2]),
+                                        (U = se_bnd_k[1], S = se_bnd_k[2]),
+                                        k_post === nothing ? nothing : k_post.sd)),
              post = k_post)
 if MCMC_JAC_ONLY
     _est = read_bundle(seed_jls)
@@ -1858,7 +1898,7 @@ if MCMC_JAC_ONLY
        _est.result.theta_opt == bundle.result.theta_opt
         write_bundle(seed_jls; result = _est.result, spec = _est.spec, stage = _est.stage,
                      provenance = _est.provenance, sim = _est.sim, se = se_record,
-                     se_source = Symbol("jacobian_", MCMC_JAC_METHOD), mcmc = _est.mcmc,
+                     se_source = se_source, mcmc = _est.mcmc,
                      vacancy_costs = k_record, attracting = attract, tag = _est.tag)
         @printf("\n  standard errors → %s\n", basename(seed_jls))
     else
@@ -1893,7 +1933,7 @@ else
                                                  version = ROYSEARCH_VERSION),
                      sim    = spec.sim,
                      se     = se_record,
-                     se_source = :chain,
+                     se_source = se_source,
                      vacancy_costs = (k = equilibrium_at(θ̄_t2, spec).k, se = k_record.se,
                                       post = k_post),
                      attracting = attract_mean,
@@ -1905,8 +1945,8 @@ else
                                accept     = res.accept,
                                aborted    = res.aborted,
                                abort_why  = hasproperty(res, :abort_why) ? res.abort_why : :none,
-                               rhat_max   = all(isnan, rhat) ? NaN : maximum(filter(!isnan, rhat)),
-                               ess_min    = all(isnan, ess)  ? NaN : minimum(filter(!isnan, ess)),
+                               rhat_max   = all(isnan, rhat_all) ? NaN : maximum(filter(!isnan, rhat_all)),
+                               ess_min    = all(isnan, ess_all)  ? NaN : minimum(filter(!isnan, ess_all)),
                                chain_ok   = chain_ok,
                                draws_ok   = draws_ok,
                                prior      = MCMC_PRIOR),
@@ -1918,7 +1958,7 @@ else
         if _stage === :mcmc_aborted
             @printf("    the chain ABORTED, so any table printing these standard errors must\n")
             @printf("    also print the abort reason, R̂=%.3f and %d accepted moves — both are\n",
-                    all(isnan, rhat) ? NaN : maximum(filter(!isnan, rhat)),
+                    all(isnan, rhat_all) ? NaN : maximum(filter(!isnan, rhat_all)),
                     round(Int, res.accept * res.gens * MCMC_N))
             @printf("    in the bundle's mcmc field, so the caveat travels with the number.\n")
         end

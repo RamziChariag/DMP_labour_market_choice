@@ -27,7 +27,11 @@
 # 1. USER CONFIGURATION
 # ═══════════════════════════════════════════════════════════
 
-# Which scenarios to run.  Use [:fc], [:covid], or [:fc, :covid].
+# Which scenarios to run, from the transition pairs of paths.jl (PAIRS), three per event:
+# :fc and :covid run from the base estimate to the crisis estimate, :fc_cf1 / :covid_cf1
+# to the cf1 estimate (crisis_<event>_cf1, its choices held at the base equilibrium on the
+# whole path) and :fc_cf2 / :covid_cf2 to the cf2 estimate. Every scenario writes the same
+# files, named by the scenario.
 const SCENARIOS = [:fc, :covid]
 
 # The estimate both windows of a pair are read at; never one of each.
@@ -39,14 +43,6 @@ const SCENARIOS = [:fc, :covid]
 # The tables phase reads this point's transition files, stops on one that records another,
 # and reports the bundles they record: exactly the points the paths were solved at.
 const POINT_ESTIMATE = :smm
-
-# Weight-matrix mode used when the SMM results were estimated — must match
-# the W_COND_TARGET set in smm/smm_main.jl, whose default is 0.0 and under
-# which every shipped estimate bundle was produced.  A mismatch is not a
-# silent one: estimate_path() names a file that is not on disk and the run
-# stops at the first load.
-#   0.0 → "_diagonalW"   1.0 → "_compressedW"   2.0 → "_equalW"   >2.0 → "_fullW"
-const W_COND_TARGET = 0.0
 
 # Simulation switch
 #   true  → always (re)run the transition simulation for every SCENARIO
@@ -114,14 +110,6 @@ mkpath(TRANS_OUT_DIR)
 mkpath(PLOTS_DIR)
 mkpath(TABLES_DIR)
 
-function _w_suffix(cond_target::Float64)
-    cond_target == 0.0 && return "_diagonalW"
-    cond_target == 1.0 && return "_compressedW"
-    cond_target == 2.0 && return "_equalW"
-    return "_fullW"
-end
-const W_SUFFIX = _w_suffix(W_COND_TARGET)
-
 # ═══════════════════════════════════════════════════════════
 # 4. LOAD SOLVER / SMM / TRANSITION MODULES
 # ═══════════════════════════════════════════════════════════
@@ -141,6 +129,12 @@ include(joinpath(SMM_DIR, "smm_params.jl"))
 include(joinpath(SMM_DIR, "bundle.jl"))
 include(joinpath(SMM_DIR, "smm.jl"))
 println("done."); flush(stdout)
+
+# The weighting the estimates were produced under (WEIGHTING, run_weighting in moments.jl),
+# the same setting smm_main.jl reads. A mismatch is not a silent one: estimate_path() names a
+# file that is not on disk and the run stops at the first load.
+const WEIGHTING = run_weighting()
+const W_SUFFIX  = weighting_suffix(WEIGHTING)
 
 print("Loading transition modules... "); flush(stdout)
 include(joinpath(TRANSITION_DIR, "transition_params.jl"))
@@ -165,7 +159,7 @@ println("  RoySearch v$(ROYSEARCH_VERSION) — Transition Run")
 println("="^65)
 @printf("  Scenarios:            %s\n", join(SCENARIOS, ", "))
 @printf("  POINT_ESTIMATE:       %s\n", POINT_ESTIMATE)
-@printf("  W_COND_TARGET:        %.1f  (%s)\n", W_COND_TARGET, W_SUFFIX)
+@printf("  WEIGHTING:            %s  (%s)\n", WEIGHTING, W_SUFFIX)
 @printf("  RERUN_SIMULATION:     %s\n", RERUN_SIMULATION)
 @printf("  RUN_PANELS:           %s\n", RUN_PANELS)
 @printf("  RUN_TABLES_AND_PLOTS: %s\n", RUN_TABLES_AND_PLOTS)

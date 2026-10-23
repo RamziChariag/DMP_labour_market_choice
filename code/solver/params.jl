@@ -158,16 +158,24 @@ end
 
 
 Base.@kwdef mutable struct UnskilledCache
-    # Values — one-dimensional in own ability (notes §231, §276)
+    # Values of a type that searches — one-dimensional in own ability (notes §231, §276)
     Usearch   :: Vector{Float64}    # U^search(aU): value of unskilled search
-    T         :: Vector{Float64}    # T(aS): value of training
     Jfrontier :: Vector{Float64}    # J_U(aU, 1): firm value at frontier p = 1
     pstar     :: Vector{Float64}    # p*(aU): unskilled reservation quality cutoff
+
+    # Training value, and the unskilled matches whose outside option is training: those
+    # of the trained workers hired into the unskilled market (career_choices!)
+    T         :: Matrix{Float64}    # T(aU,aS): value of training, on U_S(aU,aS)
+    pstar_t   :: Matrix{Float64}    # p*_t(aU,aS): their reservation quality
+    S1_t      :: Matrix{Float64}    # S_t(aU,aS,1): their entry surplus, before the positive part
+    χ_t       :: Matrix{Float64}    # χ_t(aU,aS): hired share of their meetings
 
     # Two-dimensional policy and composition on the (aU, aS) copula grid
     τT        :: Matrix{Float64}    # τ(aU,aS): training policy indicator
     u         :: Matrix{Float64}    # u_U(aU,aS): density of untrained unemployed
+    uh        :: Matrix{Float64}    # hired branch of u_U(aU,aS)
     t         :: Matrix{Float64}    # t(aU,aS): density of workers in training
+    et        :: Matrix{Float64}    # unskilled employment of the trained, outside option training
 
     # Cross-market contribution carried from the skilled block:
     # duS_carry(aU,aS) = d(aU,aS) · u_S(aU,aS).  Held constant within one
@@ -245,9 +253,9 @@ end
 
 Base.@kwdef mutable struct SkilledCache
     # Values — one-dimensional in the SKILLED ability aS (notes §407–444)
-    U     :: Vector{Float64}           # U_S(aS) = max{U_S^(0)(aS), U_S^(1)(aU)} folded to the aS-grid via d
+    U     :: Vector{Float64}           # U_S^(0)(aS): the employed outside option, and the global link
     U0    :: Vector{Float64}           # U_S^(0)(aS): stay-skilled candidate
-    U1    :: Vector{Float64}           # U_S^(1)(aU): cross-to-unskilled candidate (indexed by aU)
+    U1    :: Matrix{Float64}           # U_S^(1)(aU,aS): cross-to-unskilled candidate (career_choices!)
 
     E0    :: Matrix{Float64}           # E_S^0(aS,p): worker value, employed, no OJS
     E1    :: Matrix{Float64}           # E_S^1(aS,p): worker value, employed, with OJS
@@ -266,7 +274,7 @@ Base.@kwdef mutable struct SkilledCache
     s_part :: Vector{Float64}
 
     # Cross-market directed-search policy on the (aU, aS) grid:
-    # d(aU,aS) = 1 ⇔ U_S^(1)(aU) > U_S^(0)(aS)  (notes eq:dpolicy).
+    # d(aU,aS) = 1 ⇔ U_S^(1)(aU,aS) > U_S^(0)(aS)  (notes eq:dpolicy).
     d     :: Matrix{Float64}
 
     # Stationary trained composition.  Per-aS UNIT shapes (total mass 1 for
@@ -275,7 +283,7 @@ Base.@kwdef mutable struct SkilledCache
     u_frac :: Vector{Float64}          # û_S(aS): unemployed fraction of a d=0 type's mass
     e_frac :: Matrix{Float64}          # ê_S(aS,p): employed density fraction of a d=0 type's mass
 
-    m_S   :: Matrix{Float64}           # m_S(aU,aS): trained-worker mass = φ t / (ν + d κ_U)
+    m_S   :: Matrix{Float64}           # m_S(aU,aS): trained-worker mass = φ t / (ν + crossing hire rate)
 
     θ     :: Float64                   # skilled market tightness
 end
@@ -343,6 +351,33 @@ end
 
 
 ##############
+# Held education choices
+##############
+
+"""
+    HeldChoices
+
+The training choice and the choice of market of a stationary equilibrium, held at every type
+by a model that carries them (`Model.held`): wherever the model takes a max over training or
+over the market, it uses these instead.  Both cell fractions are held exactly as the solver
+weighs them, and so are the node choices the value functions read:
+  x       the ability grid they were solved on
+  τ       training fraction of each (aU, aS) cell (training_policy!)
+  d       drain fraction of each cell (drain_fraction!)
+  trains  the node choice in U_U = max{U^search, −c + T}: true where training is chosen
+  drains  the node choice in U_S = max{U_S^(0), U_S^(1)}: true where U_S^(1) is chosen
+Built from a solved model by `HeldChoices(model)` (unskilled.jl).
+"""
+struct HeldChoices
+    x      :: Vector{Float64}
+    τ      :: Matrix{Float64}
+    d      :: Matrix{Float64}
+    trains :: Matrix{Bool}
+    drains :: Matrix{Bool}
+end
+
+
+##############
 # Top-level model
 ##############
 
@@ -364,6 +399,9 @@ Base.@kwdef mutable struct Model
     # Set by solve_model! once the solve has converged at a corner: free entry at a market
     # that holds no one is then priced at its limit composition (marginal_training_cells).
     corner_limit :: Bool = false
+
+    # The education choices held fixed (a cf1 window), or `nothing` when the model chooses.
+    held :: Union{Nothing,HeldChoices} = nothing
 end
 
 
@@ -445,32 +483,41 @@ end
 
 
 """
-    build_model(cp, grids, up, u_grids, sp, s_grids, sim; Nx, Np_S) -> Model
+    build_model(cp, grids, up, u_grids, sp, s_grids, sim; Nx, Np_S, held = nothing) -> Model
 
 Assemble a `Model` from parameter/grid blocks with freshly seeded caches.
 Shared by `initialise_model` and the SMM entry point so both construct
-identical initial conditions.
+identical initial conditions.  `held` holds the education choices (`HeldChoices`); they
+must have been solved on this ability grid.
 """
 function build_model(cp::CommonParams, grids::CommonGrids,
                      up::UnskilledParams, u_grids::UnskilledGrids,
                      sp::SkilledParams, s_grids::SkilledGrids,
-                     sim::SimParams; Nx::Int, Np_S::Int)
+                     sim::SimParams; Nx::Int, Np_S::Int,
+                     held::Union{Nothing,HeldChoices} = nothing)
+    held === nothing || held.x == grids.x ||
+        error("build_model: the held choices were solved on another ability grid")
     s_pre = build_skilled_precomp(s_grids, sp)
 
     r = cp.r;  ν = cp.ν;  φ = cp.φ
     US_flat  = sp.bS * exp(cp.A) / (r + ν)
-    T_init   = fill((up.bT * exp(cp.A) + φ * US_flat) / (r + φ + ν), Nx)
+    T_init   = fill((up.bT * exp(cp.A) + φ * US_flat) / (r + φ + ν), Nx, Nx)
     Us_init  = fill(up.bU * exp(cp.A) / (r + ν), Nx)
     ℓrow     = grids.wa_U                       # marginal mass in aU (for unemployment seed)
 
     uc = UnskilledCache(
         Usearch   = Us_init,
-        T         = T_init,
         Jfrontier = zeros(Nx),
         pstar     = fill(0.10, Nx),
+        T         = T_init,
+        pstar_t   = ones(Nx, Nx),
+        S1_t      = zeros(Nx, Nx),
+        χ_t       = zeros(Nx, Nx),
         τT        = zeros(Nx, Nx),
         u         = 0.4 .* grids.copula.W2,
+        uh        = zeros(Nx, Nx),
         t         = (ν / (2ν + φ)) .* grids.copula.W2,
+        et        = zeros(Nx, Nx),
         duS_carry = zeros(Nx, Nx),
         θ         = 0.5,
     )
@@ -478,7 +525,7 @@ function build_model(cp::CommonParams, grids::CommonGrids,
     sc = SkilledCache(
         U      = fill(US_flat, Nx),
         U0     = fill(US_flat, Nx),
-        U1     = fill(US_flat, Nx),
+        U1     = fill(US_flat, Nx, Nx),
         E0     = zeros(Nx, Np_S),
         E1     = zeros(Nx, Np_S),
         J0     = zeros(Nx, Np_S),
@@ -497,6 +544,6 @@ function build_model(cp::CommonParams, grids::CommonGrids,
         common = cp, grids = grids,
         unsk_par = up, unsk_grids = u_grids, unsk_cache = uc,
         skl_par = sp, skl_grids = s_grids, skl_pre = s_pre, skl_cache = sc,
-        sim = sim,
+        sim = sim, held = held,
     )
 end

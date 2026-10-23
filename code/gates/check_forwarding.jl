@@ -53,6 +53,8 @@ const PARAMS   = read_src("code", "smm", "smm_params.jl")
 const MCMC     = read_src("code", "mcmc", "MCMC_main.jl")
 const DEMC     = read_src("code", "mcmc", "demc.jl")
 const SETTINGS = read_src("code", "smm", "settings.jl")
+# run_weighting reads WEIGHTING for every entry point.
+const MOMENTS  = read_src("code", "smm", "moments.jl")
 
 # ============================================================
 # Source parsing
@@ -145,7 +147,7 @@ const LEGACY_OLD = Set(String(m.captures[1])
 
 # Keys the code actually reads, across every file that reads one.
 const READ_KEYS = Set{String}()
-for src in (MAIN, MCMC, SMM, PARAMS, DEMC)
+for src in (MAIN, MCMC, SMM, PARAMS, DEMC, MOMENTS)
     for m in eachmatch(r"env_setting\(:([A-Z0-9_]+)", src)
         push!(READ_KEYS, String(m.captures[1]))
     end
@@ -156,7 +158,8 @@ end
 # lookups, which are how the mechanism is implemented.
 const RAW_ENV_READS = String[]
 for (name, src) in (("smm_main.jl", MAIN), ("MCMC_main.jl", MCMC),
-                    ("smm.jl", SMM), ("smm_params.jl", PARAMS), ("demc.jl", DEMC))
+                    ("smm.jl", SMM), ("smm_params.jl", PARAMS), ("demc.jl", DEMC),
+                    ("moments.jl", MOMENTS))
     for m in eachmatch(r"ENV\[\"(ROYSEARCH_[A-Z0-9_]+)\"\]", src)
         push!(RAW_ENV_READS, "$name reads $(m.captures[1]) directly")
     end

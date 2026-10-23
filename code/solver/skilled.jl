@@ -5,11 +5,12 @@
 # §382, §420): U_S^(0), E_S^0, E_S^1, J_S^0, J_S^1, p*_S, p^oj_S, I_S.
 # Production is linear, π_S(aS,p) = A P_S aS p (no γ_S).
 #
-# The directed-search choice reads DIFFERENT abilities on its two
-# branches (notes eq:dpolicy):
-#   U_S^(0)(aS) = (b_S + κ_S β_S I_S(aS)) / (r + ν)          stay skilled
-#   U_S^(1)(aU) = (b_S + κ_U E_U(aU,1)) / (r + ν + κ_U)      cross to U
-#   d(aU,aS)    = fraction of cell (aU,aS) with U_S^(1)(aU) > U_S^(0)(aS)
+# The directed-search choice compares the two branches (notes eq:dpolicy):
+#   U_S^(0)(aS)    = (b_S + κ_S β_S I_S(aS)) / (r + ν)       stay skilled
+#   U_S^(1)(aU,aS) = (b_S + κ_U E_U(aU,aS,1)) / (r + ν + κ_U) cross to U
+#   d(aU,aS)       = fraction of cell (aU,aS) with U_S^(1) > U_S^(0)
+# This block solves the stay-skilled branch; the cross branch and d are the
+# career choices of unskilled.jl, since E_U(aU,aS,1) is an unskilled match.
 # The employed surplus uses U_S^(0)(aS) as the outside option: the
 # non-draining fraction 1−d, which carries all the employed mass, has
 # exactly this unemployment value, and the draining fraction d carries
@@ -21,8 +22,8 @@
 # trained mass m_S(aU,aS):
 #   the 1−d part:  u_S = û(aS) m_S,  e_S(p) = ê(aS,p) m_S
 #   the d part:    u_S = m_S,        e_S ≡ 0     (these seek in U, not S)
-# where m_S(aU,aS) = φ t(aU,aS) / (ν + d κ_U) is supplied by the global
-# loop.  Free-entry aggregation reduces to a 1D sum over aS weighted by
+# where m_S(aU,aS) = φ t(aU,aS) / (ν + crossing hire rate) is supplied by
+# the stationary masses (stationary_masses).  Free-entry aggregation reduces to a 1D sum over aS weighted by
 # the non-draining column masses (1−d)·m_S.
 #
 # Functions
@@ -30,7 +31,7 @@
 #   find_cutoff_from_j0          zero-crossing of S^max(aS,·)
 #   find_poj_from_diff_grid      zero-crossing of S^1 − S^0
 #   drain_fraction!              covered fraction of the drain margin
-#   skilled_inner_loop!          iterate (U0, U1, S^0, S^1, d)
+#   skilled_inner_loop!          iterate (U0, S^0, S^1)
 #   solve_stationary_skilled!    per-aS unit shapes (û, ê)
 #   compute_Jbar_skilled         expected firm value for free entry
 #   update_theta_skilled         free-entry tightness update
@@ -179,108 +180,42 @@ end
 # M(aS) = max_{p >= p*_S} (S^1 − S^0)(aS, p) is the participation score: on-the-job
 # search pays for aS at some acceptable match quality iff M(aS) > 0, so the searching
 # set in ability is {M > 0} and its frontier is a zero of M.  The weight of ability
-# cell k is the fraction of the cell that set covers — the ability-grid analogue of the
-# p-coverage _soft_oj_weight returns, with the cell taken as the node's midpoint
-# interval, the convention drain_fraction! and the training frontier both use.
-#
-# Each half-cell is scored against its own neighbour, so a frontier anywhere inside the
-# cell is located from the two nodes bracketing it; mass is uniform within the cell, the
-# assumption every other covered fraction in the solver makes.  At the ends of the grid
-# the missing half takes the node's own sign.
+# cell k is the fraction of the cell that set covers (covered_fraction!) — the
+# ability-grid analogue of the p-coverage _soft_oj_weight returns.
 # ---------------------------------------------------------------------------
-function ojs_participation!(part::AbstractVector{Float64},
-                            M::AbstractVector{Float64},
-                            x::AbstractVector{Float64})
-    Nx = length(x)
-    xlo, xhi = node_midpoint_intervals(x)
-    @inbounds for k in 1:Nx
-        wl = x[k] - xlo[k];  wr = xhi[k] - x[k]
-        sl = k > 1  ? _pos_share(M[k - 1], M[k], x[k - 1], x[k], xlo[k], x[k]) :
-                      (M[k] > 0.0 ? 1.0 : 0.0)
-        sr = k < Nx ? _pos_share(M[k], M[k + 1], x[k], x[k + 1], x[k], xhi[k]) :
-                      (M[k] > 0.0 ? 1.0 : 0.0)
-        part[k] = wl + wr > 1e-14 ? (wl * sl + wr * sr) / (wl + wr) :
-                                    (M[k] > 0.0 ? 1.0 : 0.0)
-    end
-    return part
-end
+ojs_participation!(part::AbstractVector{Float64}, M::AbstractVector{Float64},
+                   x::AbstractVector{Float64}) =
+    covered_fraction!(part, M, x, node_midpoint_intervals(x)...)
 
 
 # ---------------------------------------------------------------------------
 # Cross-market drain d(aU,aS): the POPULATION FRACTION of cell (aU,aS) that
-# abandons skill and searches in the unskilled market, from U_S^(1)(aU) >
+# abandons skill and searches in the unskilled market, from U_S^(1)(aU,aS) >
 # U_S^(0)(aS) (notes eq:dpolicy).
 #
-# U_S^(1) reads only aU and U_S^(0) only aS, and U_S^(0) is increasing in aS, so
-# for each aU the drain set is a LOWER interval in aS with a single crossing
-# aS*(aU) solving U_S^(0)(aS*) = U_S^(1)(aU).  A hard 0/1 at the nodes made every
-# aggregate that reads d a step function of the skilled parameters: a change too
-# small to move aS* past a node flipped no cell, so the non-draining column
-# masses and the augmented seeker pool were bit-identical and ∂m/∂θ was exactly
-# zero — the same defect the training frontier carried before v22.0.0.
-#
-# d is now the fraction of node j's midpoint interval lying BELOW aS*, which is
-# continuous and piecewise-linear in aS* and therefore in the parameters.  It
-# agrees with the indicator on every cell the crossing does not cut and replaces
-# the cut cell's 0/1 by its covered fraction — one cell per aU row.
-#
-# At the base_fc estimate this changes no moment, because the crossing sits 16 to
-# 36 aS-nodes BELOW the training frontier in every row where both cut, so the 120
-# cells it makes fractional hold exactly zero trained mass (v26.0.0 changelog).
-# The margin is continuous where it was not; whether it binds is a property of the
-# parameter point, not of this code.
-#
-# Monotonicity of U_S^(0) is the maintained property (verified: 119/119
-# increments at the base_fc estimate, the smallest 1.07e2).  Where it fails the
-# crossing is not unique, so that case keeps the hard indicator rather than
-# interpolating a crossing that means nothing.
+# A hard 0/1 at the nodes made every aggregate that reads d a step function of
+# the skilled parameters: a change too small to move the margin past a node
+# flipped no cell, so the non-draining column masses and the augmented seeker
+# pool were bit-identical and ∂m/∂θ was exactly zero.  d is the covered fraction
+# of each cell, continuous in the margin and equal to the indicator on every cell
+# the margin does not cut.  U_S^(0) is increasing in aS, so where U_S^(1) does not
+# vary with aS the drain set is a lower interval; where U_S^(1) reads aS — the
+# trained enclosed by the training frontier — it need not be, and each sign change
+# is located where it lies.
 # ---------------------------------------------------------------------------
-function drain_fraction!(d::AbstractMatrix{Float64},
-                         U1::AbstractVector{Float64},
-                         U0::AbstractVector{Float64},
-                         x::AbstractVector{Float64})
-    Nx = length(x)
+"""
+    drain_fraction!(d, U1, U0, x)
+
+Drain `d(a_U, a_S)` from the two branch values on the (aU, aS) grid: the covered fraction
+of each cell on which `U1 > U0`.  Shared by the stationary career choices and the
+transition.
+"""
+function drain_fraction!(d::AbstractMatrix{Float64}, U1::AbstractMatrix{Float64},
+                         U0::AbstractMatrix{Float64}, x::AbstractVector{Float64})
     xlo, xhi = node_midpoint_intervals(x)
-
-    U0_monotone = true
-    @inbounds for j in 2:Nx
-        if U0[j] < U0[j - 1]
-            U0_monotone = false
-            break
-        end
-    end
-
-    @threads for i in 1:Nx
-        @inbounds begin
-            u1 = U1[i]                                      # aU = x[i]
-            if !U0_monotone
-                for j in 1:Nx
-                    d[i, j] = (u1 > U0[j]) ? 1.0 : 0.0
-                end
-            elseif U0[1] >= u1                              # nobody at this aU crosses
-                for j in 1:Nx
-                    d[i, j] = 0.0
-                end
-            elseif U0[Nx] < u1                              # everybody at this aU crosses
-                for j in 1:Nx
-                    d[i, j] = 1.0
-                end
-            else
-                j0 = 2
-                while j0 < Nx && U0[j0] < u1
-                    j0 += 1
-                end
-                dU = U0[j0] - U0[j0 - 1]
-                aS = dU > 0.0 ?
-                     x[j0 - 1] + (u1 - U0[j0 - 1]) * (x[j0] - x[j0 - 1]) / dU :
-                     x[j0]
-                for j in 1:Nx
-                    w = xhi[j] - xlo[j]
-                    d[i, j] = w > 0.0 ? clamp((aS - xlo[j]) / w, 0.0, 1.0) :
-                                        (x[j] < aS ? 1.0 : 0.0)
-                end
-            end
-        end
+    @threads for i in axes(d, 1)
+        g = [U1[i, j] - U0[i, j] for j in axes(d, 2)]
+        covered_fraction!(view(d, i, :), g, x, xlo, xhi)
     end
     return d
 end
@@ -291,11 +226,9 @@ end
 #
 # Given (θ_S, p*_S, p^oj_S) fixed, iterate on the surplus surfaces
 # (S^0_S, S^1_S) and the stay-skilled unemployment value U_S^(0)(aS)
-# until convergence.  Also form the cross branch U_S^(1)(aU) and the 2D
-# directed-search policy d(aU,aS) — a by-product of the value iteration,
-# no separate fixed point.
+# until convergence.
 # ---------------------------------------------------------------------------
-function skilled_inner_loop!(model::Model; κU::Float64, EU1::AbstractVector{Float64})
+function skilled_inner_loop!(model::Model)
     cp = model.common;  gp = model.grids;  sp = model.skl_par
     sg = model.skl_grids;  pre = model.skl_pre;  sc = model.skl_cache;  sim = model.sim
 
@@ -323,11 +256,6 @@ function skilled_inner_loop!(model::Model; κU::Float64, EU1::AbstractVector{Flo
     resid = Vector{Float64}(undef, sim.maxit_inner)
     status = :maxit;  n_inner = 0;  streak = 0
     denom_nb = max(1.0 - β, 1e-14)
-
-    # Cross branch U_S^(1)(aU) is fixed within the block (reads κ_U, E_U(aU,1)).
-    @inbounds for i in 1:Nx
-        sc.U1[i] = (bS + κU * EU1[i]) / (r + ν + κU)
-    end
 
     for it in 1:sim.maxit_inner
         @sync for (c, rng) in enumerate(chunks)
@@ -420,7 +348,6 @@ function skilled_inner_loop!(model::Model; κU::Float64, EU1::AbstractVector{Flo
         end
     end
 
-    drain_fraction!(sc.d, sc.U1, sc.U0, gp.x)
     @inbounds for j in 1:Nx
         sc.U[j] = sc.U0[j]                         # employed outside option (1D in aS)
     end
@@ -537,9 +464,9 @@ function skilled_stayer_columns(model::Model, d::AbstractMatrix{Float64},
                                 mS::AbstractMatrix{Float64})
     mcol0 = nondrain_column_mass(d, mS)
     sum(mcol0) > EMPTY_MASS && return mcol0
-    cp = model.common;  uc = model.unsk_cache;  up = model.unsk_par
+    cp = model.common
     w  = marginal_training_cells(model; entering = true, admit = d .< 1.0)
-    return nondrain_column_mass(d, _mS_from_t(w, d, cp.φ, cp.ν, meeting_rate(uc.θ, up.μ, up.η)))
+    return nondrain_column_mass(d, _mS_from_t(w, crossing_rate(model, d), cp.φ, cp.ν))
 end
 
 
@@ -778,8 +705,7 @@ end
 # `θS_fixed` imposes the skilled tightness instead of solving free entry for it: the block
 # then solves every other skilled object conditional on that θ_S, which is one evaluation
 # of the skilled free-entry map (skilled_equilibria, solver.jl).
-function solve_skilled_block!(model::Model; κU::Float64, EU1::AbstractVector{Float64},
-                              θS_fixed::Union{Nothing,Float64} = nothing)
+function solve_skilled_block!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing)
     gp = model.grids;  sc = model.skl_cache;  sim = model.sim
     Nx = length(gp.x)
     θS_fixed === nothing || (sc.θ = θS_fixed)
@@ -807,7 +733,7 @@ function solve_skilled_block!(model::Model; κU::Float64, EU1::AbstractVector{Fl
         poj_old   = copy(sc.poj)
         part_old  = copy(sc.s_part)
 
-        inner = skilled_inner_loop!(model; κU = κU, EU1 = EU1)
+        inner = skilled_inner_loop!(model)
         κ = inner.κ;  inner_conv = inner.converged
 
         if inner.status === :diverged

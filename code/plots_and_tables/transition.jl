@@ -103,21 +103,9 @@ isdefined(Main, :TransitionResult) ||
 # Configuration
 # ============================================================
 
-# Weight matrix suffix — must match what was used in estimation
-if !@isdefined(W_COND_TARGET)
-    const W_COND_TARGET = 2.0
-end
-
-# _w_suffix may already be defined by the orchestrator; provide a local
-# helper that doesn't clash.
-if !isdefined(Main, :_w_suffix_pt)
-    _w_suffix_pt(ct::Float64) = ct == 0.0 ? "_diagonalW" :
-                                 ct == 1.0 ? "_compressedW" :
-                                 ct == 2.0 ? "_equalW" : "_fullW"
-end
-
+# The weighting the estimates were produced under; transition_main.jl has already set it.
 if !@isdefined(W_SUFFIX)
-    const W_SUFFIX = _w_suffix_pt(W_COND_TARGET)
+    const W_SUFFIX = weighting_suffix(run_weighting())
 end
 
 # The four estimation windows (ordered for tables)
@@ -167,7 +155,7 @@ function load_all_smm_bundles!(; scenarios, point::Symbol, suffix::String = W_SU
             b = read_bundle(file)
             (b === nothing || b.result === nothing || b.spec === nothing) &&
                 error("$(basename(file)), which the $sc transition was solved at, is unreadable.")
-            require_current_major(b, file)
+            require_current_estimate(b, file)
             smm_bundles[w] = b
             @printf("  %-14s %s  %s\n", w, basename(file), bundle_summary(b))
         end
@@ -201,20 +189,12 @@ end
 # Helper: load data moments + standard errors for a window
 # ============================================================
 
+# The data standard error of a moment is its sampling SD σ̂_k, the one the diagonal weighting
+# divides by; NaN for a moment the variance file does not list.
 function _load_data_and_se(window::Symbol)
     moments_nt = load_data_moments(; window=window, derived_dir=DERIVED_DIR)
-    se_vec     = load_sigma_matrix(; window=window, derived_dir=DERIVED_DIR)
-    # se_vec is sqrt(diag(Σ)) in the sigma CSV's own column order.  Match the
-    # SEs to moment names BY CSV HEADER, not by position in MOMENT_NAMES, so
-    # the mapping stays correct across moment-list reorderings (e.g. the
-    # p10/p90 insertion into the wage-percentile block) and across old/new
-    # sigma files.
-    sigma_file = joinpath(DERIVED_DIR, "sigma_$(window).csv")
-    hdr = Symbol.(strip.(split(readline(sigma_file), ',')))
-    se_dict = Dict{Symbol,Float64}(nm => NaN for nm in MOMENT_NAMES)
-    for (i, nm) in enumerate(hdr)
-        (i <= length(se_vec) && haskey(se_dict, nm)) && (se_dict[nm] = se_vec[i])
-    end
+    sv         = load_sampling_variances(; window=window, derived_dir=DERIVED_DIR)
+    se_dict    = Dict{Symbol,Float64}(nm => sqrt(max(get(sv, nm, NaN), 0.0)) for nm in MOMENT_NAMES)
     return moments_nt, se_dict
 end
 
@@ -388,134 +368,12 @@ CAT_COLOR = Dict{String,Symbol}(
 
 
 # ============================================================
-# SMM Standard Errors (sandwich formula)
-# ============================================================
-
-"""
-    compute_smm_standard_errors(bundle; derived_dir, cond_target) → (SE_θ, SE_model_mom)
-
-Compute SMM standard errors for parameter estimates and model moments
-using the sandwich formula:
-
-    Var(θ̂) = (D'WD)⁻¹ D'W Ŝ W D (D'WD)⁻¹
-
-where:
-  - D  = Jacobian ∂g(θ)/∂θ' (K_active × n_free), computed numerically
-  - W  = weight matrix from load_weight_matrix
-  - Ŝ  = covariance matrix of moments from sigma_{window}.csv
-
-Returns:
-  - SE_θ         :: Vector{Float64}  — SEs for each free parameter in spec.free order
-  - SE_model_mom :: Dict{Symbol, Float64} — SEs for each active model moment
-                    (delta method: SE_g = sqrt(diag(D * Var(θ̂) * D')))
-"""
-function compute_smm_standard_errors(bundle; derived_dir::String, cond_target::Float64=W_COND_TARGET, window::Symbol=:base_fc)
-    res  = bundle.result
-    spec = bundle.spec
-    sim  = _bundle_sim(bundle)
-
-    θ_opt = res.theta_opt
-    n_free = length(θ_opt)
-
-    # Determine active moments (weight > 0) in spec order
-    active_moments = [nm for nm in MOMENT_NAMES
-                      if haskey(spec.moments, nm) && spec.moments[nm].weight > 0.0]
-    K_active = length(active_moments)
-
-    # ── Helper: compute model moment vector at a given θ ────────────────
-    # θ carries the tightnesses, so each step is one equilibrium and there is no branch to hold.
-    function _model_mom_vec(θ)
-        mm = equilibrium_at(θ, spec; sim = sim).moments
-        mm === nothing && return fill(NaN, K_active)
-        return [hasproperty(mm, nm) ? getproperty(mm, nm) : NaN for nm in active_moments]
-    end
-
-    # ── Numerical Jacobian D (K_active × n_free) ────────────────────────
-    ε = 1e-5
-    g0 = _model_mom_vec(θ_opt)
-    D  = zeros(K_active, n_free)
-    for j in 1:n_free
-        θ_fwd = copy(θ_opt); θ_fwd[j] += ε
-        θ_bwd = copy(θ_opt); θ_bwd[j] -= ε
-        g_fwd = _model_mom_vec(θ_fwd)
-        g_bwd = _model_mom_vec(θ_bwd)
-        D[:, j] = (g_fwd .- g_bwd) ./ (2ε)
-    end
-
-    # ── Load Ŝ (full covariance matrix, subset to active moments) ────────
-    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-    if !isfile(sigma_file)
-        @warn "sigma_$(window).csv not found — SMM SEs unavailable"
-        return fill(NaN, n_free), Dict{Symbol,Float64}(nm => NaN for nm in active_moments)
-    end
-    df_sig   = CSV.read(sigma_file, DataFrame)
-    csv_cols = Symbol.(names(df_sig))
-    Σ_full   = Matrix{Float64}(df_sig)
-
-    # Subset to active moments
-    col_idx = [findfirst(==(nm), csv_cols) for nm in active_moments]
-    missing_idx = findall(isnothing, col_idx)
-    if !isempty(missing_idx)
-        @warn "sigma CSV missing some active moments — SE computation may be unreliable"
-        # Replace missing with 0
-        col_idx = [isnothing(i) ? 0 : i for i in col_idx]
-    end
-    Ŝ = zeros(K_active, K_active)
-    for (r, ci) in enumerate(col_idx), (c, cj) in enumerate(col_idx)
-        if ci > 0 && cj > 0
-            Ŝ[r, c] = Σ_full[ci, cj]
-        end
-    end
-
-    # ── Load W matrix ────────────────────────────────────────────────────
-    # Determine skip_moments: those with weight == 0
-    skip_moments = [nm for nm in MOMENT_NAMES
-                    if haskey(spec.moments, nm) && spec.moments[nm].weight <= 0.0]
-    W = load_weight_matrix(; window=window, derived_dir=derived_dir,
-                             cond_target=cond_target, skip_moments=skip_moments)
-
-    # If W is nothing (equal weights), use identity
-    if isnothing(W)
-        W = Matrix{Float64}(I, K_active, K_active)
-    end
-
-    # ── Sandwich formula ─────────────────────────────────────────────────
-    # Var(θ̂) = (D'WD)⁻¹ D'W Ŝ W D (D'WD)⁻¹
-    DtW   = D' * W          # n_free × K_active
-    DtWD  = DtW * D         # n_free × n_free
-    meat  = DtW * Ŝ * W * D # n_free × n_free
-
-    # Regularise DtWD for inversion
-    DtWD_reg = DtWD + 1e-12 * I
-    DtWD_inv = try
-        inv(DtWD_reg)
-    catch e
-        @warn "DtWD inversion failed ($e) — using pinv"
-        pinv(DtWD_reg)
-    end
-
-    Var_θ = DtWD_inv * meat * DtWD_inv
-    SE_θ  = sqrt.(max.(diag(Var_θ), 0.0))
-
-    # ── Delta-method SEs for model moments ──────────────────────────────
-    # Var(g(θ̂)) = D * Var(θ̂) * D'  (note: D is K×p, Var_θ is p×p)
-    Var_g = D * Var_θ * D'
-    SE_g_vec = sqrt.(max.(diag(Var_g), 0.0))
-    SE_model_mom = Dict{Symbol,Float64}(
-        nm => SE_g_vec[i] for (i, nm) in enumerate(active_moments)
-    )
-
-    return SE_θ, SE_model_mom
-end
-
-
-# ============================================================
 # 1. MODEL FIT TABLES A & B (LaTeX)
 # ============================================================
 
 """
     _build_model_fit_tex(moments_in_table; windows_for_table, window_labels,
-                          data_mom, se_dict, model_mom, se_model_mom,
+                          data_mom, se_dict, model_mom,
                           caption, label, col_spec) → Vector{String}
 
 Internal helper: build the lines of a LaTeX model-fit table for a given
@@ -528,7 +386,6 @@ function _build_model_fit_tex(
     data_mom          :: Dict{Symbol, NamedTuple},
     se_dict           :: Dict{Symbol, Dict{Symbol,Float64}},
     model_mom         :: Dict{Symbol, NamedTuple},
-    se_model_mom      :: Dict{Symbol, Dict{Symbol,Float64}},
     caption           :: String,
     label             :: String,
     categories        :: Vector{String},
@@ -587,7 +444,6 @@ function _build_model_fit_tex(
                 d_val    = haskey(data_mom, w) && haskey(data_mom[w], nm) ? data_mom[w][nm].value : NaN
                 m_val    = haskey(model_mom, w) && hasproperty(model_mom[w], nm) ? getproperty(model_mom[w], nm) : NaN
                 se_d_val = haskey(se_dict, w) ? get(se_dict[w], nm, NaN) : NaN
-                se_m_val = haskey(se_model_mom, w) ? get(se_model_mom[w], nm, NaN) : NaN
                 diff     = isfinite(d_val) && isfinite(m_val) ? m_val - d_val : NaN
 
                 fmt_d    = isfinite(d_val)  ? @sprintf("%.4f", d_val)   : "--"
@@ -596,12 +452,9 @@ function _build_model_fit_tex(
 
                 row *= " & $fmt_d & $fmt_m & $fmt_diff"
 
-                # SE row: data SE under data column, model SE under model column
-                _sd_str  = isfinite(se_d_val) ? @sprintf("%.4f", se_d_val) : ""
-                _sm_str  = isfinite(se_m_val) ? @sprintf("%.4f", se_m_val) : ""
-                fmt_se_d = isfinite(se_d_val) ? "{\\scriptsize ($(_sd_str))}" : ""
-                fmt_se_m = isfinite(se_m_val) ? "{\\scriptsize ($(_sm_str))}" : ""
-                se_row *= " & $fmt_se_d & $fmt_se_m &"
+                # SE row: the data SE under the data column
+                fmt_se_d = isfinite(se_d_val) ? "{\\scriptsize ($(@sprintf("%.4f", se_d_val)))}" : ""
+                se_row *= " & $fmt_se_d & &"
             end
 
             row    *= " \\\\"
@@ -627,8 +480,8 @@ Generate two LaTeX tables comparing data and model moments.
 Table A (`model_fit_A{suffix}.tex`): Labour-market stocks + Transition rates
 Table B (`model_fit_B{suffix}.tex`): Wages + Tightness
 
-Each data cell has the data SE in parentheses on the row below (\\scriptsize).
-Each model cell has the delta-method SE for the model moment below it.
+Each data cell has the data SE, the moment's sampling SD, in parentheses on the row
+below (\\scriptsize).
 """
 function make_model_fit_tables(; suffix::String=W_SUFFIX)
     println("\n── Generating model fit tables (A & B) ──"); flush(stdout)
@@ -640,7 +493,6 @@ function make_model_fit_tables(; suffix::String=W_SUFFIX)
     data_mom     = Dict{Symbol, NamedTuple}()
     se_dict      = Dict{Symbol, Dict{Symbol,Float64}}()
     model_mom    = Dict{Symbol, NamedTuple}()
-    se_model_mom = Dict{Symbol, Dict{Symbol,Float64}}()
 
     for w in windows_for_table
         dm, sd = _load_data_and_se(w)
@@ -649,18 +501,8 @@ function make_model_fit_tables(; suffix::String=W_SUFFIX)
         if haskey(smm_bundles, w)
             model_mom[w] = _get_model_moments(smm_bundles[w])
             println("  Computed model moments for $w"); flush(stdout)
-
-            # Compute SMM standard errors
-            println("  Computing SMM standard errors for $w..."); flush(stdout)
-            _, se_mm = compute_smm_standard_errors(smm_bundles[w];
-                                                    derived_dir=DERIVED_DIR,
-                                                    cond_target=W_COND_TARGET,
-                                                    window=w)
-            se_model_mom[w] = se_mm
-            println("  Done SE for $w"); flush(stdout)
         else
             @warn "No SMM bundle for $w — model column will be blank"
-            se_model_mom[w] = Dict{Symbol,Float64}()
         end
     end
 
@@ -688,7 +530,6 @@ function make_model_fit_tables(; suffix::String=W_SUFFIX)
         data_mom          = data_mom,
         se_dict           = se_dict,
         model_mom         = model_mom,
-        se_model_mom      = se_model_mom,
         caption           = "Model Fit (A): Labour-Market Stocks and Transition Rates",
         label             = "tab:model_fit_a",
         categories        = cats_A,
@@ -708,7 +549,6 @@ function make_model_fit_tables(; suffix::String=W_SUFFIX)
         data_mom          = data_mom,
         se_dict           = se_dict,
         model_mom         = model_mom,
-        se_model_mom      = se_model_mom,
         caption           = "Model Fit (B): Wages and Tightness",
         label             = "tab:model_fit_b",
         categories        = cats_B,
@@ -902,8 +742,9 @@ function _get_x_bar(bundle; Nx_fine::Int = 400)
     obj = compute_equilibrium_objects(sel.model)
     xg  = obj.xg
 
-    # gap(x) = (−c(x) + T(x)) − U_search(x);  training chosen where gap ≥ 0
-    gap = obj.net_T .- obj.Usearch
+    # gap(x) = (−c(x) + T(x)) − U_search(x) for the type with a_U = a_S = x;  training
+    # chosen where gap ≥ 0
+    gap = diag(obj.net_T) .- obj.Usearch
 
     # Find zero crossing via linear interpolation
     for i in firstindex(xg):lastindex(xg)-1

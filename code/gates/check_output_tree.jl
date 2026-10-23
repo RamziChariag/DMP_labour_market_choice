@@ -75,8 +75,9 @@ for f in _walk(CODE)
 end
 
 # ── 5. exact window / pair subdirectories per category ─────────────────────
-const WINDOWS_E = ("base_fc", "crisis_fc", "base_covid", "crisis_covid")
-const PAIRS_E   = ("fc", "covid")
+const WINDOWS_E = ("base_fc", "crisis_fc", "base_covid", "crisis_covid",
+                   "crisis_fc_cf1", "crisis_covid_cf1", "crisis_fc_cf2", "crisis_covid_cf2")
+const PAIRS_E   = ("fc", "covid", "fc_cf1", "covid_cf1", "fc_cf2", "covid_cf2")
 for (kind, root) in (("plots", joinpath(OUT, "plots")), ("tables", joinpath(OUT, "tables")))
     isdir(root) || continue
     for (cat, admitted) in (("fit", WINDOWS_E), ("model", WINDOWS_E),

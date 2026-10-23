@@ -95,7 +95,8 @@ end
 
 Return the empirical moment targets used in SMM estimation.  Each
 field is a (value, weight) tuple.  Reads from
-`moments_{window}.csv` produced by the data pipeline.
+`moments_{window}.csv` produced by the data pipeline; a counterfactual window reads its
+parent's (`data_window`, paths.jl), and so do its sampling variances and calibrated rates.
 
 The training_share row already carries its level from the enrolment target,
 written in Stage 9 of the data pipeline, so this returns the moments exactly as
@@ -125,7 +126,7 @@ Moment list
     overlap_UgtS, overlap_SltU, ltu_share_S
 """
 function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
-    moments_file = joinpath(derived_dir, "moments_$(window).csv")
+    moments_file = joinpath(derived_dir, "moments_$(data_window(window)).csv")
     isfile(moments_file) || error("Moments file not found: $moments_file — run the data pipeline first.")
     raw = _read_moments_csv(moments_file)
 
@@ -136,38 +137,60 @@ end
 
 
 """
-    _w_suffix(cond_target) -> String
+    run_weighting() -> Symbol
 
-Filename suffix identifying the weighting scheme, so bundles produced under the two
-schemes never overwrite one another. Kept beside `load_weight_matrix` because the
-same constant selects both the suffix and the matrix that is loaded.
+The objective's weighting, `:diagonal` or `:equal` (see `load_weight_matrix`), from
+`ROYSEARCH_WEIGHTING`. Every entry point reads it here — the estimation, the chains, the
+transition, the policy run and the tables — so all of them name and read the same files.
+Diagonal is the default: every stored estimate was produced under it.
 """
-function _w_suffix(cond_target::Float64)
-    cond_target == 0.0 && return "_diagonalW"
-    cond_target == 2.0 && return "_equalW"
-    error("W_COND_TARGET must be 0.0 (diagonal-σ) or 2.0 (equal weights); got $cond_target.")
+run_weighting() = env_setting(:WEIGHTING, :diagonal)
+
+"""
+    weighting_suffix(weighting) -> String
+
+Filename suffix of a weighting, `_diagonalW` or `_equalW`, so the estimates under the two
+never overwrite one another.
+"""
+function weighting_suffix(weighting::Symbol)
+    weighting === :diagonal && return "_diagonalW"
+    weighting === :equal    && return "_equalW"
+    error("WEIGHTING must be :diagonal or :equal; got :$weighting.")
 end
 
 """
-    load_weight_matrix(; window, derived_dir, cond_target,
+    load_sampling_variances(; window, derived_dir) → Dict{Symbol,Float64}
+
+The per-moment sampling variances σ̂²_k of `sampling_var_{window}.csv` (the parent's for a
+counterfactual window), in raw moment units. They are the diagonal weights of the objective
+and, as σ̂_k, the data standard errors the tables and panels report.
+"""
+function load_sampling_variances(; window::Symbol, derived_dir::String)
+    sv_name = "sampling_var_$(data_window(window)).csv"
+    sv_file = joinpath(derived_dir, sv_name)
+    isfile(sv_file) || error("$sv_name not found in $derived_dir — run the data pipeline first.")
+    df_sv = CSV.read(sv_file, DataFrame)
+    return Dict(Symbol(r.moment) => Float64(r.sampling_var) for r in eachrow(df_sv))
+end
+
+"""
+    load_weight_matrix(; window, derived_dir, weighting,
                          skip_moments) → Union{Nothing, Matrix{Float64}}
 
 Build the SMM weighting matrix over the active moments (i.e. those in
-`MOMENT_NAMES` that are not in `skip_moments`).
+`MOMENT_NAMES` that are not in `skip_moments`):
+  :diagonal  W = Diagonal(1 / σ̂²_k), σ̂²_k the sampling variances of
+             `load_sampling_variances` (all moments on one 1/N footing)
+  :equal     returns `nothing`; `build_smm_spec` then builds the
+             relative-deviation weights Diagonal(weight_k / m̂_k²)
 
-Conditioning behaviour (controlled by `cond_target`):
-  cond_target == 0.0  diagonal-σ: W = Diagonal(1 / σ̂²_samp) from the per-moment
-                       SAMPLING-variance vector sampling_var_{window}.csv (all
-                       moments on one 1/N footing).
-  cond_target == 2.0  equal weights — returns `nothing`
-
-The σ̂²_samp vector is in RAW moment units, matching the raw deviation vector
+The σ̂²_k are in RAW moment units, matching the raw deviation vector
 g_k = m_k − m̂_k in compute_loss_matrix (all scaling lives in W).
 """
 function load_weight_matrix(;
     window::Symbol = :base_fc,
     derived_dir::String,
-    cond_target::Float64 = 0.0,
+    weighting::Symbol = :diagonal,
     skip_moments::Vector{Symbol} = Symbol[],
 )
     K = length(MOMENT_NAMES)
@@ -184,53 +207,27 @@ function load_weight_matrix(;
                 K_active, K, join(string.(skip_moments), ", "))
     end
 
-    if cond_target == 2.0
-        @printf("  cond_target == 2.0 → equal weights (no W matrix)\n")
+    if weighting === :equal
+        @printf("  weighting = equal → no W matrix\n")
         return nothing
     end
+    weighting === :diagonal || error("WEIGHTING must be :diagonal or :equal; got :$weighting.")
 
-    # Diagonal-σ: W = Diagonal(1/σ̂²_samp) over the active moments, from the
-    # per-moment sampling-variance vector (one 1/N footing). A missing file
-    # means the data pipeline has not been run — error loudly.
-    if cond_target == 0.0
-        sv_file = joinpath(derived_dir, "sampling_var_$(window).csv")
-        isfile(sv_file) || error(
-            "sampling_var_$(window).csv not found in $derived_dir — the diagonal-σ " *
-            "weight needs the per-moment sampling variances; run the data pipeline first.")
-        df_sv = CSV.read(sv_file, DataFrame)
-        sv    = Dict(Symbol(r.moment) => Float64(r.sampling_var) for r in eachrow(df_sv))
-        d = Float64[]
-        bad = Symbol[]
-        for nm in active_names
-            v = get(sv, nm, NaN)
-            (isfinite(v) && v > 0.0) ? push!(d, 1.0 / v) : (push!(d, NaN); push!(bad, nm))
-        end
-        isempty(bad) || error(
-            "sampling_var_$(window).csv has non-positive / missing variance for active " *
-            "moment(s): " * join(string.(bad), ", ") * " — cannot build the diagonal-σ weight.")
-        @printf("  cond_target == 0.0 → diagonal-σ W = Diagonal(1/σ̂²_samp) from %s\n", sv_file)
-        return Matrix(Diagonal(d))
+    # A moment without a positive variance cannot be weighted: error loudly rather than
+    # drop it from the objective.
+    sv  = load_sampling_variances(; window = window, derived_dir = derived_dir)
+    d   = Float64[]
+    bad = Symbol[]
+    for nm in active_names
+        v = get(sv, nm, NaN)
+        (isfinite(v) && v > 0.0) ? push!(d, 1.0 / v) : (push!(d, NaN); push!(bad, nm))
     end
-
-    error("full-Σ⁻¹ and compressed-diagonal weighting were removed in v14.1; use " *
-          "cond_target=0.0 (diagonal sampling-variance) or 2.0 (equal weights). " *
-          "Got cond_target=$cond_target.")
-end
-
-
-"""
-    load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String) → Vector{Float64}
-
-Read `sigma_{window}.csv` and return the vector of standard errors
-(square root of the diagonal). The training_share entry is the
-enrolment target's own across-Fall-year dispersion, written by the
-data pipeline, so the returned σ refers to the shipped data target.
-"""
-function load_sigma_matrix(; window::Symbol = :base_fc, derived_dir::String)
-    sigma_file = joinpath(derived_dir, "sigma_$(window).csv")
-    isfile(sigma_file) || error("Sigma file not found: $sigma_file — run the data pipeline first.")
-    σ_vec = _read_sigma_csv(sigma_file)
-    return σ_vec
+    isempty(bad) || error(
+        "sampling_var_$(data_window(window)).csv has non-positive / missing variance for active " *
+        "moment(s): " * join(string.(bad), ", ") * " — cannot build the diagonal weight.")
+    @printf("  weighting = diagonal → W = Diagonal(1/σ̂²_samp) from sampling_var_%s.csv\n",
+            data_window(window))
+    return Matrix(Diagonal(d))
 end
 
 
@@ -254,23 +251,18 @@ SMM estimation.
   φ   from phi_calibration.csv training completion rate (nominal four-year programme,
                                 pooled across Fall semesters)
 
-`window` controls which ν is returned. Crisis windows are mapped to
-their baseline (crisis_fc → base_fc, crisis_covid → base_covid)
-per data_and_moments.pdf §21.
+`window` controls which ν is returned. Every window is mapped to
+its baseline (`PAIR_BASE`, paths.jl: crisis_fc → base_fc, crisis_covid → base_covid, and
+each counterfactual window to its parent's) per data_and_moments.pdf §21.
 """
 function load_calibrated_params(; window::Symbol = :base_fc,
                                   derived_dir::String)
     r_val = 0.05 / 12
 
     # Which baseline supplies ν for this window
-    nu_pair = if window in (:base_fc, :crisis_fc)
-        :base_fc
-    elseif window in (:base_covid, :crisis_covid)
-        :base_covid
-    else
-        error("load_calibrated_params: unrecognised window :$window. " *
-              "Expected one of :base_fc, :crisis_fc, :base_covid, :crisis_covid.")
-    end
+    haskey(PAIR_BASE, window) || error("load_calibrated_params: unrecognised window :$window. " *
+                                       "Expected one of $(join(WINDOWS, ", ")).")
+    nu_pair = PAIR_BASE[window]
 
     nu_file = joinpath(derived_dir, "nu_estimation.csv")
     isfile(nu_file) || error(
@@ -364,19 +356,6 @@ function _read_moments_csv(filepath::String)
     end
 
     return NamedTuple(pairs)
-end
-
-
-"""
-    _read_sigma_csv(filepath) → Vector{Float64}
-
-Read a covariance-matrix CSV and return the vector of standard
-errors (square root of the diagonal).
-"""
-function _read_sigma_csv(filepath::String)
-    df = CSV.read(filepath, DataFrame)
-    Sigma = Matrix{Float64}(df)
-    return sqrt.(max.(diag(Sigma), 0.0))
 end
 
 

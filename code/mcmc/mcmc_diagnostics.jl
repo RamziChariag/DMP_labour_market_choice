@@ -416,10 +416,11 @@ function jacobian_adaptive_fd(θ̂_unc::Vector{Float64}, free::Vector{ParamSpec}
 end
 
 """
-    se_bound_diagonal(G, W, σ̂, C = I) -> (se_bound, se_curv)
+    se_bound_diagonal(G, W, σ̂, C = I; bread = nothing) -> (se_bound, se_sandwich)
 
-Standard errors from CH Theorem 4 with the ONLY input about Ω being its
-diagonal.  With `a_j = W G J⁻¹ e_j` and `J = G′WG`, the sandwich variance is
+Standard errors of the extremum estimator with the ONLY input about Ω being its
+diagonal.  Its first-order condition gives δθ̂ = B G′W δm̂, with `B` the inverse curvature
+of Q/2 (the bread).  With `a_j = W G B e_j` the sandwich variance is
 `a_j′Ω a_j ≤ (Σ_i |a_ij| σ̂_i)²`, with equality at the rank-one Ω aligned with
 sign(a_j) — so the bound is sharp and attainable, not a slack inequality.
 
@@ -427,24 +428,31 @@ No off-diagonal element of Ω is estimated, assumed, or set to zero; no two
 moments are ever compared, so moments observed at different frequencies and
 from different surveys raise no issue here.  The bound therefore holds for the
 true Ω whatever it is, and a reported interval built on it cannot be too
-narrow.  Returned alongside `se_curv = sqrt(diag(J⁻¹))`, the curvature-only
-standard error (exact under efficient weighting; CH Theorem 3).
+narrow.  Returned alongside the sandwich at Ω = W⁻¹ (uncorrelated moment errors),
+`sqrt(diag(B J B))` with `J = G′WG`.
+
+`bread = nothing` takes `B = J⁻¹ = pinv(J)`, the Gauss–Newton curvature, under which the
+sandwich is `sqrt(diag(J⁻¹))` (exact under efficient weighting; CH Theorem 3).  Any other
+`bread` is an inverse curvature measured elsewhere: on the chain path, the covariance of the
+kept draws.
 
 Each column `c` of `C` is a linear combination of the parameters, and the two errors are
-those of `c′θ̂`: `a = W G J⁻¹ c` and `sqrt(c′J⁻¹c)`.  With `C = I` they are the parameters'
+those of `c′θ̂`: `a = W G B c` and `sqrt(c′B J B c)`.  With `C = I` they are the parameters'
 own; with `C` the gradient of a function of the parameters they are its delta-method errors.
 """
 function se_bound_diagonal(G::Matrix{Float64}, W::Matrix{Float64}, σ̂::Vector{Float64},
-                           C::AbstractMatrix{Float64} = Matrix{Float64}(I, size(G, 2), size(G, 2)))
+                           C::AbstractMatrix{Float64} = Matrix{Float64}(I, size(G, 2), size(G, 2));
+                           bread::Union{Nothing,AbstractMatrix{Float64}} = nothing)
     J  = G' * W * G
-    Ji = pinv(J)
-    A  = W * G * Ji * C                              # column j = a_j
+    B  = bread === nothing ? pinv(J) : bread
+    A  = W * G * B * C                               # column j = a_j
     m  = size(C, 2)
     se_bound = Vector{Float64}(undef, m)
     @inbounds for j in 1:m
         se_bound[j] = sum(abs.(@view A[:, j]) .* σ̂)
     end
-    return (se_bound, sqrt.(abs.(diag(C' * Ji * C))))
+    V  = bread === nothing ? C' * B * C : C' * B * J * B * C
+    return (se_bound, sqrt.(abs.(diag(V))))
 end
 
 """

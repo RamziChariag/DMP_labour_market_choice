@@ -36,7 +36,7 @@ for f in ("moments", "smm_params", "bundle", "smm")
     include(joinpath(ROOT, "code", "smm", f * ".jl"))
 end
 
-const W_SUFFIX = get(ENV, "ROYSEARCH_W_SUFFIX", "_diagonalW")
+const W_SUFFIX = weighting_suffix(run_weighting())
 # Relative distance to a^h inside which a node's p*_U classification is rounding. 1 − p*_U
 # is first order in (a_U − a^h)/a^h, so a node that close sits under the 1e-10 classification
 # threshold or the solve error; measured at the base_fc estimate, that band is 1.0e-10 wide.

@@ -62,7 +62,7 @@ mk = active_moment_keys(spec)
 k  = length(mk)
 # W is diag(1/σ̂²) over the active moments in this same order, so the whitening the
 # objective applies is already in the matrix. Reading it from there rather than from
-# the sigma file keeps the diagnostic and the criterion in step if either is rebuilt.
+# sampling_var_<window>.csv keeps the diagnostic and the criterion in step if either is rebuilt.
 σ̂  = [1.0 / sqrt(spec.W[i, i]) for i in 1:k]
 
 @printf("window %s   moments k=%d   free params d=%d   r = k-d = %d\n", WINDOW, k, d, k - d)

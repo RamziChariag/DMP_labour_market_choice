@@ -29,8 +29,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # The closed-form sampling-variance helpers (_kish_prop_var, _kish_neff, _wcm,
 # _wquantile_var) and the cluster-robust _kish_prop_var_clustered live in
-# setup.jl, which data_processing_main.jl includes first. They were duplicated
-# verbatim here and in sigma.jl; one definition now serves both.
+# setup.jl, which data_processing_main.jl includes first.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Within-person correlation assumed for the ASEC design effect (see the ASEC

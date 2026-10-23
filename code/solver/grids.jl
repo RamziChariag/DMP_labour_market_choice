@@ -402,6 +402,33 @@ end
                       clamp((hi - xc) / (hi - lo), 0.0, 1.0)
 end
 
+"""
+    covered_fraction!(share, g, x, xlo, xhi) → share
+
+Fraction of each ability cell `[xlo[k], xhi[k]]` on which `g > 0`, `g` interpolated
+linearly between nodes.  Each half-cell is scored against its own neighbour, so a sign
+change anywhere inside the cell is located from the two nodes bracketing it, and every
+sign change of `g` along the grid is located, not only the first; mass is uniform within
+the cell.  At the ends of the grid the missing half takes the node's own sign.  The
+margin it scores moves continuously with `g`, and the share equals the indicator on every
+cell no sign change cuts.
+"""
+function covered_fraction!(share::AbstractVector{Float64}, g::AbstractVector{Float64},
+                           x::AbstractVector{Float64},
+                           xlo::AbstractVector{Float64}, xhi::AbstractVector{Float64})
+    Nx = length(x)
+    @inbounds for k in 1:Nx
+        wl = x[k] - xlo[k];  wr = xhi[k] - x[k]
+        sl = k > 1  ? _pos_share(g[k - 1], g[k], x[k - 1], x[k], xlo[k], x[k]) :
+                      (g[k] > 0.0 ? 1.0 : 0.0)
+        sr = k < Nx ? _pos_share(g[k], g[k + 1], x[k], x[k + 1], x[k], xhi[k]) :
+                      (g[k] > 0.0 ? 1.0 : 0.0)
+        share[k] = wl + wr > 1e-14 ? (wl * sl + wr * sr) / (wl + wr) :
+                                     (g[k] > 0.0 ? 1.0 : 0.0)
+    end
+    return share
+end
+
 # The searching share of cell (aS, p): the type-level OJS participation weight times
 # the p-coverage of the region below p^oj.  The two OJS margins — which abilities
 # search at all, and from which match qualities — are both covered fractions of a

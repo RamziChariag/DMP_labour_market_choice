@@ -40,7 +40,7 @@ for f in ("moments", "smm_params", "bundle", "smm")
     include(joinpath(ROOT, "code", "smm", f * ".jl"))
 end
 
-const W_SUFFIX = get(ENV, "ROYSEARCH_W_SUFFIX", "_diagonalW")
+const W_SUFFIX = weighting_suffix(run_weighting())
 
 @printf("RoySearch v%s — threaded-evaluation gate (%d threads)\n",
         ROYSEARCH_VERSION, Threads.nthreads())

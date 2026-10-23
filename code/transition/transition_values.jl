@@ -19,6 +19,12 @@
 #   skilled match          search on the job, end     max{0, S⁰, S¹}
 # T continues on U_S, and both crossing branches continue on U_S.
 #
+# HELD CHOICES.  A z₁ model that holds its education choices (`Model.held`, a cf1 window)
+# re-makes neither of the first and third choices: τ and d are the held arrays at every
+# date, and every envelope over training or over the market is the held branch of its node
+# (`trains_at`, `drains_at`, `skilled_value_at`, unskilled.jl), as in its stationary solve.
+# τ then never moves between dates, so no slice is swept or released.
+#
 # FLOW VALUES OF UNEMPLOYMENT.  A match's outside option enters its surplus as the flow
 # z = (r+ν)U − U̇ (spec V4), which the recursion gives without the stationary
 # substitution: b_U + κ_U β_U S_U(·,1) for an unskilled searcher, b_S + κ_S β_S ∫S dΓ for
@@ -186,107 +192,18 @@ function _unskilled_surface!(raw::AbstractVector{Float64}, E::AbstractVector{Flo
 end
 
 """
-    _training_fraction!(τ, Utr, C, x)
+    _training_slice_hire_share!(path, model, n, D)
 
-`training_policy!` with a searching value that may vary with aS: in each aU row the
-training set is the upper interval of aS on which `Utr ≥ C`, and τ is the covered
-fraction of each cell above the crossing.  Where `C` is constant along the row every
-comparison and the interpolation are `training_policy!`'s own arithmetic, so a steady
-state returns its policy.
+The hired share of every training slice's meetings at date n (`crosser_hire_share`), from
+the date's row entry surplus and the slice's own; zero where the cell does not train.
 """
-function _training_fraction!(τ::AbstractMatrix{Float64}, Utr::AbstractMatrix{Float64},
-                             C::AbstractMatrix{Float64}, x::AbstractVector{Float64})
-    Nx = length(x)
-    xlo, xhi = node_midpoint_intervals(x)
-    @threads for i in 1:Nx
-        @inbounds begin
-            monotone = true
-            for j in 2:Nx
-                if Utr[i, j] - Utr[i, j - 1] < C[i, j] - C[i, j - 1]
-                    monotone = false
-                    break
-                end
-            end
-            if !monotone
-                for j in 1:Nx
-                    τ[i, j] = Utr[i, j] >= C[i, j] ? 1.0 : 0.0
-                end
-            elseif Utr[i, Nx] < C[i, Nx]
-                for j in 1:Nx
-                    τ[i, j] = 0.0
-                end
-            elseif Utr[i, 1] >= C[i, 1]
-                for j in 1:Nx
-                    τ[i, j] = 1.0
-                end
-            else
-                j0 = 2
-                while j0 < Nx && Utr[i, j0] < C[i, j0]
-                    j0 += 1
-                end
-                den = (Utr[i, j0] - Utr[i, j0 - 1]) - (C[i, j0] - C[i, j0 - 1])
-                aS  = den > 0.0 ?
-                      x[j0 - 1] + (C[i, j0 - 1] - Utr[i, j0 - 1]) * (x[j0] - x[j0 - 1]) / den :
-                      x[j0]
-                for j in 1:Nx
-                    τ[i, j] = fraction_above(xlo[j], xhi[j], x[j], aS)
-                end
-            end
-        end
+function _training_slice_hire_share!(path::TransitionPath, model::Model, n::Int, D::Float64)
+    hp = hire_profile(view(path.SU1, :, n), model, D)
+    Nx = length(model.grids.x)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        path.χUt[i, j, n] = path.τT[i, j, n] > 0.0 ? crosser_hire_share(hp, i, path.SUt1[i, j, n]) : 0.0
     end
-    return τ
-end
-
-"""
-    _crossing_fraction!(d, U1, U0, x)
-
-`drain_fraction!` with branch values that may both vary with aS: in each aU row the
-crossing set is the lower interval of aS on which `U_S^(1) > U_S^(0)`, and d is the
-covered fraction of each cell below the crossing.  The hard indicator returns where the
-gap is not monotone in aS.
-"""
-function _crossing_fraction!(d::AbstractMatrix{Float64}, U1::AbstractMatrix{Float64},
-                             U0::AbstractMatrix{Float64}, x::AbstractVector{Float64})
-    Nx = length(x)
-    xlo, xhi = node_midpoint_intervals(x)
-    @threads for i in 1:Nx
-        @inbounds begin
-            monotone = true
-            for j in 2:Nx
-                if U0[i, j] - U0[i, j - 1] < U1[i, j] - U1[i, j - 1]
-                    monotone = false
-                    break
-                end
-            end
-            if !monotone
-                for j in 1:Nx
-                    d[i, j] = U1[i, j] > U0[i, j] ? 1.0 : 0.0
-                end
-            elseif U0[i, 1] >= U1[i, 1]
-                for j in 1:Nx
-                    d[i, j] = 0.0
-                end
-            elseif U0[i, Nx] < U1[i, Nx]
-                for j in 1:Nx
-                    d[i, j] = 1.0
-                end
-            else
-                j0 = 2
-                while j0 < Nx && U0[i, j0] < U1[i, j0]
-                    j0 += 1
-                end
-                den = (U0[i, j0] - U0[i, j0 - 1]) - (U1[i, j0] - U1[i, j0 - 1])
-                aS  = den > 0.0 ?
-                      x[j0 - 1] + (U1[i, j0 - 1] - U0[i, j0 - 1]) * (x[j0] - x[j0 - 1]) / den :
-                      x[j0]
-                for j in 1:Nx
-                    w = xhi[j] - xlo[j]
-                    d[i, j] = w > 0.0 ? clamp((aS - xlo[j]) / w, 0.0, 1.0) : (x[j] < aS ? 1.0 : 0.0)
-                end
-            end
-        end
-    end
-    return d
+    return nothing
 end
 
 """
@@ -400,10 +317,8 @@ rebuilt from them, because the caches store only the ω-weighted, positive-part
 transforms (`J`), which cannot be inverted where `ω = 0`.  Rebuilding is one pass of the
 stationary equations at `z₁`'s own converged tails, so it lands on `z₁`'s fixed point.
 
-The per-type values are the stationary ones of the transition's own definitions: the
-crossing branch `(b_S + κ_U E_U)/(r+ν+κ_U)`, with κ_U only where an unskilled match forms,
-the training value on `max{U_S^(0), U_S^(1)}`, and τ from them.  Where Proposition 1
-holds these are the solver's objects.
+The per-type values are the solver's own (`career_choices!`): the crossing branch
+U_S^(1), the training value on `max{U_S^(0), U_S^(1)}` (or the held branch), and τ.
 """
 function _seed_terminal_values!(path::TransitionPath, model_z1::Model)
     cp = model_z1.common;  up = model_z1.unsk_par;  sp = model_z1.skl_par
@@ -413,11 +328,11 @@ function _seed_terminal_values!(path::TransitionPath, model_z1::Model)
 
     Nt = length(path.tgrid);  Nx = length(gp.x)
     NpU = length(ug.p);  NpS = length(sg.p)
-    r = cp.r;  ν = cp.ν;  φ = cp.φ
+    r = cp.r;  ν = cp.ν
 
     # ── Unskilled, one-dimensional ─────────────────────────────────
     λU = up.λ;  ξU = up.ξ;  βU = up.β
-    PU = exp(cp.A) * up.PU;  bU = up.bU * exp(cp.A);  bT = up.bT * exp(cp.A)
+    PU = exp(cp.A) * up.PU;  bU = up.bU * exp(cp.A)
     κU = meeting_rate(uc.θ, up.μ, up.η)
     wG = build_unskilled_G_weights(ug.p, ug.wp, up.α_U)
     ϱU = r + ν + λU + ξU
@@ -471,21 +386,19 @@ function _seed_terminal_values!(path::TransitionPath, model_z1::Model)
 
     # ── Per type ───────────────────────────────────────────────────
     @inbounds for j in 1:Nx, i in 1:Nx
-        κX = path.SU1[i, Nt] > 0.0 ? κU : 0.0
-        EU = uc.Usearch[i] + βU * path.SU1[i, Nt]
         path.U0[i, j, Nt] = sc.U0[j]
-        path.U1[i, j, Nt] = (bS + κX * EU) / (r + ν + κX)
-        path.pureS[i, j, Nt] = !(path.U1[i, j, Nt] > path.U0[i, j, Nt])
-        path.T[i, j, Nt]   = (bT + φ * max(path.U0[i, j, Nt], path.U1[i, j, Nt])) / (r + φ + ν)
+        path.U1[i, j, Nt] = sc.U1[i, j]
+        path.pureS[i, j, Nt] = !(model_z1.held === nothing ? path.U1[i, j, Nt] > path.U0[i, j, Nt] :
+                                                             model_z1.held.drains[i, j])
+        path.T[i, j, Nt]   = uc.T[i, j]
         path.Utr[i, j, Nt] = -training_cost(gp.x[j], cp.c) + path.T[i, j, Nt]
         path.UC[i, j, Nt]  = uc.Usearch[i]
+        path.τT[i, j, Nt]  = uc.τT[i, j]
         path.pUs[i, j, Nt]  = uc.pstar[i]
         path.SUs1[i, j, Nt] = path.SU1[i, Nt]
         path.zUs[i, j, Nt]  = bU + κU * βU * path.SU1[i, Nt]
         path.pureU[i, j, Nt] = true
     end
-    _training_fraction!(view(path.τT, :, :, Nt), view(path.Utr, :, :, Nt),
-                        view(path.UC, :, :, Nt), gp.x)
     return nothing
 end
 
@@ -498,15 +411,15 @@ end
     _training_step!(path, model, n; inv_dt)
 
 Training value at date n, `(r+φ+ν) T = b_T + φ U_S + Ṫ`, with the cross-block term
-`U_S = max{U_S^(0), U_S^(1)}` of the next date (spec Part 4, step 1), and the training
-option `−c(aS) + T`.
+`U_S = max{U_S^(0), U_S^(1)}` of the next date (spec Part 4, step 1), its held branch where
+the model holds its choices, and the training option `−c(aS) + T`.
 """
 function _training_step!(path::TransitionPath, model::Model, n::Int; inv_dt::Float64)
-    cp = model.common;  gp = model.grids
+    cp = model.common;  gp = model.grids;  held = model.held
     Nx = length(gp.x)
     bT = model.unsk_par.bT * exp(cp.A);  den = cp.r + cp.φ + cp.ν + inv_dt
     @inbounds for j in 1:Nx, i in 1:Nx
-        US_next = max(path.U0[i, j, n + 1], path.U1[i, j, n + 1])
+        US_next = skilled_value_at(held, i, j, path.U0[i, j, n + 1], path.U1[i, j, n + 1])
         path.T[i, j, n]   = (bT + cp.φ * US_next + inv_dt * path.T[i, j, n + 1]) / den
         path.Utr[i, j, n] = -training_cost(gp.x[j], cp.c) + path.T[i, j, n]
     end
@@ -586,7 +499,8 @@ at n+1 in any case, and they train already at n when that beats searching for on
 first, U_tr ≥ C¹ with C¹ the per-type value at a full sweep.  Locating the frontier on
 the swept value instead makes τ a fixed point of C(τ) whose slope is 1/(1−τ) near a full
 cell, and the iteration leaves the steady state.  With τ chosen, C is the searching slice's
-value at the share (τ'−τ)/(1−τ) that the frontier sweeps.
+value at the share (τ'−τ)/(1−τ) that the frontier sweeps.  A model that holds its choices
+takes τ as held.
 """
 function _unskilled_slices_step!(path::TransitionPath, model::Model, n::Int,
                                  wG::Vector{Float64}, buf; inv_dt::Float64)
@@ -614,23 +528,28 @@ function _unskilled_slices_step!(path::TransitionPath, model::Model, n::Int,
         return (C = (bU + κβ * o.S1 + inv_dt * Ĉ) / (r + ν + inv_dt), o = o)
     end
 
-    # The frontier on C⁰, then the types between it and the next date's frontier.
-    @threads for i in 1:Nx
-        Es = zeros(Float64, Np);  Et = zeros(Float64, Np);  Ê = zeros(Float64, Np)
-        raw = zeros(Float64, Np)
-        @inbounds for j in 1:Nx
-            C[i, j] = path.pureU[i, j, n + 1] ? path.Usearch[i, n] :
-                      searching_value!(raw, Es, Et, Ê, i, j, 0.0).C
+    # The frontier on C⁰, then the types between it and the next date's frontier; or the
+    # held τ.
+    if model.held === nothing
+        @threads for i in 1:Nx
+            Es = zeros(Float64, Np);  Et = zeros(Float64, Np);  Ê = zeros(Float64, Np)
+            raw = zeros(Float64, Np)
+            @inbounds for j in 1:Nx
+                C[i, j] = path.pureU[i, j, n + 1] ? path.Usearch[i, n] :
+                          searching_value!(raw, Es, Et, Ê, i, j, 0.0).C
+            end
         end
-    end
-    _training_fraction!(τn, Utr, C, gp.x)
-    @threads for i in 1:Nx
-        Es = zeros(Float64, Np);  Et = zeros(Float64, Np);  Ê = zeros(Float64, Np)
-        raw = zeros(Float64, Np)
-        @inbounds for j in 1:Nx
-            sweep_share(τn[i, j], τ1[i, j]) > 0.0 || continue
-            Utr[i, j] >= searching_value!(raw, Es, Et, Ê, i, j, 1.0).C && (τn[i, j] = τ1[i, j])
+        training_policy!(τn, Utr, C, gp.x)
+        @threads for i in 1:Nx
+            Es = zeros(Float64, Np);  Et = zeros(Float64, Np);  Ê = zeros(Float64, Np)
+            raw = zeros(Float64, Np)
+            @inbounds for j in 1:Nx
+                sweep_share(τn[i, j], τ1[i, j]) > 0.0 || continue
+                Utr[i, j] >= searching_value!(raw, Es, Et, Ê, i, j, 1.0).C && (τn[i, j] = τ1[i, j])
+            end
         end
+    else
+        copyto!(τn, model.held.τ)
     end
 
     # The searching slice at the chosen τ.
@@ -681,6 +600,7 @@ function _unskilled_slices_step!(path::TransitionPath, model::Model, n::Int,
             path.zUt[i, j, n]  = z
         end
     end
+    _training_slice_hire_share!(path, model, n, D)
     return nothing
 end
 
@@ -779,13 +699,16 @@ Date-n skilled branch values per type (spec V3, reading (A), the author's choice
 skilled unemployed choose the market at every date, and both branches continue on
 `U_S = max{U_S^(0), U_S^(1)}` of the next date,
 
-    U_S^(1) = [b_S + κ_X E_U(a,1) + Û_S/dt] / (r+ν+κ_X+1/dt),   κ_X = κ_U where S_U(a,1) > 0,
+    U_S^(1) = [b_S + κ_X E_U(a,1) + Û_S/dt] / (r+ν+κ_X+1/dt),   κ_X = κ_U χ_X,
     U_S^(0) = [b_S + κ_S β_S ∫S dΓ + Û_S/dt] / (r+ν+1/dt).
 
 A type that stays skilled at every later date and does not cross at n has the
 one-dimensional U_S^(0)(aS).  Every other type has a skilled outside option that prices
 the crossing, so its own skilled surface is solved, at the flow `z = (r+ν+1/dt)U_S −
-Û_S/dt`, with the column's OJS participation and cutoff.
+Û_S/dt`, with the column's OJS participation and cutoff.  The match a crosser enters and
+its hired share χ_X are `crossing_value`'s: the training slice's where training beats
+searching at the node, the searching slice's otherwise.  A model that holds its choices
+takes the market choice, the training choice at the node and every U_S as held.
 """
 function _skilled_types_step!(path::TransitionPath, model::Model, n::Int, buf;
                               inv_dt::Float64)
@@ -796,29 +719,30 @@ function _skilled_types_step!(path::TransitionPath, model::Model, n::Int, buf;
     PS = exp(cp.A) * sp.PS;  bS = sp.bS * exp(cp.A);  σS = sp.σ * exp(cp.A)
     ϱ  = r + ν + λ + sp.ξ
     κ  = meeting_rate(path.θS[n], sp.μ, sp.η)
-    κU = meeting_rate(path.θU[n], up.μ, up.η)
+    κU = meeting_rate(path.θU[n], up.μ, up.η);  χU = hire_fraction(model)
     tol = model.sim.tol_inner;  maxit = model.sim.maxit_inner
     wΓo = pre.γvals   .* sg.wp
     wΓs = pre.γs_vals .* sg.wp
-    sn = _slot(n);  s1 = _slot(n + 1)
+    sn = _slot(n);  s1 = _slot(n + 1);  held = model.held
 
     @threads for i in 1:Nx
         env = zeros(Float64, Np);  E = zeros(Float64, Np);  cbuf = zeros(Float64, Np)
         tailEo = zeros(Float64, Np);  tailEs = zeros(Float64, Np)
         Sdest = zeros(Float64, Np);  score = zeros(Float64, Np)
         @inbounds for j in 1:Nx
-            Û  = max(path.U0[i, j, n + 1], path.U1[i, j, n + 1])
+            Û  = skilled_value_at(held, i, j, path.U0[i, j, n + 1], path.U1[i, j, n + 1])
             # A crosser hired into the unskilled market is an unskilled worker like any
             # other: her match's outside option is the slice she joins, training where the
             # frontier encloses her type.
-            κX = path.SUs1[i, j, n] > 0.0 ? κU : 0.0
-            EU = path.Utr[i, j, n] >= path.UC[i, j, n] ?
-                 path.Utr[i, j, n] + up.β * max(path.SUt1[i, j, n], 0.0) :
-                 path.UC[i, j, n] + up.β * path.SUs1[i, j, n]
+            train = held === nothing ? path.Utr[i, j, n] > path.UC[i, j, n] : held.trains[i, j]
+            κX = κU * (train ? path.χUt[i, j, n] : χU[i])
+            EU = train ? path.Utr[i, j, n] + up.β * max(path.SUt1[i, j, n], 0.0) :
+                         path.UC[i, j, n] + up.β * path.SUs1[i, j, n]
             U1 = (bS + κX * EU + inv_dt * Û) / (r + ν + κX + inv_dt)
             path.U1[i, j, n] = U1
 
-            pure = path.pureS[i, j, n + 1] && !(U1 > path.US[j, n])
+            pure = path.pureS[i, j, n + 1] &&
+                   !(held === nothing ? U1 > path.US[j, n] : held.drains[i, j])
             path.pureS[i, j, n] = pure
             buf.hasK[i, j, sn]  = !pure
             if pure
@@ -845,7 +769,7 @@ function _skilled_types_step!(path::TransitionPath, model::Model, n::Int, buf;
             for pass in 1:2
                 for it in 1:maxit
                     _skilled_tails!(tailEo, tailEs, Sdest, wΓo, wΓs)
-                    US_now = max(U0, U1)
+                    US_now = skilled_value_at(held, i, j, U0, U1)
                     z      = (r + ν + inv_dt) * US_now - inv_dt * Û
                     j0_soft = max(pcut_index(sg.p, pst) - 1, 1)
                     U0_new = (bS + κ * β * tailEo[j0_soft] + inv_dt * Û) / (r + ν + inv_dt)
@@ -897,6 +821,7 @@ function _terminal_slices!(path::TransitionPath, model::Model, buf)
             path.pUt[i, j, Nt] = o.pst;  path.SUt1[i, j, Nt] = o.S1_raw;  path.zUt[i, j, Nt] = z
         end
     end
+    _training_slice_hire_share!(path, model, Nt, D)
 
     # A type crossing at the terminal date: the skilled surface at its own outside option.
     sp = model.skl_par;  sg = model.skl_grids;  pre = model.skl_pre;  NpS = length(sg.p)
