@@ -28,13 +28,14 @@ include(joinpath(CODE_ROOT, "paths.jl"))
 const PLOTS_ROOT   = joinpath(OUTPUT_DIR, "plots")
 
 # ── Moment-table / run-settings switch ──────────────────────────────────────
-# Which estimation window supplies the targets, weights, SimParams, and grid.
+# Which data window supplies the targets, weights, SimParams, and grid; a baseline period
+# is read from the baseline's estimate (`period_bundle`).
 # NOTE: the hard-coded parameter block in §1 should be the estimate for this
 # window, otherwise the table compares apples to oranges.
 const MOMENT_WINDOW = :base_covid     # :base_fc | :crisis_fc | :base_covid | :crisis_covid
 const W_SUFFIX      = "_equalW"
 const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
-const SMM_BUNDLE    = estimate_path(MOMENT_WINDOW, W_SUFFIX; point = POINT_ESTIMATE)
+const SMM_BUNDLE    = estimate_path(estimation_window(MOMENT_WINDOW), W_SUFFIX; point = POINT_ESTIMATE)
 
 # Packages
 print("Loading packages... "); flush(stdout)
@@ -204,7 +205,7 @@ function load_smm_bundle(path::AbstractString)
     b = _load_smm_bundle(path; delete_on_fail = false,
                          label = "bundle($MOMENT_WINDOW)")
     b === nothing && @warn "Could not read SMM bundle: $path"
-    return b
+    return b === nothing ? b : period_bundle(b, MOMENT_WINDOW)
 end
 
 function run_settings(bundle, sim_fb)

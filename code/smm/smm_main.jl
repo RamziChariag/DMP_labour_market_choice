@@ -21,27 +21,19 @@
 #     estimates/ — estimate_<window>_diagonalW_smm.jls (or _smm_mcmcbase.jls) and the
 #                  smm_estimates_*.csv sibling, written by this file only
 #
-# Two-stage workflow:
-#   Baseline window  (:base_fc, :base_covid):
-#       Fix (r, ν, φ) from external calibration and σ_wU/σ_wS from λ_w.
-#       Estimate every other parameter not pinned via FIX_PARAMS.
-#       ν is loaded from nu_estimation.csv using the row for the
-#       corresponding baseline (one row per crisis pair).
-#   Crisis window    (:crisis_fc, :crisis_covid):
-#       Load the matching base estimate (base_fc → crisis_fc;
-#       base_covid → crisis_covid): the SMM one, or the chain's with CRISIS_BASE = :mcmc.
-#       Fix the ability distribution (a_ℓ, b_ℓ, ρ_x) at that estimate
-#       and estimate every other parameter not pinned via FIX_PARAMS.
-#       ν comes from the baseline row (NOT a crisis-specific value).
-#   Counterfactual window (:crisis_fc_cf1, :crisis_covid_cf1, :crisis_fc_cf2,
-#                          :crisis_covid_cf2; COUNTERFACTUALS in paths.jl):
-#       A crisis window, its parent, re-estimated on the parent's data against the same
-#       base estimate, with the training cost c held there too and training_share and
-#       skilled_share held out of the objective. cf1 also holds the training choice and
-#       the choice of market at their values in the base stationary equilibrium. Started
-#       from its own estimate, or the parent's at the same CRISIS_BASE.
+# Two-stage workflow (WINDOWS, paths.jl):
+#   :baseline
+#       One economy observed in two periods, base_fc (2003-07) and base_covid (2015-19),
+#       estimated jointly: Q is the sum of the periods' Q, each on its own moments, weights,
+#       ν and σ_w. BASELINE_COMMON (smm_params.jl) is one parameter for both periods; every
+#       other parameter not pinned via FIX_PARAMS takes a value in each.
+#   :crisis_fc, :crisis_covid
+#       Load the baseline estimate (the SMM one, or the chain's with CRISIS_BASE = :mcmc)
+#       at the crisis window's period (PAIR_BASE: base_fc, base_covid), hold CRISIS_HELD
+#       there and estimate every other parameter not pinned via FIX_PARAMS. ν comes from the
+#       baseline period's row.
 #
-# WINDOWS are read from data/derived/windows.json — the single source
+# The data windows are read from data/derived/windows.json — the single source
 # of truth shared with the data pipeline. training_share is the NSC
 # enrolment target, written by the data pipeline into moments_{w}.csv /
 # sampling_var_{w}.csv; the loaders here read it as written (see the
@@ -170,28 +162,17 @@ sim_smm = SimParams(
 # each resolution for the [env] block printed below.
 assert_no_legacy_env()
 
-WINDOW = env_setting(:WINDOW, :crisis_covid_cf2)
-# Crisis windows only; a base window ignores it. Which base-window point the crisis window holds the
-# ability distribution at: :smm = the base SMM estimate (writes estimate_<crisis>_smm.jls);
-# :mcmc = the base chain's estimate (writes estimate_<crisis>_smm_mcmcbase.jls, the crisis chain's seed).
+WINDOW = env_setting(:WINDOW, :baseline)
+String(WINDOW) in WINDOWS ||
+    error("WINDOW = :$WINDOW is not an estimation window; must be one of :" * join(WINDOWS, ", :") * ".")
+# Crisis windows only; the baseline ignores it. Which baseline point the crisis window holds
+# CRISIS_HELD at: :smm = the baseline SMM estimate (writes estimate_<crisis>_smm.jls); :mcmc =
+# the baseline chain's estimate (writes estimate_<crisis>_smm_mcmcbase.jls, the crisis chain's seed).
 CRISIS_BASE = env_setting(:CRISIS_BASE, :mcmc)
 CRISIS_BASE in (:smm, :mcmc) || error("CRISIS_BASE must be :smm or :mcmc, got :$CRISIS_BASE.")
 
-# Crisis → baseline pair map. crisis_fc pairs with base_fc; the
-# crisis_covid pair with base_covid; each counterfactual window with its parent's.
-# Used to load the right baseline bundle in a crisis re-estimation.
-const _PAIR_BASELINE = Dict(
-    :base_fc          => :base_fc,
-    :crisis_fc        => :base_fc,
-    :base_covid       => :base_covid,
-    :crisis_covid     => :base_covid,
-    :crisis_fc_cf1    => :base_fc,
-    :crisis_covid_cf1 => :base_covid,
-    :crisis_fc_cf2    => :base_fc,
-    :crisis_covid_cf2 => :base_covid,
-)
-# A crisis window, counterfactual ones included: it holds parameters at a base estimate.
-const CRISIS = get(_PAIR_BASELINE, WINDOW, WINDOW) !== WINDOW
+# A crisis window holds parameters at the baseline estimate's period PAIR_BASE[WINDOW].
+const CRISIS = is_crisis(WINDOW)
 
 # The estimate this run writes (ESTIMATE_POINTS, paths.jl).
 const OUT_POINT = CRISIS && CRISIS_BASE === :mcmc ? :smm_mcmcbase : :smm
@@ -247,12 +228,10 @@ SKIP_MOMENTS = Symbol[
 ]
 
 # ── Per-window objective holdouts ───────────────────────────────────────────
-# Maps a window to the moments given zero weight in that window only, on top of
-# SKIP_MOMENTS. Add `window => [:moment, …]` to exclude a finite-valued moment from the
-# objective in one window. A counterfactual window is estimated on the labour-market
-# moments alone, so both stocks are held out there.
-const WINDOW_SKIP_MOMENTS = Dict{Symbol,Vector{Symbol}}(
-    w => [:training_share, :skilled_share] for w in keys(COUNTERFACTUALS))
+# Maps a data window (DATA_WINDOWS, paths.jl) to the moments given zero weight in that
+# window only, on top of SKIP_MOMENTS. Add `window => [:moment, …]` to exclude a
+# finite-valued moment from the objective in one window.
+const WINDOW_SKIP_MOMENTS = Dict{Symbol,Vector{Symbol}}()
 
 # Wage-reliability calibration knob (single source of truth for both the run
 # header and calibrate_sigma_w). σ_w is calibrated externally from λ_w rather
@@ -302,19 +281,21 @@ FIX_PARAMS = Dict{Symbol,Float64}(
 
 # ============================================================
 # INIT_MODE — how the optimiser is seeded.
-#   :default    seed the spec init from DEFAULT_PARAMS; skip the candidate layer.
+#   :default    seed the spec init from the DEFAULT values; skip the candidate layer.
 #   :warmstart  start from the stored point with the lowest Q under the current code
-#               (§8a lists the candidates); DEFAULT_PARAMS if none scores a finite Q.
+#               (§8a lists the candidates); the DEFAULT values if none scores a finite Q.
+#   :warmstart_base  a crisis window starts from the baseline point at its period, its own
+#               stored files unread; the baseline runs as under :warmstart.
 #   :clusters   seed SA/DE from the Sobol→hclust candidate bank.
 # USE_AS_SEED           true: use the entered init verbatim; false: perturb it
 #                       before estimation. Under :default the init IS the
-#                       optimiser start, so true starts exactly at DEFAULT_PARAMS.
+#                       optimiser start, so true starts exactly at the DEFAULT values.
 # SEED_PERTURB_FRAC     perturbation SD as a fraction of each bound range
 #                       (applies when USE_AS_SEED = false).
 # CLUSTERS_FORCE_REGEN  rebuild the candidate cache even if present (:clusters).
 # INCLUDE_PREV_OPTIMUM  add a valid saved optimum as a guaranteed seed (:clusters).
 #                       This is the run's own output file; in a crisis
-#                       window the paired base point is a separate,
+#                       window the baseline point is a separate,
 #                       always-on start under :clusters (§8b).
 # ============================================================
 # INIT_MODE selects the start-point strategy; the settings that configure each strategy
@@ -327,11 +308,11 @@ INIT_MODE = env_setting(:INIT_MODE, :warmstart)
 # every parameter FIX_PARAMS pins. Units are the reported ones: A = ln A, c = ln c,
 # b_j and σ_S over A; θ_j in vacancies per searcher.
 #
-# Seed for the base_fc b_S-route run (b_S free, ξ_S = 0), 2026-10-11: Q = 4378.327899596 under
-# v56.0.0. Built from the ξ_S-route base_fc estimate (Q 3560.09; backup in
-# output/backups/xiS_route_estimates_2026-10-11/base_fc/) with λ_S + ξ_S as λ_S, b_S/A 0.20 from
-# a scan over 0.05-0.30, then damped Gauss–Newton steps on all 14 free parameters.
-# Start with INIT_MODE=default.
+# DEFAULT_PERIOD_PARAMS holds the values a parameter takes in each period of the baseline,
+# and DEFAULT_PARAMS everything else, the baseline's common parameters included; a crisis
+# window starts from its baseline period's values. Built 2026-10-23 from the v60 chain
+# estimates of the two former base windows: each period's values from its own window, and
+# each common parameter at the mean of the two.
 const DEFAULT_PARAMS = Dict{Symbol,Float64}(
     :r         => 0.00416667,
     :nu        => 0.00323032,
@@ -339,140 +320,90 @@ const DEFAULT_PARAMS = Dict{Symbol,Float64}(
 
     :a_l       => 1.00000000,   # pinned (FIX_PARAMS)
     :b_l       => 1.00000000,   # pinned (FIX_PARAMS)
-    :rho_x     => -0.3760712472598431,
-    :c         => 11.516787549861228,
-    :A         => 7.238932988787176,
+    :rho_x     => -0.43246076780329124,
 
     :PU        => 1.00000000,   # the numeraire
-    :PS        => 1.8274460454677544,
 
-    :bU        => 0.0773985303389596,
+    :bU        => 0.07069092317348318,
     :bT        => 0.00000000,   # pinned: no income while training
-    :bS        => 0.1647027391979343,
-
-    :alpha_U   => 3.408485659533842,
+    :bS        => 0.177733730234988,
 
     :a_Gam     => 1.00000000,   # pinned (FIX_PARAMS)
     :b_Gam     => 1.00000000,   # pinned (FIX_PARAMS)
     :skl_delta => 1.00000000,   # pinned (FIX_PARAMS)
 
-    :unsk_mu   => 0.6259721798594244,
     :unsk_eta  => 0.50000000,   # pinned (FIX_PARAMS)
-    :unsk_tight => 0.4586949068451518,
     :unsk_bet  => 0.50000000,   # pinned (FIX_PARAMS)
-    :unsk_lam  => 0.1700436663031686,
     :unsk_xi   => 0.00000000,   # pinned (FIX_PARAMS)
     :unsk_sigw => 0.25549225,   # set from λ_w (calibrated per window)
 
-    :skl_mu    => 0.2781489587725706,
     :skl_eta   => 0.50000000,   # pinned (FIX_PARAMS)
-    :skl_tight => 1.2110570013103958,
     :skl_bet   => 0.50000000,   # pinned (FIX_PARAMS)
-    :skl_lam   => 0.1530505237804924,
-    :skl_sig   => 0.351109497384089,
+    :skl_sig   => 0.27215781097836383,
     :skl_sigw  => 0.23267843,   # set from λ_w (calibrated per window)
-    :skl_xi    => 0.00000000,   # pinned at 0 on the b_S route (FIX_PARAMS)
+    :skl_xi    => 0.00000000,   # pinned (FIX_PARAMS)
+)
+
+const DEFAULT_PERIOD_PARAMS = Dict{Symbol,Dict{Symbol,Float64}}(
+    :base_fc => Dict(
+        :c          => 11.471265778520698,
+        :A          => 7.296791792868002,
+        :PS         => 1.7342881760826074,
+        :alpha_U    => 3.250407358831487,
+        :unsk_mu    => 0.5956864020132866,
+        :skl_mu     => 0.28396663842815656,
+        :unsk_lam   => 0.17146440372583185,
+        :skl_lam    => 0.1542692272823348,
+        :unsk_tight => 0.44864608267488587,
+        :skl_tight  => 1.1627529893606718,
+    ),
+    :base_covid => Dict(
+        :c          => 10.793347734898436,
+        :A          => 7.44296706781371,
+        :PS         => 1.6506777497201668,
+        :alpha_U    => 1.7898221443599454,
+        :unsk_mu    => 0.34552157586435334,
+        :skl_mu     => 0.22457734120368542,
+        :unsk_lam   => 0.22435828360971466,
+        :skl_lam    => 0.2277588335078418,
+        :unsk_tight => 0.7779525694683238,
+        :skl_tight  => 1.805317325622991,
+    ),
 )
 
 """
-    default_seed(ps) → Float64
+    default_seed(ps, period) → Float64
 
-The DEFAULT_PARAMS starting value for one ParamSpec, found through the ASCII key map
-`_DEFAULT_PARAM_KEY` (smm_params.jl). Raises, naming the parameter, when either map lacks
-it: the parameter table carries no starting values, so there is nothing else to fall
-back on.
+The starting value of one ParamSpec in baseline period `period`, found through the ASCII key
+map `_DEFAULT_PARAM_KEY` (smm_params.jl): DEFAULT_PERIOD_PARAMS[period] if it lists the key,
+DEFAULT_PARAMS otherwise. Raises, naming the parameter, when neither has it: the parameter
+table carries no starting values, so there is nothing else to fall back on.
 """
-function default_seed(ps::ParamSpec) :: Float64
+function default_seed(ps::ParamSpec, period::Symbol) :: Float64
     key = get(_DEFAULT_PARAM_KEY, (ps.block, ps.name), nothing)
     isnothing(key) && error(
         "default_seed: $(ps.block):$(ps.name) has no ASCII key in _DEFAULT_PARAM_KEY (smm_params.jl).")
+    own = DEFAULT_PERIOD_PARAMS[period]
+    haskey(own, key) && return own[key]
     haskey(DEFAULT_PARAMS, key) || error(
-        "default_seed: DEFAULT_PARAMS has no :$(key) entry, the seed for $(ps.block):$(ps.name).")
+        "default_seed: neither DEFAULT_PERIOD_PARAMS[:$period] nor DEFAULT_PARAMS has a :$(key) " *
+        "entry, the seed for $(ps.block):$(ps.name).")
     return DEFAULT_PARAMS[key]
 end
 
-"""
-    paired_base(window, path, b; point) → NamedTuple
-
-The `PAIRED_BASE` record (smm_params.jl) of counterfactual `window`: the base estimate `b`,
-read at `point` from `path`, that its base-held parameters, and under cf1 its held choices,
-come from. Identified by the file's path from the project root and its SHA-256.
-"""
-function paired_base(window::Symbol, path::AbstractString, b; point::Symbol)
-    cp, up, sp, tight = unpack_θ(b.result.theta_opt, b.spec)
-    return (window = PAIR_BASE[window], point = point, file = relpath(path, PROJECT_ROOT),
-            sha256 = bytes2hex(open(sha256, path)),
-            holds_choices = COUNTERFACTUALS[window].holds_choices,
-            common = cp, unsk = up, skl = sp, tight = tight, sim = b.spec.sim)
-end
-
 # ============================================================
-# 3. Windows + data moments
+# 3. Data windows + data moments
+#    An estimation window is estimated on its data windows (data_windows, paths.jl): the
+#    baseline on both of its periods, a crisis window on its own. Each data window has its
+#    own targets, holdouts, weight matrix, calibrated rates and σ_w (data_window_setup).
 # ============================================================
 derived_dir = joinpath(PROJECT_ROOT, "data", "derived")
-
-# Verify WINDOW against windows.json (single source of truth). A counterfactual window is
-# defined on its parent's entry and data (data_window, paths.jl).
-_win_info = load_windows(; derived_dir=derived_dir)
-if !(data_window(WINDOW) in keys(_win_info.windows))
-    error("WINDOW = :$WINDOW not found in windows.json. " *
-          "Valid windows: " * join(string.(_win_info.order), ", ") *
-          ", and the counterfactual windows " * join(sort(string.(keys(COUNTERFACTUALS))), ", "))
-end
-_wd = _win_info.windows[data_window(WINDOW)]
-@printf("  Window definition (windows.json):  %s  ym = %d..%d  ASEC %d..%d\n",
-        _wd.label, _wd.ym_start, _wd.ym_end,
-        first(_wd.asec_years), last(_wd.asec_years))
-flush(stdout)
-
-moments = load_data_moments(; window=WINDOW, derived_dir=derived_dir)
-
-# ── Auto-hold-out of NaN targets ──────────────────────────────────────────
-# A moment whose data target is NaN for this window (no source data yet —
-# e.g. wchg_rate_j before base_covid SIPP is built) cannot enter g'Wg. Union
-# such moments into the skip set so the objective and weight matrix are all
-# subsetted identically. This is what lets a base_covid run proceed
-# unchanged today while crisis_covid (with SIPP) uses the moment — no name is
-# hardcoded into SKIP_MOMENTS, so each moment activates automatically once its
-# data appears.
-# Iterating MOMENT_NAMES rather than keys(moments) so a name that is ABSENT from the
-# moments CSV holds out too, not just one present with a NaN value. Absence is the
-# normal state for a moment added to MOMENT_NAMES before the data pipeline has been
-# re-run to produce it, and the auto-activation described above only delivers on its
-# promise if that case behaves like NaN instead of failing downstream.
-_nan_targets = Symbol[k for k in MOMENT_NAMES
-                      if !(k in keys(moments)) || !isfinite(moments[k].value)]
-
-# Per-window holdouts (WINDOW_SKIP_MOMENTS above): a FINITE moment whose data
-# construction is unreliable in this window is dropped from the objective here.
-# Unlike the NaN path this is deliberate — the target is measured and finite,
-# so it would NOT auto-hold-out — hence the explicit per-window spec.
-_window_skip = get(WINDOW_SKIP_MOMENTS, WINDOW, Symbol[])
-ACTIVE_SKIP_MOMENTS = sort(unique(vcat(SKIP_MOMENTS, _nan_targets, _window_skip)))
-if !isempty(_nan_targets)
-    @printf("Auto-skipping %d moment(s) with a missing or NaN target in %s: %s\n",
-            length(_nan_targets), WINDOW, join(string.(_nan_targets), ", "))
-    flush(stdout)
-end
-if !isempty(_window_skip)
-    @printf("Per-window holdout: %d moment(s) excluded from objective in %s: %s\n",
-            length(_window_skip), WINDOW, join(string.(_window_skip), ", "))
-    flush(stdout)
-end
-
-# ── σ_w calibration (calibrated model parameters) ─────────────────────────
-# σ_{w,j}² = (1−λ_w)·Var̂[log w_j]. Calibrated from the data here, then pinned
-# in the fixed block alongside r, ν, φ (§6).
-σ_wU_cal, σ_wS_cal = calibrate_sigma_w(LAMBDA_W, moments)
-@printf("  Calibrated σ_w (λ_w = %.4f):  σ_wU = %.5f,  σ_wS = %.5f\n",
-        LAMBDA_W, σ_wU_cal, σ_wS_cal)
+_win_info   = load_windows(; derived_dir=derived_dir)
 
 # σ_w identification switch.  λ_w > 0: pin σ_w at the calibrated value, with β
 # free.  λ_w == 0: leave σ_w free (estimated) and pin β instead via FIX_PARAMS
 # (:unsk_bet, :skl_bet) — only one of {β, σ_w} is identified from wage
 # dispersion, so exactly one is fixed.
-_sigw_fixed = LAMBDA_W > 0.0 ?
-    (unsk_σ_w = σ_wU_cal, skl_σ_w = σ_wS_cal) : NamedTuple()
 if LAMBDA_W == 0.0
     @printf("  λ_w = 0 → σ_w is ESTIMATED (free), not pinned.\n")
     if !(haskey(FIX_PARAMS, :unsk_bet) && haskey(FIX_PARAMS, :skl_bet))
@@ -480,11 +411,55 @@ if LAMBDA_W == 0.0
               "(:unsk_bet / :skl_bet) — β and σ_w are jointly under-identified."
     end
 end
-flush(stdout)
+
+"""
+    data_window_setup(dw) → NamedTuple
+
+Data window `dw`'s targets and calibration, each printed once: its moments, the moments held
+out of its objective, its weight matrix, the externally calibrated r, ν and φ (`calib`) and
+the σ_w calibrated from λ_w (`sigw`, empty when λ_w = 0).
+"""
+function data_window_setup(dw::Symbol)
+    haskey(_win_info.windows, dw) || error(
+        "$dw not found in windows.json. Data windows: " * join(string.(_win_info.order), ", "))
+    wd = _win_info.windows[dw]
+    @printf("\n%s (windows.json):  %s  ym = %d..%d  ASEC %d..%d\n", dw, wd.label,
+            wd.ym_start, wd.ym_end, first(wd.asec_years), last(wd.asec_years))
+    moments = load_data_moments(; window=dw, derived_dir=derived_dir)
+
+    # A moment whose data target is NaN or absent cannot enter g'Wg, so it is held out of the
+    # objective and the weight matrix alike; it activates once its data appear. MOMENT_NAMES
+    # is iterated so a name absent from the moments CSV is held out too. The per-window
+    # holdouts (WINDOW_SKIP_MOMENTS) are finite targets dropped deliberately.
+    nan_targets = Symbol[k for k in MOMENT_NAMES
+                         if !(k in keys(moments)) || !isfinite(moments[k].value)]
+    window_skip = get(WINDOW_SKIP_MOMENTS, dw, Symbol[])
+    skip        = sort(unique(vcat(SKIP_MOMENTS, nan_targets, window_skip)))
+    isempty(nan_targets) ||
+        @printf("  Auto-skipping %d moment(s) with a missing or NaN target: %s\n",
+                length(nan_targets), join(string.(nan_targets), ", "))
+    isempty(window_skip) ||
+        @printf("  Per-window holdout: %d moment(s) excluded from the objective: %s\n",
+                length(window_skip), join(string.(window_skip), ", "))
+
+    # σ_{w,j}² = (1−λ_w)·Var̂[log w_j], calibrated from the data and pinned beside r, ν, φ.
+    σ_wU, σ_wS = calibrate_sigma_w(LAMBDA_W, moments)
+    @printf("  Calibrated σ_w (λ_w = %.4f):  σ_wU = %.5f,  σ_wS = %.5f\n", LAMBDA_W, σ_wU, σ_wS)
+    W = load_weight_matrix(; window=dw, derived_dir=derived_dir, weighting=WEIGHTING,
+                             skip_moments=skip)
+    # ν is the baseline period's (PAIR_BASE), per data_and_moments.pdf §21.
+    calib = load_calibrated_params(; window=dw, derived_dir=derived_dir)
+    @printf("  Calibrated:  r = %.6f,  ν = %.5f,  φ = %.5f\n", calib.r, calib.nu, calib.phi)
+    flush(stdout)
+    return (moments = moments, skip = skip, W = W,
+            calib = (r = calib.r, ν = calib.nu, φ = calib.phi),
+            sigw  = LAMBDA_W > 0.0 ? (unsk_σ_w = σ_wU, skl_σ_w = σ_wS) : NamedTuple())
+end
 
 # ============================================================
 # 4. Weight matrix
-#    WEIGHTING (run_weighting, moments.jl) selects the objective:
+#    WEIGHTING (run_weighting, moments.jl) selects the objective; each data window's W is
+#    loaded in data_window_setup:
 #      :diagonal  W = Diagonal(1/σ̂²_samp) from sampling_var_{window}.csv
 #                 (per-moment sampling variances on one footing)
 #      :equal     relative-deviation weights Diagonal(weight/m̂²)
@@ -495,141 +470,73 @@ W_SUFFIX  = weighting_suffix(WEIGHTING)
 # :warmstart or INCLUDE_PREV_OPTIMUM of the same configuration reads back.
 const OUT_JLS = estimate_path(WINDOW, W_SUFFIX; point = OUT_POINT)
 
-W_opt = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
-                             weighting=WEIGHTING,
-                             skip_moments=ACTIVE_SKIP_MOMENTS)
-
 # Reported Q is the raw objective magnitude: the relative-deviation loss
 # under equal weights, or g'Wg with the diagonal sampling-variance weights.
 # No display-only rescaling is applied (q_scale = 1.0, constant in θ).
 Q_SCALE = 1.0
-@printf("  q_scale (display-only Q divisor) = %.6e\n", Q_SCALE)
-
 
 # ============================================================
-# 5. Externally calibrated parameters (r, ν, φ)
-#    ν is picked per crisis pair: WINDOW ∈ {base_fc, crisis_fc} uses
-#    the base_fc row of nu_estimation.csv; the COVID pair uses
-#    base_covid.
+# 5. Parameters pinned in every window
+#    FIX_PARAMS, and per data window the externally calibrated r, ν, φ and the σ_w
+#    calibrated from λ_w (data_window_setup).
 # ============================================================
-println("\nLoading externally calibrated parameters (r, ν, φ)...")
-flush(stdout)
-calib = load_calibrated_params(; window=WINDOW, derived_dir=derived_dir)
-
-@printf("  Calibrated:  r = %.6f,  ν = %.5f,  φ = %.5f\n",
-        calib.r, calib.nu, calib.phi)
-flush(stdout)
+_extra_fixed = _fix_params_to_nt(FIX_PARAMS)
 
 # ============================================================
-# 6. Fixed and free parameters
-#
-#    r, ν, φ are always fixed from external calibration.  A baseline window
-#    estimates everything else; a crisis window also holds the ability
-#    distribution (ABILITY_PARAMS, smm_params.jl) at the paired base estimate, and a
-#    counterfactual window the training cost too (base_held_params).
+# 6. Fixed and free parameters, per data window
+#    The baseline estimates everything not pinned in each of its periods; a crisis window
+#    also holds CRISIS_HELD (smm_params.jl) at the baseline estimate's period
+#    PAIR_BASE[WINDOW]. Later entries win the merge: FIX_PARAMS overrides a baseline value,
+#    and the calibrated σ_w both. `fixed_key` picks the key convention `unpack_θ` reads back.
 # ============================================================
 
 if CRISIS
-    # Crisis re-estimation — load the matching base estimate:
-    #   crisis_fc    ← base_fc       (so crisis_fc_cf1 and crisis_fc_cf2)
-    #   crisis_covid ← base_covid    (so crisis_covid_cf1 and crisis_covid_cf2)
-    # CRISIS_BASE picks the SMM estimate or the chain's. Either must be an estimate under
-    # this code (`require_current_estimate`), and the chain's only if the chain did not abort.
-    baseline_window = _PAIR_BASELINE[WINDOW]
-    baseline_jls = estimate_path(baseline_window, W_SUFFIX; point = CRISIS_BASE)
-    @printf("\nCrisis window detected — loading baseline (%s) from:\n  %s\n",
-            baseline_window, baseline_jls)
+    # CRISIS_BASE picks the baseline's SMM estimate or its chain's. Either must be an
+    # estimate under this code (`require_current_estimate`), and the chain's only if the
+    # chain did not abort.
+    base_period  = PAIR_BASE[WINDOW]
+    baseline_jls = estimate_path(:baseline, W_SUFFIX; point = CRISIS_BASE)
+    @printf("\nCrisis window — loading the baseline estimate, period %s, from:\n  %s\n",
+            base_period, baseline_jls)
     flush(stdout)
     isfile(baseline_jls) || error(
         "Baseline estimate not found at $baseline_jls. Run " *
         (CRISIS_BASE === :smm ? "smm_main.jl" : "a chain of MCMC_main.jl") *
-        " on $baseline_window first (WEIGHTING = $WEIGHTING).")
-
-    baseline_data = _load_smm_bundle(baseline_jls; delete_on_fail=false, label="baseline file")
-    isnothing(baseline_data) && error(
-        "Baseline result at $baseline_jls is unreadable. " *
-        "Re-run the $baseline_window estimation first."
-    )
-    require_current_estimate(baseline_data, baseline_jls)
-    baseline_data.stage === :mcmc_aborted && error(
-        "$(basename(baseline_jls)): the $baseline_window chain aborted, so its draws are not " *
-        "a stationary sample and the file holds no estimate.")
-
-    baseline_result = baseline_data.result
-    baseline_spec   = baseline_data.spec
-
-    cp_base, up_base, sp_base, tight_base =
-        unpack_θ(baseline_result.theta_opt, baseline_spec)
-
+        " on the baseline first (WEIGHTING = $WEIGHTING).")
+    _baseline_raw = _load_smm_bundle(baseline_jls; delete_on_fail=false, label="baseline file")
+    isnothing(_baseline_raw) && error(
+        "Baseline result at $baseline_jls is unreadable. Re-run the baseline estimation first.")
+    require_current_estimate(_baseline_raw, baseline_jls)
+    get(_baseline_raw, :stage, :smm) === :mcmc_aborted && error(
+        "$(basename(baseline_jls)): the baseline chain aborted, so its draws are not a " *
+        "stationary sample and the file holds no estimate.")
     @printf("  Baseline Q = %.6e  (converged = %s)\n",
-            baseline_result.loss_opt, baseline_result.converged)
-    flush(stdout)
+            _baseline_raw.result.loss_opt, _baseline_raw.result.converged)
 
-    # Fixed: external calibration (r, ν, φ), the base-held parameters read off the
-    # baseline optimum, FIX_PARAMS and the calibrated σ_w.  Later entries win the
-    # merge: FIX_PARAMS overrides a baseline value, and the calibrated σ_w both.
-    # `fixed_key` picks the key convention `unpack_θ` reads back.  A counterfactual
-    # window also records the base estimate itself (`paired_base`), from which a cf1
-    # evaluation reads its held choices.
-    _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
-    _base_fixed  = NamedTuple(
+    baseline_data = period_bundle(_baseline_raw, base_period)
+    cp_base, up_base, sp_base, tight_base =
+        unpack_θ(baseline_data.result.theta_opt, baseline_data.spec)
+    _base_fixed = NamedTuple(
         fixed_key(blk, nm) => _baseline_param_value(blk, nm, cp_base, up_base, sp_base, tight_base)
-        for (blk, nm) in base_held_params(WINDOW)
-    )
-    fixed_params = merge(
-        (
-        r = calib.r,
-        ν = calib.nu,
-        φ = calib.phi,
-        ),
-        _base_fixed,
-        _extra_fixed,
-        _sigw_fixed,
-        is_counterfactual(WINDOW) ?
-            NamedTuple{(PAIRED_BASE,)}((paired_base(WINDOW, baseline_jls, baseline_data;
-                                                    point = CRISIS_BASE),)) : (;),
-    )
+        for (blk, nm) in CRISIS_HELD)
 
-    # Free parameters: every parameter but the base-held ones (build_smm_spec drops what
-    # is pinned), started from DEFAULT_PARAMS; under :warmstart §8a replaces the start
-    # with the best stored point.
-    free_params = [with_seed(ps, default_seed(ps)) for ps in default_free_params()
-                   if !((ps.block, ps.name) in base_held_params(WINDOW))]
-
+    _d = data_window_setup(WINDOW)
+    # Free: every parameter but the held ones (build_smm_spec drops what is pinned), started
+    # from the baseline period's DEFAULT values; under :warmstart §8a replaces the start.
+    PERIOD_INPUTS = [(window = WINDOW, data = _d,
+                      fixed  = merge(_d.calib, _base_fixed, _extra_fixed, _d.sigw),
+                      free   = [with_seed(ps, default_seed(ps, base_period))
+                                for ps in default_free_params()
+                                if !((ps.block, ps.name) in CRISIS_HELD)])]
 else
-    # Baseline estimation.  Fix r / ν / φ and the calibrated σ_w, plus anything
-    # in FIX_PARAMS.  There is no paired base estimate to carry into the start —
-    # the window IS the baseline.
+    # The baseline: no estimate to hold anything at. Every parameter is a candidate for the
+    # free set of each period; build_smm_spec drops what FIX_PARAMS pins, and joint_spec
+    # makes BASELINE_COMMON one parameter for both.
     baseline_data = nothing
-
-    _extra_fixed = _fix_params_to_nt(FIX_PARAMS)
-    fixed_params = merge((
-        r = calib.r,
-        ν = calib.nu,
-        φ = calib.phi,
-        ),
-        _extra_fixed, 
-        _sigw_fixed,
-    )
-
-    # Every candidate is seeded from DEFAULT_PARAMS, so a warm start that finds no usable
-    # file, or one covering only part of the free set, still starts each parameter from a
-    # value chosen in this file. Under :warmstart §8a replaces the start.
-    free_params = [with_seed(ps, default_seed(ps)) for ps in default_free_params()]
-
-    # No count here either. `free_params` is the CANDIDATE list; FIX_PARAMS and the external
-    # calibration pin some of it in build_smm_spec, so this number overstates the free set —
-    # it read "29 total" against the spec table's 23. The spec tables are the statement of
-    # what is free.
-    println("\n  Baseline mode: every parameter is a candidate for the free set")
-    flush(stdout)
+    PERIOD_INPUTS = [(window = dw, data = _d, fixed = merge(_d.calib, _extra_fixed, _d.sigw),
+                      free = [with_seed(ps, default_seed(ps, dw)) for ps in default_free_params()])
+                     for (dw, _d) in ((dw, data_window_setup(dw)) for dw in BASELINE_PERIODS)]
 end
-
-# No parameter counts printed here. `free_params` at this point is the pre-spec list, before
-# build_smm_spec drops whatever FIX_PARAMS pins, so a count taken here disagrees with the one
-# the spec tables print a few lines later — and those tables list every free and fixed
-# parameter with its bounds and value, which is the same information in a form that can be
-# read against the estimates.
 
 # ============================================================
 # 7. Run parameters — grids, SA, DE, NM, tracing
@@ -974,15 +881,15 @@ const SMM_POLISH_G_TOL    = env_setting(:SMM_POLISH_G_TOL, 1.0)
 # ============================================================
 # 8. Build SMM spec
 # ============================================================
-spec = build_smm_spec(
-    moments, sim_smm;
-    fixed        = fixed_params,
-    free_specs   = free_params,
-    run          = run_params,
-    W            = W_opt,
-    q_scale      = Q_SCALE,
-    skip_moments = ACTIVE_SKIP_MOMENTS,
-)
+_period_specs = [build_smm_spec(pi.data.moments, sim_smm;
+                                fixed        = pi.fixed,
+                                free_specs   = pi.free,
+                                run          = run_params,
+                                W            = pi.data.W,
+                                q_scale      = Q_SCALE,
+                                skip_moments = pi.data.skip)
+                 for pi in PERIOD_INPUTS]
+spec = CRISIS ? only(_period_specs) : joint_spec(_period_specs, BASELINE_PERIODS)
 
 # Every estimable parameter must be either free or pinned.  One that is neither
 # has no value, and unpack_θ would raise at the first solve on the first such
@@ -994,24 +901,23 @@ assert_all_params_accounted(spec; context = "$(WINDOW) spec")
 #     :warmstart scores every stored point that can start this window under the code
 #     as it stands and starts from the lowest Q, so a file written by an earlier
 #     version is a start like any other and its stored loss is never read:
-#       base window    its SMM estimate; the untagged file written before v57.0.0
+#       baseline       its SMM estimate
 #       crisis window  its own output file; its other SMM estimate (_smm or
-#                      _smm_mcmcbase); the untagged file; the base point
-#       counterfactual its own output file if there is one, else its parent's SMM
-#       window         estimate at the same point (_smm or _smm_mcmcbase), on the
-#                      parameters it estimates
-#     A crisis window's ability distribution is in spec.fixed, so it stays the base
+#                      _smm_mcmcbase); the baseline point, at the window's period
+#     :warmstart_base keeps a crisis window's baseline point alone.
+#     A crisis window's held parameters are in spec.fixed, so they stay the baseline
 #     point's whichever candidate wins. A parameter a candidate's run did not estimate
-#     keeps its DEFAULT_PARAMS value, except at the base point, which is read field by
-#     field. No candidate with a finite Q: DEFAULT_PARAMS.
+#     keeps its DEFAULT value, except at the baseline point, which is read field by
+#     field. No candidate with a finite Q: the DEFAULT values.
 # ============================================================
 """
     warm_start(spec, candidates) -> SMMSpec
 
 `spec` started at the candidate with the lowest Q, printing one line: the chosen file and
-its Q, or that no candidate has a finite Q and the run starts from DEFAULT_PARAMS. A
+its Q, or that no candidate has a finite Q and the run starts from the DEFAULT values. A
 candidate that is absent, unreadable or unusable is passed over. `candidates` holds
-`(path, estimated_only)` pairs; `estimated_only` is `point_in_spec`'s.
+`(path, estimated_only)` pairs; `estimated_only` is `point_in_spec`'s. A crisis window reads
+the baseline's estimate at its own period (`period_bundle`).
 """
 function warm_start(spec::SMMSpec, candidates)
     best = (Q = Inf, θ = Float64[], name = "")
@@ -1020,6 +926,7 @@ function warm_start(spec::SMMSpec, candidates)
         b = read_bundle(path)
         (b === nothing || b.result === nothing || b.spec === nothing) && continue
         try
+            CRISIS && (b = period_bundle(b, base_period))
             pt = point_in_spec(b, spec; estimated_only = estimated_only)
             Q  = smm_objective(pt.θ, spec)
             Q < best.Q && (best = (Q = Q, θ = pt.θ, name = basename(path)))
@@ -1027,28 +934,21 @@ function warm_start(spec::SMMSpec, candidates)
         end
     end
     isfinite(best.Q) ? @printf("\n  warm start: %s (Q = %.6f)\n", best.name, best.Q) :
-                       println("\n  warm start: no candidate with a finite Q — the run starts from DEFAULT_PARAMS")
+                       println("\n  warm start: no candidate with a finite Q — the run starts from the DEFAULT values")
     flush(stdout)
     return isfinite(best.Q) ? _spec_with_init(spec, best.θ) : spec
 end
 
-if INIT_MODE == :warmstart
+if INIT_MODE in (:warmstart, :warmstart_base)
     _other_point = OUT_POINT === :smm ? :smm_mcmcbase : :smm
-    _starts = if is_counterfactual(WINDOW)
-        [isfile(OUT_JLS) ? (OUT_JLS, true) :
-                           (estimate_path(data_window(WINDOW), W_SUFFIX; point = OUT_POINT), true)]
-    elseif isnothing(baseline_data)
-        [(OUT_JLS, true),
-         (legacy_estimate_path(WINDOW, W_SUFFIX), true)]
-    else
-        [(OUT_JLS, true),
-         (estimate_path(WINDOW, W_SUFFIX; point = _other_point), true),
-         (legacy_estimate_path(WINDOW, W_SUFFIX), true),
-         (baseline_jls, false)]
-    end
+    _starts = !CRISIS                       ? [(OUT_JLS, true)] :
+              INIT_MODE === :warmstart_base ? [(baseline_jls, false)] :
+              [(OUT_JLS, true),
+               (estimate_path(WINDOW, W_SUFFIX; point = _other_point), true),
+               (baseline_jls, false)]
     spec = warm_start(spec, _starts)
 else
-    @printf("\n  INIT_MODE = :%s — spec init from DEFAULT_PARAMS\n", INIT_MODE)
+    @printf("\n  INIT_MODE = :%s — spec init from the DEFAULT values\n", INIT_MODE)
 end
 
 # USE_AS_SEED = false starts the optimiser from a perturbation of the chosen start
@@ -1062,7 +962,7 @@ if !run_params.use_as_seed
     flush(stdout)
 end
 
-print_spec(spec)
+print_spec(spec; k = equilibrium_at(pack_θ(spec), spec).k)
 print_env_settings()
 
 # ============================================================
@@ -1124,7 +1024,7 @@ if INIT_MODE == :clusters
         if !isnothing(_opt)
             _o_free = [(ps.block, ps.name) for ps in _opt.spec.free]
             _c_free = [(ps.block, ps.name) for ps in spec.free]
-            if _o_free == _c_free && _opt.spec.fixed == spec.fixed
+            if _o_free == _c_free && pinned_key(_opt.spec) == pinned_key(spec)
                 # theta_opt is in the PRIOR spec's unconstrained coordinates, and the same t
                 # decodes to a different θ under a different box. After a bound change the
                 # optimum is therefore carried over as θ and re-packed in the current box.

@@ -48,6 +48,72 @@ function _de_pairs(N::Int, c::Int, δ::Int, rng::AbstractRNG)
     return @view(chosen[1:δ]), @view(chosen[δ+1:2δ])
 end
 
+# The random part of chain c's proposal, in the order the sampler draws it: the difference
+# pairs, the crossover mask (before the step, since γ depends on how many coordinates it
+# updates), then the multiplicative and additive shocks. It reads nothing but the RNG, so how
+# many numbers a generation consumes does not depend on the target.
+function _proposal_draws(rng::AbstractRNG, N::Int, c::Int, δ::Int, d::Int, CR::Float64)
+    i1, i2 = _de_pairs(N, c, δ, rng)
+    mask = rand(rng, d) .< CR
+    any(mask) || (mask[rand(rng, 1:d)] = true)   # always move ≥1 dim
+    z_mult = randn(rng, d)
+    z_add  = randn(rng, d)
+    return i1, i2, mask, z_mult, z_add
+end
+
+"""
+    _replay_rng!(rng, gens, N, δ, d, CR) -> rng
+
+Advance `rng` through every draw `gens` generations of `run_demc` make: each chain's proposal
+(`_proposal_draws`), then one Metropolis uniform per chain. None depends on the target, so
+from the run's base seed this rebuilds, without a solve, the stream of a stored run that drew
+nothing before generation 1 (`init = :at_seed`). A resume uses it when the stored file
+carries no RNG state, which no file written before v61.3.0 does.
+"""
+function _replay_rng!(rng::AbstractRNG, gens::Int, N::Int, δ::Int, d::Int, CR::Float64)
+    for _ in 1:gens
+        for c in 1:N
+            _proposal_draws(rng, N, c, δ, d, CR)
+        end
+        for _ in 1:N
+            rand(rng)
+        end
+    end
+    return rng
+end
+
+"""
+    _outcome_from_history(accepted, chain_lp, lp0) -> Matrix{Int8}
+
+LMR's outcome code per chain and generation (see the accept loop) for a stored run that did
+not record it, as no file written before v61.3.0 does. An accepted draw is a strong, equal or
+weak accept by the sign of its log-target step from the previous generation, `lp0` standing
+for generation 0. A rejection is coded 0: the candidate is not stored, so one the prior box
+rejected (−1) cannot be told apart. Exact wherever the stuck-chain rule left the history
+alone; inside a span it overwrote, the step is read off the copied chain.
+"""
+function _outcome_from_history(accepted::AbstractMatrix{Bool}, chain_lp::AbstractMatrix,
+                               lp0::AbstractVector)
+    N, G = size(accepted)
+    out  = zeros(Int8, N, G)
+    for g in 1:G, c in 1:N
+        accepted[c, g] || continue
+        dlp = chain_lp[c, g] - (g == 1 ? lp0[c] : chain_lp[c, g - 1])
+        out[c, g] = dlp > 0 ? Int8(3) : dlp == 0 ? Int8(2) : Int8(1)
+    end
+    return out
+end
+
+# Everything run_demc carries from one generation to the next besides the population and the
+# history arrays. Read off the sampler's locals by name, so one list serves the snapshots, the
+# return and a resume; copied, so a state handed out is never mutated by the run it came from.
+const _DEMC_STATE = (:rng, :n_replaced, :last_replace, :lp_best, :θ_best,
+                     :gamma_scale, :n_adapt, :wacc_ad, :wfin_ad, :acc_ad_last,
+                     :wacc, :wfin, :wprop, :weval, :wdlp, :wesjd, :wrep, :wbox,
+                     :wacc_chk, :wprop_chk, :lp_best_prev, :rhat_prev, :stop_armed, :diag_armed)
+_demc_state(locals::AbstractDict) =
+    deepcopy(NamedTuple{_DEMC_STATE}(map(k -> locals[k], _DEMC_STATE)))
+
 # Evaluate logπ over a population matrix M (d × N), filling `out`.
 function _eval_population!(out::Vector{Float64}, logπ, M::AbstractMatrix,
                           N::Int, parallel::Bool;
@@ -96,7 +162,16 @@ Keyword arguments (defaults follow LMR where sensible):
               a healthy population it is close to silent.
   init        `:at_seed` starts every chain at θ0 exactly; `:screen` draws candidates
               around θ0, keeps only the ones the objective accepts and seeds from the
-              middle of their log-target ranking
+              middle of their log-target ranking; `:resume` continues the stored run in
+              `resume` (below)
+  resume      the stored run for `init = :resume`: its history `chain` (d × N × g0),
+              `chain_lp`, `accepted`, `outcome` (`nothing` rebuilds it with
+              `_outcome_from_history`), `replaced`, and `state`, the sampler state
+              `_demc_state` records. The run continues at generation g0 + 1 with `gens` the
+              total, so everything it returns and prints is what one run of `gens`
+              generations returns and prints. A state entry the file lacks keeps its fresh
+              value, except the RNG, which `_replay_rng!` rebuilds from `rng`. The caller
+              vouches that `chain_lp` is the target's value at the stored population.
   init_screen candidate count for `init = :screen` (0 → 20N)
   parallel    thread the population evaluation over chains (see header note)
   rng, verbose, print_every, check_every, rhat_max, ess_min
@@ -107,11 +182,12 @@ on the draws so far and sampling stops once R̂ ≤ `rhat_max` for every coordin
 and ESS ≥ `ess_min` for every coordinate (`ess_min ≤ 0` uses the dimension's
 Vats–Flegal–Jones minESS floor). `gens` then acts as a budget cap.
 
-Returns `(; draws, chain, accept, lp, N, gens, gens_requested, burn)` where
+Returns `(; draws, chain, accept, lp, N, gens, gens_requested, burn, state, ...)` where
   draws          : d × (N·kept) matrix of post-burn-in samples (UNCONSTRAINED),
   chain          : d × N × gens history, truncated to the generations actually run,
   gens           : generations actually run (< gens_requested if it stopped early),
-  gens_requested : the budget cap that was passed in.
+  gens_requested : the budget cap that was passed in,
+  state          : the sampler state at the last generation, from which a resume continues.
 """
 function run_demc(logπ, θ0::AbstractVector{<:Real};
                   N::Int = 0, gens::Int = 4000, burn_frac::Float64 = 0.5,
@@ -122,6 +198,7 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
                   # unbounded — and improper — target that every version before 20.0.0 used.
                   t_box::Float64 = Inf,
                   jump_every::Int = 10, init::Symbol = :at_seed, init_screen::Int = 0,
+                  resume::Union{Nothing,NamedTuple} = nothing,
                   # Per-coordinate scale for init = :widths, in the SAMPLED space. Supplying
                   # the criterion's own ΔQ=1 half-widths starts the population at roughly the
                   # scale it would otherwise spend the run growing into: measured on base_fc,
@@ -153,10 +230,10 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
                   # Display labels, used only to name the widest coordinate on the progress
                   # line. Falls back to the coordinate index when absent.
                   labels::Union{Nothing,Vector{String}} = nothing,
-                  # Called with (chain, chain_lp, accepted, replaced, g) at the lmr_print
-                  # cadence — LMR's own structure, where `if (op%dump_chain)` sits inside the
-                  # stat_display_rate block (mpi_mcmc_mod.f90:459-468). One cadence for both,
-                  # so a printed block and the draws behind it always correspond.
+                  # Called with (chain, chain_lp, accepted, outcome, replaced, g, state) at the
+                  # lmr_print cadence — LMR's own structure, where `if (op%dump_chain)` sits
+                  # inside the stat_display_rate block (mpi_mcmc_mod.f90:459-468). One cadence
+                  # for both, so a printed block and the draws behind it always correspond.
                   on_dump::Union{Nothing,Function} = nothing,
                   outlier_iqr::Float64 = 2.0,
                   # false = LMR: mpi_mcmc_mod.f90:421-427 runs every generation, ungated.
@@ -221,13 +298,17 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
     γ_full = 2.38 / sqrt(2δ * d)
     burn = clamp(floor(Int, burn_frac * gens), 0, gens - 1)
     θ0f = collect(float.(θ0))
+    # Generations already run: the stored run's on a resume, none otherwise.
+    init === :resume && resume === nothing &&
+        error("run_demc: init = :resume needs `resume`, the stored run.")
+    g0 = init === :resume ? size(resume.chain, 3) : 0
 
     # The box defines the target, so it belongs in the header beside δ and CR: a log that
     # does not record it cannot tell a reader which density the chain sampled.
     verbose && @printf("[demc] d=%d  N=%d chains  gens=%d  δ=%d  CR=%.2f  γ(all d)=%.3f  box=%s  init=%s  threads=%d\n",
                        d, N, gens, δ, CR, γ_full,
                        isfinite(t_box) ? @sprintf("±%.4g", t_box) : "none (improper)",
-                       init, nthreads())
+                       init === :resume ? "resume from gen $g0" : init, nthreads())
 
     # The seed must carry prior mass, or the chain starts at log-target −Inf and nothing can
     # ever be accepted. Caught here rather than as a silent all-reject run.
@@ -406,8 +487,18 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             @views X[:, c] .= cand[:, src]
             lp[c] = lpc[src]
         end
+    elseif init === :resume
+        # The stored run's final population and its log-target. Its history and state are
+        # restored below, once the arrays they fill exist.
+        (size(resume.chain, 1), size(resume.chain, 2)) == (d, N) ||
+            error("run_demc: the stored run has $(size(resume.chain, 1)) coordinates and " *
+                  "$(size(resume.chain, 2)) chains; this run has $d and $N.")
+        g0 < gens || error("run_demc: gens = $gens is the total, and the stored run already " *
+                           "has $g0 generations.")
+        @views X  .= resume.chain[:, :, g0]
+        @views lp .= resume.chain_lp[:, g0]
     else
-        error("run_demc: init must be :at_seed or :screen, got :$init")
+        error("run_demc: init must be :at_seed, :widths, :screen or :resume, got :$init")
     end
 
     # Sequential termination (Vats–Flegal–Jones 2019; Vats–Knudson 2021): from
@@ -531,7 +622,32 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     # differently — a high wbox means the box is binding, not that the model is fragile.
     wbox         = 0
 
-    for g in 1:gens
+    # A resumed run continues the stored one: its history fills generations 1..g0 and the
+    # loop picks up at g0 + 1 in the stored run's state. Entries a file does not carry keep
+    # the fresh values above, except the RNG, replayed from the base seed, and the outcome
+    # codes, rebuilt from the history (a file written before v61.3.0 has neither).
+    if init === :resume
+        @views chain[:, :, 1:g0] .= resume.chain
+        @views chain_lp[:, 1:g0] .= resume.chain_lp
+        @views accepted[:, 1:g0] .= resume.accepted
+        @views replaced[:, 1:g0] .= resume.replaced
+        @views outcome[:, 1:g0]  .= resume.outcome === nothing ?
+            _outcome_from_history(resume.accepted, resume.chain_lp, fill(lp_seed, N)) :
+            resume.outcome
+        nacc = count(resume.accepted)
+        haskey(resume.state, :gamma_scale) ||
+            !((gamma_adapt && gamma_every > 0) || check_every > 0) ||
+            error("run_demc: the stored run records neither an adapted DE scale nor the " *
+                  "stopping rule's state (a file written before v61.3.0), so a run with either " *
+                  "on cannot continue it as one run.")
+        haskey(resume.state, :rng) || _replay_rng!(rng, g0, N, δ, d, CR)
+        (; rng, n_replaced, last_replace, lp_best, θ_best, gamma_scale, n_adapt, wacc_ad,
+           wfin_ad, acc_ad_last, wacc, wfin, wprop, weval, wdlp, wesjd, wrep, wbox, wacc_chk,
+           wprop_chk, lp_best_prev, rhat_prev, stop_armed, diag_armed) =
+            deepcopy(merge(_demc_state(Base.@locals()), resume.state))
+    end
+
+    for g in (g0 + 1):gens
         # Brake the DE scale toward the acceptance optimum. Robbins-Monro in log gamma, so the
         # multiplier stays positive.
         #
@@ -575,20 +691,16 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
         jump = (g % jump_every == 0)          # periodic mode jump
 
         for c in 1:N
-            i1, i2 = _de_pairs(N, c, δ, rng)
+            i1, i2, mask, z_mult, z_add = _proposal_draws(rng, N, c, δ, d, CR)
             diff = zeros(d)
             @inbounds for j in 1:δ
                 @views diff .+= Xc[:, i1[j]] .- Xc[:, i2[j]]
             end
-            # Draw the mask BEFORE the proposal: γ depends on how many coordinates it
-            # updates, so the realised count has to be known first.
-            mask = rand(rng, d) .< CR
-            any(mask) || (mask[rand(rng, 1:d)] = true)   # always move ≥1 dim
             # gamma_scale multiplies the DE step only. The mode jump keeps γ = 1: it is a
             # deliberate full-population hop and rescaling it would defeat its purpose.
             γ = jump ? 1.0 : gamma_scale * 2.38 / sqrt(2δ * count(mask))
-            e = b_mult .* randn(rng, d)
-            ε = b_add  .* randn(rng, d)
+            e = b_mult .* z_mult
+            ε = b_add  .* z_add
             @views prop = Xc[:, c] .+ (1.0 .+ e) .* γ .* diff .+ ε
             @inbounds for k in 1:d
                 cand[k, c] = mask[k] ? prop[k] : Xc[k, c]
@@ -812,15 +924,6 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             @printf(" outlier chains replaced: %d in this window, %d in the run\n",
                     count(any(view(replaced, c, lo:g)) for c in 1:N), n_replaced)
             flush(stdout)
-            # Their DUMPING CHAINS TO FILE block. Without it a run ended by hand — which is
-            # how a run with no abort ends — leaves the best POINT on disk and no draws, and
-            # the draws are what the estimator needs. Skipped at g == gens: the caller writes
-            # its own snapshot when the sampler returns, so dumping here would write the same
-            # file twice in a row.
-            if on_dump !== nothing && g < gens
-                on_dump(view(chain, :, :, 1:g), view(chain_lp, :, 1:g),
-                        view(accepted, :, 1:g), view(replaced, :, 1:g), g)
-            end
         end
 
         if check_every > 0 && g >= check_every && g % check_every == 0 && g < gens
@@ -914,6 +1017,18 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                 break
             end
         end
+
+        # Their DUMPING CHAINS TO FILE block, at the cadence of the block above but at the END
+        # of the generation, so a snapshot holds everything the next generation reads and a
+        # run resumes from it exactly. Without it a run ended by hand — which is how a run
+        # with no abort ends — leaves the best POINT on disk and no draws, and the draws are
+        # what the estimator needs. Skipped at g == gens: the caller writes its own snapshot
+        # when the sampler returns, so dumping here would write the same file twice in a row.
+        if on_dump !== nothing && lmr_print > 0 && g % lmr_print == 0 && g < gens
+            on_dump(view(chain, :, :, 1:g), view(chain_lp, :, 1:g), view(accepted, :, 1:g),
+                    view(outcome, :, 1:g), view(replaced, :, 1:g), g,
+                    _demc_state(Base.@locals()))
+        end
     end
 
     # Truncate to what was actually filled, and re-derive burn-in at g_final so a
@@ -935,5 +1050,6 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
               lp_seed, lp_best, theta_best = θ_best,
               drift = lp_best - lp_seed, aborted, abort_why,
               gamma_scale, n_adapt,
-              n_replaced, last_replace)
+              n_replaced, last_replace,
+              state = _demc_state(Base.@locals()))
 end

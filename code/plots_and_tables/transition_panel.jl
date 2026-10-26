@@ -151,14 +151,13 @@ end
 """
     episode_calendar(scenario) → EpisodeCalendar
 
-Return the calendar for a transition pair of paths.jl (PAIRS). A counterfactual pair runs
-on its parent's calendar (`data_window`), to its own crisis window.
+Return the calendar for a transition pair of paths.jl (PAIRS).
 """
 function episode_calendar(scenario::Symbol) :: EpisodeCalendar
     String(scenario) in PAIRS ||
         error("Unknown scenario: $scenario. Must be one of :" * join(PAIRS, ", :") * ".")
     crisis = Symbol("crisis_", scenario)
-    if data_window(crisis) === :crisis_fc
+    if crisis === :crisis_fc
         # FC: Jan 2003 – Jun 2009, switch Jan 2008
         start_d  = Date(2003, 1, 1)
         switch_d = Date(2008, 1, 1)

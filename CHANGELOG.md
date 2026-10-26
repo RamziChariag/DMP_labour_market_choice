@@ -35,6 +35,349 @@ measurement was, not just the verdict.
 
 ---
 
+## v61.3.0 — 2026-10-24
+
+**MINOR: `MCMC_INIT = :resume` continues a stored DE-MC run.** With `MCMC_GENS` the new
+total, the run takes the final population of the window's chain file, completed or a
+snapshot, runs the remaining generations, and writes and prints what one run of that total
+writes. A run that does not resume reproduces v61.2.1 bit for bit.
+
+**Comparability.** Full; nothing is superseded. A fresh chain is bit-identical to v61.2.1
+(measured below). Chain files now also carry `outcome`, `demc_state` and `sampler`, and the
+snapshot's `prior` moved into `sampler`; every older chain file still loads, and the stored
+`chain_baseline_diagonalW.jls` (5,000 generations) resumes.
+
+### What changed
+- `code/mcmc/demc.jl`
+  - `:55` `_proposal_draws`: the random part of a proposal (difference pairs, crossover
+    mask, the two shocks), taken out of the generation loop (`:694`) in the same order, so
+    the sampler and the replay draw one stream.
+  - `:73` `_replay_rng!`: advances an RNG through every draw of `gens` generations without a
+    solve; how many numbers a generation draws does not depend on the target.
+  - `:95` `_outcome_from_history`: LMR's outcome codes for a file that did not record them,
+    from `accepted` and `chain_lp`.
+  - `:110` `_DEMC_STATE`, `_demc_state`: the loop state (RNG, stuck-chain count and last
+    generation, best point, DE-scale adaptation, the print, adaptation and check windows),
+    read off the sampler's locals by name, so one list serves snapshot, return and resume.
+  - `run_demc`: keyword `resume` (`:201`); `g0`, the generations already run (`:304`);
+    `init = :resume` takes the stored final population and log-target (`:490`); the stored
+    history and state are restored, the RNG replayed from the base seed where a file has
+    none, and a file without adaptation or check state refuses a run that uses either
+    (`:629`); the loop runs from `g0 + 1` (`:650`); the chain dump moved to the end of the
+    generation and passes `outcome` and the state (`:1027`); `state` is returned (`:1054`).
+    The header's `init=` reads `resume from gen <g0>`.
+- `code/mcmc/MCMC_main.jl`
+  - `:212` `:resume` documented beside the other starts.
+  - `:955` `SAMPLER` (`MCMC_SPACE`, `MCMC_PRIOR`, `MCMC_T_BOX`, `MCMC_CR`, `MCMC_DELTA`),
+    recorded in every chain file.
+  - `:986` `snapshot_chain` writes `outcome`, `demc_state` and `sampler`.
+  - `:1108` §4c: loads the chain file; refuses `MCMC_GENS` at or below its generations and
+    any difference in window, free parameters, bounds, pinned values, active moments, their
+    data values, W, `MCMC_N` or `SAMPLER`, naming each; re-solves the stored final
+    population and requires the stored log-target bit for bit.
+  - `:1182` `resume = RESUME` forwarded; `:1222` the post-run snapshot carries the new fields.
+  - `:1361` a retained draw whose vacancy costs are not in the solve cache is solved once per
+    distinct point before `k_draws` is built: on a resume, the draws of stored generations
+    when `MCMC_BURN` opens the retained window before the stored run's end; otherwise none.
+  - `:1893` the final chain file carries `outcome`, `demc_state` and `sampler`.
+- `code/smm/settings.jl:247` the `MCMC_INIT` entry lists `:resume`. `SETTINGS.md` (MCMC
+  defaults) and `README.md` (the MCMC path): one entry each.
+
+### Measured, not asserted
+Scratch copy, Julia 1.10.10, 2 threads.
+- **The stored baseline chain resumes.** `chain_baseline_diagonalW.jls` (24 × 120 × 5,000,
+  v61.2.1, n_replaced 33, last replacement at generation 3,935, no outcome codes, no RNG
+  state) passes §4c at `MCMC_GENS = 7000`, and the 120 re-solved final log-targets equal the
+  stored ones bit for bit (max |Δ| = 0) at 2 threads, against the thread count it ran at.
+- **Its RNG is rebuilt exactly.** Replaying its draws from `MCMC_SEED` through generation
+  3,935 and recomputing every proposal of generations 3,936–5,000 from the stored
+  populations reproduces all 26,947 accepted positions bit for bit; every accepted move
+  passes its replayed Metropolis draw; no candidate left the box. This confirms the run's
+  δ = 2, CR = 1.0, shocks and DE scale, which the file does not record, and that the outcome
+  codes rebuilt for generations 3,936–5,000 (the 7,000-generation run's LMR blocks read from
+  4,101) are exact.
+- **Exact continuation, through `run_demc`** (an analytic 4-d target with an infeasible
+  region; N = 8, box ±6 binding 120 times, 17 replacements, DE-scale braking, check every
+  25): a straight 100-generation run against 60 generations resumed to 100 from the returned
+  state: chain, chain_lp, accepted, outcome, replaced, draws, population, best point,
+  replacement counts, DE scale and the whole state bitwise identical, and all 17 printed
+  lines after generation 60 identical. Resumed from the straight run's snapshot at 40:
+  identical. With braking firing (n_adapt 6): identical.
+- **No RNG state** (a v61.2.1-style file: n_replaced, last_replace and the best point only,
+  outcome rebuilt): two resumes identical to each other; against the straight run every
+  array and every printed line identical, and the state differs only in four counters
+  (`wacc_ad`, `wfin_ad`, `wacc_chk`, `wprop_chk`) that a run with adaptation and the check
+  off never reads. With box rejections and replacements present the arrays are still
+  identical; 116 of 480 rebuilt outcome codes then differ from the recorded ones, 37 box
+  rejections read as weak and the rest in cells the stuck-chain rule overwrote.
+- **`MCMC_main.jl` end to end** (crisis_fc, N = 6, `MCMC_BURN = 0`, LMR blocks and
+  snapshots every 2 generations, `MCMC_JAC_METHOD = design`): a straight 8-generation run
+  against 4 generations resumed to 8: chain file identical byte for byte in every field but
+  provenance (chain, draws, chain_lp, accepted, outcome, replaced, k_draws, θ̄, se, Ĝ, spec,
+  demc_state with its RNG), the estimate bundle identical (θ̄, Q 2878.235201990958, se, mcmc, vacancy costs),
+  the results CSV byte-identical, and the 52 console lines from generation 6 on identical.
+  The retained window reached into the stored generations, so the vacancy costs of their
+  draws were solved after the run: 96 of 96 finite and equal. The resumed run killed after
+  its generation-6 snapshot (`partial = true`, holding generations 1–6) and resumed from that
+  snapshot: chain file, estimate, CSV and the console from generation 8 identical to the
+  straight run's again.
+- **Refusals**: `MCMC_GENS = 5000` on the 5,000-generation file; `MCMC_N = 60` ("It differs in
+  MCMC_N (stored 120, this run 60)"); ρ_x's upper bound changed in the stored spec ("It
+  differs in bounds"), all before any solve; in `run_demc`, gens at or below the stored
+  count, a different N, a missing `resume`, and `check_every > 0` on a file without state.
+- **A fresh run is unchanged**: v61.2.1's `demc.jl` against this one on the analytic target
+  (100 generations, burn 0.8, braking and check on): all 22 returned fields, the 44 printed
+  lines and the 4 snapshots identical.
+- **Gates**, against v61.2.1: `check_forwarding` reports the standing
+  `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` row and nothing new (run_demc's keywords 29 → 30, `resume`
+  forwarded); `check_dead_settings` PASS (196 keywords, 195 before); `check_structure` the
+  same 7 files; `check_output_tree` PASS.
+
+### Settings
+`MCMC_INIT` gains `:resume`; its default stays `:at_seed`. No setting added or re-defaulted.
+Bundle audit skipped: the change reaches the sampler and `MCMC_main.jl`'s chain I/O only,
+not the solver, the objective or the moments, and a fresh chain is bit-identical (above).
+
+### Known gaps
+- The stored generations are the stored run's. A 5,000-generation run ended burn-in at
+  4,000, so its stuck-chain rule stopped there and overwrote 1,000 generations back, where
+  one 7,000-generation run would have kept it on to 5,600 and overwritten 1,400 back. From
+  generation 5,001 the resumed run applies the 7,000-generation rules; the stored run's last
+  replacement was at 3,935.
+- A run never checks its own last generation, so with `MCMC_CHECK_EVERY > 0` a resume from a
+  completed file skips the check one run would make there; from a snapshot it does not. And
+  when a completed file's last generation is not a multiple of `MCMC_PRINT_EVERY`, the first
+  progress line after the resume covers a shorter window than one run's.
+- A file written before v61.3.0: `MCMC_CR` and `MCMC_DELTA` go unchecked (it records neither);
+  the RNG replay is exact for a run started `:at_seed` only; rebuilt outcome codes read a box
+  rejection as weak and, in spans the stuck-chain rule overwrote, read the copied chain.
+- Resumes were run end to end on crisis_fc at N = 6 only; on the baseline window only the
+  start (load, guard, re-evaluation) was run, since its chain takes days.
+- Prints: with `MCMC_CHECK_EVERY > 0` a snapshot line now follows its generation's check line.
+
+### Tried and rejected
+- Seeding the continuation from a fresh stream (`MCMC_SEED` and the stored generation count),
+  as first specified: reproducible, but not the stored run's stream. The replay costs no
+  solve and makes the continuation of the stored baseline chain exact (measured above).
+
+---
+
+## v61.2.1 — 2026-10-24
+
+**PATCH: the parameter tables print k_U and k_S, not the tightness pair.** The tightness
+pair is the coordinate the optimiser searches over; the parameters are the vacancy costs,
+which follow from free entry. Prints only; every number in every output file is unchanged.
+
+**Comparability.** Full.
+
+### What changed
+- `code/smm/smm_params.jl:695` `is_tightness`: names the search coordinate.
+- `print_spec` (`smm_params.jl`) lists every free parameter except the tightness pair, then
+  k_U and k_S (per period for the baseline) with blank bounds and their values at the seed;
+  the count in the header counts k, not the tightness pair. `smm_main.jl` passes the costs
+  at the seed (one solve per period).
+- `print_results` (`smm.jl:2825`) skips the tightness rows; the k rows below it are unchanged.
+
+### Measured, not asserted
+`crisis_covid` estimate printed in a scratch copy: 8 free parameters, A … λ_S then k_U, k_S;
+no tightness row in either table.
+
+### Settings
+None.
+
+### Known gaps
+The CSV writer and the `MCMC_main.jl` table still carry the tightness rows.
+
+---
+
+## v61.2.0 — 2026-10-24
+
+**MINOR: `MCMC_main.jl` and `transition_main.jl` pin BLAS to one thread, as `smm_main.jl`
+does.** Before, both ran with OpenBLAS's default of one thread per core unless
+`OPENBLAS_NUM_THREADS=1` was exported, and that oversubscribed the cores inside their
+threaded solves.
+
+**Comparability.** A run that exported `OPENBLAS_NUM_THREADS=1` (`ops/vm_run.sh`,
+`ops/setup_vm.sh`, every measurement in this file) is unchanged. A run that did not export
+it may differ in the last bits, where a multi-threaded BLAS call summed in another order.
+
+### What changed
+- `code/mcmc/MCMC_main.jl:75`, `code/transition/transition_main.jl:95`:
+  `LinearAlgebra.BLAS.set_num_threads(1)` after the package load, with the comment of
+  `smm_main.jl:87`.
+
+### Measured, not asserted
+Both files parse. No run: the call is the one `smm_main.jl` has made since before v40.
+
+### Settings
+None. `OPENBLAS_NUM_THREADS` is no longer needed for any of the three entry points.
+
+### Known gaps
+`model_main.jl`, `policy_main.jl` and the tools do not pin BLAS.
+
+---
+
+## v61.1.0 — 2026-10-24
+
+**MINOR: `INIT_MODE = :warmstart_base`.** A crisis window starts from the baseline point at
+its period and reads none of its own stored files; the baseline runs as under `:warmstart`.
+The existing modes are unchanged.
+
+**Comparability.** Full; no stored output is affected.
+
+### What changed
+- `code/smm/smm_main.jl:942` §8a: the candidate list is the baseline point alone for a crisis
+  window under `:warmstart_base`; the INIT_MODE comment (:287) and the §8a header (:907) say
+  so. No print added: the warm start's one line names the file it started from.
+- `code/smm/settings.jl:68`, `README.md` (start-point table) list the mode.
+
+### Measured, not asserted
+Scratch copy, `crisis_fc`, `CRISIS_BASE = :smm`, with the v60 crisis files present and a
+baseline bundle at the seeds: `:warmstart` starts from
+`estimate_crisis_fc_diagonalW_smm_mcmcbase.jls` (Q 6954.935581); `:warmstart_base` from
+`estimate_baseline_diagonalW_smm.jls` (Q 258796.199088). The baseline under `:warmstart_base`
+prints the `:warmstart` line (no candidate, the DEFAULT values). `check_forwarding`: the known
+`ROYSEARCH_MCMC_JAC_ALLOW_GAPS` only.
+
+### Settings
+`INIT_MODE` gains `:warmstart_base`; the default is unchanged.
+
+### Known gaps
+None found.
+
+---
+
+## v61.0.1 — 2026-10-24
+
+**PATCH: the baseline's period tags read `[fc]` and `[covid]` instead of `[03]` and `[15]`.**
+Labels only; every number in every output is unchanged.
+
+**Comparability.** Full. A bundle written under v61.0.0 carries the old tags in its stored
+parameter labels; nothing matches on a label (starts and caches match on block and name), and
+`MCMC_main.jl` rebuilds the joint spec from the period specs, so it prints the new tags.
+
+### What changed
+- `code/smm/smm_params.jl:600` `PERIOD_TAG`: `base_fc => "fc"`, `base_covid => "covid"`.
+- Param columns widened for the longer tags: `print_spec` (8 → 11), the `MCMC_main.jl`
+  parameter and vacancy-cost rows (9 → 12) and both headers.
+- `README.md`, "The estimation windows".
+
+### Measured, not asserted
+Baseline spec built from `smm_main.jl` in a scratch copy: joint Q at the seeds
+14756.3110199568, as under v61.0.0; the spec, results and pinned tables print `[fc]`/`[covid]`.
+
+### Settings
+None.
+
+### Known gaps
+No bundle audit: the only v61 bundle is the author's running baseline.
+
+---
+
+## v61.0.0 — 2026-10-24
+
+**MAJOR: three estimation windows replace the four base and crisis windows and the four
+counterfactual windows.** `baseline` estimates the two former base windows jointly, with
+ρ_x, b_U, b_S and σ_S common to both periods; `crisis_fc` and `crisis_covid` hold the
+training cost, skilled productivity, matching efficiency and the cost of search on the job at
+the baseline's period, beside the ability distribution, and estimate the rest. The estimation
+problem changed, so Q moves and the theorist must be told.
+
+**Comparability.** None for estimates. Every stored estimate, chain, CSV and candidate bank
+in `output/estimates/` and `output/chains/` belongs to a window that no longer exists and is
+superseded; all three windows need estimating. No migration: the change is a
+respecification, not a reparameterisation. The solver and the moments are unchanged: a
+baseline period evaluated at the v60 chain estimate of its old window reproduces that
+window's Q and vacancy costs bit for bit (below).
+
+### What changed
+- **Windows.** `code/paths.jl:51` `WINDOWS` (`baseline`, `crisis_fc`, `crisis_covid`), :53
+  `DATA_WINDOWS` (the four data windows), :55 `BASELINE_PERIODS`; `PAIR_BASE` (:151) maps data
+  windows to their baseline period; `data_windows` (:157) and `estimation_window` (:158) map
+  between the two lists. `COUNTERFACTUALS`, `is_counterfactual`, `data_window` and
+  `legacy_estimate_path` are removed. `code/smm/moments.jl`: the loaders read a data window's
+  own files.
+- **The designs.** `code/smm/smm_params.jl:844` `BASELINE_COMMON`, :848 `CRISIS_HELD`; :855
+  `PERIODS`, the `spec.fixed` record of the baseline's periods (it replaces `PAIRED_BASE`).
+- **The joint spec.** `joint_spec` (`smm_params.jl:614`): one parameter vector in the
+  canonical order, a common parameter once and every other free parameter once per period,
+  named `<name>@<period>` and labelled `[03]`/`[15]`; moments keyed `<moment>@<period>`;
+  block-diagonal W; common starts checked equal. `period_list` (:659), `pinned_key` (:667),
+  `pinned_table` (:676), `vacancy_cost_rows` (:698), `k_values`/`k_struct` (:712, :715);
+  `assert_all_params_accounted` (:906) checks period by period; `unpack_θ` refuses a joint
+  spec (:1136); `print_spec` prints the pinned table.
+- **Evaluation.** `code/smm/smm.jl:220` `equilibrium_at` sends a joint spec to
+  `_joint_equilibrium_at` (:244): the periods are solved in turn, never in parallel, and Q is
+  their sum; `moments`, `model` and `k` are per period. `attracting_check` (:367) and
+  `attracting_line` (:401) run per period. `point_in_spec` (:89) maps period by period.
+  `print_results`/`save_results` print every period's costs and pinned values.
+  `period_bundle` (:2948) is one period of a baseline bundle as a single-period estimate: its
+  coordinates, spec, standard errors, vacancy costs and attracting check. The held-choice
+  lookup (`held_choices`) is removed; the solver's `HeldChoices` machinery stays, inert when
+  unset, for the counterfactual.
+- **`smm_main.jl`.** `WINDOW` defaults to `:baseline` and is validated (:165);
+  `DEFAULT_PERIOD_PARAMS` (:345) holds each period's seeds, and `default_seed` (:380) takes the
+  period; `data_window_setup` (:420) loads one data window's moments, holdouts, W, r/ν/φ and σ_w;
+  §4–§6 build the per-period inputs; §8 joins them (:890); the warm start (:941) reads a crisis
+  window's baseline candidate at its period. `_PAIR_BASELINE` and the counterfactual holdouts
+  are removed; `WINDOW_SKIP_MOMENTS` is keyed by data window and empty.
+- **Seeds.** Each period's `DEFAULT_PERIOD_PARAMS` are the v60 chain estimate of its old
+  window; the four common parameters start at the mean of the two.
+- **`MCMC_main.jl`.** The spec is rebuilt period by period on each data window's weights
+  (`chain_spec`, :679); the vacancy costs are `NK` (:701) entries, two per period, through the
+  Jacobian (:1354), the posterior summaries, R̂/ESS, the table and the CSV; the attracting
+  check reads each period's tightness columns (:1393); a crisis chain checks `CRISIS_HELD`
+  against the baseline chain's period.
+- **Transitions and tables.** `point_estimate` (`transition_simulation.jl`) reads a baseline
+  period through `period_bundle`; `check_pair` compares every `CRISIS_HELD` parameter and
+  r, ν, φ (the old loop read held fields off `CommonParams` only);
+  `load_all_smm_bundles!` (`plots_and_tables/transition.jl:159`) and `model_main.jl` read the
+  period view; `transition_panel.jl` drops `data_window`.
+- **Gates, smoke, tools.** `check_pair_map.jl` is removed with the duplicate map it checked;
+  `check_repo.sh` lists data and estimation windows separately; `check_output_tree.jl`,
+  `check_hire_margin.jl` (per data window, period view), `smoke_transition.jl` and
+  `migrate_bundles.jl` follow the windows. `settings.jl`, `README.md` (new section "The
+  estimation windows"), `SETTINGS.md` updated.
+
+### Measured, not asserted
+All in a scratch copy at 2 threads, production grid (Nx 160, Np_U 160, Np_S 180).
+- Every file parses (`Meta.parseall`, 0 failures). `smm_main.jl` builds all three specs;
+  `assert_all_params_accounted` passes for each.
+- Baseline spec: 24 free coordinates, 70 moments, W 70×70, 21 pinned rows (ν and σ_w per
+  period). Joint Q at the seeds 14756.3110199568 = 6201.4565569033 + 8554.8544630536, bit for
+  bit, and `equilibrium_at(...).Q == smm_objective(...)`.
+- Each period's spec at its old window's v60 chain estimate, every coordinate at the old value:
+
+  | period | Q, v61 | Q, v60 | rel | k_U, k_S |
+  |---|---|---|---|---|
+  | base_fc | 4164.9378811539 | 4164.937881153949 | 0 | 1.020923, 1.019927 (identical) |
+  | base_covid | 3645.7681633087 | 3645.768163308681 | 0 | 0.660014, 0.505749 (identical) |
+- Crisis specs: 8 free (A, b_U, b_S, α_U, λ_U, λ_S, θ_U, θ_S); `CRISIS_HELD` and ν at the
+  baseline's matching period. `period_bundle` round-trips a written baseline bundle;
+  `point_in_spec` of a baseline bundle into its own spec returns its vector bit for bit.
+- `MCMC_main.jl` with `MCMC_JAC_ONLY = true` on a scratch baseline bundle at the seeds: 24 of
+  24 coordinates in 288 solves, 0 not converged, 93 s; table and CSV with k_U, k_S per period.
+- Transition loader: `point_estimate(:base_fc)` reads the baseline's period (14 coordinates),
+  `point_estimate(:crisis_fc)` the crisis bundle (8), `check_pair` passes.
+- Gates: `check_threading -t 2` on the joint baseline, Q 14756.3110199568 serial and twice
+  threaded, bitwise equal; `check_forwarding` reports the known
+  `ROYSEARCH_MCMC_JAC_ALLOW_GAPS`; `check_dead_settings` PASS; `check_structure` the same 7
+  files; `check_output_tree` PASS.
+
+### Settings
+`WINDOW` takes `:baseline`, `:crisis_fc` or `:crisis_covid` (default `:baseline` in both
+entry points); any other value stops the run. No setting added or retired.
+
+### Known gaps
+- Not run: a DE-MC chain (the joint k summaries, R̂/ESS and `k_post` paths), a transition
+  path, the smoke tests.
+- The diagnostic tools that read `WINDOW` directly (`rank_diagnostic`, `width_audit`,
+  `plateau_probe`, `check_tau_margin`, `transition_audit`, `ojs_continuity_probe`,
+  `test_generator`) were not ported: on the baseline's bundle they stop at `unpack_θ`'s guard.
+  `policy/` does not load (pre-existing).
+
+---
+
 ## v60.2.0 — 2026-10-22
 
 **MINOR: the four counterfactual windows `crisis_fc_cf1`, `crisis_covid_cf1`, `crisis_fc_cf2`,

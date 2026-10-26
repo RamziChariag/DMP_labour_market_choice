@@ -89,6 +89,11 @@ using JSON3
 
 println("done."); flush(stdout)
 
+# The dense LU / kernel BLAS calls run inside a @threads region, so multi-threaded
+# BLAS would oversubscribe every core with the outer thread count.  Pin BLAS to one
+# thread and let Base.Threads own the parallelism.
+LinearAlgebra.BLAS.set_num_threads(1)
+
 # ═══════════════════════════════════════════════════════════
 # 3. PATHS  (single source of truth — sub-scripts re-use these)
 # ═══════════════════════════════════════════════════════════

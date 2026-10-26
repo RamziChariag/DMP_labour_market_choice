@@ -47,7 +47,8 @@ const MAXIT  = parse(Int, get(ENV, "SMOKE_MAXIT", "6"))
 
 println("\n$RULE\nSMOKE — transition path on the $WINDOW estimate (v$ROYSEARCH_VERSION)\n$RULE")
 
-bundle = deserialize(estimate_path(WINDOW, "_diagonalW"; point = :smm))
+bundle = period_bundle(read_bundle(estimate_path(estimation_window(WINDOW), "_diagonalW"; point = :smm)),
+                       Symbol(WINDOW))
 cp, up, sp, tight = unpack_θ(bundle.result.theta_opt, bundle.spec)
 # @with_kw gives no copy-with-changes constructor, so the fields are splatted by name
 # and the override follows — the same idiom model_main.jl uses.

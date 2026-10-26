@@ -86,13 +86,11 @@ const MIG_WINDOWS = length(ARGS) > 1 ? ARGS[2:end] : collect(WINDOWS)
 const W_SUFFIX = "_diagonalW"
 
 # The bundles to carry across: every estimate file a window can hold at the settled
-# weighting, one per point (paths.jl ESTIMATE_POINTS) plus the untagged pre-v57 estimate,
-# which smm_main.jl still scores as a warm start. A file left in the old shape would fail
-# to load, or load with shifted fields. Chains and seed banks are regenerable and
+# weighting, one per point (paths.jl ESTIMATE_POINTS). A file left in the old shape would
+# fail to load, or load with shifted fields. Chains and seed banks are regenerable and
 # deliberately excluded.
-const MIG_FILES = [f for w in MIG_WINDOWS
-                     for f in (map(p -> estimate_path(w, W_SUFFIX; point = p), ESTIMATE_POINTS)...,
-                               legacy_estimate_path(w, W_SUFFIX))]
+const MIG_FILES = [estimate_path(w, W_SUFFIX; point = p) for w in MIG_WINDOWS
+                   for p in ESTIMATE_POINTS]
 mid_path(f) = joinpath(MID, replace(basename(f), r"\.jls$" => ".neutral.jls"))
 
 """

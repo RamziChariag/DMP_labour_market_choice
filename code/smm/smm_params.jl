@@ -8,6 +8,8 @@
 #
 # Functions
 #   build_smm_spec(...)    construct an SMMSpec
+#   joint_spec(specs, ws)  the baseline's spec: its two periods, estimated jointly
+#   period_list(spec)      a spec's periods, each with its spec and coordinates
 #   default_free_params()  full list of estimable parameters
 #   pack_θ(spec)           initial values → unconstrained vector
 #   unpack_θ(θ, spec)      unconstrained vector → 3 model structs and the tightnesses
@@ -20,9 +22,10 @@
 #     ν       pre-estimated from CPS life-table (one row per crisis pair)
 #     φ       pre-estimated from NSC/IPEDS (pooled across Fall semesters)
 #
-#   Every other parameter is estimated in each window unless pinned via
-#   FIX_PARAMS, except that a crisis window holds the ability distribution
-#   (ABILITY_PARAMS: a_ℓ, b_ℓ, ρ_x) at its paired baseline estimate.
+#   Every other parameter is estimated unless pinned via FIX_PARAMS. The baseline
+#   estimates its two periods jointly, with BASELINE_COMMON shared and every other
+#   parameter taking a value in each period; a crisis window holds CRISIS_HELD at the
+#   estimate of its baseline period.
 #
 #   Production is linear in own ability under pure-Roy (π_j = exp(A)·P_j·a_j·p),
 #   so there is no ability gradient to estimate; segment separation runs through
@@ -465,8 +468,8 @@ Holds everything the SMM estimation needs.
 
 Fields
   free     vector of ParamSpec (parameters to estimate)
-  fixed    NamedTuple of pinned parameter values; in a counterfactual window also the
-           record of its paired base estimate (`PAIRED_BASE`)
+  fixed    NamedTuple of pinned parameter values; in the baseline's joint spec only the
+           record of its periods (`PERIODS`), each with its own pinned values
   moments  NamedTuple from load_data_moments() — (value, weight) pairs
   sim      SimParams — solver settings
   run      SMMRunParams — grid sizes, optimiser settings, weighting
@@ -590,6 +593,138 @@ function build_smm_spec(
 end
 
 # ============================================================
+# The baseline's joint spec
+# ============================================================
+
+# The short tag a period's parameters carry in tables: the event its window precedes.
+const PERIOD_TAG = Dict(:base_fc => "fc", :base_covid => "covid")
+
+"""
+    joint_spec(specs, windows) → SMMSpec
+
+The spec of the baseline: one parameter vector for its periods, the data windows `windows`,
+whose single-period specs `specs` share their grids, run settings and free set. A parameter
+of `BASELINE_COMMON` is one coordinate for every period; every other free parameter is one
+coordinate per period, named `<name>@<window>` and labelled with the period's tag, next to
+its counterparts in the canonical order. The objective is the sum of the periods'
+objectives, each with its own moments and weights, so the joint moments are the periods'
+keyed `<moment>@<window>` and `W` is block diagonal. A common parameter must start at the
+same value in every period.
+"""
+function joint_spec(specs::AbstractVector{SMMSpec}, windows)
+    s1 = first(specs)
+    names = [(ps.block, ps.name) for ps in s1.free]
+    all(s -> [(ps.block, ps.name) for ps in s.free] == names, specs) ||
+        error("joint_spec: the periods do not estimate the same parameters.")
+    all(s -> s.q_scale == s1.q_scale, specs) ||
+        error("joint_spec: the periods' q_scale differ, so their objectives do not add up.")
+    free  = ParamSpec[]
+    index = [Vector{Int}(undef, length(names)) for _ in specs]
+    for (k, (blk, nm)) in enumerate(names)
+        pss = [s.free[k] for s in specs]
+        if (blk, nm) in BASELINE_COMMON
+            all(ps -> (ps.lb, ps.ub, ps.init) == (pss[1].lb, pss[1].ub, pss[1].init), pss) ||
+                error("joint_spec: $blk:$nm is common to the periods but its box or start differs.")
+            push!(free, pss[1])
+            foreach(ix -> ix[k] = length(free), index)
+        else
+            for (i, (ps, w)) in enumerate(zip(pss, windows))
+                push!(free, ParamSpec(blk, Symbol(nm, "@", w), ps.lb, ps.ub, ps.init,
+                                      "$(ps.label)[$(PERIOD_TAG[w])]"))
+                index[i][k] = length(free)
+            end
+        end
+    end
+    moments = NamedTuple(Symbol(k, "@", w) => v
+                         for (s, w) in zip(specs, windows) for (k, v) in pairs(s.moments))
+    W = zeros(sum(size(s.W, 1) for s in specs), sum(size(s.W, 1) for s in specs))
+    o = 0
+    for s in specs
+        n = size(s.W, 1);  W[o+1:o+n, o+1:o+n] .= s.W;  o += n
+    end
+    periods = (windows = Tuple(Symbol.(windows)), specs = Tuple(specs), index = Tuple(index))
+    return SMMSpec(free, NamedTuple{(PERIODS,)}((periods,)), moments, s1.sim, s1.run, W,
+                   s1.q_scale)
+end
+
+is_joint(spec::SMMSpec) = haskey(spec.fixed, PERIODS)
+
+"""
+    period_list(spec) → Vector of (window, spec, index)
+
+A spec's periods: for the baseline's joint spec each data window with its single-period spec
+and the positions of that spec's coordinates in the joint vector; for any other spec the spec
+itself, `window = nothing`, at every position.
+"""
+function period_list(spec::SMMSpec)
+    is_joint(spec) || return [(nothing, spec, collect(eachindex(spec.free)))]
+    P = spec.fixed[PERIODS]
+    return [(P.windows[i], P.specs[i], P.index[i]) for i in eachindex(P.specs)]
+end
+
+# The pinned values of a spec, period by period: what two specs must share for an estimate of
+# one to be a start of the other.
+pinned_key(spec::SMMSpec) = [pinned_values(s.fixed) for (_, s, _) in period_list(spec)]
+
+"""
+    pinned_table(spec) → Vector of (key, symbol, value)
+
+The pinned parameters for display and the CSV: a value common to every period once, under
+its own key; one that differs across the baseline's periods once per period, keyed
+`<key>@<window>` and tagged with the period.
+"""
+function pinned_table(spec::SMMSpec)
+    pl  = period_list(spec)
+    out = Tuple{Symbol,String,Float64}[]
+    for key in keys(pinned_values(pl[1][2].fixed))
+        vals = [Float64(pinned_values(s.fixed)[key]) for (_, s, _) in pl]
+        if all(==(vals[1]), vals)
+            push!(out, (key, fixed_symbol(key), vals[1]))
+        else
+            for ((w, _, _), v) in zip(pl, vals)
+                push!(out, (Symbol(key, "@", w), "$(fixed_symbol(key))[$(PERIOD_TAG[w])]", v))
+            end
+        end
+    end
+    return out
+end
+
+# The tightness pair is the coordinate the optimiser searches over, not a parameter: each
+# tightness pair gives one equilibrium, and the vacancy costs k_U, k_S, the parameters, follow
+# from free entry. The parameter tables print k in its place.
+is_tightness(ps::ParamSpec) = ps.name === :tight
+
+"""
+    vacancy_cost_rows(spec) → Vector of (block, name, label, symbol)
+
+The vacancy costs a spec's estimate carries, in the order of `k_values`: k_U and k_S, once
+per period of the baseline.
+"""
+vacancy_cost_rows(spec::SMMSpec) =
+    [(blk, w === nothing ? :k : Symbol("k@", w),
+      w === nothing ? label : "$label[$(PERIOD_TAG[w])]",
+      (blk === :unsk ? "k_U" : "k_S") * (w === nothing ? "" : "[$(PERIOD_TAG[w])]"))
+     for (w, _, _) in period_list(spec) for (blk, label) in VACANCY_COSTS]
+
+"""
+    k_values(k) → Vector{Float64}
+    k_struct(spec, v) → NamedTuple
+
+The vacancy costs of an equilibrium as a vector in the order of `vacancy_cost_rows`, and back.
+A single-period spec's costs are `(U, S)`; the baseline's are one `(U, S)` per period, keyed
+by its data window.
+"""
+k_values(k::NamedTuple) = haskey(k, :U) ? [k.U, k.S] :
+                          reduce(vcat, [[x.U, x.S] for x in values(k)])
+
+function k_struct(spec::SMMSpec, v::AbstractVector)
+    pl = period_list(spec)
+    pl[1][1] === nothing && return (U = v[1], S = v[2])
+    return NamedTuple{Tuple(w for (w, _, _) in pl)}(
+        Tuple((U = v[2i-1], S = v[2i]) for i in eachindex(pl)))
+end
+
+# ============================================================
 # σ_w calibration from the wage-reliability knob λ_w
 # ============================================================
 
@@ -705,26 +840,25 @@ end
 const VACANCY_COSTS = ((:unsk, "unskilled vacancy cost k_U"),
                        (:skl,  "skilled vacancy cost k_S"))
 
-# The joint ability distribution.  A crisis window holds it at the estimate of its
-# paired baseline window, since the ability composition of prime-age workers does
-# not move within a pair; every other parameter is a candidate for the free set in
-# every window.  A tuple, so iteration order (the field order of the pinned block,
-# which enters the candidate-cache key) is fixed.
+# The joint ability distribution.  A tuple, so iteration order (the field order of the
+# pinned block, which enters the candidate-cache key) is fixed.
 const ABILITY_PARAMS = ((:common, :a_ℓ), (:common, :b_ℓ), (:common, :ρ_x))
 
-# What a window holds at its paired base estimate: a crisis window the ability
-# distribution, a counterfactual window (paths.jl) the training cost c as well.
-base_held_params(window) =
-    is_counterfactual(window) ? (ABILITY_PARAMS..., (:common, :c)) : ABILITY_PARAMS
+# The parameters the baseline's two periods share; every other estimated parameter takes a
+# value in each period (the estimation design, Table 1).
+const BASELINE_COMMON = (ABILITY_PARAMS..., (:unsk, :bU), (:skl, :bS), (:skl, :σ))
 
-# The entry of `SMMSpec.fixed` under which a counterfactual window records the base estimate
-# its base-held parameters, and under cf1 its held choices, come from: `window`, `point`,
-# `file` (relative to the project root) and its `sha256`, `holds_choices`, the decoded point
-# (`common`, `unsk`, `skl`, `tight`) and the `sim` it is solved under. Carried in the spec,
-# so every evaluation of the spec, in any entry point, solves the restricted model. It is
-# not a parameter value: the pinned values are `pinned_values(spec.fixed)`.
-const PAIRED_BASE = :paired_base
-pinned_values(fixed::NamedTuple) = Base.structdiff(fixed, NamedTuple{(PAIRED_BASE,)})
+# What a crisis window holds at the estimate of its baseline period; it estimates the rest
+# (the estimation design, Table 3).
+const CRISIS_HELD = (ABILITY_PARAMS..., (:common, :c), (:skl, :PS), (:unsk, :μ), (:skl, :μ),
+                     (:skl, :σ))
+
+# The entry of `SMMSpec.fixed` under which the baseline's joint spec records its periods
+# (`joint_spec`): their data windows, their single-period specs and, for each, the position
+# in the joint parameter vector of every coordinate of the period's vector. It is not a
+# parameter value: the pinned values are `pinned_values(spec.fixed)`.
+const PERIODS = :periods
+pinned_values(fixed::NamedTuple) = Base.structdiff(fixed, NamedTuple{(PERIODS,)})
 
 # ============================================================
 # Fixed-key convention
@@ -775,6 +909,12 @@ only for the first field it cannot resolve.  This check runs at spec constructio
 before any solve, and lists every unaccounted parameter at once.
 """
 function assert_all_params_accounted(spec::SMMSpec; context::String = "spec")
+    if is_joint(spec)
+        for (w, s, _) in period_list(spec)
+            assert_all_params_accounted(s; context = "$context, $w")
+        end
+        return nothing
+    end
     estimated   = Set((ps.block, ps.name) for ps in spec.free)
     unaccounted = Tuple{Symbol,Symbol}[]
     for ps in default_free_params()
@@ -998,6 +1138,8 @@ function unpack_θ(
     spec  :: SMMSpec;
     constrained :: Bool = false
 )
+    is_joint(spec) && error("unpack_θ: the baseline's spec has one parameter set per period; " *
+                            "decode a period through period_list(spec).")
     # 1. Constrained free values, keyed the way `fixed_key` keys a pinned one: bare for a
     #    name unique to one block, block-qualified for a name both blocks carry (μ, η, tight,
     #    β, λ, ξ, σ_w), so the unskilled and skilled copies cannot stand in for each other.
@@ -1078,38 +1220,44 @@ end
 # ============================================================
 
 """
-    print_spec(spec)
+    print_spec(spec; k = nothing)
 
 Display the estimation problem: free parameters with bounds, fixed
-overrides, and active / skipped moments.
+overrides, and active / skipped moments. The vacancy costs stand in for the tightness pair
+(`is_tightness`), with no bounds and, given `k` (the costs at the seed), their seed values.
 """
-function print_spec(spec::SMMSpec)
+function print_spec(spec::SMMSpec; k = nothing)
+    costs = vacancy_cost_rows(spec)
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimation Specification                        ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
     @printf("║  Free parameters (%d)                                ║\n",
-            length(spec.free))
+            count(!is_tightness, spec.free) + length(costs))
     @printf("╠══════════════════════════════════════════════════════╣\n")
     # The market-suffixed symbol, not the label: these tables are read against each
     # other, and a description column wide enough for the longest label pushes the
     # numbers out of alignment. The labels survive in the CSV writers, where width
     # does not matter.
     @printf("  %s%s%10s  %10s  %10s\n",
-            padr("block", 8), padr("param", 8), "lb", "ub", "seed")
-    @printf("  %s\n", "─"^50)
+            padr("block", 8), padr("param", 11), "lb", "ub", "seed")
+    @printf("  %s\n", "─"^53)
     for ps in spec.free
+        is_tightness(ps) && continue
         @printf("  %s%s%10.4f  %10.4f  %10.4f\n",
-                padr(ps.block, 8), padr(param_symbol(ps), 8), ps.lb, ps.ub, ps.init)
+                padr(ps.block, 8), padr(param_symbol(ps), 11), ps.lb, ps.ub, ps.init)
+    end
+    for ((blk, _, _, sym), v) in zip(costs, k === nothing ? fill(NaN, length(costs)) : k_values(k))
+        @printf("  %s%s%10s  %10s  %10.4f\n", padr(blk, 8), padr(sym, 11), "", "", v)
     end
 
-    pinned = pinned_values(spec.fixed)
+    pinned = pinned_table(spec)
     if length(pinned) > 0
         @printf("\n╠══════════════════════════════════════════════════════╣\n")
         @printf("║  Fixed parameters (%d)                                ║\n",
                 length(pinned))
         @printf("╠══════════════════════════════════════════════════════╣\n")
-        for (k, v) in pairs(pinned)
-            @printf("  %s = %.6f\n", padr(fixed_symbol(k), 20), v)
+        for (_, sym, v) in pinned
+            @printf("  %s = %.6f\n", padr(sym, 20), v)
         end
     end
 
@@ -1122,19 +1270,19 @@ function print_spec(spec::SMMSpec)
     if spec.run.weighting === :equal
         @printf("  (Weighting: equal weights — W = Diagonal(weight/m̂²), relative-deviation loss)\n")
         @printf("  (Q divided by q_scale = %.6e for display)\n\n", spec.q_scale)
-        @printf("  %-22s  %10s  %10s\n", "moment", "target", "weight")
-        @printf("  %s\n", "─"^46)
+        @printf("  %-26s  %10s  %10s\n", "moment", "target", "weight")
+        @printf("  %s\n", "─"^50)
         for (k, v) in active_moments
-            @printf("  %-22s  %10.4f  %10.2f\n", k, v.value, v.weight)
+            @printf("  %-26s  %10.4f  %10.2f\n", k, v.value, v.weight)
         end
     else
         @printf("  (Weighting: diagonal — W = Diagonal(1/σ̂²_samp), raw deviations g'Wg)\n")
         @printf("  (Q divided by q_scale = %.6e for display)\n\n", spec.q_scale)
-        @printf("  %-22s  %10s  %12s\n", "moment", "target", "W diag wt")
-        @printf("  %s\n", "─"^48)
+        @printf("  %-26s  %10s  %12s\n", "moment", "target", "W diag wt")
+        @printf("  %s\n", "─"^52)
         for (idx, (k, v)) in enumerate(active_moments)
             w_diag = (idx <= size(spec.W, 1)) ? spec.W[idx, idx] : NaN
-            @printf("  %-22s  %10.4f  %12.4e\n", k, v.value, w_diag)
+            @printf("  %-26s  %10.4f  %12.4e\n", k, v.value, w_diag)
         end
     end
 
@@ -1142,10 +1290,10 @@ function print_spec(spec::SMMSpec)
         @printf("\n╠══════════════════════════════════════════════════════╣\n")
         @printf("║  Skipped moments (%2d, weight = 0)                    ║\n", length(skipped_moments))
         @printf("╠══════════════════════════════════════════════════════╣\n")
-        @printf("  %-22s  %10s\n", "moment", "target")
-        @printf("  %s\n", "─"^34)
+        @printf("  %-26s  %10s\n", "moment", "target")
+        @printf("  %s\n", "─"^38)
         for (k, v) in skipped_moments
-            @printf("  %-22s  %10.4f\n", k, v.value)
+            @printf("  %-26s  %10.4f\n", k, v.value)
         end
     end
     @printf("\n  Grid: Nx=%d  Np_U=%d  Np_S=%d\n",

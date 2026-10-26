@@ -30,10 +30,10 @@ cd "$REPO_ROOT"
 VERIFY_ONLY=false
 [ "${1:-}" = "--verify-only" ] && VERIFY_ONLY=true
 
-# Files the two estimation entry points read. windows.json is the single source of
-# truth for the window list, so the loop derives the per-window names from it rather
-# than repeating them.
-WINDOWS=(base_fc base_covid crisis_fc crisis_covid)
+# Files the two estimation entry points read: one moment and one sampling-variance file per
+# data window (DATA_WINDOWS, paths.jl), and one estimate per estimation window (WINDOWS).
+DATA_WINDOWS=(base_fc base_covid crisis_fc crisis_covid)
+WINDOWS=(baseline crisis_fc crisis_covid)
 GLOBAL_INPUTS=(data/derived/windows.json data/derived/nu_estimation.csv
                data/derived/phi_calibration.csv
                Project.toml Manifest.toml)
@@ -44,7 +44,7 @@ for f in "${GLOBAL_INPUTS[@]}"; do
     if [ -f "$f" ]; then printf "  ok      %s\n" "$f"
     else printf "  MISSING %s\n" "$f"; missing=1; fi
 done
-for w in "${WINDOWS[@]}"; do
+for w in "${DATA_WINDOWS[@]}"; do
     for stem in moments sampling_var; do
         f="data/derived/${stem}_${w}.csv"
         [ -f "$f" ] || { printf "  MISSING %s\n" "$f"; missing=1; }
@@ -53,16 +53,16 @@ done
 [ "$missing" -eq 0 ] && echo "  all per-window moment and sampling-variance files present"
 
 # A warmstart scores every stored point that can start a window (smm_main.jl §8a); with
-# none it starts from DEFAULT_PARAMS, which is a different (and slower) starting point.
+# none it starts from the DEFAULT values, which is a different (and slower) starting point.
 echo ""
 echo "=== warm-start candidates (optional, but a :warmstart run wants one) ==="
 for w in "${WINDOWS[@]}"; do
     found=""
-    for tag in _smm _smm_mcmcbase ""; do
+    for tag in _smm _smm_mcmcbase; do
         f="output/estimates/estimate_${w}_diagonalW${tag}.jls"
         [ -f "$f" ] && found="$found $(basename "$f")"
     done
-    printf "  %-13s %s\n" "$w" "${found:- none — will start from DEFAULT_PARAMS}"
+    printf "  %-13s %s\n" "$w" "${found:- none — will start from the DEFAULT values}"
 done
 
 # Settings lifecycle. Runs before the size audit and in --verify-only, because a clone
@@ -77,21 +77,6 @@ if command -v "$JULIA_BIN" >/dev/null 2>&1; then
         :
     else
         echo "  check_forwarding reported findings — see SETTINGS.md" >&2
-        missing=1
-    fi
-else
-    echo "  SKIPPED: julia not on PATH (set JULIA=/path/to/julia to include this gate)"
-fi
-
-# Pair maps. smm_main.jl keeps its own crisis → baseline map beside the CRISIS_BASE
-# switch, and every other script reads paths.jl's; the two must name the same pairs.
-echo ""
-echo "=== crisis → baseline pair map (code/gates/check_pair_map.jl) ==="
-if command -v "$JULIA_BIN" >/dev/null 2>&1; then
-    if "$JULIA_BIN" --project=. --startup-file=no code/gates/check_pair_map.jl; then
-        :
-    else
-        echo "  check_pair_map reported findings — the two pair maps disagree" >&2
         missing=1
     fi
 else

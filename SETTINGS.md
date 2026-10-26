@@ -164,12 +164,10 @@ Four settings say which estimate a run reads or writes. They exist because from 
 each estimate has a file of its own (`estimate_path`, `code/paths.jl`; the file table in
 `README.md`).
 
-- **`WINDOW`** (`smm_main.jl`, `MCMC_main.jl`). The window a run estimates: a data window of
-  `data/derived/windows.json` (`base_fc`, `crisis_fc`, `base_covid`, `crisis_covid`) or a
-  counterfactual window of `COUNTERFACTUALS` (`code/paths.jl`: `crisis_fc_cf1`,
-  `crisis_covid_cf1`, `crisis_fc_cf2`, `crisis_covid_cf2`), which is estimated on its parent
-  crisis window's data and names every file it writes. The window carries the whole
-  counterfactual: there is no other setting for it.
+- **`WINDOW`** (`smm_main.jl`, `MCMC_main.jl`). The window a run estimates, one of `WINDOWS`
+  (`code/paths.jl`): `baseline`, estimated on the data windows `base_fc` and `base_covid`
+  jointly, or `crisis_fc` or `crisis_covid`, each on its own data window. It names every file
+  the run writes. Any other value stops the run.
 
 - **`WEIGHTING`** (`:diagonal` or `:equal`, default `:diagonal`). The objective's weighting:
   `:diagonal` is W = Diagonal(1/σ̂²_k) from `sampling_var_<w>.csv`, `:equal` the
@@ -180,12 +178,11 @@ each estimate has a file of its own (`estimate_path`, `code/paths.jl`; the file 
   so they cannot disagree on which files they read. The run records it in
   `SMMRunParams.weighting`. Any other value stops the run.
 - **`CRISIS_BASE`** (`smm_main.jl`, directly below `WINDOW`; `:smm` or `:mcmc`, default
-  `:smm`). A crisis window (a counterfactual one included, which holds the training cost
-  there too) holds the ability distribution at its base window's SMM
-  estimate (`:smm`, writing `estimate_<crisis>W_smm.jls`) or at the base chain's estimate
-  (`:mcmc`, writing `estimate_<crisis>W_smm_mcmcbase.jls`, the crisis chain's seed). A
-  base window never reads it, so it can stay set while the window changes, and the
-  registry declares it `:inert` because the shipped `WINDOW` is a base window. Any other
+  `:smm`). A crisis window holds `CRISIS_HELD` at the baseline's SMM estimate (`:smm`,
+  writing `estimate_<crisis>W_smm.jls`) or at the baseline chain's estimate (`:mcmc`, writing
+  `estimate_<crisis>W_smm_mcmcbase.jls`, the crisis chain's seed), at the crisis window's
+  period. The baseline never reads it, so it can stay set while the window changes, and the
+  registry declares it `:inert` because the shipped `WINDOW` is the baseline. Any other
   value stops the run.
 - **`POINT_ESTIMATE`** (`:smm` or `:mcmc`, default `:smm`). Not an environment setting: a
   constant at the top of each script that reads an estimate (`transition_main.jl`,
@@ -203,6 +200,20 @@ file is all it governs. The chain is snapshotted to `output/chains/chain_<w>W.jl
 sampler returns still leaves its draws, and a chain writes no estimate file but its own.
 **`MCMC_BURN`** is `0.8`, which keeps the last 1,000 generations of the 5,000-generation
 budget, LMR's retained length.
+
+**`MCMC_INIT = :resume`** (v61.3.0; `MCMC_main.jl` §4c, `run_demc`) continues the run stored in
+`output/chains/chain_<w>W.jls`, completed or a snapshot, from its final population.
+`MCMC_GENS` stays the total: 7,000 against a 5,000-generation file runs generations 5,001 to
+7,000, and burn-in (`MCMC_BURN` of the total), the outlier rule, the LMR blocks, every
+diagnostic and every file are computed on the combined history. It refuses `MCMC_GENS` at or
+below the stored count and a file whose window, free parameters and boxes, pinned values,
+active moments and their data values, `W`, `MCMC_N` or `SAMPLER` (`MCMC_SPACE`,
+`MCMC_PRIOR`, `MCMC_T_BOX`, `MCMC_CR`, `MCMC_DELTA`) differ, then re-solves the stored final
+population and requires its stored log-target bit for bit. Every chain file from v61.3.0 on
+carries the sampler's state, RNG included, so the continuation is exact; for an older file the
+RNG is rebuilt by replaying the sampler's draws from `MCMC_SEED`, exact for a run started
+`:at_seed`, and the run refuses `MCMC_GAMMA_ADAPT` with `MCMC_GAMMA_EVERY > 0` and
+`MCMC_CHECK_EVERY > 0`, whose state such a file does not hold.
 
 ## Graveyard — what was tried and dropped
 

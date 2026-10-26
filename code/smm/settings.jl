@@ -59,14 +59,13 @@ documentation into a gate.
 const SETTINGS_REGISTRY = [
     # ── smm_main.jl: window, weighting and seeding ──────────────────────────
     SettingDecl(:WINDOW,        "smm_main.jl:top level",       :live,
-                "estimation window; a key of data/derived/windows.json, or a counterfactual " *
-                "window of paths.jl (COUNTERFACTUALS), estimated on its parent's data"),
+                "estimation window of paths.jl (WINDOWS): :baseline, :crisis_fc or :crisis_covid"),
     SettingDecl(:CRISIS_BASE,   "smm_main.jl:§6", :inert,
-                "read only for a crisis window, and the shipped WINDOW is a base window: " *
-                ":smm holds the ability distribution at the base SMM estimate, :mcmc at the " *
-                "base chain's estimate and writes estimate_<crisis>_smm_mcmcbase.jls"),
+                "read only for a crisis window, and the shipped WINDOW is the baseline: " *
+                ":smm holds CRISIS_HELD at the baseline SMM estimate, :mcmc at the baseline " *
+                "chain's estimate and writes estimate_<crisis>_smm_mcmcbase.jls"),
     SettingDecl(:INIT_MODE,     "smm_main.jl:top level",       :live,
-                ":default, :warmstart or :clusters — selects how the optimiser is seeded"),
+                ":default, :warmstart, :warmstart_base or :clusters — selects how the optimiser is seeded"),
     SettingDecl(:WEIGHTING,     "moments.jl:load_weight_matrix", :live,
                 ":diagonal, W = Diagonal(1/σ̂²) from the sampling variances, or :equal; " *
                 "also selects the bundle suffix, _diagonalW or _equalW"),
@@ -246,7 +245,9 @@ that settles near 1e-2, so 1.0 overshoots by about a factor of 4 here. One const
     # :live as of v19.3.0 — the shipped MCMC_INIT is :screen, so all three are read.
     # They were :inert only because the default was :at_seed.
     SettingDecl(:MCMC_INIT,         "demc.jl:run_demc", :live,
-                ":screen (shipped) or :at_seed; :screen draws a cloud and keeps the feasible points"),
+                ":at_seed, :screen, :widths or :resume; :screen draws a cloud and keeps the " *
+                "feasible points; :resume continues the run in the window's chain file, " *
+                "completed or a snapshot, with MCMC_GENS the total"),
     SettingDecl(:MCMC_INIT_SCREEN,  "demc.jl:run_demc", :live,
                 "candidates drawn for the :screen start; 0 ⇒ 20·N"),
     SettingDecl(:MCMC_SCREEN_FRAC,  "MCMC_main.jl:_screen_scale", :live,

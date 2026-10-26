@@ -35,8 +35,8 @@
 # produces figures to look at and never a paper table. It replaces standalone_default/ and
 # single_run/, which were one thing under two names.
 #
-# The transition unit is the regime PAIR — "fc" is base_fc → crisis_fc, "fc_cf1" is
-# base_fc → crisis_fc_cf1 — so one subdirectory per pair there, not one per window.
+# The transition unit is the regime PAIR — "fc" is the base_fc period of the baseline →
+# crisis_fc — so one subdirectory per pair there, not one per window.
 ############################################################
 
 const ROYSEARCH_PATHS_LOADED = true
@@ -46,20 +46,24 @@ const ROYSEARCH_PATHS_LOADED = true
 # resolves to the scratch root automatically, which is how the verification harnesses run.
 const PROJECT_ROOT = normpath(joinpath(@__DIR__, ".."))
 
-const WINDOWS    = ("base_fc", "crisis_fc", "base_covid", "crisis_covid",
-                    "crisis_fc_cf1", "crisis_covid_cf1", "crisis_fc_cf2", "crisis_covid_cf2")
-# A transition runs from a base window to the crisis window `crisis_<pair>` (its PAIR_BASE):
-# for each event the crisis estimate and the two counterfactual ones.
-const PAIRS      = ("fc", "covid", "fc_cf1", "covid_cf1", "fc_cf2", "covid_cf2")
+# The estimation windows (WINDOW): the baseline, one economy estimated jointly on its two
+# periods, and the two crisis windows.
+const WINDOWS      = ("baseline", "crisis_fc", "crisis_covid")
+# The data windows of windows.json, each with its own moments, sampling variances and ν.
+const DATA_WINDOWS = ("base_fc", "crisis_fc", "base_covid", "crisis_covid")
+# The baseline's periods, in the order its parameter vector and moments run.
+const BASELINE_PERIODS = (:base_fc, :base_covid)
+# A transition runs from the baseline period PAIR_BASE[crisis_<pair>] to `crisis_<pair>`.
+const PAIRS      = ("fc", "covid")
 const CATEGORIES = (:descriptives, :fit, :model, :transition, :policy, :manual)
 
 # Which units each category admits. A category with an empty tuple takes no unit at all,
 # and passing one is an error rather than a silently-created subdirectory.
 const _CATEGORY_UNITS = Dict(:descriptives => (),
-                            :fit          => WINDOWS,
-                            :model        => WINDOWS,
+                            :fit          => DATA_WINDOWS,
+                            :model        => DATA_WINDOWS,
                             :transition   => PAIRS,
-                            :policy       => WINDOWS,
+                            :policy       => DATA_WINDOWS,
                             :manual       => ())
 
 const OUTPUT_DIR = joinpath(PROJECT_ROOT, "output")
@@ -141,38 +145,23 @@ design choice, and a choice whose evidence has been deleted is a choice nobody c
 """
 out_logs()       = (d = joinpath(OUTPUT_DIR, "logs");       mkpath(d); d)
 
-# The base window each window is paired with. A crisis window holds the ability distribution
-# at its pair's base estimate, and a transition runs between the two. smm_main.jl keeps its
-# own copy, `_PAIR_BASELINE`; gates/check_pair_map.jl holds the two equal.
-const PAIR_BASE = Dict(:base_fc          => :base_fc,    :crisis_fc        => :base_fc,
-                       :base_covid       => :base_covid, :crisis_covid     => :base_covid,
-                       :crisis_fc_cf1    => :base_fc,    :crisis_covid_cf1 => :base_covid,
-                       :crisis_fc_cf2    => :base_fc,    :crisis_covid_cf2 => :base_covid)
-is_crisis(window) = PAIR_BASE[Symbol(window)] !== Symbol(window)
+# The baseline period each data window is paired with. A crisis window holds parameters at
+# that period of the baseline estimate, a transition runs between the two, and ν is read off
+# that period's row.
+const PAIR_BASE = Dict(:base_fc    => :base_fc,    :crisis_fc    => :base_fc,
+                       :base_covid => :base_covid, :crisis_covid => :base_covid)
+is_crisis(window) = Symbol(window) in (:crisis_fc, :crisis_covid)
 
-# The counterfactual windows: a crisis window, its `parent`, re-estimated on the parent's
-# data with the training cost also held at the paired base estimate and the two stocks
-# (training_share, skilled_share) held out of the objective. `holds_choices` (cf1): the
-# training choice and the choice of market are held, at every type, at their values in
-# the base stationary equilibrium. cf2 holds the cost alone.
-const COUNTERFACTUALS = Dict(
-    :crisis_fc_cf1    => (parent = :crisis_fc,    holds_choices = true),
-    :crisis_covid_cf1 => (parent = :crisis_covid, holds_choices = true),
-    :crisis_fc_cf2    => (parent = :crisis_fc,    holds_choices = false),
-    :crisis_covid_cf2 => (parent = :crisis_covid, holds_choices = false))
-is_counterfactual(window) = haskey(COUNTERFACTUALS, Symbol(window))
-
-# The window whose data files (moments, sampling variances, windows.json entry) a window is
-# estimated on: its own, or a counterfactual's parent's.
-data_window(window) = is_counterfactual(window) ? COUNTERFACTUALS[Symbol(window)].parent :
-                                                  Symbol(window)
+# The data windows an estimation window is estimated on, and the estimation window whose
+# estimate holds a data window.
+data_windows(window) = Symbol(window) === :baseline ? BASELINE_PERIODS : (Symbol(window),)
+estimation_window(dw) = Symbol(dw) in BASELINE_PERIODS ? :baseline : Symbol(dw)
 
 # The estimates a window can hold, each in a file of its own so that no run overwrites
 # another's:
 #   :smm           the SMM estimate (smm_main.jl; a crisis window with CRISIS_BASE = :smm)
-#   :smm_mcmcbase  a crisis window's SMM estimate with the ability distribution at the base
-#                  window's chain estimate (smm_main.jl, CRISIS_BASE = :mcmc); the crisis
-#                  chain's seed
+#   :smm_mcmcbase  a crisis window's SMM estimate with its held parameters at the baseline
+#                  chain's estimate (smm_main.jl, CRISIS_BASE = :mcmc); the crisis chain's seed
 #   :mcmc          the chain's estimate (MCMC_main.jl, a chain run)
 const ESTIMATE_POINTS = (:smm, :smm_mcmcbase, :mcmc)
 
@@ -200,15 +189,6 @@ estimate_path(window, w_suffix::AbstractString; point::Symbol) =
     _estimates_file("estimate", window, w_suffix, _point_tag(point, ESTIMATE_POINTS), "jls")
 
 """
-    legacy_estimate_path(window, w_suffix) -> String
-
-The untagged `estimate_<window><w_suffix>.jls` written before v57.0.0, when SMM and MCMC
-shared one file. Read only as a warm-start candidate.
-"""
-legacy_estimate_path(window, w_suffix::AbstractString) =
-    _estimates_file("estimate", window, w_suffix, "", "jls")
-
-"""
     mcmcbest_path(window, w_suffix) -> String
 
 The best point a chain visited, written only with MCMC_CHECKPOINT = true.
@@ -220,7 +200,7 @@ mcmcbest_path(window, w_suffix::AbstractString) =
     candidates_path(window, w_suffix; point) -> String
 
 The `:clusters` candidate bank, tagged like the bundle its run writes (`:smm` or
-`:smm_mcmcbase`): the bank's Q values depend on the fixed ability distribution.
+`:smm_mcmcbase`): the bank's Q values depend on the held parameters.
 """
 candidates_path(window, w_suffix::AbstractString; point::Symbol) =
     _estimates_file("candidates", window, w_suffix, _point_tag(point, (:smm, :smm_mcmcbase)), "jls")

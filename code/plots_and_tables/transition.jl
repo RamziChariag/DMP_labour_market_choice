@@ -156,7 +156,7 @@ function load_all_smm_bundles!(; scenarios, point::Symbol, suffix::String = W_SU
             (b === nothing || b.result === nothing || b.spec === nothing) &&
                 error("$(basename(file)), which the $sc transition was solved at, is unreadable.")
             require_current_estimate(b, file)
-            smm_bundles[w] = b
+            smm_bundles[w] = period_bundle(b, w)
             @printf("  %-14s %s  %s\n", w, basename(file), bundle_summary(b))
         end
     end

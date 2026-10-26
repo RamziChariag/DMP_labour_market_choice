@@ -26,16 +26,17 @@ julia --project=. -t auto code/smm/smm_main.jl
 
 Settings come from `ROYSEARCH_*` environment variables, resolved and logged by
 `code/smm/settings.jl`; every key is declared in `SETTINGS_REGISTRY`. The data windows live
-only in `data/derived/windows.json`; the four counterfactual windows, which are estimated on
-their parent crisis window's data, are declared in `COUNTERFACTUALS` (`code/paths.jl`).
+only in `data/derived/windows.json`; the three estimation windows, `baseline`, `crisis_fc` and
+`crisis_covid`, and the data windows each is estimated on are declared in `code/paths.jl`
+(`WINDOWS`, `data_windows`).
 
 ## Starting values and the parameter box
 
 | object | single source | read by |
 |---|---|---|
 | bounds of every estimable parameter | `default_free_params()`, `code/smm/smm_params.jl` | `build_smm_spec`; the logistic map in `pack_θ` / `unpack_θ` |
-| starting values, `INIT_MODE = :default` / `:clusters` | `DEFAULT_PARAMS`, `code/smm/smm_main.jl` | `default_seed` |
-| starting values, `INIT_MODE = :warmstart` | the stored point with the lowest Q under the current code among the window's candidates (next section) | §8a of `smm_main.jl`, one line per candidate; a parameter a candidate's run did not estimate is seeded from `DEFAULT_PARAMS` and listed |
+| starting values, `INIT_MODE = :default` / `:clusters` | `DEFAULT_PARAMS` and `DEFAULT_PERIOD_PARAMS`, `code/smm/smm_main.jl` | `default_seed` |
+| starting values, `INIT_MODE = :warmstart` (`:warmstart_base`: a crisis window's baseline point only) | the stored point with the lowest Q under the current code among the window's candidates (next section) | §8a of `smm_main.jl`, one line per candidate; a parameter a candidate's run did not estimate is seeded from `DEFAULT_PARAMS` and listed |
 | final values | `output/estimates/estimate_<w>_diagonalW_<point>.jls` and its CSV (next section) | every downstream entry point, which names the point it reads |
 
 The parameter table carries no starting values: its entries are built with `init = NaN`,
@@ -71,36 +72,45 @@ read by nothing.
 
 **The SMM path.**
 
-1. `smm_main.jl` on each base window (`ROYSEARCH_WINDOW=base_fc`, then `base_covid`): writes
-   `estimate_<base>W_smm.jls` and its CSV.
-2. `smm_main.jl` on each crisis window, `CRISIS_BASE = :smm` (the default): reads
-   `estimate_<base>W_smm.jls` and holds the ability distribution (a_ℓ, b_ℓ, ρ_x) at it;
+1. `smm_main.jl` on the baseline (`ROYSEARCH_WINDOW=baseline`): writes
+   `estimate_baselineW_smm.jls` and its CSV.
+2. `smm_main.jl` on each crisis window, `CRISIS_BASE = :smm`: reads
+   `estimate_baselineW_smm.jls` at the crisis window's period and holds `CRISIS_HELD` there;
    writes `estimate_<crisis>W_smm.jls` and its CSV.
 3. `MCMC_main.jl` with `ROYSEARCH_MCMC_JAC_ONLY=true` on any window: reads
    `estimate_<w>W_smm.jls`; writes `mcmc_results_<w>W_smm.csv` and adds the standard errors
    to the bundle it read.
-4. `transition_main.jl` with `POINT_ESTIMATE = :smm`: reads both windows' `_smm` files; writes
+4. `transition_main.jl` with `POINT_ESTIMATE = :smm`: reads the baseline's `_smm` file at the
+   pair's period and the crisis window's `_smm` file; writes
    `output/transition/transition_<pair>W_smm.jls` and tables and plots ending in `W_smm`.
 
 **The MCMC path**, after step 1 of the SMM path.
 
-1. `MCMC_main.jl` (chain) on each base window: seeds from `estimate_<base>W_smm.jls`; writes
-   `estimate_<base>W_mcmc.jls`, `mcmc_results_<base>W_mcmc.csv` and
-   `output/chains/chain_<base>W.jls`.
+1. `MCMC_main.jl` (chain) on the baseline: seeds from `estimate_baselineW_smm.jls`; writes
+   `estimate_baselineW_mcmc.jls`, `mcmc_results_baselineW_mcmc.csv` and
+   `output/chains/chain_baselineW.jls`.
 2. `smm_main.jl` on each crisis window with `ROYSEARCH_CRISIS_BASE=mcmc`: reads
-   `estimate_<base>W_mcmc.jls` and holds the ability distribution at it; writes
-   `estimate_<crisis>W_smm_mcmcbase.jls` and its CSV.
+   `estimate_baselineW_mcmc.jls` at the crisis window's period and holds `CRISIS_HELD` there;
+   writes `estimate_<crisis>W_smm_mcmcbase.jls` and its CSV.
 3. `MCMC_main.jl` (chain) on each crisis window: seeds from
-   `estimate_<crisis>W_smm_mcmcbase.jls`, and stops unless its ability distribution equals
-   that of `estimate_<base>W_mcmc.jls` bit for bit; writes `estimate_<crisis>W_mcmc.jls`,
-   its CSV and the chain file.
+   `estimate_<crisis>W_smm_mcmcbase.jls`, and stops unless its held parameters equal those of
+   `estimate_baselineW_mcmc.jls` at that period bit for bit; writes
+   `estimate_<crisis>W_mcmc.jls`, its CSV and the chain file.
 4. `transition_main.jl` with `POINT_ESTIMATE = :mcmc`: reads both windows' `_mcmc` files;
    writes `output/transition/transition_<pair>W_mcmc.jls` and tables and plots ending in
    `W_mcmc`, beside the SMM path's.
 
+A chain run continues from its chain file with `ROYSEARCH_MCMC_INIT=resume`, the file a
+completed run or a snapshot of one: `ROYSEARCH_MCMC_GENS` stays the total, the run picks up
+after the stored generations, and every output and every printed line is what one run of
+that total writes. It refuses a file sampled differently (window, free parameters, boxes,
+pinned values, moments, `W`, `MCMC_N`, the sampler settings) and one whose final population
+no longer reproduces its stored log-target. A resumed run overwrites the chain file, the
+estimate and the CSV, so back the chain file up first.
+
 `CRISIS_BASE` (`smm_main.jl`, directly below `WINDOW`; `ROYSEARCH_CRISIS_BASE`) is read only
-on a crisis window, so it can stay set while the window changes: a base window writes the
-same file with the same Q under either value. `MCMC_main.jl` does not read it.
+on a crisis window, so it can stay set while the window changes. `MCMC_main.jl` does not
+read it.
 
 `POINT_ESTIMATE` is a constant at the top of each script that reads an estimate
 (`transition_main.jl`, `model_main.jl`, `policy_main.jl` and the tools in `code/tools/`):
@@ -109,41 +119,27 @@ reads both windows of a pair at the same point, never one of each.
 
 The warm start (`INIT_MODE = :warmstart`, §8a of `smm_main.jl`) scores every candidate
 under the current code, prints one line per candidate with its Q, and starts from the
-lowest; with none readable it starts from `DEFAULT_PARAMS`. A base window's candidates are
-its `_smm` file and the untagged file; a crisis window's are its own output file, its other
-SMM file (`_smm` or `_smm_mcmcbase`), the untagged crisis file and the base point. A crisis
-window's ability distribution is the base point's whichever candidate wins.
+lowest; with none readable it starts from the DEFAULT values. The baseline's candidate is
+its `_smm` file; a crisis window's are its own output file, its other SMM file (`_smm` or
+`_smm_mcmcbase`) and the baseline point at its period. A crisis window's held parameters are
+the baseline point's whichever candidate wins.
 
-## Counterfactual windows
+## The estimation windows
 
-Each crisis window is estimated twice more under a restriction. The four windows are
-declared once, in `COUNTERFACTUALS` (`code/paths.jl`), each with its parent crisis window:
+| window | data windows | estimated | held |
+|---|---|---|---|
+| `baseline` | `base_fc` (2003–07), `base_covid` (2015–19) | ρ_x, b_U, b_S and σ_S common to both periods; every other parameter once per period | — |
+| `crisis_fc` | `crisis_fc` | A, b_U, b_S, α_U, λ_U, λ_S, θ_U, θ_S (k_U, k_S by free entry) | `CRISIS_HELD` at the baseline's `base_fc` period |
+| `crisis_covid` | `crisis_covid` | as `crisis_fc` | `CRISIS_HELD` at the baseline's `base_covid` period |
 
-| window | parent | restriction |
-|---|---|---|
-| `crisis_fc_cf1`, `crisis_covid_cf1` | `crisis_fc`, `crisis_covid` | the training choice τ and the choice of market d held, at every type and every solve, at their values in the base stationary equilibrium; the training cost c held at the base estimate |
-| `crisis_fc_cf2`, `crisis_covid_cf2` | `crisis_fc`, `crisis_covid` | the training cost c held at the base estimate; τ and d chosen |
-
-Common to all four: the data are the parent's (`data_window`: `moments_<parent>.csv`,
-`sampling_var_<parent>.csv`, the parent's `windows.json` entry, ν, φ, r and σ_w); the base
-estimate is the parent's, at the point `CRISIS_BASE` selects, and ρ_x and c are held there
-(`base_held_params`, `code/smm/smm_params.jl`), so 12 parameters are free; `training_share`
-and `skilled_share` are held out of the objective (`WINDOW_SKIP_MOMENTS`, `smm_main.jl`), 33
-moments are targeted, and both stocks are still computed and listed with the skipped
-moments. The spec records the base estimate under `spec.fixed.paired_base` (`PAIRED_BASE`):
-its window, point, file (from the project root) and SHA-256, and the decoded point. A cf1
-evaluation reads its held choices from that record (`held_choices`, `code/smm/smm.jl`): the
-base point is solved once per grid under the current code and its τ, d and the node choices
-behind them (`HeldChoices`, `code/solver/params.jl`) are carried by the model (`Model.held`),
-so every reader of a cf1 bundle, in every entry point, solves the restricted model. At the
-base estimate on the base data the cf1 model reproduces the base equilibrium, every moment
-and Q bit for bit.
-
-Every file is named by the window (`estimate_crisis_fc_cf1_diagonalW_smm_mcmcbase.jls`) and
-is written exactly as a crisis window's: `smm_main.jl` writes `_smm` (`CRISIS_BASE = :smm`) or
-`_smm_mcmcbase` (`:mcmc`); `MCMC_main.jl` seeds a chain from `_smm_mcmcbase` and checks ρ_x
-and c against the base chain's estimate. The warm start reads the window's own output file
-if there is one, else the parent's SMM estimate at the same point, on the 12 free parameters.
+The two lists are `BASELINE_COMMON` and `CRISIS_HELD` (`code/smm/smm_params.jl`); r, ν, φ, σ_w
+and every `FIX_PARAMS` entry are pinned as in every window, per data window. The baseline's
+objective is the sum of its periods' objectives, each on its own moments, weights, ν and σ_w
+(`joint_spec`, `code/smm/smm_params.jl`): its parameter vector holds a common parameter once
+and every other free parameter once per period, named `<name>@<period>` and labelled `[fc]` or
+`[covid]`, and its moments are keyed `<moment>@<period>`. Every reader that needs one period's
+estimate reads it through `period_bundle` (`code/smm/smm.jl`): the transitions and their
+tables, a crisis window's run and its chain, and the gates.
 
 ## Verification
 
@@ -154,7 +150,6 @@ if there is one, else the parent's SMM estimate at the same point, on the 12 fre
 | dead settings | `code/gates/check_dead_settings.jl` | a keyword argument declared and never read |
 | threaded evaluation | `code/gates/check_threading.jl` | a solve inside `Threads.@threads` returning a non-finite objective, or one that is not bitwise equal to the serial value |
 | unskilled hiring margin | `code/gates/check_hire_margin.jl` | a node, farther than 1e-6 relative from a^h = b̃_U/P_U, where the solved p*_U < 1 and the closed-form hireable set a_U > a^h disagree |
-| crisis → baseline pairs | `code/gates/check_pair_map.jl` | `smm_main.jl`'s own `_PAIR_BASELINE` and `PAIR_BASE` in `code/paths.jl`, which every other script reads, naming different pairs |
 | output-tree layout | `code/gates/check_output_tree.jl` | a `.csv` in `tables/`, an artifact under `code/`, a `savefig` outside `plots_and_tables/`, a hardcoded output path, an `smm → mcmc` include |
 | bundle compatibility | `code/tools/migrate_bundles.jl` | a rebuilt bundle not reproducing the reference Q recorded at extract time |
 | transition path runs | `code/smoke/smoke_transition.jl` | a terminal steady state that does not solve, or a non-finite series on the path |

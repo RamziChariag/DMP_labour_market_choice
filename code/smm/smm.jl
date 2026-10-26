@@ -86,6 +86,18 @@ function point_in_spec(b, spec::SMMSpec; estimated_only::Bool = true)
            [(ps.block, ps.name, ps.lb, ps.ub) for ps in spec.free]
     same && return (θ = collect(float.(b.result.theta_opt)), unmatched = String[],
                     clamped = String[])
+    if is_joint(spec)
+        # Period by period: the baseline starts from another baseline estimate, each period's
+        # coordinates from that estimate's same period. A common parameter is written by every
+        # period, with one value.
+        θ = fill(NaN, length(spec.free));  unmatched = String[];  clamped = String[]
+        for (w, s, idx) in period_list(spec)
+            pt = point_in_spec(period_bundle(b, w), s; estimated_only = estimated_only)
+            θ[idx] .= pt.θ
+            append!(unmatched, pt.unmatched);  append!(clamped, pt.clamped)
+        end
+        return (θ = θ, unmatched = unique(unmatched), clamped = unique(clamped))
+    end
     cp, up, sp, tight = unpack_θ(b.result.theta_opt, b.spec)
     estimated = Set((ps.block, ps.name) for ps in b.spec.free)
     free = ParamSpec[];  unmatched = String[];  clamped = String[]
@@ -177,34 +189,6 @@ end
 
 const _NO_EQUILIBRIUM = (Q = Inf, moments = nothing, model = nothing, label = :none, eq = nothing)
 
-# The held choices of a cf1 spec, keyed by its base file's checksum and the grid: solved once
-# per process and grid, then read by every evaluation and every thread.
-const _HELD_CHOICES = Dict{Tuple{String,Int,Int,Int},HeldChoices}()
-const _HELD_LOCK    = ReentrantLock()
-
-"""
-    held_choices(spec; Nx, Np_U, Np_S) → HeldChoices or nothing
-
-The education choices a cf1 window holds (`spec.fixed`'s `PAIRED_BASE` record, with
-`holds_choices`): those of the base stationary equilibrium, its paired base estimate solved
-under the current code on this grid.  `nothing` for every other spec.  The base solve
-failing is an error, not an infeasible point: without it the restricted model is undefined.
-"""
-function held_choices(spec::SMMSpec; Nx::Int = spec.run.Nx, Np_U::Int = spec.run.Np_U,
-                      Np_S::Int = spec.run.Np_S)
-    pb = get(spec.fixed, PAIRED_BASE, nothing)
-    (pb === nothing || !pb.holds_choices) && return nothing
-    return lock(_HELD_LOCK) do
-        get!(_HELD_CHOICES, (pb.sha256, Nx, Np_U, Np_S)) do
-            model, sr = solve_model(pb.common, pb.unsk, pb.skl, pb.sim; Nx = Nx, Np_U = Np_U,
-                                    Np_S = Np_S, tightness = pb.tight)
-            sr.ok || error("held_choices: the base estimate $(pb.file) does not solve on the " *
-                           "grid (Nx, Np_U, Np_S) = ($Nx, $Np_U, $Np_S)")
-            HeldChoices(model)
-        end
-    end
-end
-
 """
     equilibrium_at(θ_unc, spec; Nx, Np_U, Np_S, constrained, sim) → NamedTuple
 
@@ -218,6 +202,11 @@ solve fails, the residual battery does not certify it, or a scored moment is not
 Minimising Q over (ω, θ_U, θ_S) is the best-fitting-equilibrium estimator exactly: at
 given costs the model may have several equilibria, and each is the solution at its own
 tightnesses.
+
+For the baseline's joint spec each period is solved at its own coordinates and Q is the sum
+of the periods' Q; `moments` are keyed `<moment>@<window>` as in the spec, and `model` and
+`k` hold one entry per period, keyed by its data window. The point is infeasible when any
+period is.
 """
 function equilibrium_at(
     θ_unc :: AbstractVector{Float64},
@@ -228,14 +217,16 @@ function equilibrium_at(
     constrained :: Bool = false,
     sim   :: SimParams = spec.sim,
 )
+    is_joint(spec) && return _joint_equilibrium_at(θ_unc, spec; Nx = Nx, Np_U = Np_U,
+                                                   Np_S = Np_S, constrained = constrained,
+                                                   sim = sim)
     none = (Q = Inf, moments = nothing, model = nothing, k = (U = NaN, S = NaN))
     # constrained = true: θ_unc is θ itself, not the unconstrained t. See unpack_θ.
     cp, up, sp, tight = unpack_θ(θ_unc, spec; constrained = constrained)
-    held = held_choices(spec; Nx = Nx, Np_U = Np_U, Np_S = Np_S)
     local model, m_model
     try
         model, solve_result = solve_model(cp, up, sp, sim; Nx = Nx, Np_U = Np_U, Np_S = Np_S,
-                                          tightness = tight, held = held)
+                                          tightness = tight)
         solve_result.ok || return none
         m_model = model_moments(compute_equilibrium_objects(model))
     catch
@@ -246,6 +237,23 @@ function equilibrium_at(
     Q = compute_loss_matrix(m_model, spec, spec.W)
     return (Q = Q, moments = m_model, model = model,
             k = (U = model.unsk_par.k, S = model.skl_par.k))
+end
+
+# The periods in turn, never in parallel: an evaluation is the same whether it runs alone or
+# inside threaded work, and the periods' solves already thread internally.
+function _joint_equilibrium_at(θ_unc, spec::SMMSpec; Nx, Np_U, Np_S, constrained, sim)
+    pl  = period_list(spec)
+    ws  = Tuple(w for (w, _, _) in pl)
+    evs = [equilibrium_at(θ_unc[idx], s; Nx = Nx, Np_U = Np_U, Np_S = Np_S,
+                          constrained = constrained, sim = sim) for (_, s, idx) in pl]
+    per(f) = NamedTuple{ws}(Tuple(f(ev) for ev in evs))
+    all(ev -> isfinite(ev.Q), evs) ||
+        return (Q = Inf, moments = nothing, model = nothing,
+                k = NamedTuple{ws}(Tuple((U = NaN, S = NaN) for _ in ws)))
+    moments = NamedTuple(Symbol(k, "@", w) => v
+                         for (w, ev) in zip(ws, evs) for (k, v) in pairs(ev.moments))
+    return (Q = sum(ev.Q for ev in evs), moments = moments, model = per(ev -> ev.model),
+            k = per(ev -> ev.k))
 end
 
 """
@@ -352,14 +360,19 @@ own vacancy costs.  `D[i,j] = ∂ ln k_i / ∂ ln θ_j` (i, j ∈ U, S), at the 
 held, by central differences of `ATTRACT_STEP` in ln θ (4 solves).  Market by market the
 equilibrium attracts when each market's cost falls in its own tightness, `D_UU < 0` and
 `D_SS < 0`; jointly when `D` is stable as a 2×2 system, `tr D < 0` and `det D > 0`.  The
-second method takes a `D` measured elsewhere (MCMC_main reads it off the Jacobian).
+second method takes a `D` measured elsewhere (MCMC_main reads it off the Jacobian).  For
+the baseline's joint spec, one check per period, keyed by its data window.
 """
 function attracting_check(θ_unc::AbstractVector{Float64}, spec::SMMSpec)
+    if is_joint(spec)
+        pl = period_list(spec)
+        return NamedTuple{Tuple(w for (w, _, _) in pl)}(
+            Tuple(attracting_check(θ_unc[idx], s) for (_, s, idx) in pl))
+    end
     cp, up, sp, tight = unpack_θ(θ_unc, spec)
     grid = (Nx = spec.run.Nx, Np_U = spec.run.Np_U, Np_S = spec.run.Np_S)
-    held = held_choices(spec; grid...)
     function lnk(tt)
-        model, sr = solve_model(cp, up, sp, spec.sim; grid..., tightness = tt, held = held)
+        model, sr = solve_model(cp, up, sp, spec.sim; grid..., tightness = tt)
         sr.ok || return (NaN, NaN)
         return (log(model.unsk_par.k), log(model.skl_par.k))
     end
@@ -382,9 +395,13 @@ attracting_check(D::AbstractMatrix{Float64}) =
 """
     attracting_line(chk) → String
 
-The one line a run prints about the attracting check: empty when both verdicts hold.
+The one line a run prints about the attracting check, one per failing period of the
+baseline: empty when every verdict holds.
 """
-attracting_line(chk) = chk.market && chk.joint ? "" :
+attracting_line(chk) = !haskey(chk, :D) ?
+    join(["$w " * attracting_line(c) for (w, c) in pairs(chk) if !isempty(attracting_line(c))],
+         "\n") :
+    chk.market && chk.joint ? "" :
     @sprintf("ATTRACTING CHECK FAILED: market %s, joint %s  (D_UU %.3g  D_US %.3g  D_SU %.3g  D_SS %.3g)",
              chk.market ? "ok" : "fails", chk.joint ? "ok" : "fails",
              chk.D[1, 1], chk.D[1, 2], chk.D[2, 1], chk.D[2, 2])
@@ -2805,23 +2822,25 @@ function print_results(res::SMMResult; why::AbstractString = "", k = nothing)
     @printf("  %s%s%20s\n", padr("block", 12), padr("param", 20), "estimate")
     @printf("  %s\n", "─"^(12 + 20 + 20))
     for ps in res.spec.free
+        is_tightness(ps) && continue
         key = Symbol(string(ps.block) * "_" * string(ps.name))
         val = hasproperty(res.params_opt, key) ? res.params_opt[key] : NaN
         @printf("  %s%s%20.5f\n", padr(ps.block, 12), padr(param_symbol(ps), 20), val)
     end
     # The vacancy costs are estimated parameters like the rest; the optimiser moves the
-    # tightnesses and the solve computes the costs from them (equilibrium_at).
+    # tightness pair, which is not printed, and the solve computes the costs from it.
     if k !== nothing
-        @printf("  %s%s%20.5f\n", padr(:unsk, 12), padr("k_U", 20), k.U)
-        @printf("  %s%s%20.5f\n", padr(:skl, 12),  padr("k_S", 20), k.S)
+        for ((blk, _, _, sym), v) in zip(vacancy_cost_rows(res.spec), k_values(k))
+            @printf("  %s%s%20.5f\n", padr(blk, 12), padr(sym, 20), v)
+        end
     end
-    pinned = pinned_values(res.spec.fixed)
+    pinned = pinned_table(res.spec)
     if length(pinned) > 0
         @printf("\n  Fixed:\n")
-        for (k, v) in pairs(pinned)
+        for (_, sym, v) in pinned
             # 4 + 30 + 20 = 54 as well, so the fixed values right-align on the same edge as
             # the estimates above them despite the deeper indent.
-            @printf("    %s%20.5f\n", padr(fixed_symbol(k), 30), v)
+            @printf("    %s%20.5f\n", padr(sym, 30), v)
         end
     end
     # The reason and the vacancy costs are passed in rather than stored on SMMResult: adding
@@ -2880,12 +2899,11 @@ function save_results(res::SMMResult, path::String; k)
                     ps.block, ps.name, ps.label, val, ps.lb, ps.ub, param_symbol(ps))
         end
         # The vacancy costs have no box: the optimiser moves the tightnesses.
-        for (blk, label) in VACANCY_COSTS
-            @printf(io, "%s,k,%s,%.8f,,,false,%s\n", blk, label, blk === :unsk ? k.U : k.S,
-                    blk === :unsk ? "k_U" : "k_S")
+        for ((blk, nm, label, sym), v) in zip(vacancy_cost_rows(res.spec), k_values(k))
+            @printf(io, "%s,%s,%s,%.8f,,,false,%s\n", blk, nm, label, v, sym)
         end
-        for (key, v) in pairs(pinned_values(res.spec.fixed))
-            @printf(io, "fixed,%s,%s,%.8f,,,true,%s\n", key, key, v, fixed_symbol(key))
+        for (key, sym, v) in pinned_table(res.spec)
+            @printf(io, "fixed,%s,%s,%.8f,,,true,%s\n", key, key, v, sym)
         end
         @printf(io, "\n# Q = %.10e\n", res.loss_opt)
         @printf(io, "# converged = %s\n", res.converged)
@@ -2916,4 +2934,32 @@ function _spec_with_init(spec::SMMSpec, theta_unc::Vector{Float64})
         for (i, ps) in enumerate(spec.free)
     ]
     return SMMSpec(new_free, spec.fixed, spec.moments, spec.sim, spec.run, spec.W, spec.q_scale)
+end
+
+
+"""
+    period_bundle(b, window) → bundle
+
+Bundle `b` as one data window sees it. For the baseline's estimate, its period `window` as a
+single-period estimate: that period's coordinates and spec, and its share of every record
+kept per period or per coordinate — the standard errors, the vacancy costs and the
+attracting check. Its `result.loss_opt` is NaN, because the stored Q is the joint one. Any
+other bundle is returned unchanged.
+"""
+function period_bundle(b, window::Symbol)
+    (b.spec === nothing || !is_joint(b.spec)) && return b
+    pl = period_list(b.spec)
+    i  = findfirst(p -> p[1] === window, pl)
+    i === nothing && error("period_bundle: $window is not a period of this estimate.")
+    _, s, idx = pl[i]
+    θ  = b.result.theta_opt[idx]
+    sp = _spec_with_init(s, θ)
+    n  = length(b.spec.free)
+    at(x) = x isa NamedTuple ? (haskey(x, window) ? x[window] : map(at, x)) : x
+    se = b.se === nothing ? nothing :
+         map(v -> v isa AbstractVector && length(v) == n ? v[idx] : v, b.se)
+    return merge(b, (result = SMMResult(θ, _params_to_namedtuple(θ, sp), NaN,
+                                        b.result.converged, b.result.iterations, sp),
+                     spec = sp, se = se, vacancy_costs = at(b.vacancy_costs),
+                     attracting = at(b.attracting)))
 end

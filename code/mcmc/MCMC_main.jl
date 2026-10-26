@@ -28,11 +28,10 @@
 # It reads one SMM estimate and never writes an SMM file, except that the chain-free pass
 # adds its standard errors to the SMM bundle it read (point, stage and sim unchanged):
 #
-#   seed          base window: estimate_{window}{W}_smm.jls (both routes); crisis window:
+#   seed          baseline: estimate_baseline{W}_smm.jls (both routes); crisis window:
 #                 estimate_{window}{W}_smm.jls (JAC_ONLY), or for a chain
-#                 estimate_{window}{W}_smm_mcmcbase.jls, which must hold the ability
-#                 distribution (a counterfactual window: and the training cost) of the
-#                 base window's estimate_{base}{W}_mcmc.jls
+#                 estimate_{window}{W}_smm_mcmcbase.jls, which must hold CRISIS_HELD at the
+#                 baseline chain's estimate_baseline{W}_mcmc.jls
 #   JAC_ONLY      output/estimates/mcmc_results_{window}{W}_smm.csv, and the standard
 #                 errors into the seed bundle
 #   chain         output/estimates/estimate_{window}{W}_mcmc.jls   the chain's estimate
@@ -70,6 +69,11 @@ using Base.Threads, Optim, CSV, DataFrames, Serialization
 using Clustering, QuasiMonteCarlo, JSON3
 println("done."); flush(stdout)
 
+# The dense LU / kernel BLAS calls run inside a @threads region, so multi-threaded
+# BLAS would oversubscribe every core with the outer thread count.  Pin BLAS to one
+# thread and let Base.Threads own the parallelism.
+LinearAlgebra.BLAS.set_num_threads(1)
+
 # ── Solver + SMM modules as a library (same include order as smm_main.jl) ─
 print("Loading solver + SMM modules... "); flush(stdout)
 include(joinpath(SOLVER_DIR, "grids.jl"))
@@ -97,7 +101,7 @@ println("done.")
 # (settings.jl) reads them and records each resolution for the [env] block below.
 assert_no_legacy_env()
 
-WINDOW        = env_setting(:WINDOW, :crisis_fc_cf1)            # window to compute SEs for
+WINDOW        = env_setting(:WINDOW, :baseline)                 # window to compute SEs for
 WEIGHTING     = run_weighting()                            # :diagonal or :equal (moments.jl).
                                   # Selects BOTH the estimation bundle to load and
                                   # the weighting the chain targets, as in smm_main.jl.
@@ -205,6 +209,10 @@ MCMC_B_ADD       = env_setting(:MCMC_B_ADD, 1e-4)       # LMR shock_add_std, mai
 #             Use when :at_seed mixes too slowly; it costs the screening solves up front
 #             and errors out if too few candidates converge, which is itself the useful
 #             signal that θ̂ sits in a basin too narrow to sample.
+#   :resume   continue the run stored in the window's chain file, completed or a snapshot,
+#             from its final population. MCMC_GENS stays the TOTAL, so a 5,000-generation
+#             file and MCMC_GENS = 7,000 run 2,000 more and write and print what one run of
+#             7,000 does. See section 4c.
 MCMC_OUTLIER_IQR = 2.0             # Replace a chain scoring more than this many IQRs
                                    # below Q1 with the best chain (LMR
                                    # mpi_mcmc_mod.f90:419). A stuck chain's position
@@ -638,9 +646,9 @@ print_env_settings()
 # 1. Load the SMM estimate (point estimate + spec) that seeds the run
 # ========================================================================
 # Every route starts from the window's SMM estimate except a chain on a crisis window,
-# which starts from the crisis SMM estimate holding the ability distribution at the base
-# chain's estimate (smm_main.jl with CRISIS_BASE = :mcmc): the crisis chain is seeded from
-# the base chain, the base chain from the base SMM estimate.
+# which starts from the crisis SMM estimate holding CRISIS_HELD at the baseline chain's
+# estimate (smm_main.jl with CRISIS_BASE = :mcmc): the crisis chain is seeded from the
+# baseline chain, the baseline chain from the baseline SMM estimate.
 SEED_POINT = is_crisis(WINDOW) && !MCMC_JAC_ONLY ? :smm_mcmcbase : :smm
 seed_jls   = estimate_path(WINDOW, W_SUFFIX; point = SEED_POINT)
 isfile(seed_jls) || error(
@@ -652,13 +660,14 @@ bundle = read_bundle(seed_jls)
     error("Could not read $seed_jls.")
 require_current_estimate(bundle, seed_jls)
 if SEED_POINT === :smm_mcmcbase
-    # The base chain's estimate may have been re-run since the crisis SMM estimate was
-    # made from it, so the parameters held at it (the ability distribution, and in a
-    # counterfactual window the training cost) are compared rather than trusted.
-    base_jls = estimate_path(PAIR_BASE[WINDOW], W_SUFFIX; point = :mcmc)
+    # The baseline chain's estimate may have been re-run since the crisis SMM estimate was
+    # made from it, so the parameters held at it are compared rather than trusted, at the
+    # crisis window's period of the baseline.
+    base_jls = estimate_path(:baseline, W_SUFFIX; point = :mcmc)
     base_b   = read_bundle(base_jls)
+    base_b === nothing || (base_b = period_bundle(base_b, PAIR_BASE[WINDOW]))
     base_held(b) = (blocks = unpack_θ(b.result.theta_opt, b.spec);
-                    [_baseline_param_value(blk, nm, blocks...) for (blk, nm) in base_held_params(WINDOW)])
+                    [_baseline_param_value(blk, nm, blocks...) for (blk, nm) in CRISIS_HELD])
     (base_b !== nothing && base_b.result !== nothing && base_held(base_b) == base_held(bundle)) ||
         error("$(basename(seed_jls)) does not hold the parameters of " *
               "$(basename(base_jls)) a $WINDOW run holds there: run smm_main.jl on $WINDOW " *
@@ -669,31 +678,36 @@ end
 θ0    = collect(float.(bundle.result.theta_opt))   # free params, UNCONSTRAINED space
 spec0 = bundle.spec
 
-# Held-out moments come from the bundle, so they cannot disagree with the run
-# that produced the seed.
-BUNDLE_SKIP = Symbol[k for k in keys(spec0.moments) if spec0.moments[k].weight <= 0.0]
-
 # ========================================================================
 # 2. Rebuild the spec with the SAME weighting the estimation used. Everything
 #    else (free set, fixed η/r/ν/φ, moments, grids, sim) is taken verbatim from
 #    the estimation spec, so θ0 is valid and the model is solved identically.
 # ========================================================================
-W_chain = load_weight_matrix(; window=WINDOW, derived_dir=derived_dir,
-                               weighting=WEIGHTING, skip_moments=BUNDLE_SKIP)
-spec = build_smm_spec(
-    spec0.moments, spec0.sim;
-    fixed        = spec0.fixed,
-    free_specs   = spec0.free,
-    run          = spec0.run,
-    W            = W_chain,
-    q_scale      = 1.0,          # raw g'Wg: the quasi-posterior must not be rescaled
-    skip_moments = BUNDLE_SKIP,
-)
+# Held-out moments come from the bundle, so they cannot disagree with the run that produced
+# the seed. The baseline is rebuilt period by period, each on its own data window's weights.
+function chain_spec(s0::SMMSpec, dw::Symbol)
+    skip = Symbol[k for k in keys(s0.moments) if s0.moments[k].weight <= 0.0]
+    return build_smm_spec(
+        s0.moments, s0.sim;
+        fixed        = s0.fixed,
+        free_specs   = s0.free,
+        run          = s0.run,
+        W            = load_weight_matrix(; window=dw, derived_dir=derived_dir,
+                                            weighting=WEIGHTING, skip_moments=skip),
+        q_scale      = 1.0,          # raw g'Wg: the quasi-posterior must not be rescaled
+        skip_moments = skip,
+    )
+end
+spec = is_joint(spec0) ?
+    _spec_with_init(joint_spec([chain_spec(s, w) for (w, s, _) in period_list(spec0)],
+                               BASELINE_PERIODS), pack_θ(spec0.free)) :
+    chain_spec(spec0, WINDOW)
 @assert length(θ0) == length(spec.free) "seed length ($(length(θ0))) ≠ free params " *
     "($(length(spec.free))) — bundle and spec rebuild disagree."
 
 MOM_KEYS = active_moment_keys(spec)
 K, d     = length(MOM_KEYS), length(spec.free)
+NK       = length(vacancy_cost_rows(spec))      # the vacancy costs, two per period
 
 # σ̂ over the active moments, in the SAME order as MOM_KEYS and spec.W. Needed for
 # the Ω-free bound; available only under the diagonal-σ weighting.
@@ -854,9 +868,9 @@ MCMC_PRIOR in (:flat_theta, :flat_t) ||
 
 # The vacancy costs at every point the target is evaluated, keyed by the point's hash: a
 # draw is a copy of an evaluated point, so its costs are read back here instead of re-solved.
-const _AT_POINT = Dict{UInt64,NTuple{2,Float64}}()
+const _AT_POINT = Dict{UInt64,Vector{Float64}}()
 const _AT_LOCK  = ReentrantLock()
-_at_point(θ) = lock(() -> get(_AT_POINT, hash(collect(float.(θ))), (NaN, NaN)), _AT_LOCK)
+_at_point(θ) = lock(() -> get(_AT_POINT, hash(collect(float.(θ))), fill(NaN, NK)), _AT_LOCK)
 
 function logposterior(θ)
     # The prior box on the unconstrained parameter, tested BEFORE the solve: outside it the
@@ -885,7 +899,7 @@ function logposterior(θ)
         ev = equilibrium_at(θ, spec)
     end
     isfinite(ev.Q) || return -Inf
-    lock(() -> (_AT_POINT[hash(collect(float.(θ)))] = (ev.k.U, ev.k.S)), _AT_LOCK)
+    lock(() -> (_AT_POINT[hash(collect(float.(θ)))] = k_values(ev.k)), _AT_LOCK)
     return _USE_LOGJAC ? -0.5 * ev.Q + logjac_box(collect(float.(θ)), spec.free) :
                          -0.5 * ev.Q
 end
@@ -936,6 +950,11 @@ function promote!(θ::Vector{Float64}, Q_new::Float64, Q_old::Float64; label::St
     return nothing
 end
 
+# The settings that define the chain beyond the spec, recorded in every chain file so that
+# MCMC_INIT = :resume can refuse to continue a run sampled differently.
+const SAMPLER = (MCMC_SPACE = MCMC_SPACE, MCMC_PRIOR = MCMC_PRIOR, MCMC_T_BOX = MCMC_T_BOX,
+                 MCMC_CR = MCMC_CR, MCMC_DELTA = MCMC_DELTA)
+
 # Live checkpoint. Raising MCMC_DRIFT_MAX lets the chain keep climbing instead of
 # stopping at the first 25 log units, which makes the run long enough that finishing is
 # no longer guaranteed — an interrupt, or a kill, would otherwise discard every point it
@@ -944,7 +963,7 @@ end
 # re-solved, so the callback costs nothing.
 
 """
-    snapshot_chain(ch, lp, acc, rep, g)
+    snapshot_chain(ch, lp, acc, out, rep, g, state)
 
 Write the draws so far to the chain path, atomically.
 
@@ -961,22 +980,24 @@ snapshot of it, over the generations it covers.
 
 `partial = true` marks it as a snapshot rather than a completed run; section 7 overwrites
 the same path at the end with the full bundle, including the Ĝ/moment fields a snapshot
-cannot have because they are computed afterwards.
+cannot have because they are computed afterwards. `outcome`, `demc_state` (the sampler's
+state, RNG included) and `SAMPLER` are what MCMC_INIT = :resume continues from and checks.
 """
-function snapshot_chain(ch, lp, acc, rep, g)
+function snapshot_chain(ch, lp, acc, out, rep, g, state)
     pth = chain_path(WINDOW, W_SUFFIX)
     tmp = pth * ".tmp"
     mkpath(dirname(pth))
     open(tmp, "w") do io
         serialize(io, (chain = Array(ch), chain_lp = Array(lp),
-                       accepted = BitMatrix(acc), replaced = BitMatrix(rep),
+                       accepted = BitMatrix(acc), outcome = Array(out),
+                       replaced = BitMatrix(rep), demc_state = state, sampler = SAMPLER,
                        gens = g, gens_requested = MCMC_GENS,
                        burn = clamp(floor(Int, MCMC_BURN * g), 0, g - 1),
                        spec = spec, window = WINDOW,
                        lb = [ps.lb for ps in spec.free],
                        ub = [ps.ub for ps in spec.free],
                        labels = [ps.label for ps in spec.free],
-                       prior = MCMC_PRIOR, partial = true,
+                       partial = true,
                        provenance = run_provenance(window = WINDOW, w_suffix = W_SUFFIX,
                                                    version = ROYSEARCH_VERSION)))
     end
@@ -1083,6 +1104,70 @@ if need_pre
     flush(stdout)
 end
 
+# ------------------------------------------------------------------------
+# 4c. MCMC_INIT = :resume: the stored run this one continues.
+#
+# MCMC_GENS stays the total. The run continues the one in the window's chain file, a
+# completed run or a snapshot alike, after its last generation, and writes and prints what one
+# run of MCMC_GENS generations would. It continues only the same chain, so what defines the
+# target (window, free parameters and their boxes, pinned values, active moments, their data
+# values, W) and the sampler (N and SAMPLER) is compared first and every difference is named.
+# A file written before v61.3.0 records no SAMPLER; for it, MCMC_PRIOR and MCMC_T_BOX are
+# checked only through the re-evaluation below, and MCMC_CR and MCMC_DELTA not at all.
+#
+# Then the stored final population is re-evaluated. Its log-target must equal the stored one
+# bit for bit: a solve is the same whether run alone or nested in threaded work, and its
+# reductions are maxima, which no grouping changes, so any difference means the code or the
+# data no longer define the target the stored run sampled.
+# ------------------------------------------------------------------------
+RESUME = nothing
+if !MCMC_JAC_ONLY && MCMC_INIT === :resume
+    stored_jls = chain_path(WINDOW, W_SUFFIX)
+    isfile(stored_jls) || error("MCMC_INIT = :resume: no stored run at $stored_jls.")
+    stored = open(deserialize, stored_jls)
+    g0     = size(stored.chain, 3)
+    MCMC_GENS > g0 || error("MCMC_INIT = :resume: MCMC_GENS = $MCMC_GENS is the total, and " *
+                            "$(basename(stored_jls)) already holds $g0 generations.")
+    let s = stored.spec,
+        same = [("window",            stored.window,                         WINDOW),
+                ("free parameters",   [(ps.block, ps.name) for ps in s.free],
+                                      [(ps.block, ps.name) for ps in spec.free]),
+                ("bounds",            [(ps.lb, ps.ub) for ps in s.free],
+                                      [(ps.lb, ps.ub) for ps in spec.free]),
+                ("pinned values",     pinned_key(s),                         pinned_key(spec)),
+                ("active moments",    active_moment_keys(s),                 MOM_KEYS),
+                ("moment data",       [s.moments[k].value for k in active_moment_keys(s)],
+                                      [spec.moments[k].value for k in MOM_KEYS]),
+                ("W",                 s.W,                                   spec.W),
+                ("MCMC_N",            size(stored.chain, 2),                 MCMC_N)]
+        hasproperty(stored, :sampler) &&
+            append!(same, [(String(k), stored.sampler[k], SAMPLER[k]) for k in keys(SAMPLER)])
+        bad = [l * (a isa AbstractArray ? "" : " (stored $a, this run $b)")
+               for (l, a, b) in same if !isequal(a, b)]
+        isempty(bad) || error("MCMC_INIT = :resume: $(basename(stored_jls)) is not this run's " *
+                              "chain. It differs in " * join(bad, "; ") * ".")
+    end
+    hasproperty(stored, :demc_state) || hasproperty(stored, :n_replaced) ||
+        error("MCMC_INIT = :resume: $(basename(stored_jls)) is a snapshot written before " *
+              "v61.3.0, which records neither the sampler state nor the best visited point.")
+    lp_now = Vector{Float64}(undef, MCMC_N)
+    _eval_population!(lp_now, logposterior, stored.chain[:, :, g0], MCMC_N, MCMC_PARALLEL)
+    lp_now == stored.chain_lp[:, g0] || error(
+        "MCMC_INIT = :resume: the stored final population does not reproduce its log-target " *
+        "($(count(lp_now .!= stored.chain_lp[:, g0])) of $MCMC_N chains differ, largest " *
+        @sprintf("relative difference %.3e", maximum(abs.(lp_now .- stored.chain_lp[:, g0]) ./
+                                                     abs.(stored.chain_lp[:, g0]))) *
+        "). The code or the data no longer define the target the stored run sampled.")
+    # The sampler state of a file written before v61.3.0 is what its final bundle records; the
+    # rest takes fresh values in run_demc, the RNG replayed from MCMC_SEED.
+    global RESUME = (chain = stored.chain, chain_lp = stored.chain_lp,
+                     accepted = stored.accepted, replaced = stored.replaced,
+                     outcome = hasproperty(stored, :outcome) ? stored.outcome : nothing,
+                     state = hasproperty(stored, :demc_state) ? stored.demc_state :
+                             (n_replaced = stored.n_replaced, last_replace = stored.last_replace,
+                              lp_best = stored.lp_best, θ_best = stored.theta_best))
+end
+
 res = MCMC_JAC_ONLY ?
     (draws = reshape(θ0, :, 1), chain = reshape(θ0, :, 1, 1), accept = NaN,
      lp = [logposterior(θ0)], N = 1, gens = 0, gens_requested = 0, burn = 0,
@@ -1094,7 +1179,7 @@ res = MCMC_JAC_ONLY ?
                b_add = MCMC_B_ADD, b_mult = MCMC_B_MULT, t_box = MCMC_T_BOX,
                init_widths = _init_widths, init_widths_dn = _init_widths_dn,
                init_disperse = MCMC_INIT_DISPERSE,
-               init = MCMC_INIT, init_screen = MCMC_INIT_SCREEN,
+               init = MCMC_INIT, init_screen = MCMC_INIT_SCREEN, resume = RESUME,
                init_scale = init_scale, init_width = init_width,
                outlier_iqr = MCMC_OUTLIER_IQR,
                outlier_burn_only = MCMC_OUTLIER_BURN_ONLY,
@@ -1134,7 +1219,8 @@ res = MCMC_JAC_ONLY ?
 # itself — so the stub carries no chain_lp/accepted/replaced to write, and snapshotting it
 # would replace this window's real chain bundle with a single-draw stub.
 MCMC_JAC_ONLY ||
-    snapshot_chain(res.chain, res.chain_lp, res.accepted, res.replaced, res.gens)
+    snapshot_chain(res.chain, res.chain_lp, res.accepted, res.outcome, res.replaced, res.gens,
+                   res.state)
 
 # ========================================================================
 # 5. Points at which to store the model moment vector, from which Ĝ is regressed.
@@ -1269,13 +1355,21 @@ se_chain = draws_ok ?
                      spec.free[k].lb, spec.free[k].ub) for k in 1:d] :
     θ̄_con
 # Each retained draw's vacancy costs, read back from the evaluation that scored it, and
-# their posterior summary.
+# their posterior summary. A resumed run evaluated only its own generations, so a retained
+# draw from the stored ones, which a retained window opening before the stored run's end
+# holds, is solved here first, once per distinct point; otherwise there is none to solve.
+draws_ok && let todo = unique([res.draws[:, t] for t in axes(res.draws, 2)
+                               if all(isnan, _at_point(view(res.draws, :, t)))])
+    @threads for t in todo
+        logposterior(t)
+    end
+end
 k_draws = draws_ok ?
-    reduce(hcat, [collect(_at_point(view(res.draws, :, t))) for t in axes(res.draws, 2)]) :
-    Matrix{Float64}(undef, 2, 0)
+    reduce(hcat, [_at_point(view(res.draws, :, t)) for t in axes(res.draws, 2)]) :
+    Matrix{Float64}(undef, NK, 0)
 k_post = !draws_ok ? nothing :
-    let kd = [filter(isfinite, k_draws[i, :]) for i in 1:2]
-        nt(f) = (U = f(kd[1]), S = f(kd[2]))
+    let kd = [filter(isfinite, k_draws[i, :]) for i in 1:NK]
+        nt(f) = k_struct(spec, f.(kd))
         (mean = nt(mean), sd = nt(std), q025 = nt(x -> quantile(x, 0.025)),
          q500 = nt(median), q975 = nt(x -> quantile(x, 0.975)))
     end
@@ -1299,8 +1393,8 @@ P   = chain_ok ?
 # delta method their standard errors and the attracting check — cost no solve of their own.
 function moments_and_k(t)
     ev = equilibrium_at(collect(float.(t)), spec)
-    isfinite(ev.Q) || return fill(NaN, K + 2)
-    return vcat([getproperty(ev.moments, m) for m in MOM_KEYS], ev.k.U, ev.k.S)
+    isfinite(ev.Q) || return fill(NaN, K + NK)
+    return vcat([getproperty(ev.moments, m) for m in MOM_KEYS], k_values(ev.k))
 end
 
 if need_reg
@@ -1311,7 +1405,7 @@ if need_reg
                  round.(Int, range(1, n_kept; length = MCMC_JAC_DRAWS))
         res.draws[:, sel]
     end
-    MK = Matrix{Float64}(undef, K + 2, size(Xj, 2))
+    MK = Matrix{Float64}(undef, K + NK, size(Xj, 2))
     @printf("Storing moments at %d %s for Ĝ... ", size(Xj, 2),
             use_design ? "local-design points" : "thinned draws"); flush(stdout)
     @threads for i in axes(Xj, 2)
@@ -1320,7 +1414,7 @@ if need_reg
     keep    = vec(all(isfinite, MK; dims = 1))
     Msel    = MK[1:K, keep]
     draws_J = Xj[:, keep]
-    Ĝk_reg, _ = jacobian_from_draws(draws_J, MK[K+1:K+2, keep], spec.free)
+    Ĝk_reg, _ = jacobian_from_draws(draws_J, MK[K+1:K+NK, keep], spec.free)
     @printf("%d feasible.\n", size(Msel, 2)); flush(stdout)
 
     # The screen pre-pass above already produced Ĝ from a local design around the seed. When
@@ -1346,8 +1440,8 @@ if MCMC_JAC_METHOD === :fd
         isfinite(mk[1]) || t == θ_G || Threads.atomic_add!(n_fail, 1)
         return mk
     end
-    Ĝmk, fd = jacobian_adaptive_fd(θ_G, spec.free, σ̂, mom_at; n_carried = 2)
-    global Ĝ, Ĝk = Ĝmk[1:K, :], Ĝmk[K+1:K+2, :]
+    Ĝmk, fd = jacobian_adaptive_fd(θ_G, spec.free, σ̂, mom_at; n_carried = NK)
+    global Ĝ, Ĝk = Ĝmk[1:K, :], Ĝmk[K+1:K+NK, :]
     @printf("%d of %d coordinates in %d solves, %d not converged.\n",
             count(fd.ok), d, sum(fd.n_eval), n_fail[])
     flush(stdout)
@@ -1378,21 +1472,28 @@ se_bnd, se_sw = se_bound_diagonal(Ĝ, spec.W, σ̂; bread = P)
 # delta method's: their gradient in the parameter vector (natural units, the rows of Ĝk) is the combination
 # se_bound_diagonal is evaluated at. The SMM covariance does not depend on the coordinates it
 # is expressed in, so these are the errors a k-coordinate estimation would report.
-k_hat            = seed_eq.k
+k_hat            = k_values(seed_eq.k)
 se_bnd_k, se_sw_k = se_bound_diagonal(Ĝ, spec.W, σ̂, Matrix(Ĝk'); bread = P)
 
 # θ̂'s attracting check off the same columns: D_ij = ∂ln k_i/∂ln θ_j needs the two tightness
 # columns of Ĝk, and costs no solve where both tightnesses are estimated and Ĝ is measured at
 # θ̂. On the chain path Ĝ is measured at θ̄, so θ̂'s check is solved directly.
-let jU = findfirst(ps -> (ps.block, ps.name) == (:unsk, :tight), spec.free),
-    jS = findfirst(ps -> (ps.block, ps.name) == (:skl,  :tight), spec.free)
-    global attract = if chain_ok || jU === nothing || jS === nothing
+# One check per period of the baseline: its tightness columns and its two rows of Ĝk.
+_tight_col(s, idx, blk) =
+    (j = findfirst(ps -> (ps.block, ps.name) == (blk, :tight), s.free); j === nothing ? nothing : idx[j])
+let cols = [(_tight_col(s, idx, :unsk), _tight_col(s, idx, :skl)) for (_, s, idx) in period_list(spec)]
+    global attract = if chain_ok || any(c -> nothing in c, cols)
         attracting_check(θ0, spec)
     else
-        θU = _to_constrained(θ0[jU], spec.free[jU].lb, spec.free[jU].ub)
-        θS = _to_constrained(θ0[jS], spec.free[jS].lb, spec.free[jS].ub)
-        attracting_check([Ĝk[1, jU] * θU / k_hat.U  Ĝk[1, jS] * θS / k_hat.U;
-                          Ĝk[2, jU] * θU / k_hat.S  Ĝk[2, jS] * θS / k_hat.S])
+        checks = map(enumerate(cols)) do (i, (jU, jS))
+            θU = _to_constrained(θ0[jU], spec.free[jU].lb, spec.free[jU].ub)
+            θS = _to_constrained(θ0[jS], spec.free[jS].lb, spec.free[jS].ub)
+            rU, rS = 2i - 1, 2i
+            attracting_check([Ĝk[rU, jU] * θU / k_hat[rU]  Ĝk[rU, jS] * θS / k_hat[rU];
+                              Ĝk[rS, jU] * θU / k_hat[rS]  Ĝk[rS, jS] * θS / k_hat[rS]])
+        end
+        is_joint(spec) ? NamedTuple{Tuple(w for (w, _, _) in period_list(spec))}(Tuple(checks)) :
+                         only(checks)
     end
 end
 isempty(attracting_line(attract)) || println(attracting_line(attract))
@@ -1411,11 +1512,11 @@ rhat, ess = draws_ok ? split_rhat_ess(res.chain, res.burn) :
 # draw, and k_draws holds them in the column order of res.draws, which is
 # reshape(chain[:, :, burn+1:end], d, :), chain fastest. Laid back out as chain × generation
 # they get the same split R̂ and ESS as the coordinates, on the same kept generations.
-# rhat_all and ess_all are the table's R̂ column and its ESS, the 14 coordinates then k_U, k_S.
+# rhat_all and ess_all are the table's R̂ column and its ESS, the coordinates then the costs.
 rhat_k, ess_k = draws_ok && size(k_draws, 2) == size(res.draws, 2) &&
                     size(res.draws, 2) % size(res.chain, 2) == 0 ?
-                split_rhat_ess(reshape(k_draws, 2, size(res.chain, 2), :), 0) :
-                (fill(NaN, 2), fill(NaN, 2))
+                split_rhat_ess(reshape(k_draws, NK, size(res.chain, 2), :), 0) :
+                (fill(NaN, NK), fill(NaN, NK))
 rhat_all, ess_all = vcat(rhat, rhat_k), vcat(ess, ess_k)
 blo, bhi  = draws_ok ? boundary_mass(res.draws, spec.free) :
                        (fill(NaN, d), fill(NaN, d))
@@ -1487,9 +1588,9 @@ end
 # The sandwich column is named by its bread: sandw. with the chain's covariance, J⁻¹ without.
 sw  = chain_ok ? "sandw." : "J⁻¹"
 hdr = draws_ok ?
-    "  block   param     estimate  se(chain)" * lpad("se($sw)", 11) * "   se(bound) |t|(chain)" *
+    "  block   param        estimate  se(chain)" * lpad("se($sw)", 11) * "   se(bound) |t|(chain)" *
     lpad("|t|($sw)", 12) * "   |t|(bnd)       R̂" * "  " :
-    "  block   param     estimate    se(J⁻¹)   se(bound)  |t|(J⁻¹)   |t|(bnd)"
+    "  block   param        estimate    se(J⁻¹)   se(bound)  |t|(J⁻¹)   |t|(bnd)"
 box_w = textwidth(hdr) + 4              # + room for the trailing RAIL / edge flag
 box_rule(l, r) = println(l, "═"^box_w, r)
 box_title = MCMC_JAC_ONLY ? "Standard errors from Ĵ = Ĝ'WĜ" : "DE-MC Quasi-Posterior"
@@ -1650,12 +1751,12 @@ open(out_csv, "w") do io
                  edge > 0.01     ? " edge" : ""
         if draws_ok
             @printf("  %s%s%9.5f %10.5f %10.5f %11.5f %10.2f %11.2f %10.2f %7.3f%s%s\n",
-                    padr(ps.block, 8), padr(param_symbol(ps), 9),
+                    padr(ps.block, 8), padr(param_symbol(ps), 12),
                     est_rep, se_chain[k], se_sw[k], se_bnd[k], tstat, tstat_s, tstat_b,
                     rhat[k], rhat[k] <= MCMC_RHAT_MAX ? " ✓" : "  ", flag)
         else
             @printf("  %s%s%9.5f %10.5f %11.5f %9.2f %10.2f%s\n",
-                    padr(ps.block, 8), padr(param_symbol(ps), 9),
+                    padr(ps.block, 8), padr(param_symbol(ps), 12),
                     est_rep, se_sw[k], se_bnd[k], tstat_s, tstat_b, flag)
         end
         @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f,%.1f,%.6f,%.6f,%.8f,%s,%d,%.6f,%.6f,%.8e\n",
@@ -1668,29 +1769,28 @@ open(out_csv, "w") do io
     # The vacancy costs, estimated through the tightnesses: θ̂'s costs with their
     # delta-method standard errors, and the chain's summary of each draw's costs, with their
     # R̂ and ESS (rhat_k, ess_k). They have no box, so no rail or edge.
-    for (i, (blk, label)) in enumerate(VACANCY_COSTS)
-        sym   = blk === :unsk ? "k_U" : "k_S"
+    for (i, (blk, nm, label, sym)) in enumerate(vacancy_cost_rows(spec))
         dk    = draws_ok ? filter(isfinite, k_draws[i, :]) : Float64[]
         q(p)  = isempty(dk) ? NaN : quantile(dk, p)
         pmean = isempty(dk) ? NaN : mean(dk)
         sech  = isempty(dk) ? NaN : std(dk)
-        pe    = i == 1 ? k_hat.U : k_hat.S
+        pe    = k_hat[i]
         est_rep = chain_ok ? pmean : pe
         se_rep  = draws_ok ? sech : se_sw_k[i]
         tstat_s = _abs_t(est_rep, se_sw_k[i])
         tstat_b = _abs_t(est_rep, se_bnd_k[i])
         if draws_ok
             @printf("  %s%s%9.5f %10.5f %10.5f %11.5f %10.2f %11.2f %10.2f %7.3f%s\n",
-                    padr(blk, 8), padr(sym, 9), est_rep, sech, se_sw_k[i], se_bnd_k[i],
+                    padr(blk, 8), padr(sym, 12), est_rep, sech, se_sw_k[i], se_bnd_k[i],
                     _abs_t(est_rep, se_rep), tstat_s, tstat_b,
                     rhat_k[i], rhat_k[i] <= MCMC_RHAT_MAX ? " ✓" : "  ")
         else
             @printf("  %s%s%9.5f %10.5f %11.5f %9.2f %10.2f\n",
-                    padr(blk, 8), padr(sym, 9), est_rep, se_sw_k[i], se_bnd_k[i],
+                    padr(blk, 8), padr(sym, 12), est_rep, se_sw_k[i], se_bnd_k[i],
                     tstat_s, tstat_b)
         end
-        @printf(io, "%s,k,%s,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f,%.1f,%.6f,%.6f,%.8f,%s,%d,%.6f,%.6f,%.8e\n",
-                blk, label, pe, pmean, se_sw_k[i], se_bnd_k[i], q(0.025), q(0.500), q(0.975),
+        @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.6f,%.1f,%.6f,%.6f,%.8f,%s,%d,%.6f,%.6f,%.8e\n",
+                blk, nm, label, pe, pmean, se_sw_k[i], se_bnd_k[i], q(0.025), q(0.500), q(0.975),
                 rhat_k[i], ess_k[i], NaN, NaN, sech, sym, 0, tstat_s, tstat_b, NaN)
     end
 end
@@ -1787,6 +1887,12 @@ MCMC_JAC_ONLY || open(chain_jls, "w") do io
                    replaced   = res.replaced,
                    n_replaced = res.n_replaced,
                    last_replace = res.last_replace,
+                   # What MCMC_INIT = :resume continues from and checks: the outcome code of
+                   # every draw, the sampler's state at the last generation (its RNG included,
+                   # so the continuation is exact) and the settings that define the chain.
+                   outcome    = res.outcome,
+                   demc_state = res.state,
+                   sampler    = SAMPLER,
                    # The reported estimate and its standard error. theta_mean averages
                    # over the basin, which is what makes it reportable: on a criterion
                    # with flat directions any single visited point is one draw from the
@@ -1795,7 +1901,7 @@ MCMC_JAC_ONLY || open(chain_jls, "w") do io
                    # The vacancy costs of every retained draw (2 × kept, rows U and S), in
                    # the order of `draws`, and at θ̂.
                    k_draws    = k_draws,
-                   k_hat      = k_hat,
+                   k_hat      = k_struct(spec, k_hat),
                    # The transform-invariant point estimate. Identical to q500 in the results
                    # CSV; carried here because a table script reads the bundle, not the CSV.
                    theta_median = θ̃_med,
@@ -1887,9 +1993,8 @@ end
 se_names  = (chain_ok ? :sandwich : :curvature, :bound, :chain)
 se_source = chain_ok ? Symbol("chain_bread_", MCMC_JAC_METHOD) : Symbol("jacobian_", MCMC_JAC_METHOD)
 se_record = NamedTuple{se_names}((se_sw, se_bnd, se_chain))
-k_record  = (k  = k_hat,
-             se = NamedTuple{se_names}(((U = se_sw_k[1],  S = se_sw_k[2]),
-                                        (U = se_bnd_k[1], S = se_bnd_k[2]),
+k_record  = (k  = k_struct(spec, k_hat),
+             se = NamedTuple{se_names}((k_struct(spec, se_sw_k), k_struct(spec, se_bnd_k),
                                         k_post === nothing ? nothing : k_post.sd)),
              post = k_post)
 if MCMC_JAC_ONLY

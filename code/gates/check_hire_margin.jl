@@ -65,11 +65,12 @@ end
 
 fails = String[]
 n_checked = 0
-for window in WINDOWS, point in ESTIMATE_POINTS
-    path = estimate_path(window, W_SUFFIX; point = point)
+for window in DATA_WINDOWS, point in ESTIMATE_POINTS
+    path = estimate_path(estimation_window(window), W_SUFFIX; point = point)
     isfile(path) || continue
     b = read_bundle(path)
     (b === nothing || b.spec === nothing || b.result === nothing) && continue
+    b = period_bundle(b, Symbol(window))
     sel = equilibrium_at(collect(float.(getfield(b.result, 1))), b.spec)
     if sel.model === nothing
         push!(fails, "$(window) $(point): no certified equilibrium at the stored optimum.")

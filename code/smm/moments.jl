@@ -95,8 +95,8 @@ end
 
 Return the empirical moment targets used in SMM estimation.  Each
 field is a (value, weight) tuple.  Reads from
-`moments_{window}.csv` produced by the data pipeline; a counterfactual window reads its
-parent's (`data_window`, paths.jl), and so do its sampling variances and calibrated rates.
+`moments_{window}.csv` produced by the data pipeline; `window` is a data window
+(`DATA_WINDOWS`, paths.jl).
 
 The training_share row already carries its level from the enrolment target,
 written in Stage 9 of the data pipeline, so this returns the moments exactly as
@@ -126,7 +126,7 @@ Moment list
     overlap_UgtS, overlap_SltU, ltu_share_S
 """
 function load_data_moments(; window::Symbol = :base_fc, derived_dir::String)
-    moments_file = joinpath(derived_dir, "moments_$(data_window(window)).csv")
+    moments_file = joinpath(derived_dir, "moments_$(window).csv")
     isfile(moments_file) || error("Moments file not found: $moments_file — run the data pipeline first.")
     raw = _read_moments_csv(moments_file)
 
@@ -161,12 +161,12 @@ end
 """
     load_sampling_variances(; window, derived_dir) → Dict{Symbol,Float64}
 
-The per-moment sampling variances σ̂²_k of `sampling_var_{window}.csv` (the parent's for a
-counterfactual window), in raw moment units. They are the diagonal weights of the objective
+The per-moment sampling variances σ̂²_k of `sampling_var_{window}.csv`, in raw moment
+units. They are the diagonal weights of the objective
 and, as σ̂_k, the data standard errors the tables and panels report.
 """
 function load_sampling_variances(; window::Symbol, derived_dir::String)
-    sv_name = "sampling_var_$(data_window(window)).csv"
+    sv_name = "sampling_var_$(window).csv"
     sv_file = joinpath(derived_dir, sv_name)
     isfile(sv_file) || error("$sv_name not found in $derived_dir — run the data pipeline first.")
     df_sv = CSV.read(sv_file, DataFrame)
@@ -223,10 +223,10 @@ function load_weight_matrix(;
         (isfinite(v) && v > 0.0) ? push!(d, 1.0 / v) : (push!(d, NaN); push!(bad, nm))
     end
     isempty(bad) || error(
-        "sampling_var_$(data_window(window)).csv has non-positive / missing variance for active " *
+        "sampling_var_$(window).csv has non-positive / missing variance for active " *
         "moment(s): " * join(string.(bad), ", ") * " — cannot build the diagonal weight.")
     @printf("  weighting = diagonal → W = Diagonal(1/σ̂²_samp) from sampling_var_%s.csv\n",
-            data_window(window))
+            window)
     return Matrix(Diagonal(d))
 end
 
@@ -251,9 +251,9 @@ SMM estimation.
   φ   from phi_calibration.csv training completion rate (nominal four-year programme,
                                 pooled across Fall semesters)
 
-`window` controls which ν is returned. Every window is mapped to
-its baseline (`PAIR_BASE`, paths.jl: crisis_fc → base_fc, crisis_covid → base_covid, and
-each counterfactual window to its parent's) per data_and_moments.pdf §21.
+`window` is a data window, and controls which ν is returned: each is mapped to its
+baseline period (`PAIR_BASE`, paths.jl: crisis_fc → base_fc, crisis_covid → base_covid)
+per data_and_moments.pdf §21.
 """
 function load_calibrated_params(; window::Symbol = :base_fc,
                                   derived_dir::String)
@@ -261,7 +261,7 @@ function load_calibrated_params(; window::Symbol = :base_fc,
 
     # Which baseline supplies ν for this window
     haskey(PAIR_BASE, window) || error("load_calibrated_params: unrecognised window :$window. " *
-                                       "Expected one of $(join(WINDOWS, ", ")).")
+                                       "Expected one of $(join(DATA_WINDOWS, ", ")).")
     nu_pair = PAIR_BASE[window]
 
     nu_file = joinpath(derived_dir, "nu_estimation.csv")
