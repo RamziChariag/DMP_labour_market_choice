@@ -1,0 +1,54 @@
+block,name,label,estimate,lb,ub,fixed,symbol
+common,ρ_x,ability correlation ρ_x,-0.41800522,-0.90000000,-0.10000000,false,ρ_x
+common,c@base_fc,training cost coeff c[03],11.47691918,6.00000000,15.00000000,false,c[03]
+common,c@base_covid,training cost coeff c[15],10.78150650,6.00000000,15.00000000,false,c[15]
+common,A@base_fc,aggregate production scale A[03],7.31761944,4.00000000,10.00000000,false,A[03]
+common,A@base_covid,aggregate production scale A[15],7.36759487,4.00000000,10.00000000,false,A[15]
+unsk,bU,unskilled outside flow b_U,0.07733451,0.00000000,0.20000000,false,b_U
+skl,bS,skilled outside flow b_S,0.20890256,0.00000000,0.50000000,false,b_S
+skl,PS@base_fc,skilled productivity P_S[03],1.69873365,1.00001600,5.00000000,false,P_S[03]
+skl,PS@base_covid,skilled productivity P_S[15],1.77889625,1.00001600,5.00000000,false,P_S[15]
+unsk,α_U@base_fc,unskilled damage shape α_U[03],3.02978383,0.10000000,6.00000000,false,α_U[03]
+unsk,α_U@base_covid,unskilled damage shape α_U[15],2.20949370,0.10000000,6.00000000,false,α_U[15]
+unsk,μ@base_fc,unskilled matching eff μ_U[03],0.57302998,0.00010000,2.00000000,false,μ_U[03]
+unsk,μ@base_covid,unskilled matching eff μ_U[15],0.38336512,0.00010000,2.00000000,false,μ_U[15]
+skl,μ@base_fc,skilled matching eff μ_S[03],0.28254815,0.00010000,2.00000000,false,μ_S[03]
+skl,μ@base_covid,skilled matching eff μ_S[15],0.22609637,0.00010000,2.00000000,false,μ_S[15]
+unsk,λ@base_fc,unskilled damage rate λ_U[03],0.17288190,0.00010000,0.55000000,false,λ_U[03]
+unsk,λ@base_covid,unskilled damage rate λ_U[15],0.22379253,0.00010000,0.55000000,false,λ_U[15]
+skl,λ@base_fc,skilled quality shock λ_S[03],0.17292926,0.00010000,0.50000000,false,λ_S[03]
+skl,λ@base_covid,skilled quality shock λ_S[15],0.22662119,0.00010000,0.50000000,false,λ_S[15]
+unsk,tight@base_fc,unskilled tightness θ_U[03],0.44860487,0.05000000,3.00000000,false,θ_U[03]
+unsk,tight@base_covid,unskilled tightness θ_U[15],0.77795876,0.05000000,3.00000000,false,θ_U[15]
+skl,tight@base_fc,skilled tightness θ_S[03],1.16350891,0.10000000,5.00000000,false,θ_S[03]
+skl,tight@base_covid,skilled tightness θ_S[15],1.80571814,0.10000000,5.00000000,false,θ_S[15]
+skl,σ,OJS flow cost σ_S,0.24090685,0.00000000,0.50000000,false,σ_S
+unsk,k@base_fc,unskilled vacancy cost k_U[03],1.05695630,,,false,k_U[03]
+skl,k@base_fc,skilled vacancy cost k_S[03],0.90456656,,,false,k_S[03]
+unsk,k@base_covid,unskilled vacancy cost k_U[15],0.59389059,,,false,k_U[15]
+skl,k@base_covid,skilled vacancy cost k_S[15],0.51188012,,,false,k_S[15]
+fixed,r,r,0.00416667,,,true,r
+fixed,ν@base_fc,ν@base_fc,0.00323032,,,true,ν[03]
+fixed,ν@base_covid,ν@base_covid,0.00335677,,,true,ν[15]
+fixed,φ,φ,0.02083333,,,true,φ
+fixed,bT,bT,0.00000000,,,true,b_T
+fixed,skl_δ,skl_δ,1.00000000,,,true,skl_δ
+fixed,skl_η,skl_η,0.50000000,,,true,η_S
+fixed,skl_β,skl_β,0.50000000,,,true,skl_β
+fixed,b_ℓ,b_ℓ,1.00000000,,,true,b_ℓ
+fixed,PU,PU,1.00000000,,,true,P_U
+fixed,a_ℓ,a_ℓ,1.00000000,,,true,a_ℓ
+fixed,unsk_η,unsk_η,0.50000000,,,true,η_U
+fixed,a_Γ,a_Γ,1.00000000,,,true,a_Γ
+fixed,unsk_β,unsk_β,0.50000000,,,true,unsk_β
+fixed,b_Γ,b_Γ,1.00000000,,,true,b_Γ
+fixed,skl_ξ,skl_ξ,0.00000000,,,true,skl_ξ
+fixed,unsk_ξ,unsk_ξ,0.00000000,,,true,unsk_ξ
+fixed,unsk_σ_w@base_fc,unsk_σ_w@base_fc,0.25549225,,,true,σ_wU[03]
+fixed,unsk_σ_w@base_covid,unsk_σ_w@base_covid,0.25921002,,,true,σ_wU[15]
+fixed,skl_σ_w@base_fc,skl_σ_w@base_fc,0.23267843,,,true,σ_wS[03]
+fixed,skl_σ_w@base_covid,skl_σ_w@base_covid,0.24198071,,,true,σ_wS[15]
+
+# Q = 8.0669308067e+03
+# converged = true
+# iterations = 129

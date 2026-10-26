@@ -1,25 +1,25 @@
 block,name,label,estimate,lb,ub,fixed,symbol
-common,c,training cost coeff c,11.39599266,6.00000000,15.00000000,false,c
-common,A,aggregate production scale A,7.37351067,4.00000000,10.00000000,false,A
-unsk,bU,unskilled outside flow b_U,0.08192872,0.00000000,0.20000000,false,b_U
-skl,bS,skilled outside flow b_S,0.24373849,0.00000000,0.50000000,false,b_S
-skl,PS,skilled productivity P_S,1.55761330,1.00001600,5.00000000,false,P_S
-unsk,α_U,unskilled damage shape α_U,2.04754757,0.10000000,6.00000000,false,α_U
-unsk,μ,unskilled matching eff μ_U,0.52386559,0.00010000,2.00000000,false,μ_U
-skl,μ,skilled matching eff μ_S,0.31885810,0.00010000,2.00000000,false,μ_S
-unsk,λ,unskilled damage rate λ_U,0.13013652,0.00010000,0.55000000,false,λ_U
-skl,λ,skilled quality shock λ_S,0.12152337,0.00010000,0.50000000,false,λ_S
-unsk,tight,unskilled tightness θ_U,0.20463381,0.05000000,3.00000000,false,θ_U
-skl,tight,skilled tightness θ_S,0.55110477,0.10000000,5.00000000,false,θ_S
-skl,σ,OJS flow cost σ_S,0.15368747,0.00000000,0.50000000,false,σ_S
-unsk,k,unskilled vacancy cost k_U,2.51236781,,,false,k_U
-skl,k,skilled vacancy cost k_S,1.69728514,,,false,k_S
+common,A,aggregate production scale A,7.33456519,4.00000000,10.00000000,false,A
+unsk,bU,unskilled outside flow b_U,0.09157664,0.00000000,0.20000000,false,b_U
+skl,bS,skilled outside flow b_S,0.24602567,0.00000000,0.50000000,false,b_S
+unsk,α_U,unskilled damage shape α_U,2.31457269,0.10000000,6.00000000,false,α_U
+unsk,λ,unskilled damage rate λ_U,0.13004338,0.00010000,0.55000000,false,λ_U
+skl,λ,skilled quality shock λ_S,0.13206451,0.00010000,0.50000000,false,λ_S
+unsk,tight,unskilled tightness θ_U,0.20422980,0.05000000,3.00000000,false,θ_U
+skl,tight,skilled tightness θ_S,0.56575006,0.10000000,5.00000000,false,θ_S
+unsk,k,unskilled vacancy cost k_U,2.34399338,,,false,k_U
+skl,k,skilled vacancy cost k_S,1.63932419,,,false,k_S
 fixed,r,r,0.00416667,,,true,r
 fixed,ν,ν,0.00323032,,,true,ν
 fixed,φ,φ,0.02083333,,,true,φ
 fixed,a_ℓ,a_ℓ,1.00000000,,,true,a_ℓ
 fixed,b_ℓ,b_ℓ,1.00000000,,,true,b_ℓ
-fixed,ρ_x,ρ_x,-0.44388645,,,true,ρ_x
+fixed,ρ_x,ρ_x,-0.41582595,,,true,ρ_x
+fixed,c,c,11.47388932,,,true,c
+fixed,PS,PS,1.70321547,,,true,P_S
+fixed,unsk_μ,unsk_μ,0.57704507,,,true,unsk_μ
+fixed,skl_μ,skl_μ,0.28231857,,,true,skl_μ
+fixed,σ,σ,0.24219410,,,true,σ
 fixed,bT,bT,0.00000000,,,true,b_T
 fixed,skl_δ,skl_δ,1.00000000,,,true,skl_δ
 fixed,skl_η,skl_η,0.50000000,,,true,η_S
@@ -34,6 +34,6 @@ fixed,unsk_ξ,unsk_ξ,0.00000000,,,true,unsk_ξ
 fixed,unsk_σ_w,unsk_σ_w,0.25333048,,,true,σ_wU
 fixed,skl_σ_w,skl_σ_w,0.23484970,,,true,σ_wS
 
-# Q = 2.5654371093e+03
+# Q = 2.8799812068e+03
 # converged = true
-# iterations = 127
+# iterations = 43
