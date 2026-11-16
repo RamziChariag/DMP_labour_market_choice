@@ -77,9 +77,10 @@ code only. Every existing output is reproduced; the counterfactual outputs are n
 ### Measured
 - Smoke, scratch copy, 8 threads, 4-step transitions at the chain means, grid [1.0, 1.1],
   one outer iteration, 5-node branch scan: all four exercises run in 45 s; the held margin
-  under free entry in 26 s. Forward replay of the stored masses: largest cell gap 2.3e-13
-  and 1.4e-12 on the steady states; 2e-7 on the 2-iteration paths, whose stored tightness
-  was updated after their last forward pass.
+  under free entry in 26 s. Forward replay of the stored masses, largest cell gap: steady
+  states 8.99e-13 and 1.14e-12 (fc base, crisis), 8.03e-13 and 1.38e-12 (covid); the
+  2-iteration paths 2.00e-07 (fc) and 1.08e-07 (covid), whose stored tightness was updated
+  after their last forward pass.
 - Steady-state welfare, months of baseline mean unskilled new-match output: base_fc
   243.3793, crisis_fc 238.9633, base_covid 238.8152, crisis_covid 245.5136.
 - COVID crisis, c × 1.1 and the held margin under free entry: Newton finds no steady state
