@@ -13,14 +13,15 @@
 #     2. Solves the selected stationary equilibrium of each window at its own grid and
 #        its own estimation settings.
 #     3. Chooses the horizon by an accuracy test and solves the transition there.
-#     4. Serialises the bundle to <TRANS_OUT_DIR>/transition_<scenario><W>_<point>.jls.
+#     4. Adds every type's values and masses at date 0 and at the baseline (date0_types).
+#     5. Serialises the bundle to <TRANS_OUT_DIR>/transition_<scenario><W>_<point>.jls.
 #
 # Expects in scope (provided by transition_main.jl): the solver, SMM and transition
 # modules, paths.jl and JSON3.
 ############################################################
 
 # Bundle shape of the transition output.  Bumped only when its field set changes.
-const TRANSITION_SCHEMA = 2
+const TRANSITION_SCHEMA = 3
 
 # The horizon test: the horizon doubles, from the fine grid's span, until no reported
 # series moves on the first HORIZON_TEST_MONTHS by more than HORIZON_TOL relative to its
@@ -232,6 +233,10 @@ function run_transition_simulation(scenario::Symbol, w_suffix::String;
             revs.d_reversals, revs.cells_d_reversing, revs.max_mS_on_reversing_cells)
     flush(stdout)
 
+    print("Per-type values and masses at date 0 and at the baseline... ");  flush(stdout)
+    types = date0_types(path, sel0.model, sel1.model, tp)
+    println("done.");  flush(stdout)
+
     mkpath(TRANS_OUT_DIR)
     out_file = transition_file(scenario, w_suffix, point)
     record(m) = (common = m.common, unsk_par = m.unsk_par, skl_par = m.skl_par)
@@ -266,6 +271,7 @@ function run_transition_simulation(scenario::Symbol, w_suffix::String;
             model_z1      = sel1.model,
             eq_z0         = eq_z0,
             eq_z1         = eq_z1,
+            types         = types,
         ))
     end
     @printf("\nSaved → %s (%.1f MB)\n", out_file, filesize(out_file) / 2^20);  flush(stdout)

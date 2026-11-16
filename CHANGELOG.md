@@ -35,6 +35,64 @@ measurement was, not just the verdict.
 
 ---
 
+## v61.4.0 — 2026-11-16
+
+**MINOR: `transition_main.jl` solves and saves the two transitions and does nothing else.**
+No switches, no panels, no tables, no `Plots`. The saved file also carries every type's
+values and masses at date 0 and at the baseline, so no later script re-solves a transition.
+A transition solved under this version is bit-identical to v61.3.0 (measured below).
+
+**Comparability.** Full. No transition file existed under v61.x (`output/transition/` was
+empty), so nothing is superseded; the file schema moves from 2 to 3 (one field added).
+
+### What changed
+- `code/transition/transition_main.jl` rewritten on the pattern of `smm_main.jl`: banner,
+  packages, BLAS pinned to one thread, modules, settings, run. Solves `PAIRS` (`:fc`,
+  `:covid`) in turn. `RERUN_SIMULATION`, `RUN_PANELS`, `RUN_TABLES_AND_PLOTS` and the
+  plots-and-tables phases removed; `SCENARIOS` removed (both pairs always run). The banner
+  prints `Threads.nthreads()` and `@warn`s at one thread (VS Code's Julia REPL starts with
+  one unless `Julia: Num Threads` is set).
+- `POINT_ESTIMATE` default `:smm` → `:mcmc`, the chains' posterior means, the estimates the
+  paper reports. Still a constant at the top of the script (SETTINGS.md).
+- `code/transition/transition_simulation.jl:203` `estimate_path(wb, …)` →
+  `estimate_path(estimation_window(wb), …)` (and `wc`). Under v61.3.0 every transition run
+  stopped there: `paths: unknown window "base_fc" — must be one of ("baseline",
+  "crisis_fc", "crisis_covid")`, because the baseline periods are held by the estimation
+  window `:baseline` (v57). The fix only names the bundle files the run prints and records.
+- `transition_simulation.jl`: the saved file gains `types = date0_types(...)`;
+  `TRANSITION_SCHEMA = 3`.
+- New `code/transition/transition_types.jl`: `type_values`, `type_density`,
+  `date0_types` — per type and state, the worker's value (E = outside option + β S⁺) and the
+  mass at date 0 (after the date-0 reallocation) and at the baseline steady state; p-indexed
+  arrays Float32.
+- `code/transition/transition_solver.jl`: the body of `_forward_pass!` split into
+  `_forward_state`, `_reallocate!` (records each cell's mass entering training,
+  `into_T`), `_advance!`, `_carry_policies!`, `_substeps`, so the welfare replay of
+  `code/counterfactuals/` takes the solver's own steps. Same operations in the same order.
+- `code/transition/transition_values.jl`: `_backward_pass!` also returns its buffers
+  (`buf`), whose slot 1 holds date 1's per-type surfaces.
+
+### Measured
+- Refactor: a 4-step, 2-iteration transition of each pair at the SMM estimates, solved
+  under v61.3.0 and under this version: every field of the path, the `TransitionResult` and
+  `path_statistics` equal (`==`), both pairs.
+- Smoke, 10 threads, scratch copy, `POINT_ESTIMATE = :mcmc`: both bundles load and pass
+  `check_pair` (also at `:smm`); FC endpoints θ_U 0.448639 / 0.204244, θ_S 1.163111 /
+  0.565724, Q 4289.460839 / 2879.999978; outer iterations 1 and 10 at free-entry gap
+  4.768e-01 and 1.875e-02, about 25 s per iteration on 241 dates; stopped by a CPU cap.
+- A v61.3.0 FC run at the SMM point (scratch, 10 threads) reached the gap 1.71e-4 at
+  iteration 90, 1.75e-4 at 100 and 1.88e-4 at 110 against `TOL = 1e-4`, 27–37 s per
+  iteration, and was stopped at 110 on the first (120-month) horizon.
+
+### Known gaps
+- No transition was run to convergence; the save step (`date0_types`, serialisation) was
+  run only on 4-step transitions.
+- The FC outer iteration stalls near 1.8e-4 on the first horizon (above); a run may take
+  all 200 iterations of each horizon trial.
+- Bundle audit not rerun: no file an estimate depends on changed (`bundles = skip`).
+
+---
+
 ## v61.3.0 — 2026-10-24
 
 **MINOR: `MCMC_INIT = :resume` continues a stored DE-MC run.** With `MCMC_GENS` the new

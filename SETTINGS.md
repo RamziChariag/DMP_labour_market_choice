@@ -184,9 +184,10 @@ each estimate has a file of its own (`estimate_path`, `code/paths.jl`; the file 
   period. The baseline never reads it, so it can stay set while the window changes, and the
   registry declares it `:inert` because the shipped `WINDOW` is the baseline. Any other
   value stops the run.
-- **`POINT_ESTIMATE`** (`:smm` or `:mcmc`, default `:smm`). Not an environment setting: a
-  constant at the top of each script that reads an estimate (`transition_main.jl`,
-  `model_main.jl`, `policy_main.jl` and the tools), beside that script's other constants.
+- **`POINT_ESTIMATE`** (`:smm` or `:mcmc`). Not an environment setting: a constant at the
+  top of each script that reads an estimate, beside that script's other constants. Default
+  `:mcmc`, the estimates the paper reports, in `transition_main.jl` and
+  `counterfactuals_main.jl`, which must agree; `:smm` in `model_main.jl` and the tools.
   `:smm` reads `estimate_<w>W_smm.jls`, `:mcmc` reads `estimate_<w>W_mcmc.jls`.
   `estimate_path` has no default `point`, so no reader falls back to a file it did not
   name. In `transition_main.jl` it also tags every file the run writes, the transition file

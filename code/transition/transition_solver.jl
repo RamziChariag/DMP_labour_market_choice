@@ -225,83 +225,144 @@ function _advance_unskilled!(e::AbstractVector{Float64}, hires::Float64, ω::Vec
 end
 
 """
+    _forward_state(path) -> NamedTuple
+
+The forward pass's state at date 0⁻: the base masses per cell (unskilled matches by p,
+atom at p = 1 last), the policies they were formed under, which the first reallocation
+judges them against, the cell mass each reallocation moves into training (`into_T`), and
+scratch.
+"""
+function _forward_state(path::TransitionPath)
+    Nx = size(path.uU0, 1);  NpU1 = size(path.eU0p, 3)
+    uS = copy(path.uS[:, :, 1])
+    return (uU = copy(path.uU0), tU = copy(path.tU0), Es = copy(path.eU0p), Et = copy(path.eUt0p),
+            uS = uS, mS = copy(path.mS[:, :, 1]), eS = copy(path.eS[:, :, 1]),
+            τprev = copy(path.τT0), pUs_prev = repeat(path.pU0, 1, Nx), pUt_prev = copy(path.pUt0),
+            χt_prev = copy(path.χUt0), pS_prev = copy(path.pS0), into_T = zeros(Nx, Nx),
+            uS_n = similar(uS), mS_n = similar(uS), tU_n = similar(uS),
+            mv_s = zeros(Float64, NpU1), mv_t = zeros(Float64, NpU1))
+end
+
+"""
+    _reallocate!(st, path, model, χU, d, n) -> (ended, quit, swept, ended_S)
+
+The reallocation at date n (spec L6) of the forward state `st` under the date's policies.
+Each moved or remaining mass is judged against the cutoff it was accepted under and the
+cutoff of the slice it is in now.  Returns the unskilled matches ended into u_U and into
+training, the unemployed swept into training and the skilled matches ended; `st.into_T`
+holds each cell's mass entering training.
+"""
+function _reallocate!(st, path::TransitionPath, model::Model, χU::Vector{Float64},
+                      d::Matrix{Float64}, n::Int)
+    Nx = length(model.grids.x);  ug = model.unsk_grids
+    uU = st.uU;  tU = st.tU;  Es = st.Es;  Et = st.Et;  mv_s = st.mv_s;  mv_t = st.mv_t
+    ended = 0.0;  quit = 0.0;  swept = 0.0
+    @inbounds for j in 1:Nx, i in 1:Nx
+        τ  = clamp(path.τT[i, j, n], 0.0, 1.0)
+        τ0 = clamp(st.τprev[i, j], 0.0, 1.0)
+        σ  = sweep_share(τ0, τ);  ς = return_share(τ0, τ)
+        ps = path.pUs[i, j, n];  pt = path.pUt[i, j, n]
+        es = view(Es, i, j, :);  et = view(Et, i, j, :)
+        # The atom of each slice is its hired share: the row's χ in the searching slice
+        # (S_U(a,1) ≥ 0 exactly above a^h), which moves only when the primitives switch,
+        # and χ_t in the training slice, which moves with the slice's own surplus.  A
+        # share below the one an atom was formed under ends the matches it no longer
+        # covers: `kt` for the training slice's own atom, `km` for the searching slice's
+        # atom the frontier moves into it.
+        ks = n == 1 && path.χU0[i] > 0.0 ? min(χU[i] / path.χU0[i], 1.0) : 1.0
+        kt = st.χt_prev[i, j] > 0.0 ? min(path.χUt[i, j, n] / st.χt_prev[i, j], 1.0) : 1.0
+        km = χU[i] > 0.0 ? min(path.χUt[i, j, n] / χU[i], 1.0) : 1.0
+
+        mv_u = 0.0
+        if σ == 0.0 && ς == 0.0            # no slice moves: only the cutoffs can end matches
+            e_s = _end_below!(es, st.pUs_prev[i, j], ps, ug.p, ks)
+            e_t = _end_below!(et, st.pUt_prev[i, j], pt, ug.p, kt)
+        else
+            mv_u = σ * uU[i, j]
+            uU[i, j] -= mv_u;  tU[i, j] += mv_u;  swept += mv_u
+            @. mv_s = σ * es;  @. mv_t = ς * et
+            es .-= mv_s;  et .-= mv_t
+            e_s = _end_below!(es, st.pUs_prev[i, j], ps, ug.p, ks) +
+                  _end_below!(mv_t, st.pUt_prev[i, j], ps, ug.p, ks)
+            e_t = _end_below!(et, st.pUt_prev[i, j], pt, ug.p, kt) +
+                  _end_below!(mv_s, st.pUs_prev[i, j], pt, ug.p, km)
+            es .+= mv_t;  et .+= mv_s
+        end
+        uU[i, j] += e_s;  tU[i, j] += e_t
+        ended += e_s;  quit += e_t
+        st.into_T[i, j] = mv_u + e_t
+    end
+    ended_S = _end_skilled_below!(st.eS, st.uS, st.mS, d, st.pS_prev, view(path.pstar_S, :, n),
+                                  model.skl_grids)
+    return (ended = ended, quit = quit, swept = swept, ended_S = ended_S)
+end
+
+"""
+    _advance!(st, path, model, χU, hX, d, wG, n, dt)
+
+One explicit sub-step of length `dt` of the laws of motion (spec L1–L5) at date n's rates
+and policies.
+"""
+function _advance!(st, path::TransitionPath, model::Model, χU::Vector{Float64}, hX,
+                   d::Matrix{Float64}, wG::Vector{Float64}, n::Int, dt::Float64)
+    up = model.unsk_par
+    κU = meeting_rate(path.θU[n], up.μ, up.η)
+    κS = meeting_rate(path.θS[n], model.skl_par.μ, model.skl_par.η)
+    copyto!(st.uS_n, st.uS);  copyto!(st.mS_n, st.mS);  copyto!(st.tU_n, st.tU)
+    _advance_unskilled_cells!(st.uU, st.tU, st.Es, st.Et, st.uS_n, d, κU, χU, hX, path, model, wG, n, dt)
+    _advance_skilled_masses!(st.uS, st.mS, st.tU_n, st.uS_n, st.mS_n, d, κU, κS, hX.h, model,
+                             view(path.pstar_S, :, n), dt)
+    _advance_skilled_shape!(st.eS, st.uS_n, st.mS_n, st.mS, d, κS, model, view(path.pstar_S, :, n),
+                            view(path.poj, :, n), view(path.s_part, :, n), dt)
+    return nothing
+end
+
+# The policies of date n become the ones the next reallocation judges the masses against.
+function _carry_policies!(st, path::TransitionPath, n::Int)
+    copyto!(st.τprev, view(path.τT, :, :, n))
+    copyto!(st.pUs_prev, view(path.pUs, :, :, n));  copyto!(st.pUt_prev, view(path.pUt, :, :, n))
+    copyto!(st.χt_prev, view(path.χUt, :, :, n))
+    copyto!(st.pS_prev, view(path.pstar_S, :, n))
+    return nothing
+end
+
+# The sub-steps of the step from date n to n+1: equal, of at most FORWARD_SUBSTEP.
+function _substeps(path::TransitionPath, n::Int)
+    Δ = path.tgrid[n + 1] - path.tgrid[n]
+    nsub = max(ceil(Int, Δ / FORWARD_SUBSTEP - 1e-9), 1)
+    return (nsub = nsub, dt = Δ / nsub)
+end
+
+"""
     _forward_pass!(path, model_z1, tp)
 
 March the masses from z₀ through the path: at each date the reallocations of the date's
-policies, the stock record (the masses free entry and the statistics read), then one
-explicit step of the laws of motion at the date's rates.
+policies, the stock record (the masses free entry and the statistics read), then the laws
+of motion at the date's rates to the next date.
 """
 function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
     Nt  = length(path.tgrid)
     Nx  = length(model.grids.x);  NpU = length(model.unsk_grids.p)
-    cp = model.common;  up = model.unsk_par
-    W2 = model.grids.copula.W2;  x = model.grids.x;  ug = model.unsk_grids
-    ν = cp.ν;  φ = cp.φ;  βU = up.β
-    PU = exp(cp.A) * up.PU
+    up = model.unsk_par;  x = model.grids.x;  ug = model.unsk_grids
+    βU = up.β;  PU = exp(model.common.A) * up.PU
     χU = hire_fraction(model)                      # post-switch primitives, constant on the path
     wG = build_unskilled_G_weights(ug.p, ug.wp, up.α_U)
-
-    uU = copy(path.uU0);  tU = copy(path.tU0)
-    Es = copy(path.eU0p);  Et = copy(path.eUt0p)
-    uS = copy(path.uS[:, :, 1]);  mS = copy(path.mS[:, :, 1]);  eS = copy(path.eS[:, :, 1])
-    τprev = copy(path.τT0);  pUs_prev = repeat(path.pU0, 1, Nx);  pUt_prev = copy(path.pUt0)
-    χt_prev = copy(path.χUt0)
-    pS_prev = copy(path.pS0)
-    uS_n = similar(uS);  mS_n = similar(mS);  tU_n = similar(tU)
-    mv_s = zeros(Float64, NpU + 1);  mv_t = zeros(Float64, NpU + 1)
+    st = _forward_state(path)
 
     for n in 1:Nt
         d  = _d_matrix(path, model, n)
         hX = _crosser_hire_shares(path, χU, d, n)
-
-        # ── Reallocation at date n (spec L6) ─────────────────────────────
-        # Each moved or remaining mass is judged against the cutoff it was accepted under
-        # and the cutoff of the slice it is in now.
-        ended = 0.0;  quit = 0.0;  swept = 0.0
-        @inbounds for j in 1:Nx, i in 1:Nx
-            τ  = clamp(path.τT[i, j, n], 0.0, 1.0)
-            τ0 = clamp(τprev[i, j], 0.0, 1.0)
-            σ  = sweep_share(τ0, τ);  ς = return_share(τ0, τ)
-            ps = path.pUs[i, j, n];  pt = path.pUt[i, j, n]
-            es = view(Es, i, j, :);  et = view(Et, i, j, :)
-            # The atom of each slice is its hired share: the row's χ in the searching slice
-            # (S_U(a,1) ≥ 0 exactly above a^h), which moves only when the primitives switch,
-            # and χ_t in the training slice, which moves with the slice's own surplus.  A
-            # share below the one an atom was formed under ends the matches it no longer
-            # covers: `kt` for the training slice's own atom, `km` for the searching slice's
-            # atom the frontier moves into it.
-            ks = n == 1 && path.χU0[i] > 0.0 ? min(χU[i] / path.χU0[i], 1.0) : 1.0
-            kt = χt_prev[i, j] > 0.0 ? min(path.χUt[i, j, n] / χt_prev[i, j], 1.0) : 1.0
-            km = χU[i] > 0.0 ? min(path.χUt[i, j, n] / χU[i], 1.0) : 1.0
-
-            if σ == 0.0 && ς == 0.0            # no slice moves: only the cutoffs can end matches
-                e_s = _end_below!(es, pUs_prev[i, j], ps, ug.p, ks)
-                e_t = _end_below!(et, pUt_prev[i, j], pt, ug.p, kt)
-            else
-                mv_u = σ * uU[i, j]
-                uU[i, j] -= mv_u;  tU[i, j] += mv_u;  swept += mv_u
-                @. mv_s = σ * es;  @. mv_t = ς * et
-                es .-= mv_s;  et .-= mv_t
-                e_s = _end_below!(es, pUs_prev[i, j], ps, ug.p, ks) +
-                      _end_below!(mv_t, pUt_prev[i, j], ps, ug.p, ks)
-                e_t = _end_below!(et, pUt_prev[i, j], pt, ug.p, kt) +
-                      _end_below!(mv_s, pUs_prev[i, j], pt, ug.p, km)
-                es .+= mv_t;  et .+= mv_s
-            end
-            uU[i, j] += e_s;  tU[i, j] += e_t
-            ended += e_s;  quit += e_t
-        end
-        path.ended_U[n] = ended;  path.quit_T[n] = quit;  path.swept_T[n] = swept
-        path.ended_S[n] = _end_skilled_below!(eS, uS, mS, d, pS_prev, view(path.pstar_S, :, n),
-                                              model.skl_grids)
+        ra = _reallocate!(st, path, model, χU, d, n)
+        path.ended_U[n] = ra.ended;  path.quit_T[n] = ra.quit;  path.swept_T[n] = ra.swept
+        path.ended_S[n] = ra.ended_S
 
         # ── Stock record at date n ───────────────────────────────────────
         wnum = 0.0;  wden = 0.0
         fill!(view(path.eUsp, :, :, n), 0.0);  fill!(view(path.eUtp, :, :, n), 0.0)
         @inbounds for j in 1:Nx, i in 1:Nx
-            path.uU[i, j, n] = uU[i, j];  path.tU[i, j, n] = tU[i, j]
-            path.uS[i, j, n] = uS[i, j];  path.mS[i, j, n] = mS[i, j]
-            es = view(Es, i, j, :);  et = view(Et, i, j, :)
+            path.uU[i, j, n] = st.uU[i, j];  path.tU[i, j, n] = st.tU[i, j]
+            path.uS[i, j, n] = st.uS[i, j];  path.mS[i, j, n] = st.mS[i, j]
+            es = view(st.Es, i, j, :);  et = view(st.Et, i, j, :)
             path.eUs[i, j, n] = sum(es);  path.eUt[i, j, n] = sum(et)
             for q in 1:(NpU + 1)
                 path.eUsp[i, q, n] += es[q];  path.eUtp[i, q, n] += et[q]
@@ -311,30 +372,15 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
                 mt > 0.0 && (wnum += mt * log(max(y + (1.0 - βU) * path.zUt[i, j, n], 1e-14));  wden += mt)
             end
         end
-        path.eS[:, :, n] .= eS
+        path.eS[:, :, n] .= st.eS
         path.wU_mean[n] = wden > 1e-14 ? wnum / wden : 0.0
         n == Nt && break
 
-        # ── Laws of motion, date n → n+1 (spec L1–L5) ───────────────────
-        # At the date's rates and policies, in equal sub-steps of at most FORWARD_SUBSTEP.
-        Δ    = path.tgrid[n + 1] - path.tgrid[n]
-        nsub = max(ceil(Int, Δ / FORWARD_SUBSTEP - 1e-9), 1)
-        dt   = Δ / nsub
-        κU = meeting_rate(path.θU[n], up.μ, up.η)
-        κS = meeting_rate(path.θS[n], model.skl_par.μ, model.skl_par.η)
-        for _ in 1:nsub
-            copyto!(uS_n, uS);  copyto!(mS_n, mS);  copyto!(tU_n, tU)
-            _advance_unskilled_cells!(uU, tU, Es, Et, uS_n, d, κU, χU, hX, path, model, wG, n, dt)
-            _advance_skilled_masses!(uS, mS, tU_n, uS_n, mS_n, d, κU, κS, hX.h, model,
-                                     view(path.pstar_S, :, n), dt)
-            _advance_skilled_shape!(eS, uS_n, mS_n, mS, d, κS, model, view(path.pstar_S, :, n),
-                                    view(path.poj, :, n), view(path.s_part, :, n), dt)
+        sub = _substeps(path, n)
+        for _ in 1:sub.nsub
+            _advance!(st, path, model, χU, hX, d, wG, n, sub.dt)
         end
-
-        copyto!(τprev, view(path.τT, :, :, n))
-        copyto!(pUs_prev, view(path.pUs, :, :, n));  copyto!(pUt_prev, view(path.pUt, :, :, n))
-        copyto!(χt_prev, view(path.χUt, :, :, n))
-        copyto!(pS_prev, view(path.pstar_S, :, n))
+        _carry_policies!(st, path, n)
     end
     return nothing
 end

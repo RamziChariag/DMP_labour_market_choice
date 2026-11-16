@@ -862,13 +862,15 @@ end
 # ════════════════════════════════════════════════════════════
 
 """
-    _backward_pass!(path, model_z1, tp) -> (iters, resid)
+    _backward_pass!(path, model_z1, tp) -> (iters, resid, buf)
 
 Sweep dates `n = Nt-1 … 1` under the `z₁` parameters, solving the time-dependent values
 at the path's own tightness: the training value off the next date, the unskilled block,
 then the skilled block, which uses the same date's unskilled values (spec Part 4).
 Date `Nt` is the boundary condition.  Returns the largest within-date iteration count and
-residual of the one-dimensional blocks.
+residual of the one-dimensional blocks, and the per-type surfaces: slot 1 of `buf` holds
+date 1's (searching slice `Ss`, training slice `St`, skilled branches `K0/K1`) wherever
+its flags `hasS/hasT/hasK` are set; elsewhere date 1 is the one-dimensional surface.
 """
 function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
     Nt = length(path.tgrid);  Nx = length(model.grids.x)
@@ -895,5 +897,5 @@ function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParam
         it_max = max(it_max, maximum(iters));  res_max = max(res_max, maximum(resid))
         _skilled_types_step!(path, model, n, buf; inv_dt = inv_dt)
     end
-    return (iters = it_max, resid = res_max)
+    return (iters = it_max, resid = res_max, buf = buf)
 end
