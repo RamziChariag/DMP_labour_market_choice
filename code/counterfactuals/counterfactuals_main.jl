@@ -34,10 +34,12 @@ const EXERCISES = [:welfare, :incidence, :held_margin, :training_cost]
 # :mcmc the chains' posterior means, the estimates the paper reports; :smm the SMM estimates.
 const POINT_ESTIMATE = :mcmc
 
-# Held margin: false holds tightness on the estimated transition's path (one backward and
-# one forward pass, no free-entry iteration); true re-solves it by free entry and reports
-# whether the end steady state leaves the estimate's unskilled branch.
-const HELD_FREE_ENTRY = false
+# Held margin, run in each mode listed: :free_entry re-solves tightness by free entry at the
+# estimated vacancy costs, scans the held crisis economy for every tightness pair at which
+# both free-entry conditions hold, and follows the estimate's unskilled branch;
+# :tightness_held keeps tightness on the estimated transition's path (one backward and one
+# forward pass) and reports the free-entry gap this leaves.
+const HELD_MODES = [:free_entry, :tightness_held]
 
 # Training cost: the scales of c applied from date 0.  Must contain 1.0, the estimate.
 const TRAINING_COST_GRID = [0.8, 0.9, 1.0, 1.1, 1.2]
@@ -126,7 +128,7 @@ println("="^65)
 @printf("  Crises:               %s\n", join(CRISES, ", "))
 @printf("  Exercises:            %s\n", join(EXERCISES, ", "))
 @printf("  POINT_ESTIMATE:       %s\n", POINT_ESTIMATE)
-@printf("  HELD_FREE_ENTRY:      %s\n", HELD_FREE_ENTRY)
+@printf("  HELD_MODES:           %s\n", join(HELD_MODES, ", "))
 @printf("  TRAINING_COST_GRID:   %s\n", join(TRAINING_COST_GRID, ", "))
 @printf("  Transitions read:     %s\n",
         join((basename(transition_file(c, W_SUFFIX, POINT_ESTIMATE)) for c in CRISES), ", "))

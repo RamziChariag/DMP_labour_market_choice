@@ -78,7 +78,8 @@ function run_training_cost(crises)
                                  W_level = NaN, W_months_base_piU = NaN, W_over_A = NaN,
                                  W_months_own_piU = NaN, ur_U_window = NaN, ur_S_window = NaN,
                                  ur_total_window = NaN, ur_U_end = NaN, ur_S_end = NaN,
-                                 training_share_end = NaN, theta_U_end = ep.solve.θU,
+                                 training_share_end = NaN, training_share_window = NaN,
+                                 skilled_share_window = NaN, skilled_share_end = NaN, theta_U_end = ep.solve.θU,
                                  theta_S_end = ep.solve.θS, steady_state_found = false,
                                  branch_switch = ep.branch.switched, converged = false,
                                  iterations = 0, fe_gap = NaN, seconds = time() - t0))
@@ -102,6 +103,9 @@ function run_training_cost(crises)
                          ur_U_window = win(:ur_U), ur_S_window = win(:ur_S), ur_total_window = win(:ur_total),
                          ur_U_end = getfield(res, :ur_U)[end], ur_S_end = getfield(res, :ur_S)[end],
                          training_share_end = getfield(res, :training_share)[end],
+                         training_share_window = win(:training_share),
+                         skilled_share_window = win(:skilled_share),
+                         skilled_share_end = getfield(res, :skilled_share)[end],
                          theta_U_end = ep.solve.θU, theta_S_end = ep.solve.θS,
                          steady_state_found = ep.solve.ok, branch_switch = ep.branch.switched,
                          converged = conv, iterations = its, fe_gap = gap, seconds = time() - t0))

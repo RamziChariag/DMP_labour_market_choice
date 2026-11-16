@@ -5,7 +5,8 @@
 #
 # For every type (a_U, a_S) and state, the value at date 0 of the estimated transition
 # against the value in the same state at the baseline steady state, relative to general
-# productivity: (V_0 / A_crisis) / (V_base / A_base) − 1, averaged with the date-0 masses.
+# productivity: (V_0 / A_crisis) / (V_base / A_base) − 1, and the differences V_0 − V_base (level)
+# and V_0/A_crisis − V_base/A_base (in units of A), each averaged with the date-0 masses.
 # Values and masses are those transition_main.jl saved (`types`, transition_types.jl).
 ############################################################
 
@@ -33,25 +34,32 @@ function incidence_ratios(types)
     A0 = types.A_base;  A1 = types.A_crisis
     Nx = size(v0.UC, 1)
     num_all = zeros(Nx, Nx);  den_all = zeros(Nx, Nx);  unmatched = zeros(Nx, Nx)
+    dl_all = zeros(Nx, Nx);  dA_all = zeros(Nx, Nx)
     by_state = Dict{Symbol,Matrix{Float64}}();  mass = Dict{Symbol,Matrix{Float64}}()
+    dlev = Dict{Symbol,Matrix{Float64}}();  dA = Dict{Symbol,Matrix{Float64}}()
     for (name, vf, mf) in INCIDENCE_STATES
         V0 = getfield(v0, vf);  Vb = getfield(vb, vf);  ρ = getfield(ρ0, mf)
-        num = zeros(Nx, Nx);  den = zeros(Nx, Nx)
+        num = zeros(Nx, Nx);  den = zeros(Nx, Nx);  nl = zeros(Nx, Nx);  na = zeros(Nx, Nx)
         @inbounds for c in CartesianIndices(ρ)
             m = Float64(ρ[c]);  m > 0.0 || continue
             ij = CartesianIndex(c[1], c[2])
             if isfinite(V0[c]) && isfinite(Vb[c]) && Vb[c] != 0
                 num[ij] += m * ((V0[c] / A1) / (Vb[c] / A0) - 1.0);  den[ij] += m
+                nl[ij]  += m * (V0[c] - Vb[c]);  na[ij] += m * (V0[c] / A1 - Vb[c] / A0)
             else
                 unmatched[ij] += m
             end
         end
         by_state[name] = ifelse.(den .> 0.0, num ./ den, NaN)
         mass[name] = den
-        num_all .+= num;  den_all .+= den
+        dlev[name] = ifelse.(den .> 0.0, nl ./ den, NaN);  dA[name] = ifelse.(den .> 0.0, na ./ den, NaN)
+        num_all .+= num;  den_all .+= den;  dl_all .+= nl;  dA_all .+= na
     end
     return (all = ifelse.(den_all .> 0.0, num_all ./ den_all, NaN), by_state = by_state,
-            mass = mass, unmatched = unmatched)
+            mass = mass, unmatched = unmatched,
+            diff_level_all = ifelse.(den_all .> 0.0, dl_all ./ den_all, NaN),
+            diff_A_all = ifelse.(den_all .> 0.0, dA_all ./ den_all, NaN),
+            diff_level = dlev, diff_A = dA, A_base = A0, A_crisis = A1)
 end
 
 """
@@ -70,9 +78,13 @@ function run_incidence(crises)
         gp = L.m1.grids;  Nx = length(gp.x);  pop = gp.copula.W2
         df = DataFrame(i = repeat(1:Nx, outer = Nx), j = repeat(1:Nx, inner = Nx),
                        a_U = repeat(gp.x, outer = Nx), a_S = repeat(gp.x, inner = Nx),
-                       population = vec(pop), ratio_all_states = vec(ir.all))
+                       population = vec(pop), ratio_all_states = vec(ir.all),
+                       diff_level_all_states = vec(ir.diff_level_all),
+                       diff_over_A_all_states = vec(ir.diff_A_all))
         for (name, _, _) in INCIDENCE_STATES
             df[!, Symbol("ratio_", name)] = vec(ir.by_state[name])
+            df[!, Symbol("diff_level_", name)] = vec(ir.diff_level[name])
+            df[!, Symbol("diff_over_A_", name)] = vec(ir.diff_A[name])
             df[!, Symbol("mass_", name)]  = vec(ir.mass[name])
         end
         df.mass_without_baseline_value = vec(ir.unmatched)
@@ -81,7 +93,10 @@ function run_incidence(crises)
             serialize(io, (crisis = crisis, version = ROYSEARCH_VERSION, point = POINT_ESTIMATE,
                            x = gp.x, population = pop, ratio_all_states = ir.all,
                            ratio_by_state = ir.by_state, mass_by_state = ir.mass,
-                           mass_without_baseline_value = ir.unmatched))
+                           mass_without_baseline_value = ir.unmatched,
+                           diff_level_all_states = ir.diff_level_all, diff_over_A_all_states = ir.diff_A_all,
+                           diff_level_by_state = ir.diff_level, diff_over_A_by_state = ir.diff_A,
+                           A_base = ir.A_base, A_crisis = ir.A_crisis))
         end
         k = findall(isfinite, ir.all)
         cf_log(dir, @sprintf("[%s] population-weighted mean ratio %.5f; range over types [%.5f, %.5f]; mass without a baseline value %.2e; %.1f s",

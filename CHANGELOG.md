@@ -35,6 +35,25 @@ measurement was, not just the verdict.
 
 ---
 
+## v61.7.0 — 2026-11-16
+
+**MINOR: the counterfactual scripts produce what the exercises' definitions need.** No
+estimate, moment or transition path changes.
+- **Held margin** (`held_margin.jl`): `HELD_FREE_ENTRY` is replaced by `HELD_MODES`
+  (default both, `:free_entry` and `:tightness_held`); every file carries the mode as a
+  suffix. New `equilibrium_pairs`: in the free-entry mode, every tightness pair at which both
+  free-entry conditions hold in the held crisis economy, from a scan of θ_U with θ_S solved
+  by skilled free entry at each node (`held_margin_equilibria_<crisis>.csv` and the scan in
+  `held_margin_equilibria_scan_<crisis>.csv`), with each pair's stability in the unskilled
+  market. The per-market table adds the rise at the horizon and the absorbed share
+  1 − rise_est/rise_held, at the horizon and over the window.
+- **Incidence** (`incidence.jl`): adds, per type and state class and over all states, the
+  date-0 value difference in levels (V_0 − V_base) and in units of A (V_0/A_crisis −
+  V_base/A_base), mass-weighted, next to the existing ratio.
+- **Training cost** (`training_cost.jl`): adds the training and skilled shares over the
+  crisis window and the skilled share at the horizon.
+All exercises run on the stored transition's grid, which since v61.6.0 ends at month 36.
+
 ## v61.6.0 — 2026-11-16
 
 **MINOR: the transition horizon is the crisis data window (the author's decision).** The
