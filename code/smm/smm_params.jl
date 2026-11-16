@@ -1,42 +1,20 @@
 ############################################################
-# smm_params.jl — SMM parameter specification
+# smm/smm_params.jl — the estimation problem: parameters, specs, provenance
 #
-# Types
-#   ParamSpec      metadata for a single free parameter
-#   SMMRunParams   runtime settings (grids, DE / SA / NM, tracing)
-#   SMMSpec        full estimation problem
+# Types: ParamSpec (one free parameter), SMMRunParams (run settings), RunProvenance,
+# SeedBank, SMMSpec (the full problem). Serialised bundles store these structs, which
+# the deserialiser fills by field POSITION: a field may not be added, removed or
+# reordered without migrating every stored bundle.
 #
-# Functions
-#   build_smm_spec(...)    construct an SMMSpec
-#   joint_spec(specs, ws)  the baseline's spec: its two periods, estimated jointly
-#   period_list(spec)      a spec's periods, each with its spec and coordinates
-#   default_free_params()  full list of estimable parameters
-#   pack_θ(spec)           initial values → unconstrained vector
-#   unpack_θ(θ, spec)      unconstrained vector → 3 model structs and the tightnesses
-#   print_spec(spec)       display the estimation problem
+# Parameters. r, ν, φ are calibrated externally and σ_wU, σ_wS are calibrated from λ_w;
+# every other parameter is estimated unless pinned via FIX_PARAMS. The baseline
+# estimates its two periods jointly, BASELINE_COMMON shared and every other parameter
+# taking one value per period; a crisis window holds CRISIS_HELD at its baseline
+# period's estimate. Stored units: A = ln A, b_j and σ_S over A, c = ln c, θ_j in
+# vacancies per searcher, k_j in months of mean new-match output.
 #
-# Parameters
-#
-#   Externally set, always fixed at SMM runtime:
-#     r       calibrated to 4% annual real risk-free rate (monthly r = 0.05/12)
-#     ν       pre-estimated from CPS life-table (one row per crisis pair)
-#     φ       pre-estimated from NSC/IPEDS (pooled across Fall semesters)
-#
-#   Every other parameter is estimated unless pinned via FIX_PARAMS. The baseline
-#   estimates its two periods jointly, with BASELINE_COMMON shared and every other
-#   parameter taking a value in each period; a crisis window holds CRISIS_HELD at the
-#   estimate of its baseline period.
-#
-#   Production is linear in own ability under pure-Roy (π_j = exp(A)·P_j·a_j·p),
-#   so there is no ability gradient to estimate; segment separation runs through
-#   the ρ_x separation device (Gola concordance).
-#
-# Note on ξ_U / ξ_S: each of UnskilledParams / SkilledParams carries an
-# exogenous-separation field ξ, defaulting to 0.0. Total separation into
-# unemployment is ξ_U + λ_U · G(p*_U) (unskilled) and ξ_S + λ_S · Γ(p*_S)
-# (skilled) — see Model Notes §sep_asymmetry. Pinning a ξ to 0 (FIX_PARAMS
-# :unsk_xi / :skl_xi => 0.0, or dropping it from the free list) recovers the
-# purely-endogenous variant for that sector exactly.
+# Entry points: default_free_params, build_smm_spec, joint_spec, period_list,
+# pack_θ, unpack_θ, assert_all_params_accounted, print_spec.
 ############################################################
 
 # ============================================================
@@ -51,15 +29,13 @@ Metadata for one free parameter.
 Fields
   block   :: Symbol   which struct (:common, :unsk, :skl)
   name    :: Symbol   field name within that struct
-  lb      :: Float64  lower bound (used for the logit transform)
+  lb      :: Float64  lower bound of the logistic box
   ub      :: Float64  upper bound
-  init    :: Float64  starting value (constrained space); NaN until seeded
-  label   :: String   human-readable label for printing
+  init    :: Float64  starting value (constrained); NaN until seeded
+  label   :: String   human-readable label; its last word is the display symbol
 
-`init` is a carrier, not a default: the parameter table builds every entry unseeded,
-and the estimation driver writes the seed in — from DEFAULT_PARAMS in smm_main.jl or
-from a stored optimum. `pack_θ` refuses an unseeded entry, so a path that forgets to
-seed fails at its first use instead of starting from a value nobody chose.
+The parameter table is built unseeded; the estimation driver writes the seed in, from
+DEFAULT_PARAMS (smm_main.jl) or a stored optimum, and `pack_θ` refuses an unseeded entry.
 """
 struct ParamSpec
     block :: Symbol
@@ -70,14 +46,18 @@ struct ParamSpec
     label :: String
 end
 
+"""
+    ParamSpec(block, name, lb, ub, label) → ParamSpec
+
+An unseeded entry (`init = NaN`).
+"""
 ParamSpec(block::Symbol, name::Symbol, lb::Real, ub::Real, label::AbstractString) =
     ParamSpec(block, name, Float64(lb), Float64(ub), NaN, String(label))
 
 """
     with_seed(ps, value) → ParamSpec
 
-`ps` carrying `value` as its starting value, pulled 1e-10 inside the box so the logit
-map in `pack_θ` stays finite at a seed that sits on a bound.
+`ps` with starting value `value`, pulled 1e-10 inside the box so its logit is finite.
 """
 with_seed(ps::ParamSpec, value::Real) =
     ParamSpec(ps.block, ps.name, ps.lb, ps.ub,
@@ -86,11 +66,8 @@ with_seed(ps::ParamSpec, value::Real) =
 """
     param_symbol(ps) → String
 
-The parameter's canonical symbol, market suffix included: `μ_U` rather than the bare
-`μ` that `ps.name` carries for both markets. Taken from the tail of `ps.label`, which
-already spells each symbol the way the model notes and the paper do, so the suffix
-convention lives in one place — the label — rather than in a second table that can
-drift from it. A trailing parenthetical (units, as on the vacancy costs) is dropped.
+The parameter's market-suffixed display symbol (`μ_U`, not the bare `μ` of `ps.name`): the
+last word of `ps.label`, a trailing parenthetical dropped.
 """
 function param_symbol(ps::ParamSpec)
     lab = replace(ps.label, r"\s*\([^)]*\)\s*$" => "")
@@ -101,16 +78,13 @@ end
 """
     padr(s, n) → String
 
-Left-justify `s` in a field `n` columns wide, counting DISPLAY columns rather than
-bytes. Julia's `%-ns` pads to a byte count, so a name containing a multi-byte glyph
-(`a_ℓ` is three characters in five bytes) comes out short and drags every following
-column left. Every parameter table here carries such names.
+`s` left-justified in a field `n` DISPLAY columns wide (`%-ns` pads bytes, which misaligns
+names such as `a_ℓ`).
 """
 padr(s, n::Int) = (t = string(s); t * " "^max(0, n - textwidth(t)))
 
-# Fixed parameters are keyed `block_name` in the fixed NamedTuple and have no
-# ParamSpec to carry a label, so their display symbols are spelled here. The market
-# suffix follows the same convention as `param_symbol`, which reads it from a label.
+# Display symbols of fixed parameters, keyed as in the fixed NamedTuple (no ParamSpec, so
+# no label to read the symbol from).
 const FIXED_SYMBOLS = Dict(
     :unsk_eta  => "η_U", :skl_eta  => "η_S",
     :unsk_η    => "η_U", :skl_η    => "η_S",
@@ -123,8 +97,7 @@ const FIXED_SYMBOLS = Dict(
 """
     fixed_symbol(key) → String
 
-Display symbol for a fixed parameter. Falls back to the key itself for the genuinely
-unsuffixed ones (`r`, `ν`, `φ`), which need no market label.
+Display symbol for a fixed parameter; the key itself for unsuffixed ones (`r`, `ν`, `φ`).
 """
 fixed_symbol(key) = get(FIXED_SYMBOLS, Symbol(key), string(key))
 
@@ -135,17 +108,18 @@ fixed_symbol(key) = get(FIXED_SYMBOLS, Symbol(key), string(key))
 """
     SMMRunParams
 
-Runtime settings for the SMM estimation — grid sizes, DE, SA, NM,
-weighting and tracing options.  Construct with keyword arguments;
-all have defaults.
+Run settings of an SMM estimation: grids, candidate layer, DE, SA, Nelder-Mead, weighting,
+start-point construction and tracing. Keyword constructor; every field has a default.
+smm_main.jl sets them on every run; the defaults matter only to a bundle read outside it.
+`de_patience` and `sa_target_fin` are read by nothing and are kept for bundle layout only.
 """
 Base.@kwdef struct SMMRunParams
-    # Grids (real SA / DE / NM runs)
+    # Grids
     Nx      :: Int     = 80
     Np_U    :: Int     = 80
     Np_S    :: Int     = 80
 
-    # Candidate-generation layer (coarse grid, Sobol sample, hierarchical clustering)
+    # Candidate layer (coarse grid, Sobol sample, hierarchical clustering)
     cand_Nx          :: Int = 40
     cand_Np_U        :: Int = 40
     cand_Np_S        :: Int = 40
@@ -158,234 +132,126 @@ Base.@kwdef struct SMMRunParams
     de_pop_size  :: Int     = 0        # 0 ⇒ 10 × n_free_params
     de_f         :: Float64 = 0.65
     de_cr        :: Float64 = 0.85
-    # RETIRED v19.5.0, kept only so stored bundles stay loadable. The DE stall test is
-    # de_reheat_flat + de_reheat_rate; this field's value never reached that test. Delete
-    # it at the next struct change that migrates bundles anyway. See CHANGELOG.md.
-    de_patience  :: Int     = 20
-    de_avg_tol   :: Float64 = 0.0      # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 disables.
-                                       # Off: across a six-configuration sweep this rule
-                                       # correlated +0.915 with achieved ΔQ, i.e. it ranked
-                                       # the run that converged prematurely as the most
-                                       # converged one.
+    de_patience  :: Int     = 20       # unread
+    de_avg_tol   :: Float64 = 0.0      # stop when (Q_mean−Q_best)/|Q_best| < tol; 0 disables
 
-    # Population generator.  Appended, never inserted: Serialization rebuilds a struct by
-    # field position, so a field added anywhere but the end shifts every later value.
+    # DE population generator and reheat
     de_gen_per_k   :: Int     = 30     # candidates drawn at each sparsity k = 1:n_free
-    de_reheat_flat :: Int     = 6      # reheat once Q_best has been flat this many
-                                       # generations and
-    de_reheat_rate :: Float64 = 0.04   # the improved-member rate is below this
-    de_max_reheats :: Int     = 50     # a reheat that finds no improvement ends the run,
-                                       # so this is a guard rather than the usual stop
-    de_adapt_fcr   :: Bool    = false  # take de_f and de_cr from the generator's own
-                                       # draws instead of the values set above. Off by
-                                       # default: the derived cr is the winning sparsity
-                                       # as a fraction of the free count, which on a
-                                       # near-flat allocation lands near 1/n_free and
-                                       # moves one coordinate per proposal.
+    de_reheat_flat :: Int     = 6      # reheat once Q_best has been flat this many generations
+    de_reheat_rate :: Float64 = 0.04   # and the improved-member rate is below this
+    de_max_reheats :: Int     = 50
+    de_adapt_fcr   :: Bool    = false  # take de_f, de_cr from the generator's draws
 
     # Simulated annealing
     sa_max_iter      :: Int     = 5_000
-    sa_T0            :: Float64 = 2.0
-    # Proposal sd in unconstrained space.  Sized to the measured ΔQ = 1 feasible
-    # half-widths (median 3.4e-03) rather than to the ±4 box: at 0.20 the walk
-    # accepted 0 of 150 proposals at 97% feasibility, at 0.01 it accepted 7 and
-    # descended.  smm_main.jl sets this on every run (ROYSEARCH_SA_STEP); the
-    # default matters only to a bundle read outside that path.
-    sa_step          :: Float64 = 0.01
-    sa_cooling_rate  :: Float64 = 1.0
+    sa_T0            :: Float64 = 2.0      # ≤ 0 ⇒ calibrated from sa_t0_rel, sa_t0_accept
+    sa_step          :: Float64 = 0.01     # fallback step for an unmeasurable coordinate
+    sa_cooling_rate  :: Float64 = 1.0      # logarithmic schedule (sa_halflife = 0)
     sa_cooling_exp   :: Float64 = 0.5
     sa_reheat_patience :: Int     = 200
     sa_reheat_factor   :: Float64 = 2.0
     sa_max_reheats     :: Int     = 5
     sa_adapt_window  :: Int     = 50
-    # RETIRED v19.5.0, kept only so stored bundles stay loadable. It was meant to shrink
-    # the step when feasibility fell below it, and _sa_loop never read it. The mechanism it
-    # would have counteracted was measured and is not there: at realised feasibility 0.88
-    # the walk closes 94.4% of the gap against 97.2% at full feasibility, and the adapted
-    # step is unchanged. Delete at the next bundle-migrating struct change. See CHANGELOG.md.
-    sa_target_fin    :: Float64 = 0.90
-    # T0 auto-calibration (used when sa_T0 <= 0).  T0 solves
-    # exp(-sa_t0_rel*Q0 / T0) = sa_t0_accept: a proposal that worsens the
-    # objective by sa_t0_rel of its current level is accepted with probability
-    # sa_t0_accept.  Anchored to Q rather than to probed move sizes, so it is
-    # invariant to the weighting matrix and to the objective's scale.
-    # 0.05 was set for a cold start and gives T0 = 48 at Q ≈ 1164 — a move of 58 in Q,
-    # which is a different basin. Warm starts, which is how every window now runs, need
-    # the run's own per-100-iteration gain of ~0.1 in Q as the reference scale.
+    sa_target_fin    :: Float64 = 0.90     # unread
+    # T0 solves exp(−sa_t0_rel·Q0 / T0) = sa_t0_accept: a move worsening Q by sa_t0_rel of
+    # its level is accepted with probability sa_t0_accept. 1e-4 is for warm starts.
     sa_t0_rel        :: Float64 = 1e-4
     sa_t0_accept     :: Float64 = 0.30
-    # On a reheat, snap back to the incumbent when the walk has drifted more than
-    # this fraction above Q_best; within the tolerance it reheats in place.
+    # At a reheat, snap back to the incumbent when the walk is more than this fraction
+    # above Q_best; otherwise reheat in place.
     sa_reheat_reset_tol :: Float64 = 0.25
     sa_random_init   :: Bool    = false
-    sa_parallel_steps :: Int    = 100         # parallel SA steps before pruning to the best chain
-    sa_seed           :: Int    = 20240601    # base seed for parallel SA chains (replicability)
+    sa_parallel_steps :: Int    = 100         # warm-up steps per start before pruning
+    sa_seed           :: Int    = 20240601    # base seed of the SA chains
 
-    # The objective's weighting, :diagonal or :equal (run_weighting, load_weight_matrix)
+    # The objective's weighting, :diagonal or :equal
     weighting :: Symbol = :diagonal
 
-    # Wage-reliability calibration knob. σ_w is NOT a free parameter: it is
-    # calibrated externally from λ_w via σ_{w,j}² = (1−λ_w)·Var̂[log w_j]
-    # (calibrate_sigma_w), so λ_w configures the run and is reported in the
-    # header only — it never appears in the parameter tables.
-    # smm_main.jl sets this from LAMBDA_W on every run; the default matters only to a
-    # bundle read outside that path, so it tracks the value the project uses.
+    # Wage-reliability ratio; σ_{w,j}² = (1−λ_w)·Var̂[log w_j] (calibrate_sigma_w)
     λ_w :: Float64 = 0.78
 
-    # Nelder-Mead polish.
-    #
-    # Optim's Nelder-Mead cannot use f_reltol or x_abstol. Its assess_convergence
-    # method (nelder_mead.jl:317) returns the four flags as
-    # `(false, false, g_converged, false)` — x_converged and f_converged are literals,
-    # so no code path reads those two options for this solver. Sweeping f_reltol over
-    # 1e-12 … 5e-1 leaves the iteration count unchanged at 111 on a smooth problem,
-    # confirming it. Both fields are still passed because the same branch serves
-    # :lbfgs and :bfgs, where they are live.
-    #
-    # nm_f_tol is set from the scale of Q rather than convention. Q is a chi-square,
-    # so ΔQ = 1 is one moment moving by one sampling standard error; at Q of order
-    # 1e3 that is a relative tolerance of about 1e-3. Measured solver noise is
-    # ΔQ ≈ 1e-6, six orders below, so this threshold is statistical, not numerical.
+    # Nelder-Mead (f_tol and x_tol are read by :lbfgs/:bfgs only; Optim's Nelder-Mead
+    # ignores them, and its g_tol tests sd(Q) over the simplex in Q units)
     nm_max_iter  :: Int     = 10_000
     nm_f_tol     :: Float64 = 1e-3
     nm_x_tol     :: Float64 = 1e-5
-    # g_abstol is Nelder-Mead's ONLY built-in stopping test, and it is not a gradient
-    # test. Optim compares it against nmobjective = sqrt(var(f_simplex)·m/n), i.e. the
-    # standard deviation of Q across the simplex vertices — an ABSOLUTE quantity in Q
-    # units. At d = 25 that factor is 1.02, so the test is effectively sd(Q) ≤ tol.
-    #
-    # Left at Optim's own default. On a Q of order 1e3 it is unreachable (it demands
-    # sd(Q) ≤ 1e-8, some 1e-9 % of Q), so in practice the rate rule below is what
-    # stops the run; the default is kept rather than lowered so this field never
-    # silently becomes a second, scale-dependent f-tolerance.
     nm_g_tol     :: Float64 = 1e-8
-    nm_no_improve :: Int    = 4_000  # halt after this many evaluations with no
-                                     # improvement in best Q (0 disables; units of
-                                     # the [iter N] trace)
+    nm_no_improve :: Int    = 4_000  # evaluations without improvement before a stop; 0 disables
 
     # Tracing
     show_trace_members     :: Bool = false
     show_trace_generations :: Bool = true
     trace_stride           :: Int  = 10
 
-    # ── Start-point construction ─────────────────────────────
-    # How the optimiser's starting points are built. These were top-level constants in
-    # smm_main.jl, which meant a serialised bundle did not record them and a run could
-    # not be reproduced from its own output.
-    use_as_seed          :: Bool    = true   # feed the warm-start optimum in as a seed
-    seed_perturb_frac    :: Float64 = 0.05   # fraction of each box width to jitter it by
-    clusters_force_regen :: Bool    = true   # rebuild the seed bank rather than reuse it
+    # Start-point construction
+    use_as_seed          :: Bool    = true   # start from the chosen point itself
+    seed_perturb_frac    :: Float64 = 0.05   # else jitter it by this fraction of each box width
+    clusters_force_regen :: Bool    = true   # rebuild the candidate bank rather than reuse it
     include_prev_optimum :: Bool    = false  # add this window's previous optimum as a start
 
-    # ── Rate-based stopping (SA and Nelder-Mead) ─────────────
-    # Both optimisers stop on the RATE of improvement over a trailing window rather than
-    # on an absolute tolerance: on a Q of order 1e3 an absolute threshold is either
-    # unreachable or fires immediately, while a rate is scale-free. tol = 0 disables the
-    # test and falls back to the iteration caps above.
+    # Rate-based stops (RateStop, smm.jl); tol = 0 disables
     sa_rate_tol   :: Float64 = 0.05
     sa_rate_span  :: Int     = 300
-    sa_halflife   :: Int     = 5_000   # geometric cooling half-life, in iterations
+    sa_halflife   :: Int     = 5_000   # geometric cooling half-life, iterations
     nm_rate_tol   :: Float64 = 0.05
     nm_rate_span  :: Int     = 300
 
-    # Nelder-Mead initial simplex edge, as a fraction of each box width. Optim's default
-    # builds a simplex whose vertices are mostly infeasible here; 0.2 keeps them inside.
+    # Nelder-Mead initial simplex cap, transformed units; 0 keeps Optim's default
     nm_simplex_step :: Float64 = 0.2
 
-    # ── Local search around incumbents ───────────────────────
-    # The generator perturbs each chosen coordinate by de_local_sigma of its own ΔQ<1
-    # width — a units-free fraction of a measured scale, not a fraction of the box.
-    #
-    # sa_subset_k was REMOVED here in v19.1.0. BUNDLE STATUS AT THE TIME OF THIS EDIT:
-    # the neutral intermediates were extracted BEFORE the removal and the rebuild has run,
-    # but NOTHING IS INSTALLED YET — the .new files sit beside the originals in output/smm.
-    # base_fc and base_covid round-trip theta EXACTLY (max|dtheta| = 0.000e+00) and are the
-    # two windows to install; crisis_fc and crisis_covid do NOT (max|dtheta| = 3.34 and
-    # 4.55) because they encode a pre-P_U-normalisation 19-parameter spec and must be
-    # re-estimated rather than migrated. Do not read this comment as "the bundles on disk
-    # are current" until that install has happened.
-    # It set a fixed number of coordinates for SA to perturb per iteration; the
-    # proposal now draws its own mask from a measured p_move and takes its step scale
-    # from the measured ΔQ=1 half-widths (sa_proposal_scale, SA_SCALE_* in smm_main.jl).
-    # Removal required a migration because Serialization rebuilds a struct by field
-    # POSITION: it sat between nm_simplex_step (Float64) and de_local_sigma (Float64),
-    # so deleting an Int between two Float64s is the loud TypeError case rather than the
-    # silent shift — but only by luck of the types, which is not a reason to rely on it.
-    # See the graveyard entry in SETTINGS.md for the measurement that retired it.
+    # DE perturbation, as a fraction of each coordinate's measured ΔQ<1 width
     de_local_sigma :: Float64 = 0.33
 
 end
 
 # ============================================================
-# RunProvenance — where a serialised bundle came from
+# RunProvenance
 # ============================================================
 
 """
-Current bundle-format version. Bump only on a shape change; see `RunProvenance` and
-`bundle.jl`.
-
-3 (v56.0.0): the optimiser's coordinates are the tightnesses, and the vacancy costs are
-computed from free entry rather than carried in θ, so the field set gains `vacancy_costs`
-(the costs at the estimate, with their standard errors or posterior when a run produced
-them) and `attracting` (the free-entry slope check at the estimate).
-
-2 (v19.6.0): one shape for every writer, with a CONSTANT field set —
-`schema, stage, result, spec, provenance, sim, se, se_source, mcmc, tag` — where absent
-information is `nothing` rather than an absent field. Written by `write_bundle` only;
-normalised on read by `read_bundle`, which infers `stage` for a schema-1 file.
-
-1: four writers, four different field sets, and whichever touched a window last decided
-what its file contained.
+Bundle-format version (`RunProvenance.schema`, bundle.jl). Bump only when the top-level
+field set of a bundle changes: 3 added `vacancy_costs` and `attracting`; 2 introduced the
+constant field set; 1 is the earlier per-writer shapes.
 """
 const BUNDLE_SCHEMA = 3
 
 """
     RunProvenance
 
-Identifies the run that produced a bundle. Serialised alongside the estimate so a
-result carries its own origin: with several machines estimating different windows in
-parallel, "which code produced this number" cannot be answered from the filename.
+Where a serialised bundle came from.
 
-`schema` is the bundle-format version, and it is the field a loader checks. It changes
-only when the top-level FIELD SET of a serialised bundle changes, not when a parameter
-value does, and not when a struct carried inside it gains or loses a field: such a file
-fails to deserialise before `schema` can be read, so the number cannot help there.
-`@kwdef` buys nothing on read — `Serialization` fills fields positionally and never calls
-the constructor — so adding a field makes existing bundles unreadable (`EOFError`) exactly
-as removing one does (`TypeError`). Either way the bundles must be migrated; see
-`code/tools/migrate_bundles.jl`.
-
-`unrecorded` names fields that were reconstructed rather than read from the original
-run. A bundle migrated from a version that did not store a setting carries that
-setting's name here rather than silently presenting a default as fact.
-
-`version` means "the code that last WROTE this file", so a migration necessarily
-overwrites it and the version that produced the ESTIMATE would be lost. `migrated_from`
-carries that: each migration appends the version the bundle arrived with, oldest first,
-so a twice-migrated bundle records both hops and an un-migrated one is empty.
+Fields
+  schema         bundle-format version (`BUNDLE_SCHEMA`)
+  version        ROYSEARCH_VERSION of the code that last WROTE the file
+  window         estimation window
+  w_suffix       weighting suffix
+  git_sha        short commit hash; empty when git is unavailable
+  host           host name; empty when unavailable
+  julia          Julia version
+  written_at     ISO 8601 UTC timestamp
+  unrecorded     fields reconstructed rather than read from the original run
+  migrated_from  versions the bundle passed through in migrations, oldest first; empty
+                 for an estimated bundle
 """
 Base.@kwdef struct RunProvenance
     schema        :: Int             = 1
-    version       :: String          = "unknown"   # ROYSEARCH_VERSION at write time
+    version       :: String          = "unknown"
     window        :: Symbol          = :unknown
     w_suffix      :: String          = ""
-    git_sha       :: String          = ""          # empty when git is unavailable
+    git_sha       :: String          = ""
     host          :: String          = ""
     julia         :: String          = string(VERSION)
-    written_at    :: String          = ""          # ISO 8601, UTC
+    written_at    :: String          = ""
     unrecorded    :: Vector{Symbol}  = Symbol[]
-    migrated_from :: Vector{String}  = String[]    # versions that produced the estimate
+    migrated_from :: Vector{String}  = String[]
 end
 
 """
     run_provenance(; window, w_suffix, version, unrecorded = Symbol[], migrated_from = String[])
+        → RunProvenance
 
-Build a `RunProvenance` for the current process. `git_sha` and `host` are probed and
-left empty on failure rather than raising: provenance is metadata, and a run must not
-die because a machine has no git.
-
-`migrated_from` is empty for an estimated bundle and is supplied only by
-`migrate_bundles.jl`, which is the only writer that rewrites a file it did not produce.
+Provenance for the current process. The git SHA and host are probed and left empty on
+failure. `migrated_from` lists the files a bundle was rebuilt from, when it was.
 """
 function run_provenance(; window::Symbol, w_suffix::AbstractString,
                           version::AbstractString, unrecorded::Vector{Symbol} = Symbol[],
@@ -407,8 +273,12 @@ function run_provenance(; window::Symbol, w_suffix::AbstractString,
                          migrated_from = migrated_from)
 end
 
-# Formatted without Dates: smm_params.jl is included by the solver path too, and the
-# dependency would be carried for one timestamp.
+"""
+    _utc_now_iso() → String
+
+The current UTC time as `YYYY-MM-DDThh:mm:ssZ`, without Dates (the solver path includes
+this file).
+"""
 function _utc_now_iso()
     t = round(Int, time())
     days, rem = divrem(t, 86_400)
@@ -418,7 +288,11 @@ function _utc_now_iso()
     return @sprintf("%04d-%02d-%02dT%02d:%02d:%02dZ", y, mo, d, h, mi, s)
 end
 
-# Howard Hinnant's days-from-civil inverse, for a UTC date without a date library.
+"""
+    _civil_from_days(z) → (year, month, day)
+
+The civil date `z` days after 1970-01-01 (Hinnant's algorithm).
+"""
 function _civil_from_days(z::Int)
     z += 719_468
     era = fld(z, 146_097)
@@ -433,22 +307,19 @@ function _civil_from_days(z::Int)
 end
 
 # ============================================================
-# SeedBank — output of the candidate-generation layer
+# SeedBank
 # ============================================================
 
 """
     SeedBank
 
-The product of the candidate-generation layer (candidates.jl): a bank of
-feasible candidate parameter vectors (unconstrained space), their coarse-grid
-Q values, and hierarchical-clustering cluster labels (noise already dropped).  Passed as a
-single object into `run_smm` and forwarded to the SA / DE seeders.
+A bank of candidate start points (candidates.jl), passed to `run_smm`.
 
 Fields
   candidates :: Vector{Vector{Float64}}   feasible θ (unconstrained)
-  Q          :: Vector{Float64}           coarse-grid Q for each candidate
-  labels     :: Vector{Int}               cluster id (>= 1; noise removed)
-  meta       :: NamedTuple                staleness key (see candidates.jl)
+  Q          :: Vector{Float64}           coarse-grid Q of each candidate
+  labels     :: Vector{Int}               cluster id (≥ 1; noise removed)
+  meta       :: NamedTuple                cache key (`_candidate_meta`)
 """
 struct SeedBank
     candidates :: Vector{Vector{Float64}}
@@ -464,22 +335,18 @@ end
 """
     SMMSpec
 
-Holds everything the SMM estimation needs.
+The estimation problem.
 
 Fields
-  free     vector of ParamSpec (parameters to estimate)
-  fixed    NamedTuple of pinned parameter values; in the baseline's joint spec only the
-           record of its periods (`PERIODS`), each with its own pinned values
-  moments  NamedTuple from load_data_moments() — (value, weight) pairs
-  sim      SimParams — solver settings
-  run      SMMRunParams — grid sizes, optimiser settings, weighting
-  W        Matrix — weight matrix.  Never `nothing` after construction:
-           the equal-weight scheme is stored as the diagonal matrix
-           Diagonal(weight_k / m̂_k²), so every scheme shares one
-           weighted-loss path (see compute_loss_matrix).
-  q_scale  Float64 — DISPLAY-ONLY positive constant dividing the
-           reported scalar Q (default 1.0).  Constant in θ, so it does
-           not move the argmin.
+  free     Vector{ParamSpec}, the estimated parameters
+  fixed    NamedTuple of pinned values; for the baseline's joint spec, only its periods
+           under `PERIODS`
+  moments  NamedTuple of `(value, weight)` targets; weight 0 = held out
+  sim      SimParams, the solver settings
+  run      SMMRunParams
+  W        weight matrix over the active moments (never `nothing`: equal weights are
+           stored as Diagonal(weight_k / m̂_k²))
+  q_scale  display-only positive divisor of Q; constant in θ
 """
 struct SMMSpec
     free    :: Vector{ParamSpec}
@@ -491,44 +358,19 @@ struct SMMSpec
     q_scale :: Float64
 end
 
-# ============================================================
-# Constructor
-# ============================================================
-
 """
-    build_smm_spec(moments, sim;
-                   fixed        = (;),
-                   free_specs   = default_free_params(),
-                   run          = SMMRunParams(),
-                   W            = nothing,
-                   skip_moments = Symbol[])
+    build_smm_spec(moments, sim; fixed, free_specs, run, W, q_scale, skip_moments) → SMMSpec
 
 Build an `SMMSpec`.
 
-- `fixed` is a NamedTuple of parameter values to pin.  Keys may be
-  plain names (e.g. `:r`) or block-qualified (e.g. `:unsk_μ`, `:skl_μ`)
-  to disambiguate shared field names across the unskilled and
-  skilled blocks.  Any free spec whose name matches an entry in
-  `fixed` is silently dropped from the free list.
-
-- `skip_moments` is a vector of moment Symbols to deactivate.  Their
-  weights are zeroed in the stored moments NamedTuple so that
-  `compute_loss_matrix` skips them automatically.  Unknown names
-  produce a warning.
-
-- `W` selects the weighting scheme.  If `W === nothing` (equal
-  weights), the constructor builds the diagonal matrix
-  Diagonal(weight_k / m̂_k²) over the active moments, so that
-  g' W g = Σ_k weight_k · (g_k / m̂_k)² is the scale-normalised
-  relative-deviation loss.  If a matrix is passed (the diagonal-σ
-  W = Diagonal(1/σ̂²_samp) from `load_weight_matrix`) it must be square
-  with size equal to the number of active moments; a mismatch raises an
-  error — typically a sign that `W` was built with a different
-  `skip_moments` list.
-
-- `q_scale` is a DISPLAY-ONLY positive constant (default 1.0) that
-  divides the reported scalar Q.  It is constant in θ and therefore
-  does not move the argmin.
+- `fixed`: pinned values, keyed bare (`:r`) or block-qualified (`:unsk_μ`) as `fixed_key`
+  writes them; a free spec that is pinned is dropped from the free list.
+- `skip_moments`: moments given weight 0 (unknown names are reported and ignored).
+- `W`: `nothing` builds the equal-weight Diagonal(weight_k / m̂_k²), so g′Wg is the
+  relative-deviation loss; a matrix (`load_weight_matrix`) must be square in the number of
+  active moments, which are `keys(moments)` with weight > 0 in that order — the order of
+  the deviation vector in `compute_loss_matrix`.
+- `q_scale`: display-only positive divisor of Q.
 """
 function build_smm_spec(
     moments      :: NamedTuple,
@@ -542,9 +384,6 @@ function build_smm_spec(
 )
     fixed_nt = (fixed isa NamedTuple) ? fixed : NamedTuple()
 
-    # Silent: a parameter pinned here appears in the spec's own Fixed table with its value,
-    # so announcing the drop separately says the same thing twice — and the ASCII `name`
-    # field it printed duplicated across markets (two η, two σ_w), which read as a defect.
     active_free = filter(ps -> !is_pinned(fixed_nt, ps.block, ps.name), free_specs)
 
     if !isempty(skip_moments)
@@ -559,16 +398,10 @@ function build_smm_spec(
         )
     end
 
-    # Resolve the weight matrix.  Active moments are those with
-    # weight > 0, taken in `keys(moments)` order — the SAME order
-    # compute_loss_matrix uses to assemble the deviation vector, so the
-    # diagonal lines up element-for-element.
     active_keys = [k for k in keys(moments) if moments[k].weight > 0.0]
     K_active    = length(active_keys)
 
     W_final::Matrix{Float64} = if isnothing(W)
-        # Equal-weight scheme as a diagonal matrix:
-        #   W_kk = weight_k / m̂_k²   ⟹   g' W g = Σ_k weight_k (g_k/m̂_k)²
         d = Vector{Float64}(undef, K_active)
         for (i, k) in enumerate(active_keys)
             t      = moments[k]
@@ -596,20 +429,19 @@ end
 # The baseline's joint spec
 # ============================================================
 
-# The short tag a period's parameters carry in tables: the event its window precedes.
+# The tag a period's parameters carry in tables: the event its window precedes.
 const PERIOD_TAG = Dict(:base_fc => "fc", :base_covid => "covid")
 
 """
     joint_spec(specs, windows) → SMMSpec
 
-The spec of the baseline: one parameter vector for its periods, the data windows `windows`,
-whose single-period specs `specs` share their grids, run settings and free set. A parameter
-of `BASELINE_COMMON` is one coordinate for every period; every other free parameter is one
-coordinate per period, named `<name>@<window>` and labelled with the period's tag, next to
-its counterparts in the canonical order. The objective is the sum of the periods'
-objectives, each with its own moments and weights, so the joint moments are the periods'
-keyed `<moment>@<window>` and `W` is block diagonal. A common parameter must start at the
-same value in every period.
+The baseline's spec: one parameter vector for its periods (data windows `windows`, with
+single-period specs `specs` sharing grids, run settings and free set). A parameter of
+`BASELINE_COMMON` is one coordinate for every period and must have the same box and start
+in each; every other free parameter is one coordinate per period, named
+`<name>@<window>`. The objective is the sum of the periods' objectives: moments are keyed
+`<moment>@<window>` and `W` is block diagonal. The periods are recorded under
+`fixed[PERIODS]`.
 """
 function joint_spec(specs::AbstractVector{SMMSpec}, windows)
     s1 = first(specs)
@@ -647,14 +479,19 @@ function joint_spec(specs::AbstractVector{SMMSpec}, windows)
                    s1.q_scale)
 end
 
+"""
+    is_joint(spec) → Bool
+
+Whether `spec` is the baseline's joint spec (`joint_spec`).
+"""
 is_joint(spec::SMMSpec) = haskey(spec.fixed, PERIODS)
 
 """
     period_list(spec) → Vector of (window, spec, index)
 
-A spec's periods: for the baseline's joint spec each data window with its single-period spec
-and the positions of that spec's coordinates in the joint vector; for any other spec the spec
-itself, `window = nothing`, at every position.
+A spec's periods: for the joint spec, each data window with its single-period spec and the
+positions of that spec's coordinates in the joint vector; for any other spec, the spec
+itself with `window = nothing` at every position.
 """
 function period_list(spec::SMMSpec)
     is_joint(spec) || return [(nothing, spec, collect(eachindex(spec.free)))]
@@ -662,16 +499,19 @@ function period_list(spec::SMMSpec)
     return [(P.windows[i], P.specs[i], P.index[i]) for i in eachindex(P.specs)]
 end
 
-# The pinned values of a spec, period by period: what two specs must share for an estimate of
-# one to be a start of the other.
+"""
+    pinned_key(spec) → Vector
+
+The pinned values of `spec`, period by period: what two specs must share for an estimate of
+one to start the other.
+"""
 pinned_key(spec::SMMSpec) = [pinned_values(s.fixed) for (_, s, _) in period_list(spec)]
 
 """
     pinned_table(spec) → Vector of (key, symbol, value)
 
-The pinned parameters for display and the CSV: a value common to every period once, under
-its own key; one that differs across the baseline's periods once per period, keyed
-`<key>@<window>` and tagged with the period.
+The pinned parameters for display and the CSV: a value common to every period once; one
+that differs across the baseline's periods once per period, keyed `<key>@<window>`.
 """
 function pinned_table(spec::SMMSpec)
     pl  = period_list(spec)
@@ -689,9 +529,12 @@ function pinned_table(spec::SMMSpec)
     return out
 end
 
-# The tightness pair is the coordinate the optimiser searches over, not a parameter: each
-# tightness pair gives one equilibrium, and the vacancy costs k_U, k_S, the parameters, follow
-# from free entry. The parameter tables print k in its place.
+"""
+    is_tightness(ps) → Bool
+
+Whether `ps` is a tightness coordinate. The tightnesses are what the optimiser moves; the
+vacancy costs follow from free entry and are reported in their place.
+"""
 is_tightness(ps::ParamSpec) = ps.name === :tight
 
 """
@@ -710,9 +553,9 @@ vacancy_cost_rows(spec::SMMSpec) =
     k_values(k) → Vector{Float64}
     k_struct(spec, v) → NamedTuple
 
-The vacancy costs of an equilibrium as a vector in the order of `vacancy_cost_rows`, and back.
-A single-period spec's costs are `(U, S)`; the baseline's are one `(U, S)` per period, keyed
-by its data window.
+The vacancy costs of an equilibrium as a vector in the order of `vacancy_cost_rows`, and
+back. A single-period spec's costs are `(U, S)`; the baseline's are one `(U, S)` per
+period, keyed by data window.
 """
 k_values(k::NamedTuple) = haskey(k, :U) ? [k.U, k.S] :
                           reduce(vcat, [[x.U, x.S] for x in values(k)])
@@ -725,18 +568,14 @@ function k_struct(spec::SMMSpec, v::AbstractVector)
 end
 
 # ============================================================
-# σ_w calibration from the wage-reliability knob λ_w
+# σ_w calibration
 # ============================================================
 
 """
     calibrate_sigma_w(λ_w, moments) → (σ_wU, σ_wS)
 
-Calibrate the log-wage measurement-error SDs from the reliability ratio
-λ_w via the classical-error decomposition σ_{w,j}² = (1−λ_w)·Var̂[log w_j],
-mirroring the external calibration of ν and φ. `moments` is the data
-NamedTuple from `load_data_moments`; the empirical log-wage variances are
-its `emp_var_U` / `emp_var_S` targets. The returned pair is injected into
-the pinned (calibrated) block exactly like r, ν, φ.
+Log-wage measurement-error SDs from the reliability ratio: σ_{w,j}² = (1−λ_w)·Var̂[log w_j],
+with Var̂[log w_j] the `emp_var_U` / `emp_var_S` targets of the data `moments`.
 """
 function calibrate_sigma_w(λ_w::Real, moments::NamedTuple)
     σ_wU = sqrt(max((1.0 - λ_w) * moments[:emp_var_U].value, 0.0))
@@ -745,50 +584,34 @@ function calibrate_sigma_w(λ_w::Real, moments::NamedTuple)
 end
 
 # ============================================================
-# Default free parameter list
+# Parameter table
 # ============================================================
 
 """
     default_free_params() → Vector{ParamSpec}
 
-Full list of estimable parameters with their bounds.  Pass a subset to
-`build_smm_spec` to estimate only some.
-
-The entries are UNSEEDED (`init = NaN`).  Starting values have exactly two sources,
-both in the estimation driver: DEFAULT_PARAMS in smm_main.jl, or a stored optimum
-(warm start, crisis-window baseline).  A start written here would be a third source
-that could reach a run without anyone having chosen it.
-
-Excluded from this list because they are always fixed:
-  r       calibrated externally at 4% annual → monthly r = 0.05/12
-  ν       pre-estimated from CPS data (one value per crisis pair)
-  φ       pre-estimated from NSC/IPEDS data (pooled)
+Every estimable parameter with its box, unseeded. r, ν and φ are not in it: they are always
+calibrated externally. Production is π_j = e^A P_j a_j p, so only e^A·P_j is pinned by wage
+levels and P_U = 1 is pinned as the numeraire.
 """
 function default_free_params() :: Vector{ParamSpec}
     return [
-        # Ability distribution — common block.  a_ℓ, b_ℓ shape the aU marginal;
-        # ρ_x is the ability correlation, the RoySearch separation device
-        # (Gola concordance).
+        # Ability distribution: a_ℓ, b_ℓ shape the a_U marginal; ρ_x is the ability
+        # correlation, the segment-separation device, boxed strongly negative because the
+        # estimate is not stable otherwise.
         ParamSpec(:common, :a_ℓ,    0.1000,    8.0000,  "worker type shape a_ℓ"),
         ParamSpec(:common, :b_ℓ,    0.0500,    4.0000,  "worker type shape b_ℓ"),
-
-        # ρ_x: must be highly negative for the estimate to be stable
         ParamSpec(:common, :ρ_x,   -0.90000,    -0.10000,  "ability correlation ρ_x"),
 
-        # Common block — training cost coeff and aggregate scale
         ParamSpec(:common, :c,      6.00000,   15.00000,  "training cost coeff c"),
         ParamSpec(:common, :A,      4.00000,   10.00000,  "aggregate production scale A"),
 
-        # Unemployment income and the training flow (stored by consuming block).
+        # Outside flows (stored in the block that consumes them)
         ParamSpec(:unsk,   :bU,     0.000000,  0.200000, "unskilled outside flow b_U"),
         ParamSpec(:unsk,   :bT,     0.000000,  1.500000, "training flow b_T"),
         ParamSpec(:skl,    :bS,     0.000000,  0.500000, "skilled outside flow b_S"),
 
-        # Productivity levels.  Under pure-Roy production is linear in own
-        # ability, π_U = exp(A) P_U aU p and π_S = exp(A) P_S aS p (no ability
-        # gradient).  Only exp(A)·P_j is pinned by wage levels,
-        # so (A, P_U, P_S) share one flat direction; fix A (e.g. A=0) or one
-        # P to identify them individually.  The premium loads on log(P_S/P_U).
+        # Productivity levels and match-quality distributions
         ParamSpec(:unsk,   :PU,     0.000016,  1.303171, "unskilled productivity P_U"),
         ParamSpec(:skl,    :PS,     1.000016,  5.000000, "skilled productivity P_S"),
         ParamSpec(:unsk,   :α_U,    0.1000,    6.0000,  "unskilled damage shape α_U"),
@@ -796,7 +619,7 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:skl,    :b_Γ,    0.1000,   10.0000,  "skilled offer shape b_Γ"),
         ParamSpec(:skl,    :δ,      0.0500,    1.0000,  "shock/offer support ratio δ_S"),
 
-        # Matching efficiency, matching elasticity, bargaining (U/S paired)
+        # Matching efficiency, matching elasticity, bargaining
         ParamSpec(:unsk,   :μ,      0.0001,    2.0000,  "unskilled matching eff μ_U"),
         ParamSpec(:skl,    :μ,      0.0001,    2.0000,  "skilled matching eff μ_S"),
         ParamSpec(:unsk,   :η,      0.0001,    1.0000,  "unskilled matching elas η_U"),
@@ -804,69 +627,61 @@ function default_free_params() :: Vector{ParamSpec}
         ParamSpec(:unsk,   :β,      0.0010,    0.9000,  "unskilled bargaining β_U"),
         ParamSpec(:skl,    :β,      0.0001,    0.9000,  "skilled bargaining β_S"),
 
-        # Shock arrival rates (U/S paired)
+        # Shock arrival rates
         ParamSpec(:unsk,   :λ,      0.0001,    0.5500,  "unskilled damage rate λ_U"),
         ParamSpec(:skl,    :λ,      0.0001,    0.5000,  "skilled quality shock λ_S"),
 
-        # Market tightnesses (U/S paired), vacancies per searcher.  Estimated in place of
-        # the vacancy costs: given (θ_U, θ_S) the stationary state is unique, and free entry
-        # gives each cost in closed form (solve_at_tightness!, solver.jl), while the map
-        # from costs to tightnesses is a correspondence.  The costs remain estimated
-        # parameters: every evaluation computes them from free entry, in months of the
-        # mean output of a new match (mean_output_U/S).
+        # Tightnesses, vacancies per searcher: estimated in place of the vacancy costs.
+        # Given (θ_U, θ_S) the stationary state is unique and free entry gives each cost
+        # in closed form; costs → tightnesses is a correspondence.
         ParamSpec(:unsk,   :tight,  0.0500,    3.0000,  "unskilled tightness θ_U"),
         ParamSpec(:skl,    :tight,  0.1000,    5.0000,  "skilled tightness θ_S"),
 
-        # OJS cost and the two exogenous separation baselines.  δ_S compresses the
-        # λ_S-shock redraw onto [0,δ_S]; it carries endogenous separation and the EE
-        # ladder (both dead at δ_S = 1, the single-distribution limit).  Each ξ_j is a
-        # quality-independent hazard on top of the endogenous margin λ_j·G_j(p*_j):
-        # (ξ_S, δ_S, λ_S) jointly split sep_rate_S / ee_rate_S into baseline and
-        # endogenous margins, and ξ_U gives sep_rate_U a lever the endogenous part
-        # alone cannot reach.  Same box for both sectors.
+        # OJS cost and exogenous separation. ξ_j is a quality-independent hazard on top of
+        # the endogenous margin λ_j·G_j(p*_j); δ_S = 1 is the single-distribution limit.
         ParamSpec(:skl,    :σ,      0.0000,    0.5000,  "OJS flow cost σ_S"),
         ParamSpec(:unsk,   :ξ,      0.0000,    0.0200,  "unskilled exogenous separation ξ_U"),
         ParamSpec(:skl,    :ξ,      0.0000,    0.0200,  "skilled exogenous separation ξ_S"),
 
-        # Wage measurement error (per sector; pinned when λ_w > 0)
+        # Wage measurement error (pinned from λ_w when λ_w > 0)
         ParamSpec(:unsk,   :σ_w,    0.0000,    1.0000,  "unskilled wage meas. error σ_wU"),
         ParamSpec(:skl,    :σ_w,    0.0000,    1.0000,  "skilled wage meas. error σ_wS"),
     ]
 end
 
-# The vacancy costs, estimated through the tightnesses: every evaluation computes them
-# (solve_at_tightness!) and every table lists them beside the free parameters, keyed
-# (block, :k) and labelled here, in months of the mean output of a new match.
+# The vacancy costs, (block, label): computed from free entry at every evaluation and
+# listed beside the free parameters, in months of the mean output of a new match.
 const VACANCY_COSTS = ((:unsk, "unskilled vacancy cost k_U"),
                        (:skl,  "skilled vacancy cost k_S"))
 
-# The joint ability distribution.  A tuple, so iteration order (the field order of the
-# pinned block, which enters the candidate-cache key) is fixed.
+# The joint ability distribution. A tuple, so its order (which enters the candidate-cache
+# key through the pinned block) is fixed.
 const ABILITY_PARAMS = ((:common, :a_ℓ), (:common, :b_ℓ), (:common, :ρ_x))
 
-# The parameters the baseline's two periods share; every other estimated parameter takes a
-# value in each period (the estimation design, Table 1).
+# Parameters the baseline's two periods share (the estimation design, Table 1).
 const BASELINE_COMMON = (ABILITY_PARAMS..., (:unsk, :bU), (:skl, :bS), (:skl, :σ))
 
-# What a crisis window holds at the estimate of its baseline period; it estimates the rest
-# (the estimation design, Table 3).
+# Parameters a crisis window holds at its baseline period's estimate (Table 3).
 const CRISIS_HELD = (ABILITY_PARAMS..., (:common, :c), (:skl, :PS), (:unsk, :μ), (:skl, :μ),
                      (:skl, :σ))
 
-# The entry of `SMMSpec.fixed` under which the baseline's joint spec records its periods
-# (`joint_spec`): their data windows, their single-period specs and, for each, the position
-# in the joint parameter vector of every coordinate of the period's vector. It is not a
-# parameter value: the pinned values are `pinned_values(spec.fixed)`.
+# Key of `SMMSpec.fixed` under which the joint spec records its periods (`joint_spec`).
+# Not a parameter value: read the pinned values through `pinned_values`.
 const PERIODS = :periods
+
+"""
+    pinned_values(fixed) → NamedTuple
+
+The pinned parameter values of a fixed NamedTuple, the `PERIODS` record removed.
+"""
 pinned_values(fixed::NamedTuple) = Base.structdiff(fixed, NamedTuple{(PERIODS,)})
 
 # ============================================================
 # Fixed-key convention
 # ============================================================
 
-# Field names carried by more than one block (μ, η, tight, β, λ, ξ, σ_w).  Derived
-# from default_free_params() rather than written out, so adding a parameter
-# cannot leave a stale list behind.
+# Field names carried by more than one block (μ, η, tight, β, λ, ξ, σ_w), derived from the
+# parameter table.
 const _SHARED_PARAM_NAMES = let counts = Dict{Symbol,Int}()
     for ps in default_free_params()
         counts[ps.name] = get(counts, ps.name, 0) + 1
@@ -877,12 +692,8 @@ end
 """
     fixed_key(block, name) → Symbol
 
-The key under which to WRITE a pinned value into `SMMSpec.fixed`.  `unpack_θ`
-resolves a fixed entry by trying the block-qualified key `<block>_<name>` first
-and the bare `name` second, so a name carried by only one block is written bare
-— the convention already used for r, ν, φ, bU, bT, bS, α_U, … — while a name
-shared by the unskilled and skilled blocks must be qualified, or pinning one
-block's copy would pin the other's too.
+The key under which to write a pinned value into `SMMSpec.fixed`: `<block>_<name>` for a name
+both blocks carry, the bare `name` otherwise.
 """
 fixed_key(block::Symbol, name::Symbol) :: Symbol =
     name in _SHARED_PARAM_NAMES ? Symbol(string(block) * "_" * string(name)) : name
@@ -890,10 +701,8 @@ fixed_key(block::Symbol, name::Symbol) :: Symbol =
 """
     is_pinned(fixed, block, name) → Bool
 
-Whether (block, name) is pinned in a fixed NamedTuple.  Both key forms count,
-qualified and bare, matching how `unpack_θ` READS a fixed entry: a caller is
-free to qualify a block-unique name (FIX_PARAMS does so for σ_S and δ_S) and
-`unpack_θ` still finds it.
+Whether (block, name) is pinned in `fixed`, under its qualified or its bare key (as
+`unpack_θ` reads it).
 """
 is_pinned(fixed, block::Symbol, name::Symbol) :: Bool =
     haskey(fixed, Symbol(string(block) * "_" * string(name))) || haskey(fixed, name)
@@ -901,12 +710,8 @@ is_pinned(fixed, block::Symbol, name::Symbol) :: Bool =
 """
     assert_all_params_accounted(spec; context = "spec")
 
-Check that every entry of `default_free_params()` is either estimated (in
-`spec.free`) or pinned (in `spec.fixed`), and raise if any is neither.
-
-`unpack_θ` raises on such a parameter too, but only when it first decodes θ and
-only for the first field it cannot resolve.  This check runs at spec construction,
-before any solve, and lists every unaccounted parameter at once.
+Raise, listing them all, if any parameter of `default_free_params()` is neither estimated nor
+pinned in `spec` (per period for the joint spec). Run before any solve.
 """
 function assert_all_params_accounted(spec::SMMSpec; context::String = "spec")
     if is_joint(spec)
@@ -933,13 +738,11 @@ end
 # ============================================================
 # ASCII ↔ Unicode key maps
 #
-# The estimation entry point configures runs with ASCII keys (:a_l, :rho_x,
-# :unsk_bet) so the file is editable without Unicode input; the solver structs and
-# ParamSpec table use the Unicode names (:a_ℓ, :ρ_x, :β). These maps are the single
-# translation layer between the two conventions, and they live beside the ParamSpec
-# table so a parameter added there is renamed in the same file.
+# smm_main.jl configures runs with ASCII keys (:a_l, :rho_x, :unsk_bet); the solver
+# structs and the parameter table use Unicode names (:a_ℓ, :ρ_x, :β).
 # ============================================================
 
+# (block, name) → ASCII key of DEFAULT_PARAMS / DEFAULT_PERIOD_PARAMS.
 const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:common, :a_ℓ) => :a_l,     (:common, :b_ℓ)  => :b_l,     (:common, :c)   => :c,
     (:common, :ρ_x) => :rho_x,   (:common, :A)    => :A,
@@ -955,8 +758,7 @@ const _DEFAULT_PARAM_KEY = Dict{Tuple{Symbol,Symbol}, Symbol}(
     (:skl,    :ξ)   => :skl_xi,  (:skl,    :δ)    => :skl_delta,
 )
 
-# ASCII key (FIX_PARAMS convention) → unicode fixed-NamedTuple key.
-
+# ASCII key (FIX_PARAMS) → key of the fixed NamedTuple.
 const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :r        => :r,
     :nu       => :ν,
@@ -992,13 +794,15 @@ const _ASCII_TO_FIXED_KEY = Dict{Symbol, Symbol}(
     :skl_delta => :skl_δ,
 )
 
-# The vacancy costs follow from the tightnesses through free entry, so neither can be pinned.
+# The vacancy costs follow from the tightnesses through free entry, so they cannot be pinned.
 const _COST_KEYS = (:unsk_k, :skl_k)
 
 """
     _fix_params_to_nt(fix_dict) → NamedTuple
-"""
 
+FIX_PARAMS (ASCII keys) as a fixed NamedTuple. Pinning a vacancy cost is an error; an
+unrecognised key prints a WARNING and is ignored, so that parameter is estimated.
+"""
 function _fix_params_to_nt(fix_dict::Dict{Symbol,Float64}) :: NamedTuple
     isempty(fix_dict) && return (;)
     pinned_k = [k for k in keys(fix_dict) if k in _COST_KEYS]
@@ -1026,9 +830,7 @@ end
     _baseline_param_value(block, name, cp, up, sp, tight) → Float64
     _baseline_param_value(ps::ParamSpec, cp, up, sp, tight) → Float64
 
-Read one parameter out of a decoded optimum (`unpack_θ`'s `cp`, `up`, `sp` and the
-tightnesses `tight`).  The (block, name) method serves callers that iterate ABILITY_PARAMS,
-which holds bare pairs rather than ParamSpecs.
+One parameter of a decoded point (`unpack_θ`'s `cp`, `up`, `sp` and tightnesses `tight`).
 """
 function _baseline_param_value(block::Symbol, name::Symbol, cp, up, sp, tight) :: Float64
     name === :tight && return Float64(block == :unsk ? tight.U : tight.S)
@@ -1042,9 +844,15 @@ _baseline_param_value(ps::ParamSpec, cp, up, sp, tight) :: Float64 =
     _baseline_param_value(ps.block, ps.name, cp, up, sp, tight)
 
 # ============================================================
-# Bounds-aware transforms:  (lb, ub) ↔ ℝ
+# Box transforms (lb, ub) ↔ ℝ
 # ============================================================
 
+"""
+    _to_unconstrained(x, lb, ub) → Float64
+    _to_constrained(t, lb, ub) → Float64
+
+The logit of x's position in [lb, ub] (clamped to [1e-8, 1 − 1e-8]), and its inverse.
+"""
 @inline function _to_unconstrained(x::Float64, lb::Float64, ub::Float64)
     p = (x - lb) / (ub - lb)
     p = clamp(p, 1e-8, 1.0 - 1e-8)
@@ -1057,20 +865,12 @@ end
 end
 
 """
-    logjac_box(θ_unc, free) -> Float64
+    logjac_box(θ_unc, free) → Float64
 
-Log |dθ/dt| of the box transform, summed over free parameters:
-`log(ub−lb) + log σ(t) + log(1−σ(t))`.
-
-A sampler moving in `t` must add this to the log-target, or the density it
-induces on θ is `∝ e^{−Q/2} / [(θ−lb)(ub−θ)]` — U-shaped with poles at both
-bounds instead of flat on the box.  That is not a cosmetic prior: since Q tends
-to a finite limit as a parameter saturates, the un-Jacobianed target is not
-integrable in `t`, so it has no stationary distribution and a flat direction
-diffuses without bound.  Adding this term makes it proper (∫σ(1−σ)dt = 1) and
-satisfies the Chernozhukov–Hong (2003) Assumption 2(iv) requirement of a
-continuous, uniformly positive prior.  Written with `logsigmoid` so the tails
-stay finite in floating point.
+log |dθ/dt| of the box transform summed over the free parameters,
+Σ log(ub−lb) + log σ(t) + log(1−σ(t)). A sampler moving in t must add it to the log target
+for the induced prior on θ to be flat on the box; without it the target has poles at the
+bounds and, Q being asymptotically flat, is improper.
 """
 function logjac_box(θ_unc::AbstractVector{Float64}, free::Vector{ParamSpec})
     lj = 0.0
@@ -1091,13 +891,8 @@ end
     pack_θ(free_specs) → Vector{Float64}
     pack_θ(spec)       → Vector{Float64}
 
-Return the init values of a free-parameter list — or of `spec.free` — as an
-unconstrained vector.  The list method is what maps an arbitrary set of
-constrained values onto a spec's own parameter ordering (build the list with
-those values as inits, then pack), keeping one implementation of the transform.
-
-Raises on a non-finite init, naming the parameter: the table builds every entry
-unseeded, so a NaN here means the caller never wrote a starting value in.
+The starting values of a free-parameter list (or of `spec.free`) as an unconstrained
+vector. Raises, naming them, on unseeded (non-finite) entries.
 """
 function pack_θ(free_specs::Vector{ParamSpec}) :: Vector{Float64}
     unseeded = ["$(ps.block):$(ps.name)" for ps in free_specs if !isfinite(ps.init)]
@@ -1112,26 +907,21 @@ pack_θ(spec::SMMSpec) :: Vector{Float64} = pack_θ(spec.free)
 """
     perturb_free_init(free_specs, frac, rng) → Vector{ParamSpec}
 
-Return `free_specs` with each init jittered by a Gaussian of SD `frac·(ub−lb)`,
-clamped to the open interval. Used to start the optimiser from a perturbation
-of the entered seed rather than the seed itself.
+`free_specs` with each start jittered by N(0, (frac·(ub−lb))²), kept inside the box.
 """
 function perturb_free_init(free_specs::Vector{ParamSpec}, frac::Float64, rng) :: Vector{ParamSpec}
     return [with_seed(ps, ps.init + frac * (ps.ub - ps.lb) * randn(rng)) for ps in free_specs]
 end
 
 """
-    unpack_θ(θ_unc, spec) → (CommonParams, UnskilledParams, SkilledParams, tight)
+    unpack_θ(θ_unc, spec; constrained = false) → (CommonParams, UnskilledParams, SkilledParams, tight)
 
-Convert an unconstrained free-parameter vector back to the three
-model structs and the tightnesses `tight = (U = θ_U, S = θ_S)`, merging with any fixed
-values.  PU, bU, bT and α_U live in `UnskilledParams`; PS, bS, a_Γ and b_Γ live in
-`SkilledParams`.
-
-Every field comes from the spec: pinned (block-qualified key, then bare) or free.
-A field that is neither raises, naming it — there is no fallback value.  The vacancy
-costs are not parameters: the blocks carry `k = NaN` until the solve at `θ` derives
-them (`solve_model(...; tightness = tight)`), so a cost read before that is NaN, not a number.
+The model's parameter structs and tightnesses `tight = (U = θ_U, S = θ_S)` at the
+unconstrained vector `θ_unc` of a single-period spec. Each field is pinned (qualified key,
+then bare; pinned beats free) or free; a field that is neither raises. The vacancy costs
+are NaN until a solve at these tightnesses derives them. `constrained = true` takes
+`θ_unc` as the constrained values themselves and skips the box map (θ → t → θ is not exact
+next to a bound).
 """
 function unpack_θ(
     θ_unc :: AbstractVector{Float64},
@@ -1140,27 +930,12 @@ function unpack_θ(
 )
     is_joint(spec) && error("unpack_θ: the baseline's spec has one parameter set per period; " *
                             "decode a period through period_list(spec).")
-    # 1. Constrained free values, keyed the way `fixed_key` keys a pinned one: bare for a
-    #    name unique to one block, block-qualified for a name both blocks carry (μ, η, tight,
-    #    β, λ, ξ, σ_w), so the unskilled and skilled copies cannot stand in for each other.
-    #
-    # `constrained = true` says the caller passed θ itself rather than the unconstrained t,
-    # so the box map is skipped. This exists for MCMC_SPACE = :theta (v21.0.0), which samples
-    # the natural parameter directly. It is NOT equivalent to mapping θ→t→θ around the
-    # existing path: logit((θ-lb)/(ub-lb)) underflows for a θ within ~1e-300 of a bound and
-    # the round trip returns the bound exactly, destroying precision in precisely the
-    # coordinates that motivated the change. Skipping the map keeps θ bit-exact.
     free_vals = Dict{Symbol, Float64}()
     for (i, ps) in enumerate(spec.free)
         free_vals[fixed_key(ps.block, ps.name)] =
             constrained ? θ_unc[i] : _to_constrained(θ_unc[i], ps.lb, ps.ub)
     end
 
-    # 2. Resolve one field.  A pinned value takes priority over a free one, matching
-    #    `is_pinned`, which drops a pinned parameter from the free list.  A field in
-    #    neither set is what assert_all_params_accounted rejects at spec construction; it
-    #    reaches here only through a spec built another way — typically a stored bundle
-    #    written under a different free set — and is an error, not a substituted value.
     function _get(name::Symbol, block::Symbol) :: Float64
         qualified = Symbol(string(block) * "_" * string(name))
         haskey(spec.fixed, qualified) && return Float64(spec.fixed[qualified])
@@ -1179,7 +954,7 @@ function unpack_θ(
         b_ℓ = _get(:b_ℓ, :common),
         ρ_x = _get(:ρ_x, :common),
         c   = _get(:c,   :common),
-        A   = _get(:A,   :common),   # log scale; model uses exp(A)
+        A   = _get(:A,   :common),   # ln A
     )
 
     up = UnskilledParams(
@@ -1222,9 +997,10 @@ end
 """
     print_spec(spec; k = nothing)
 
-Display the estimation problem: free parameters with bounds, fixed
-overrides, and active / skipped moments. The vacancy costs stand in for the tightness pair
-(`is_tightness`), with no bounds and, given `k` (the costs at the seed), their seed values.
+Print the estimation problem: free parameters with bounds and seeds (the vacancy costs in
+place of the tightnesses, with their seed values when `k` is given), fixed parameters,
+active and skipped moments, and the requested run settings. The settings are those of
+`spec.run`; what SA actually uses is the `[SA config]` line printed by `_sa_loop`.
 """
 function print_spec(spec::SMMSpec; k = nothing)
     costs = vacancy_cost_rows(spec)
@@ -1234,10 +1010,6 @@ function print_spec(spec::SMMSpec; k = nothing)
     @printf("║  Free parameters (%d)                                ║\n",
             count(!is_tightness, spec.free) + length(costs))
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    # The market-suffixed symbol, not the label: these tables are read against each
-    # other, and a description column wide enough for the longest label pushes the
-    # numbers out of alignment. The labels survive in the CSV writers, where width
-    # does not matter.
     @printf("  %s%s%10s  %10s  %10s\n",
             padr("block", 8), padr("param", 11), "lb", "ub", "seed")
     @printf("  %s\n", "─"^53)
@@ -1300,9 +1072,6 @@ function print_spec(spec::SMMSpec; k = nothing)
             spec.run.Nx, spec.run.Np_U, spec.run.Np_S)
     @printf("  λ_w (wage-reliability calibration knob, σ_w = √((1−λ_w)·Var̂[log w])): %.4f\n",
             spec.run.λ_w)
-    # sa_target_fin and de_patience were printed here until v19.5.0 and neither reached a
-    # consumer that read it — a banner asserting settings nothing acted on. They survive
-    # as struct fields only so stored bundles stay loadable; see CHANGELOG.md.
     @printf("  SA:  max_iter=%d  T0=%.2f  step=%.2f  cooling_rate=%.2f  cooling_exp=%.2f  reheat_patience=%d  reheat_factor=%.2f  adapt_window=%d\n",
             spec.run.sa_max_iter, spec.run.sa_T0, spec.run.sa_step,
             spec.run.sa_cooling_rate, spec.run.sa_cooling_exp,
@@ -1316,14 +1085,6 @@ function print_spec(spec::SMMSpec; k = nothing)
     @printf("  NM:   max_iter=%d  f_tol=%.0e  x_tol=%.0e  g_tol=%.0e  no_improve=%s\n",
             spec.run.nm_max_iter, spec.run.nm_f_tol, spec.run.nm_x_tol, spec.run.nm_g_tol,
             spec.run.nm_no_improve > 0 ? string(spec.run.nm_no_improve) : "off")
-    # REQUESTED, not effective — every line here reads spec.run, which is what the
-    # bundle records, not what the optimiser received. The two can differ: these
-    # settings reach run_smm as keyword arguments, and an omitted one takes run_smm's
-    # own default in silence. The authoritative line is [SA config], printed from
-    # inside _sa_loop off the values it actually holds; if the two disagree, believe
-    # [SA config] and fix the forwarding.
-    # The proposal itself is not reported here: it is measured at the start point, so
-    # the only honest source for it is [SA config], printed from inside the walk.
     @printf("  SA (requested):   cooling %s;  stop ΔQ < %s per 100 iters\n",
             spec.run.sa_halflife > 0 ?
                 @sprintf("geometric, half-life %d", spec.run.sa_halflife) : "logarithmic",

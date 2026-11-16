@@ -1,14 +1,34 @@
 ############################################################
-# grids.jl — Grid construction, matching technology, the skill
-#            copula, and shared numerical utilities (RoySearch)
+# grids.jl — Grids, matching technology, skill copula and shared numerics
+#
+# Quadrature on the ability and match-quality grids, the Gaussian skill copula,
+# cell-mass densities for the quality distributions, the covered-fraction
+# primitives every policy margin is built from, and Anderson(1) acceleration.
 ############################################################
 
 # ============================================================
 # Matching technology (Cobb–Douglas)
 # ============================================================
 
+"""
+    q_from_theta(θ, μ, η) → q
+
+Vacancy filling rate `q(θ) = μ θ^(−η)`.
+"""
 @inline q_from_theta(θ::Float64, μ::Float64, η::Float64)    = μ * θ^(-η)
+
+"""
+    theta_from_q(q, μ, η) → θ
+
+Tightness at which the vacancy filling rate equals `q`, the inverse of `q_from_theta`.
+"""
 @inline theta_from_q(q::Float64, μ::Float64, η::Float64)    = (μ / q)^(1/η)
+
+"""
+    meeting_rate(θ, μ, η) → κ
+
+Worker meeting rate `κ(θ) = θ q(θ)`.
+"""
 @inline meeting_rate(θ::Float64, μ::Float64, η::Float64) = θ * q_from_theta(θ, μ, η)
 
 
@@ -16,7 +36,18 @@
 # Norms and clamp
 # ============================================================
 
+"""
+    supnorm(a, b) → Float64
+
+Largest absolute elementwise difference between `a` and `b`.
+"""
 @inline supnorm(a, b)       = maximum(abs.(a .- b))
+
+"""
+    clamp01(x) → Float64
+
+`x` clamped to [0, 1].
+"""
 @inline clamp01(x::Float64) = min(max(x, 0.0), 1.0)
 
 
@@ -25,23 +56,13 @@
 # ============================================================
 
 """
-    index_chunks(N, [nch]) -> Vector{UnitRange{Int}}
+    index_chunks(N, [nch]) → Vector{UnitRange{Int}}
 
-Split `1:N` into at most `nch` (default `nthreads()`) contiguous ranges, for a
-`@sync`/`@spawn` fan-out over them.
-
-WHY CHUNKS AND NOT `@threads`. The inner value loops run inside the SMM's own threaded
-loops over parameter points — the DE population, the Jacobian, the ΔQ=1 widths. Their
-per-worker scratch used to be indexed by `threadid()`, which is only safe under
-`@threads :static`, and `:static` throws `cannot be used concurrently or nested` when a
-caller is already in a threaded loop. `smm_objective` caught that and returned `Inf`, so
-every threaded evaluation in v40.0.0 read as an infeasible parameter point.
-
-`@spawn` nests. With the work partitioned once here, scratch is allocated *inside* each
-task, so no two tasks can alias a buffer and `threadid()` is not needed anywhere. A
-reduction indexed by chunk is also more reproducible than one indexed by thread: the
-partition is a function of `N` alone, so the grouping of terms does not depend on how the
-scheduler happened to assign work.
+Split `1:N` into at most `nch` (default `nthreads()`) contiguous ranges for a
+`@sync`/`@spawn` fan-out. `@spawn` nests inside the SMM's own threaded loops, where
+`@threads :static` throws; scratch is allocated inside each task, so no `threadid()` is
+needed. The partition depends on `N` alone, so a reduction indexed by chunk groups the same
+terms on every schedule.
 """
 @inline function index_chunks(N::Int, nch::Int = Threads.nthreads())
     N <= 0 && return UnitRange{Int}[]
@@ -51,13 +72,13 @@ end
 
 
 # ============================================================
-# Gauss–Legendre quadrature on [0, 1]
+# Quadrature
 # ============================================================
 
 """
-    build_gl_grid(N) -> (nodes, weights)
+    build_gl_grid(N) → (nodes, weights)
 
-Return `N`-point Gauss–Legendre nodes and weights on [0, 1].
+`N`-point Gauss–Legendre nodes and weights on [0, 1].
 """
 function build_gl_grid(N::Int)
     nodes, weights = gausslegendre(N)
@@ -66,40 +87,15 @@ function build_gl_grid(N::Int)
     return x, w
 end
 
-
-# ============================================================
-# Ability marginal as a Gauss–Jacobi mass rule
-#
-# Each ability marginal is the Beta(a_ℓ, b_ℓ) density.  Every marginal
-# aggregate in the model is an expectation E_ℓ[g] = ∫ g(a) f_ℓ(a) da with
-# g a smooth conditional-occupancy profile.  Gauss–Jacobi integrates
-# exactly against the kernel a^{a_ℓ−1}(1−a)^{b_ℓ−1}, so it handles the
-# a_ℓ<1 / b_ℓ<1 endpoint singularities that defeat Gauss–Legendre.
-#
-# `gaussjacobi(N, α, β)` gives nodes/weights for
-#   ∫_{−1}^{1} h(t) (1−t)^α (1+t)^β dt.
-# Map a = (t+1)/2 and match a^{a_ℓ−1}(1−a)^{b_ℓ−1}: α = b_ℓ−1 (pairs with
-# 1−t), β = a_ℓ−1 (pairs with 1+t).  Then for any smooth g,
-#   E_ℓ[g] = ∫ g f_ℓ da = (C/B) Σ_i w_i g(a_i),  C = 2^{−(a_ℓ+b_ℓ−1)}.
-# Since E_ℓ[1] = 1 forces (C/B) Σ_i w_i = 1, the population mass weights
-# are simply the normalised Gauss–Jacobi weights
-#   wa_i = w_i / Σ_j w_j,        Σ_i wa_i = 1  (exactly),
-# with no Beta normaliser and no division by the kernel (which would
-# reintroduce the endpoint singularity).  Every marginal expectation is
-# then `dot(g, wa)`, exact to quadrature order for smooth g.
-#
-# Under the symmetric-marginals baseline both abilities share this grid
-# and these weights; the two-dimensional joint is assembled from them and
-# the copula density in build_copula (below).
-# ============================================================
-
 """
-    build_ability_grid(N, a, b) -> (nodes, weights)
+    build_ability_grid(N, a, b) → (nodes, wa)
 
-`N`-point Gauss–Jacobi mass rule on [0, 1] for a Beta(a, b) ability
-marginal.  Returns nodes and population mass weights `wa` with
-`sum(wa) = 1` and `dot(g, wa) ≈ E_ℓ[g]` for any smooth `g`.  Valid for
-any `a, b > 0`, including the singular `a<1` / `b<1` regime.
+`N`-point Gauss–Jacobi mass rule on [0, 1] for a Beta(a, b) ability marginal: nodes and
+population mass weights `wa` with `sum(wa) = 1` and `dot(g, wa) ≈ E[g]` for smooth `g`.
+Integrating against the kernel a^(a−1)(1−a)^(b−1) handles the singular `a < 1` / `b < 1`
+endpoints. `gaussjacobi(N, α, β)` weights (1−t)^α (1+t)^β on [−1, 1], so α = b − 1 and
+β = a − 1 under a = (t+1)/2; the mass weights are the normalised GJ weights (never divided
+by the kernel).
 """
 function build_ability_grid(N::Int, a::Float64, b::Float64)
     (a > 0.0 && b > 0.0) ||
@@ -112,13 +108,11 @@ end
 
 
 """
-    node_midpoint_intervals(x) -> (xlo, xhi)
+    node_midpoint_intervals(x) → (xlo, xhi)
 
-The interval each ability node represents: the midpoints to its neighbours,
-clipped to the grid's own support at the ends.  Every continuous frontier on the
-ability grid — the training frontier τ_T, the cross-market drain d and the unskilled
-hiring threshold χ — expresses a cell's covered fraction against these intervals, so
-they share one definition.
+The ability cell of each node: midpoints to its neighbours, clipped to the grid's support at
+the ends. The one definition of a cell for every covered-fraction margin (τ, d, χ, OJS
+participation).
 """
 function node_midpoint_intervals(x::AbstractVector{Float64})
     N   = length(x)
@@ -131,12 +125,11 @@ function node_midpoint_intervals(x::AbstractVector{Float64})
 end
 
 """
-    fraction_above(xlo, xhi, x, a) -> Float64
+    fraction_above(xlo, xhi, x, a) → Float64
 
-Fraction of the ability cell `[xlo, xhi]` (node `x`) lying above a frontier `a`: the
-cell's quadrature of the indicator 1{ability ≥ a}.  Continuous and piecewise linear in
-`a`, and equal to the indicator whenever `a` sits on a cell edge.  A zero-width cell has
-no interior to split and takes the indicator at its node.
+Fraction of the ability cell `[xlo, xhi]` (node `x`) above the frontier `a`: piecewise linear
+in `a`, equal to the indicator when `a` is on a cell edge. A zero-width cell takes the
+indicator at its node.
 """
 @inline function fraction_above(xlo::Float64, xhi::Float64, x::Float64, a::Float64)
     w = xhi - xlo
@@ -147,51 +140,32 @@ end
 # ============================================================
 # Skill copula
 #
-# The joint ability density is (notes eq. copula)
-#   ℓ(aU,aS) = f_ℓ(aU) f_ℓ(aS) c_ρ(F_ℓ(aU), F_ℓ(aS)),
-# a Gaussian copula with a single correlation ρ_x on the Gaussian ranks
-#   ζ_u = Φ⁻¹(F_ℓ(aU)),  ζ_v = Φ⁻¹(F_ℓ(aS)),
-#   c_ρ(u,v) = exp(−(ρ²(ζ_u²+ζ_v²) − 2ρ ζ_u ζ_v)/(2(1−ρ²))) / √(1−ρ²).
-#
-# Because wa^U, wa^S are marginal population masses (Σ = 1 each), the
-# two-dimensional aggregation weight is the outer product of the two
-# marginal weight vectors, modulated pointwise by the copula density:
-#   W2[i,j] = c_ρ(F_i, F_j) · wa^U_i · wa^S_j.
-# Then for any surface g(aU,aS),  E_ℓ[g] = Σ_{ij} g_{ij} W2_{ij}.
-#
-# Copula margins are uniform, so ∫ c_ρ(u,v) dv = 1: the aU-marginal of
-# W2 (row sums) returns wa^U exactly, and total mass is 1.  build_copula
-# renormalises row/column/total on the finite grid so these identities
-# hold to machine precision at every ρ_x (mandatory for the ρ_x → 1
-# nesting check against the single-ability model).
-#
-# ρ_x → 1 concentrates c_ρ on the diagonal aU = aS; W2 becomes diagonal
-# with entries wa_i and RoySearch reduces to the one-dimensional model.
+# ℓ(aU,aS) = f_ℓ(aU) f_ℓ(aS) c_ρ(F_ℓ(aU), F_ℓ(aS)), a Gaussian copula with correlation ρ_x
+# on the ranks ζ = Φ⁻¹(F_ℓ). On the grid W2[i,j] = c_ρ(F_i, F_j) wa_U[i] wa_S[j], so that
+# E[g] = Σ g_ij W2_ij. ρ_x → 1 makes W2 diagonal (the single-ability model).
 # ============================================================
 
 """
     CopulaGrid
 
-Two-dimensional aggregation structure for the skill copula.  `W2[i,j]`
-is the joint population weight at ability pair `(a[i], a[j])` such that
-`sum(g .* W2) ≈ ∫∫ g(aU,aS) ℓ(aU,aS) daU daS` for any surface `g`.
-`ρ_x` is the copula correlation; `F` holds the marginal CDF values at
-the ability nodes.
+Joint aggregation weights of the skill copula: `sum(g .* W2) ≈ ∬ g ℓ daU daS`.
+Fields: `ρ_x` the copula correlation, `F` the marginal CDF at the nodes, `ζ` the Gaussian
+ranks Φ⁻¹(F), `W2` the joint weights (rows aU, columns aS).
 """
 struct CopulaGrid
     ρ_x :: Float64
-    F   :: Vector{Float64}    # marginal CDF F_ℓ at the ability nodes
-    ζ   :: Vector{Float64}    # Gaussian ranks Φ⁻¹(F) at the ability nodes
-    W2  :: Matrix{Float64}    # joint population weights (rows aU, cols aS)
+    F   :: Vector{Float64}
+    ζ   :: Vector{Float64}
+    W2  :: Matrix{Float64}
 end
 
 """
-    build_copula(ρ_x, xgrid, wa_U, wa_S, a_ℓ, b_ℓ) -> CopulaGrid
+    build_copula(ρ_x, xgrid, wa_U, wa_S, a_ℓ, b_ℓ) → CopulaGrid
 
-Assemble the joint aggregation weights for correlation `ρ_x` on the
-shared ability grid `xgrid` with marginal population weights `wa_U`,
-`wa_S`.  Row sums return `wa_U`, column sums return `wa_S`, and the
-total is 1, all to machine precision after renormalisation.
+Joint weights for correlation `ρ_x` on `xgrid` with marginal mass weights `wa_U`, `wa_S`
+of a Beta(`a_ℓ`, `b_ℓ`) marginal. Sinkhorn renormalisation makes row sums `wa_U`, column
+sums `wa_S` and the total 1 to machine precision at every ρ_x, as the ρ_x → 1 nesting
+requires.
 """
 function build_copula(ρ_x::Float64, xgrid::Vector{Float64},
                       wa_U::Vector{Float64}, wa_S::Vector{Float64},
@@ -220,10 +194,7 @@ function build_copula(ρ_x::Float64, xgrid::Vector{Float64},
         end
     end
 
-    # Sinkhorn-style renormalisation so the discrete margins match wa_U,
-    # wa_S exactly (a few sweeps converge to machine precision; the
-    # continuous copula already has uniform margins, so this only removes
-    # finite-grid quadrature error).
+    # Sinkhorn sweeps: remove the finite-grid error in the margins.
     for _ in 1:64
         rs = vec(sum(W2, dims = 2))
         @inbounds for i in 1:N
@@ -243,53 +214,39 @@ end
 
 
 # ============================================================
-# Training cost — psychological cost in fixed utility units
-#   c(aS) = (1 − aS) · exp(c̃ − aS)      [decreasing in aS]
-#
-# The cost is NOT scaled by A: it is a utility cost of effort, not a
-# dollar outlay.  The training margin compares T(aS) − c(aS) with
-# U^search(aU); because T and U^search scale with A while c does not,
-# the margin is no longer invariant to A — it shifts with the wage level.
-# The argument is the SKILLED aptitude aS: workers more apt at skilled
-# work train more cheaply (c'(aS) < 0).
+# Training cost, empty markets, vacancy-cost units
 # ============================================================
 
+"""
+    training_cost(aS, c) → Float64
+
+Psychological training cost `(1 − aS) exp(c − aS)`, `c` the stored ln c. In utility units,
+not scaled by A, so the training margin moves with the wage level.
+"""
 @inline training_cost(aS::Float64, c::Float64) = (1.0 - aS) * exp(c - aS)
 
-
-# ============================================================
-# Empty markets
-#
-# A market whose mass is below EMPTY_MASS holds no one.  Its within-market objects are
-# then read at the limit of its composition as it empties (marginal_training_cells),
-# never at its mass, and its aggregates are zero.
-# ============================================================
-
+# A market whose mass is below EMPTY_MASS holds no one: its within-market objects are read at
+# the limit of its composition (marginal_training_cells) and its aggregates are zero.
 const EMPTY_MASS = 1.0e-12
 
+"""
+    mean_output_U(model) → π̄_U
 
-# ============================================================
-# Mean flow output of a new match — LMR-style vacancy-cost units
-#
-#   π̄_U ≡ exp(A) · P_U · E_ℓ[aU]                      (new unskilled match at p = 1)
-#   π̄_S ≡ exp(A) · P_S · E_ℓ[aS] · E_Γ[p],  E_Γ[p] = a_Γ/(a_Γ+b_Γ)
-#
-# LMR (2016) price a vacancy at c times the mean of f(x,y) over independent
-# population draws of worker and job type: the output of a random new match.
-# Production is linear in own ability (notes eq. prod), so the ability factor
-# is the marginal mean E_ℓ[a] = dot(a, wa).  The quality factor is the mean of
-# the distribution a new match starts from: Γ for a skilled match, the point
-# mass at p = 1 for an unskilled one (G governs only the redraw after a shock).
-# Vacancy costs are k_j · π̄_j with k_j dimensionless, in months of the mean
-# output of a new match, so k_U's unit does not move with α_U.
-# ============================================================
-
+Mean flow output of a new unskilled match, `exp(A) P_U E[aU]` (a new match starts at p = 1).
+Unit of the unskilled vacancy cost: dollar cost = k_U π̄_U.
+"""
 function mean_output_U(model)
     gp = model.grids;  up = model.unsk_par;  cp = model.common
     Ea = dot(gp.x, gp.wa_U)                   # E_ℓ[aU]; starting quality p = 1
     return exp(cp.A) * up.PU * Ea
 end
 
+"""
+    mean_output_S(model) → π̄_S
+
+Mean flow output of a new skilled match, `exp(A) P_S E[aS] E_Γ[p]`. Unit of the skilled
+vacancy cost: dollar cost = k_S π̄_S.
+"""
 function mean_output_S(model)
     gp = model.grids;  sp = model.skl_par;  cp = model.common
     Ea = dot(gp.x, gp.wa_S)                   # E_ℓ[aS]
@@ -299,11 +256,14 @@ end
 
 
 # ============================================================
-# Tail-weight vector
-#   tail[j] = Σ_{k ≥ j} wp[k]
-# Used for Γ-integrals in the skilled block.
+# Quality-distribution quadrature
 # ============================================================
 
+"""
+    build_tail_weights(wp) → tail
+
+Suffix sums `tail[j] = Σ_{k ≥ j} wp[k]`.
+"""
 function build_tail_weights(wp::Vector{Float64})
     N    = length(wp)
     tail = similar(wp)
@@ -315,28 +275,12 @@ function build_tail_weights(wp::Vector{Float64})
     return tail
 end
 
+"""
+    build_node_cell_edges(p) → e
 
-# ============================================================
-# Exact-CDF cell masses for a quality distribution on [0,1]
-#
-# Each quadrature node owns the cell between the midpoints to its
-# neighbours, with the support endpoints closing the first and last cell,
-# so the cells tile [0,1] exactly and their masses sum to 1.
-#
-# build_cell_mass_density returns γ̃_j ≡ (Γ(e_{j+1}) − Γ(e_j)) / wp_j — a
-# CELL MASS PER UNIT wp, NOT a pointwise density.  It is built this way so
-# that every ∫ g dΓ in the model, which appears as Σ_j g_j γ̃_j wp_j,
-# carries the exact cell mass: total mass is 1 by construction, and the
-# mass near the shock density's singularity at p = δ_S comes from the CDF
-# (finite and exact there) instead of from a pdf evaluated at whichever
-# node happens to sit nearest the pole.  Nodes and weights are untouched;
-# only the density they multiply changes.
-#
-# γ̃_j MUST NEVER BE READ POINTWISE.  Its error against γ(p_j) does not
-# vanish with refinement — measured RMS 1.194 at N = 60 and 1.202 at
-# N = 480 — because wp_j is a Gauss–Legendre weight, not the cell's width.
-# ============================================================
-
+Edges of the cells owned by the nodes `p` on [0, 1]: midpoints between nodes, closed by 0
+and 1, so the `length(p)` cells tile [0, 1].
+"""
 function build_node_cell_edges(p::Vector{Float64})
     N = length(p)
     e = Vector{Float64}(undef, N + 1)
@@ -347,6 +291,14 @@ function build_node_cell_edges(p::Vector{Float64})
     return e
 end
 
+"""
+    build_cell_mass_density(Γ_at, p, wp) → γ̃
+
+Exact-CDF cell mass per unit quadrature weight, `γ̃_j = (Γ(e_{j+1}) − Γ(e_j)) / wp_j`, for
+the CDF `Γ_at`. Every `∫ g dΓ` appears as `Σ g_j γ̃_j wp_j`, so it carries the exact cell
+mass (total 1, and the mass near a density pole comes from the CDF). Not a pointwise
+density: never read it as one.
+"""
 function build_cell_mass_density(Γ_at, p::Vector{Float64}, wp::Vector{Float64})
     e  = build_node_cell_edges(p)
     Fe = Γ_at.(e)
@@ -355,17 +307,18 @@ end
 
 
 # ============================================================
-# Soft tail-indicator weight
+# Covered fractions
 #
-# Linear-in-p smoothing of 1{p ≥ p*} across the grid cell that contains
-# p*: returns 1 above the cell, 0 below it, and the fractional coverage
-# inside it.  Makes every tail integral ∫_{p*}^1 (·) dG a continuous
-# function of p*, which the outer fixed point on the reservation cutoff
-# needs to converge smoothly.  Node j's cell is [p_j, p_{j+1}], and the top
-# node's is [p_N, 1], so the rule holds at every node: a cutoff crossing p_N
-# fades the top node out like any other instead of switching it off.
+# Every margin that moves with the parameters across a fixed grid enters as the covered
+# fraction of a cell, never a node indicator, so aggregates are continuous in the parameters.
 # ============================================================
 
+"""
+    _soft_weight(pj, pstar, pgrid, j, Np) → Float64
+
+Covered fraction of node `j`'s cell [p_j, p_{j+1}] (the top node's is [p_N, 1]) above the
+cutoff `pstar`: 1 above the cell, 0 below it, linear inside it.
+"""
 @inline function _soft_weight(pj::Float64, pstar::Float64,
                               pgrid::Vector{Float64}, j::Int, Np::Int)
     pj >= pstar && return 1.0
@@ -376,8 +329,12 @@ end
     return clamp((p_next - pstar) / cell, 0.0, 1.0)
 end
 
-# Companion soft weight for the OJS region {p < p^oj}: 1 below the OJS
-# cutoff, 0 above it, linear across the straddling cell (the same cells).
+"""
+    _soft_oj_weight(pj, poj, pgrid, j, Np) → Float64
+
+Covered fraction of node `j`'s cell below the cutoff `poj` (the OJS region): the complement
+of `_soft_weight` on the same cells.
+"""
 @inline function _soft_oj_weight(pj::Float64, poj::Float64,
                                  pgrid::Vector{Float64}, j::Int, Np::Int)
     pj >= poj && return 0.0
@@ -388,10 +345,12 @@ end
     return clamp((poj - pj) / cell, 0.0, 1.0)
 end
 
-# Fraction of the sub-interval [lo, hi] ⊆ [xa, xb] on which the linear interpolant
-# through (xa, fa) and (xb, fb) is positive.  The one-dimensional covered-fraction
-# primitive behind _soft_oj_weight, written separately so it can also be applied on
-# the ABILITY grid, where the sign of the OJS participation score changes inside a cell.
+"""
+    _pos_share(fa, fb, xa, xb, lo, hi) → Float64
+
+Fraction of `[lo, hi] ⊆ [xa, xb]` on which the linear interpolant through `(xa, fa)` and
+`(xb, fb)` is positive.
+"""
 @inline function _pos_share(fa::Float64, fb::Float64, xa::Float64, xb::Float64,
                             lo::Float64, hi::Float64)
     fa >  0.0 && fb >  0.0 && return 1.0
@@ -405,13 +364,10 @@ end
 """
     covered_fraction!(share, g, x, xlo, xhi) → share
 
-Fraction of each ability cell `[xlo[k], xhi[k]]` on which `g > 0`, `g` interpolated
-linearly between nodes.  Each half-cell is scored against its own neighbour, so a sign
-change anywhere inside the cell is located from the two nodes bracketing it, and every
-sign change of `g` along the grid is located, not only the first; mass is uniform within
-the cell.  At the ends of the grid the missing half takes the node's own sign.  The
-margin it scores moves continuously with `g`, and the share equals the indicator on every
-cell no sign change cuts.
+Fraction of each ability cell `[xlo[k], xhi[k]]` on which `g > 0`, with `g` linear between
+nodes. Each half-cell is scored against its own neighbour, so every sign change along the
+grid is located; at the grid ends the missing half takes the node's sign. Equal to the
+indicator on every cell no sign change cuts.
 """
 function covered_fraction!(share::AbstractVector{Float64}, g::AbstractVector{Float64},
                            x::AbstractVector{Float64},
@@ -429,19 +385,23 @@ function covered_fraction!(share::AbstractVector{Float64}, g::AbstractVector{Flo
     return share
 end
 
-# The searching share of cell (aS, p): the type-level OJS participation weight times
-# the p-coverage of the region below p^oj.  The two OJS margins — which abilities
-# search at all, and from which match qualities — are both covered fractions of a
-# grid cell, so they enter every consumer the same way and every consumer stays
-# continuous in the parameters.
+"""
+    _ojs_share(part, pj, poj, pgrid, j, Np) → Float64
+
+Searching share of skilled cell (aS, p): the type's OJS participation weight `part` times
+the p-coverage of the region below `poj`. Every consumer of the OJS margin reads it.
+"""
 @inline _ojs_share(part::Float64, pj::Float64, poj::Float64,
                    pgrid::Vector{Float64}, j::Int, Np::Int) =
     part * _soft_oj_weight(pj, poj, pgrid, j, Np)
 
-# Smooth non-negative part: ½(x + √(x²+ε²)) ≈ max(x,0) but C^∞.  Replaces
-# max(·,0) on raw surplus expressions so the outer fixed-point map has no
-# C⁰-but-not-C¹ kink at grid-aligned sign changes (which admit period-2
-# limit cycles in the cutoff iteration).
+"""
+    smooth_pos(x, ε = 1e-8) → Float64
+
+Smooth positive part `(x + √(x² + ε²)) / 2`. Used for the surpluses the inner loops price, so
+the cutoff map has no kink (a kink admits period-2 cycles). Never used to locate p*_S: it is
+strictly positive and would never cross zero.
+"""
 @inline smooth_pos(x::Float64, ε::Float64 = 1e-8) = 0.5 * (x + sqrt(x * x + ε * ε))
 
 
@@ -450,13 +410,10 @@ end
 # ============================================================
 
 """
-    pcut_index(pgrid, pstar) -> j
+    pcut_index(pgrid, pstar) → j
 
-First index `j` such that `pgrid[j] >= pstar`. Returns `Np` if none.
-
-For a LOOP BOUND only. To read a CDF at the cutoff use `cdf_at_cutoff`: a
-cutoff does not sit on a node, and `Γ(pgrid[pcut_index(pgrid, p*)])` is the
-CDF at the first node above it, which silently relocates the cutoff.
+First index with `pgrid[j] >= pstar`, or `Np` if none. For loop bounds only: to read a CDF
+at a cutoff use `cdf_at_cutoff`.
 """
 @inline function pcut_index(pgrid::Vector{Float64}, pstar::Float64)
     Np = length(pgrid)
@@ -467,20 +424,11 @@ CDF at the first node above it, which silently relocates the cutoff.
 end
 
 """
-    cdf_at_cutoff(γcells, pgrid, wp, cutoff) -> Γ(cutoff)
+    cdf_at_cutoff(γcells, pgrid, wp, cutoff) → Γ(cutoff)
 
-CDF of a cell-mass density at an off-node cutoff: the mass of the cells lying
-below `cutoff`, the straddling cell entering at its covered fraction.  This is
-the only correct way to read `Γvals`/`Γs_vals` at a reservation or OJS cutoff,
-and the integration convention `solve_stationary_skilled!` already uses — a
-`γ·wp` sum under the soft coverage weight.
-
-Written as the mass BELOW the cutoff rather than as `1 − ∫ω dΓ` so that a DEAD
-margin is exactly zero unconditionally: at `cutoff = 0` every coverage weight
-is exactly 0, so the sum is 0.0 whatever the cell masses total, while the
-complement form is exactly 0 only where they total exactly 1.0 in floating
-point.  A margin the model says is dead must not carry a rounding residual —
-it is multiplied by `λ_S` and reported as an endogenous separation hazard.
+CDF of a cell-mass density at an off-node cutoff: the mass of the cells below `cutoff`, the
+straddling cell at its covered fraction. Written as the mass below rather than `1 − ∫ω dΓ`
+so that a dead margin (`cutoff = 0`) is exactly 0, not a rounding residual.
 """
 @inline function cdf_at_cutoff(γcells::AbstractVector{Float64}, pgrid::Vector{Float64},
                                wp::Vector{Float64}, cutoff::Float64)
@@ -495,17 +443,35 @@ end
 
 
 # ============================================================
-# Anderson acceleration (memory m = 1)
+# Anderson acceleration (memory 1)
 # ============================================================
 
+"""
+    Anderson1
+
+State of a memory-1 Anderson accelerator: the previous iterate `x_prev`, its image
+`f_prev`, and whether a previous pair exists.
+"""
 mutable struct Anderson1
     x_prev      :: Vector{Float64}
     f_prev      :: Vector{Float64}
     initialized :: Bool
 end
 
+"""
+    Anderson1(n) → Anderson1
+
+An empty accelerator for vectors of length `n`.
+"""
 Anderson1(n::Int) = Anderson1(zeros(n), zeros(n), false)
 
+"""
+    anderson1_update!(aa, x, f) → x_new
+
+One Anderson(1) step for the map `x ↦ f`: the mix `α f + (1 − α) f_prev` minimising the
+linearised residual. Plain Picard (`f`) on the first call and when the residual difference
+is below 1e-12.
+"""
 function anderson1_update!(aa::Anderson1, x::Vector{Float64}, f::Vector{Float64})
     if !aa.initialized
         aa.x_prev      = copy(x)

@@ -1,22 +1,19 @@
 ############################################################
 # transition_types.jl — every type's values and masses at date 0 of a transition
 #
-# LIBRARY FILE — loaded by transition_main.jl and counterfactuals_main.jl.
-#
-# A value depends on the whole type (a_U, a_S) only where a later choice differs, so the
-# path stores per-type surfaces only as a two-slot ring inside the backward pass.  This
-# file keeps date 1's, and writes, per type and state, the worker's value and the mass in
-# that state at date 0 (after the date-0 reallocation) and at the baseline steady state.
-# p-indexed arrays are Float32 (they are most of the size); the unskilled ones carry the
-# atom p = 1 in the last slot.
+# Library file, loaded by transition_main.jl and counterfactuals_main.jl. `date0_types`
+# gives, per type (a_U, a_S) and state, the worker's value and the mass in that state at
+# date 0 (after the date-0 reallocation) and at the baseline steady state. The per-type
+# surfaces exist only inside the backward pass, so they are recomputed here. p-indexed
+# arrays are Float32 (most of the size); the unskilled ones carry the atom p = 1 last.
 ############################################################
 
 """
     type_values(path, buf, model) -> NamedTuple
 
-Per-type values at date 1 of `path` in every state, from its date-1 values and the
+Per-type worker values at the first date of `path` in every state, from the path and the
 per-type surfaces in slot 1 of `buf` (`_backward_pass!`), the one-dimensional surfaces where
-the type is pure.  Worker values follow the Nash split, E = outside option + β S⁺:
+the type is pure. E = outside option + β S⁺:
   UC      unskilled unemployed (searching slice)    T, Utr  in training, −c + T
   EUs_p   unskilled employed, searching slice, by p  EUt_p  training slice (NaN: none)
   U0      trained, searching the skilled market      U1     trained, searching the unskilled market
@@ -52,12 +49,12 @@ function type_values(path::TransitionPath, buf, model::Model)
 end
 
 """
-    type_density(st, model) -> NamedTuple
+    type_density(st, d, model) -> NamedTuple
 
 The masses per type and state of the forward state `st` (`_forward_state`, after a
-reallocation): the crossers are the share d of the trained unemployed, and skilled
-employment of a cell is its non-draining mass (1 − d) m_S spread over p by the column's
-unit shape ê_S, as `path_statistics` reads it.
+reallocation) with crossing fractions `d`: the crossers are the share d of the trained
+unemployed, and a cell's skilled employment is its non-draining mass (1 − d) m_S spread
+over p by the column's unit shape ê_S, as `path_statistics` reads it.
 """
 function type_density(st, d::Matrix{Float64}, model::Model)
     sg = model.skl_grids;  Nx = length(model.grids.x);  NpS = length(sg.p)
@@ -70,8 +67,13 @@ function type_density(st, d::Matrix{Float64}, model::Model)
             eS_p = eSp, d = copy(d))
 end
 
-# Values and masses at date 1 of `path` under `model`: one backward pass at the path's
-# tightness (which reproduces the values of a converged path), then the date-1 reallocation.
+"""
+    _date1_types(path, model, tp) -> (values, density)
+
+Values and masses per type at the first date of `path` under `model`: one backward pass at
+the path's tightness (it reproduces the values of a converged path; it overwrites the
+path's values, so pass a copy), then the first reallocation.
+"""
 function _date1_types(path::TransitionPath, model::Model, tp::TransitionParams)
     buf = _backward_pass!(path, deepcopy(model), tp).buf
     st  = _forward_state(path)
@@ -83,9 +85,9 @@ end
 """
     date0_types(path, model_z0, model_z1, tp) -> NamedTuple
 
-Every type's value and mass in every state at date 0 of the transition `path` (on a copy,
-so the path itself is untouched) and at the baseline steady state (its self-transition),
-with the two levels of A, the ratio's normalisation (V_0/A_crisis)/(V_base/A_base).
+Every type's value and mass in every state at date 0 of `path` (computed on a copy) and at
+the baseline steady state (its self-transition), with the two levels of A for the
+normalisation (V_0/A_crisis)/(V_base/A_base).
 """
 function date0_types(path::TransitionPath, model_z0::Model, model_z1::Model, tp::TransitionParams)
     at0 = _date1_types(deepcopy(path), model_z1, tp)

@@ -1,31 +1,24 @@
 ############################################################
 # training_cost.jl — the cost of training scaled from date 0, with and without each crisis
 #
-# LIBRARY FILE — loaded by counterfactuals_main.jl; `run_training_cost` is the exercise.
+# Library file, loaded by counterfactuals_main.jl; `run_training_cost` is the exercise.
 #
-# For each scale s of `TRAINING_COST_GRID`, the training cost c(a_S) becomes s·c(a_S) at
-# date 0, unannounced, and stays there, on two paths from the baseline steady state:
-#   crisis      the crisis parameters from date 0 (the estimated transition at s = 1)
-#   no_crisis   the baseline parameters throughout (the baseline steady state at s = 1)
-# Tightness is re-solved by free entry at the estimated vacancy costs, warm-started from
-# the corresponding estimated path (the stored transition; the baseline steady state's
-# tightness); the end steady state follows the estimate's branch from its tightnesses
-# (`stationary_at_costs!`) and `unskilled_branch` flags a switch.  The horizon is the
-# stored transition's.  s = 1 needs no solve: it is the stored transition and the baseline
-# steady state.  A scale at which Newton finds no steady state on the estimate's branch (a
-# fold: the branch has ended) is reported and its path not solved.
-#
-# Welfare is the present value of the social flow with the subsidy (s < 1) or tax (s > 1)
-# counted as a transfer: the training cost that enters it is the resource cost at the
-# estimated c, (1 − a_S) e^{c̃ − a_S}, paid on the entries the scaled cost produces.
+# For each scale s of `TRAINING_COST_GRID`, the training cost becomes s·c(a_S) at date 0,
+# unannounced and permanent, on two paths from the baseline steady state:
+#   crisis      the crisis parameters from date 0 (at s = 1, the stored transition)
+#   no_crisis   the baseline parameters throughout (at s = 1, the baseline steady state)
+# Tightness is re-solved by free entry at the estimated vacancy costs from the matching
+# estimated path, on the stored horizon; the end steady state follows the estimate's branch
+# (`stationary_at_costs!`, a switch flagged by `unskilled_branch`). A scale with no steady
+# state on that branch (a fold) is reported and its path not solved. Welfare counts the
+# subsidy (s < 1) or tax (s > 1) as a transfer: training is costed at the estimated c.
 ############################################################
 
 """
     training_cost_endpoint(model, s, kU, kS) -> (model, solve, branch)
 
-The steady state of `model`'s parameters with the training cost scaled by `s`, at the
-vacancy costs (kU, kS), from `model`'s tightnesses, with its unskilled branch checked
-against `model`'s.
+The steady state of `model` with its training cost scaled by `s`, at the vacancy costs
+(kU, kS), from `model`'s tightnesses, with its unskilled branch checked against `model`'s.
 """
 function training_cost_endpoint(model::Model, s::Float64, kU::Float64, kS::Float64)
     θ = (U = model.unsk_cache.θ, S = model.skl_cache.θ)
@@ -41,10 +34,10 @@ end
 """
     run_training_cost(crises)
 
-Writes `training_cost_<crisis>.csv` (one row per path and scale: welfare in the four units,
-unemployment by market over the crisis window and at the horizon, the end steady state's
-tightnesses and branch, the solve's convergence) and `training_cost_<crisis>.jls` (the
-TransitionResult of every solved path).  Prints the number of transition solves first.
+For each crisis, writes `training_cost_<crisis>.csv` (one row per path and scale: welfare
+in the four units, unemployment over the crisis window and at the horizon, the end steady
+state's tightnesses and branch, convergence) and `training_cost_<crisis>.jls` (the
+TransitionResult of every path). Logs the number of transition solves first.
 """
 function run_training_cost(crises)
     dir = cf_log_start(out_counterfactuals(:training_cost), "Training cost scaled from date 0")

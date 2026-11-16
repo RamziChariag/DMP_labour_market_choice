@@ -1,16 +1,15 @@
 ############################################################
-# transition/transition_main.jl — transition entry point (RoySearch)
+# transition/transition_main.jl — entry point: the transition of each crisis (RoySearch)
 #
-# Solves the perfect-foresight transition of each crisis, from the baseline steady state
-# to the crisis steady state at the stored point estimates, and saves each to
+# For each pair of PAIRS, solves the perfect-foresight transition from the baseline steady
+# state to the crisis steady state at the stored point estimates and saves it to
 #   output/transition/transition_<pair><W>_<point>.jls
-# holding the whole path, both endpoint models, the path statistics, and every type's
-# values and masses at date 0 and at the baseline (transition_types.jl): everything the
-# counterfactual exercises and the plotting scripts read.  Nothing is plotted here.
+# (path, endpoint models, path statistics, per-type values and masses at date 0 and at the
+# baseline), the input of the counterfactuals and the transition figures.
 #
 # Usage (from the repo root):
 #   julia --project=. --threads auto code/transition/transition_main.jl
-# Setting: POINT_ESTIMATE below (SETTINGS.md, "Settings that choose a file").
+# Settings: below (SETTINGS.md, "Settings that choose a file").
 ############################################################
 
 include(joinpath(@__DIR__, "..", "smm", "version.jl"))
@@ -41,8 +40,7 @@ using Clustering
 using JSON3
 println("done."); flush(stdout)
 
-# The date steps run inside @threads regions; BLAS stays on one thread so it does not
-# oversubscribe every core with the outer thread count.
+# The date steps are threaded; BLAS stays on one thread so it does not oversubscribe.
 LinearAlgebra.BLAS.set_num_threads(1)
 
 print("Loading solver, SMM and transition modules... "); flush(stdout)
@@ -66,19 +64,19 @@ println("done."); flush(stdout)
 # ============================================================
 assert_no_legacy_env()
 
-# The estimate both windows of each pair are read at: :mcmc the chains' posterior means
-# (estimate_<window><W>_mcmc.jls, the estimates the paper reports), :smm the SMM estimates.
+# The estimate both windows of each pair are read at: :mcmc the chains' posterior means (the
+# estimates the paper reports), :smm the SMM estimates.
 const POINT_ESTIMATE = :mcmc
 POINT_ESTIMATE in (:smm, :mcmc) || error("POINT_ESTIMATE must be :smm or :mcmc, got :$POINT_ESTIMATE.")
 
-# The outer fixed point.  The fine grid spans T_MAX months in N_STEPS half-month steps; the
-# horizon beyond it is chosen by the accuracy test of transition_simulation.jl.  DAMP is
-# the weight on the free-entry tightness in the damped update (TransitionParams).
+# The fine grid (T_MAX months in N_STEPS steps; the horizon beyond it is chosen by the test
+# of transition_simulation.jl) and the outer fixed point: tolerance on the free-entry gap,
+# iteration cap, and DAMP, the weight on the free-entry tightness in the update.
 const T_MAX   = 120.0
 const N_STEPS = 240
-const TOL     = 1e-4
+const TOL     = 5e-4
 const MAXIT   = 200
-const DAMP    = 0.3
+const DAMP    = 1.0
 
 @printf("  Pairs:           %s\n", join(PAIRS, ", "))
 @printf("  POINT_ESTIMATE:  %s\n", POINT_ESTIMATE)

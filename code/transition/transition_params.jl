@@ -1,27 +1,15 @@
 ############################################################
-# transition_params.jl — Parameters and path storage for the
-#                         RoySearch backward–forward transition.
+# transition_params.jl — settings, storage and output of the transition (RoySearch)
 #
-# Contains:
-#   TransitionParams   — algorithm control knobs
-#   TransitionPath     — full time-indexed working storage (internal)
-#   TransitionResult   — serialisable output for downstream use
-#   transition_file    — the file a run writes, tagged by its weight matrix and point
+#   TransitionParams   time grid and outer-loop settings; time_grid
+#   TransitionPath     the time-indexed working storage; allocate_path
+#   TransitionResult   the serialised summary of a solved path
+#   transition_file    the file a run writes, tagged by weight matrix and point; read_transition
 #
-# State layout on the (aU, aS) copula grid
-# ────────────────────────────────────────
-# Off a steady state a value depends on the whole type (aU, aS): the unskilled
-# unemployed price their later training option, and the skilled unemployed their
-# later crossing choice.  Values are therefore stored per type (Nx × Nx × Nt).  The
-# one-dimensional values the stationary solver uses are kept beside them (Nx × Nt):
-# they are the exact values of every type that makes no different choice at any
-# later date, which is most of the grid, so the full two-dimensional surfaces are
-# solved only on the types that do (see transition_values.jl).
-#
-# SURFACES ARE RAW BRANCH VALUES.  A stored surface is the date-n value of a match
-# before the positive part, continuing on the date-(n+1) envelope; its zero crossing
-# is the reservation cutoff.  Nash splitting recovers worker and firm values
-# (J = (1−β)·S⁺, E = U + β·S⁺).
+# Values are stored per type (Nx × Nx × Nt) beside the stationary solver's one-dimensional
+# values (Nx × Nt), which are exact for every type making no different choice later
+# (transition_values.jl). A stored surface is a RAW branch value, before the positive part;
+# its zero is the reservation cutoff, and J = (1−β)S⁺, E = U + βS⁺.
 ############################################################
 
 # ──────────────────────────────────────────────────────────
@@ -31,19 +19,17 @@
 """
     TransitionParams
 
-Controls the backward–forward iteration for transition dynamics.
+Settings of the backward–forward transition.
 
 # Fields
-- `T_max`   : span of the fine part of the time grid (model months)
+- `T_max`   : span of the fine part of the time grid (months)
 - `N_steps` : number of fine steps over `[0, T_max]`
-- `dt`      : fine step = T_max / N_steps  (computed)
-- `horizon` : the date the path reaches the crisis steady state, ≥ `T_max`.  Beyond
-              `T_max` the step grows geometrically by `TAIL_GROWTH`, so a long horizon
-              adds few dates; the masses are advanced there in sub-steps of at most
-              `FORWARD_SUBSTEP`.  `horizon = T_max` is the uniform grid.
-- `tol`     : convergence tolerance on the free-entry gap max_n |ln θ^new − ln θ|
-- `maxit`   : maximum backward–forward iterations
-- `damp`    : weight on the free-entry tightness in the damped update ∈ (0, 1]
+- `dt`      : fine step `T_max / N_steps` (computed)
+- `horizon` : date the path reaches the end steady state, ≥ `T_max`; beyond `T_max` the
+              step grows by `TAIL_GROWTH` (`horizon = T_max` is the uniform grid)
+- `tol`     : tolerance on the free-entry gap `max_n |ln θ^new − ln θ|`
+- `maxit`   : maximum outer iterations
+- `damp`    : weight on the free-entry tightness in the damped update, in (0, 1]
 - `verbose` : print iteration info
 """
 mutable struct TransitionParams
@@ -72,10 +58,9 @@ mutable struct TransitionParams
     end
 end
 
-# Growth of the step beyond the fine grid, and the longest step the explicit laws of
-# motion take.  Values are solved implicitly and are stable at any step; the masses are
-# explicit, and at the stored estimates no exit rate reaches 0.5 per month, so a
-# one-month sub-step keeps every stock positive.
+# Growth of the step beyond the fine grid, and the longest sub-step of the explicit laws of
+# motion (values are implicit and stable at any step; at the estimates no exit rate reaches
+# 0.5 per month, so a one-month sub-step keeps every stock positive).
 const TAIL_GROWTH     = 1.05
 const FORWARD_SUBSTEP = 1.0
 
@@ -103,9 +88,9 @@ end
 """
     TransitionPath
 
-Complete time-indexed path of value functions, policies, tightness, and
-distributions over the transition horizon.  `Nt = N_steps + 1` dates; the
-ability grid has `Nx` nodes and the skilled match-quality grid `NpS`.
+Time-indexed values, policies, tightnesses and masses of a transition, on `Nt` dates
+(`time_grid`), the ability grid (`Nx`) and the match-quality grids (`NpU`, `NpS`). Built
+positionally (`allocate_path`, `load_transition`): field order is part of the stored format.
 """
 mutable struct TransitionPath
     tgrid :: Vector{Float64}          # (Nt) calendar of model-time nodes
@@ -186,7 +171,7 @@ end
 """
     allocate_path(model, tp) -> TransitionPath
 
-Allocate a zero-initialised path sized to `model`'s grids and `tp`'s horizon.
+A zero-initialised path sized to `model`'s grids and `tp`'s dates (the `pure*` flags true).
 """
 function allocate_path(model::Model, tp::TransitionParams)
     tgrid = time_grid(tp)
@@ -221,12 +206,10 @@ end
 """
     TransitionResult
 
-Downstream-facing summary of a solved transition.  Aggregate series are
-length-`Nt` vectors; the distribution fields `uU`, `tU`, `uS`, `mS` are
-ability-*marginal densities* (`Nx × Nt`) so the panel/table layer aggregates
-them as `dot(wx, field[:, n])` with `wx = wa` the marginal population
-weights.  The full 2D masses are not serialised — the marginal profiles
-carry everything the plotting layer consumes and keep the bundle small.
+The summary of a solved transition (`_build_result`): length-`Nt` aggregate series, and the
+ability profiles `uU`, `tU` (cell masses summed over a_S, by a_U row) and `uS`, `mS`
+(summed over a_U, by a_S column), `Nx × Nt`. Serialised positionally: new fields go at the
+end.
 """
 struct TransitionResult
     scenario   :: Symbol
@@ -248,7 +231,7 @@ struct TransitionResult
     mean_wage_U    :: Vector{Float64}     # mean log wages, the data moments' units
     mean_wage_S    :: Vector{Float64}
 
-    # Ability-marginal density profiles (Nx × Nt)
+    # Ability profiles (Nx × Nt): cell masses by a_U row (uU, tU) or a_S column (uS, mS)
     uU :: Matrix{Float64}
     tU :: Matrix{Float64}
     uS :: Matrix{Float64}
@@ -260,22 +243,11 @@ struct TransitionResult
     p  :: Vector{Float64}      # skilled match-quality nodes
     wp :: Vector{Float64}      # skilled match-quality weights
 
-    # Transition diagnostics.  Appended after the grids rather than grouped with
-    # the aggregate series above: Julia deserialises structs POSITIONALLY, so a
-    # field inserted mid-struct silently shifts every later value in a stored
-    # bundle, while one appended at the end raises EOFError instead.
-    #
-    # `frontier_floor` locates the TRAINING frontier F_τ: the lowest point of the
-    # line, the aS at which the least unskilled-able worker is indifferent to
-    # training.  The other three are the CROSS-MARKET frontier F_d, kept apart
-    # because a zero in one says nothing about the others:
-    #   d_region  ∬ d ℓ      — is the active side of F_d a non-empty region?
-    #   d_mass    ∬ d m_S    — does any skilled mass sit on it?
-    #   d_flow    κ_U ∬ d u_S — does anyone actually cross?
-    # The flow is zero at a stationary endpoint where no trained worker gains by
-    # crossing, as at every stored estimate, and positive there only where one does,
-    # so reading it alone cannot tell an inert solver from a channel that is
-    # directionally unable to fire on this pair.
+    # Diagnostics, appended after the grids (a field inserted mid-struct would shift every
+    # later value of a stored bundle). frontier_floor: the a_S at which the least
+    # unskilled-able worker is indifferent to training. The crossing frontier, kept apart
+    # because a zero in one says nothing about the others: d_region ∬ d ℓ, d_mass ∬ d m_S,
+    # d_flow κ_U ∬ d h u_S (zero at a stationary endpoint where nobody gains by crossing).
     frontier_floor :: Vector{Float64}
     d_region       :: Vector{Float64}
     d_mass         :: Vector{Float64}
@@ -285,13 +257,20 @@ end
 # ──────────────────────────────────────────────────────────
 # The transition file
 # ──────────────────────────────────────────────────────────
-# A run is tagged by its weight matrix and the point estimate both windows are read at,
-# `<W>_<point>` with point :smm or :mcmc, and every file it writes ends in the tag: the
-# transition file below, and the tables and plots made from it.  The runs at the two points
-# therefore coexist.  Every writer and reader of a transition file loads this file.
 
+"""
+    transition_tag(w_suffix, point) -> String
+
+The tag `<W>_<point>` that ends every file a transition run writes, so the runs at the two
+points coexist.
+"""
 transition_tag(w_suffix::AbstractString, point::Symbol) = "$(w_suffix)_$(point)"
 
+"""
+    transition_file(scenario, w_suffix, point) -> String
+
+`output/transition/transition_<scenario><W>_<point>.jls`.
+"""
 transition_file(scenario::Symbol, w_suffix::AbstractString, point::Symbol) =
     joinpath(TRANS_OUT_DIR, "transition_$(scenario)$(transition_tag(w_suffix, point)).jls")
 

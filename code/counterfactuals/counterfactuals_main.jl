@@ -1,27 +1,23 @@
 ############################################################
-# counterfactuals_main.jl — Single entry point of the counterfactual exercises (RoySearch)
+# counterfactuals_main.jl — entry point of the counterfactual exercises (RoySearch)
 #
-# RUN code/transition/transition_main.jl FIRST, AT THE SAME POINT_ESTIMATE AS BELOW: it
-# solves and saves both crises.  Every exercise reads the transitions it saves,
-# output/transition/transition_<crisis><W>_<point>.jls, and stops with a message naming
-# the missing file otherwise.
+# Run code/transition/transition_main.jl first, at the same POINT_ESTIMATE: every exercise
+# reads output/transition/transition_<crisis><W>_<point>.jls.
 #
-# The exercises, one file each:
-#   :welfare        welfare.jl        social flow and present value along each transition,
-#                                     by market and component, against both steady states
+#   :welfare        welfare.jl        social flow and its present value along each
+#                                     transition, by market and component, against both
+#                                     steady states
 #   :incidence      incidence.jl      each type's date-0 value against the baseline, by
-#                                     aptitude pair and state; table and heatmap
+#                                     aptitude pair and state
 #   :held_margin    held_margin.jl    each transition with τ and d held at the baseline
 #   :training_cost  training_cost.jl  the training cost scaled from date 0, with and
 #                                     without each crisis
-# Shared: cf_common.jl.  Outputs (CSV tables, JLS data for the figures, log.txt) go to
+# Shared: cf_common.jl. Outputs (CSV tables, JLS data for the figures, log.txt) go to
 # output/counterfactuals/<exercise>/; nothing is plotted here.
 #
-# Usage (from the repo root):
+# Usage (from the repo root), or run the file in VS Code with `Julia: Num Threads` = auto:
 #   julia --project=. --threads auto code/counterfactuals/counterfactuals_main.jl
-# or open this file in VS Code and run it, with the setting `Julia: Num Threads` = auto.
-#
-# All user-facing switches live in section 1.
+# Settings: section 1.
 ############################################################
 
 # ═══════════════════════════════════════════════════════════
@@ -48,9 +44,9 @@ const TRAINING_COST_GRID = [0.8, 0.9, 1.0, 1.1, 1.2]
 
 # The outer fixed point of every path that is solved again (held margin under free entry,
 # training cost): transition_main.jl's tolerance, iteration cap and damping.
-const CF_TOL   = 1e-4
+const CF_TOL   = 5e-4
 const CF_MAXIT = 200
-const CF_DAMP  = 0.3
+const CF_DAMP  = 1.0
 
 # ═══════════════════════════════════════════════════════════
 # 2. PACKAGES
@@ -77,7 +73,7 @@ using JSON3
 
 println("done."); flush(stdout)
 
-# The date steps thread over the ability grid; BLAS inside them stays on one thread.
+# The date steps are threaded; BLAS stays on one thread so it does not oversubscribe.
 LinearAlgebra.BLAS.set_num_threads(1)
 
 # ═══════════════════════════════════════════════════════════

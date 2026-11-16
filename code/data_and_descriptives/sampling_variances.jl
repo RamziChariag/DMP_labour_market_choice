@@ -1,46 +1,45 @@
 ############################################################
-# data_processing/sampling_variances.jl
+# code/data_and_descriptives/sampling_variances.jl
 #
-# Combine step (Stage 8) — the per-moment SAMPLING-variance vector σ̂²_samp,
-# one entry per moment on a single 1/N footing (the window = one steady state
-# observed with sampling noise). Read only by the diagonal-σ SMM weight
-# W = Diagonal(1/σ̂²_samp); the equal-weight path ignores it.
+# Per-moment sampling variances σ̂²_samp, in raw moment units on a single 1/N
+# footing (each window is one steady state observed with sampling noise). They
+# form the diagonal SMM weight W = Diagonal(1/σ̂²_samp). Every entry is a closed
+# form (no bootstrap, no RNG), so the output is bit-identical across runs.
 #
-# Every entry is a CLOSED FORM — no bootstrap, no resampling, no RNG — so the
-# vector is a deterministic function of the data: two runs are bit-identical.
-# CPS shares get the Kish weighted-proportion variance; ASEC wage moments get
-# analytic delta-method / order-statistic forms on the pooled window cross-
-# section, each divided by the Kish N_eff of the relevant sector pool; flow
-# hazards and θ use the delta method; SIPP moments are already sampling
-# variances (delta-method / sd²·N_eff, FC wchg BBG-corrected); the J2J-sourced
-# ee_rate_S uses the across-quarter variance of the quarterly hazards (sd²,
-# genuine within-window movement + per-quarter sampling, not divided by n).
-#
-# The training_share row carries the enrolment target's own across-Fall-year
-# variance rather than a CPS closed form.
-#
-# Reads:  moments_{window}.csv, cps_basic_clean.arrow, cps_asec_clean.arrow, transitions_monthly.arrow, sipp_wchg_rates.csv, sipp_ee_rates.csv, j2j_ee_rates.csv
-# Writes: sampling_var_{window}.csv
-#
-# Plain include() file: definitions only, no top-level execution.
-# `using` packages and path consts come from data_processing_main.jl.
+# Entry point: compute_sampling_variances()
+#   reads  moments_{window}.csv, cps_basic_clean.arrow, cps_asec_clean.arrow,
+#          transitions_monthly.arrow, sipp_wchg_rates.csv, sipp_ee_rates.csv,
+#          j2j_ee_rates.csv, training_share_target.csv
+#   writes sampling_var_{window}.csv
+# The closed-form helpers live in setup.jl.
+# Definitions only; packages and path constants come from data_processing_main.jl.
 ############################################################
 
-# ─────────────────────────────────────────────────────────────────────────────
-# The closed-form sampling-variance helpers (_kish_prop_var, _kish_neff, _wcm,
-# _wquantile_var) and the cluster-robust _kish_prop_var_clustered live in
-# setup.jl, which data_processing_main.jl includes first.
-# ─────────────────────────────────────────────────────────────────────────────
+"""
+    ASEC_CLUSTER_RHO
 
-# Within-person correlation assumed for the ASEC design effect (see the ASEC
-# block below). Log wages are highly persistent within person, so the upper end
-# is the relevant one; at ρ = 0.9 and the measured 1.21-1.29 records per person
-# the resulting variance inflation is ~19-26%.
+Within-person correlation of log wages in the ASEC design effect 1 + (k − 1)ρ,
+k the records per person (1.21–1.29 from the supplement's two-year overlap).
+Log wages are persistent within person, so the upper end applies.
+"""
 const ASEC_CLUSTER_RHO = 0.9
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 8: per-moment sampling variance σ̂²_samp for every window.
-# ─────────────────────────────────────────────────────────────────────────────
+"""
+    compute_sampling_variances()
+
+Write sampling_var_{window}.csv (columns `moment`, `sampling_var`, in
+`MOMENT_NAMES` order) for every window:
+- CPS shares and duration survivors: person-clustered linearised variance
+  (`_kish_prop_var_clustered`) on the same masks as moments.jl;
+- `training_share`: the across-Fall-year variance of the enrolment target;
+- ASEC wage moments: analytic moment, quantile (p(1−p)/(N f(q̂)²) at the
+  shipped q̂) and overlap forms, with N_eff deflated by the ASEC design effect;
+- jfr/sep: delta method on h = −log(1−p) with the pooled at-risk Kish N;
+- θ_j: θ²(1−p)/(p N_lf), the CPS unemployment-count error (V treated as measured);
+- SIPP wchg: delta method, on the raw break rate π̂ scaled by 1/(γ̄−ᾱ)² on the
+  BBG windows; `ee_step_S`: sd²/N_eff; `ee_rate_S`: J2J across-quarter sd².
+A moment whose source is missing gets NaN (with a warning) and is held out.
+"""
 function compute_sampling_variances()
     @info "Stage 8: per-moment sampling variances (closed-form, $(length(MOMENT_NAMES)) moments)..."
 
@@ -52,11 +51,8 @@ function compute_sampling_variances()
         hasproperty(df, :window) && (df.window = Symbol.(df.window))
     end
 
-    # SIPP moments carry their own sampling variances (delta-method hazards +
-    # sd²/N_eff mean), built below from the point estimates + Kish neff in
-    # sipp_wchg_rates.csv (wchg_rate_U/S) and sipp_ee_rates.csv (ee_step_S); the
-    # SIPP micro-data are not re-read here. ee_rate_S sources its variance from
-    # j2j_ee_rates.csv (across-quarter variance of the quarterly hazards, sd²).
+    # SIPP and J2J variances are built from the point estimates and N_eff columns
+    # of their derived CSVs; the micro data are not re-read.
     sipp_path = joinpath(DERIVED_DIR, "sipp_wchg_rates.csv")
     sipp_wchg = isfile(sipp_path) ? CSV.read(sipp_path, DataFrame) : DataFrame()
     if !isempty(sipp_wchg) && hasproperty(sipp_wchg, :window)
@@ -69,9 +65,6 @@ function compute_sampling_variances()
         sipp_ee.window = Symbol.(sipp_ee.window)
     end
 
-    # J2J EE rates (Stage 5): the ee_rate_S target source. Its window-level
-    # sampling variance is the across-quarter variance of the quarterly
-    # hazards (sd², genuine+sampling), built below from ee_rate_S_sd.
     j2j_ee_path = joinpath(DERIVED_DIR, "j2j_ee_rates.csv")
     j2j_ee = isfile(j2j_ee_path) ? CSV.read(j2j_ee_path, DataFrame) : DataFrame()
     if !isempty(j2j_ee) && hasproperty(j2j_ee, :window)
@@ -87,10 +80,6 @@ function compute_sampling_variances()
         mdf = CSV.read(mpath, DataFrame)
         moment_vals = Dict(Symbol(row.moment) => row.value for row in eachrow(mdf))
 
-        # training_share comes from the enrolment target, not from this file's
-        # CPS closed forms; its level and variance are both read from
-        # training_share_target.csv (see nsc.jl). Nothing to recover here.
-
         cps_w = filter(row -> row.window == wname, cps_basic_m)
         @assert nrow(cps_w) > 0 "CPS Basic empty for window $wname"
 
@@ -100,29 +89,19 @@ function compute_sampling_variances()
         trans_w = filter(r -> r.window == wname, trans_monthly)
         @assert nrow(trans_w) > 0 "Transitions empty for window $wname"
 
-        # ── SIPP/J2J moment sampling variances (raw units) ────────────────────
-        # Each moment's own sampling variance, from its point estimate + Kish
-        # neff (the SIPP micro-data are not re-read). The SIPP wchg hazards
-        # wchg_rate_U/S use the binomial-proportion delta method on h = −log(1−p):
-        # Var(h) = [p(1−p)/neff]·(1−p)⁻². FC windows ship the BBG-corrected wchg
-        # hazard, whose variance is evaluated on the RAW break rate π̂ (binomial on
-        # the hourly-series neff) and scaled by 1/(γ̄−ᾱ)², since π̃ = (π̂−ᾱ)/(γ̄−ᾱ)
-        # divides by the correction factor, inflating the FC wchg variance.
-        # ee_step_S (SIPP) is a weighted mean, so Var(mean) = sd²/neff from the
-        # weighted sd. ee_rate_S (J2J) uses the across-quarter variance of the
-        # quarterly hazards, sd² (see its block below). Where a window lacks a row
-        # the variance is left NaN with a warning (the moment holds out).
+        # ── SIPP and J2J moments ──────────────────────────────────────────────
         sipp_w  = isempty(sipp_wchg) ? nothing : filter(r -> r.window == wname, sipp_wchg)
         sipp_er = isempty(sipp_ee)   ? nothing : filter(r -> r.window == wname, sipp_ee)
         j2j_er  = isempty(j2j_ee)    ? nothing : filter(r -> r.window == wname, j2j_ee)
         sipp_rawvar = Dict{Symbol,Float64}()
 
-        # Raw hazard delta-method variance on a proportion p with effective N.
+        # Delta-method variance of h = −log(1−p) for a proportion p with N_eff:
+        # [p(1−p)/N_eff]·(1−p)⁻².
         _haz_var(p, neff) = (neff > 0.0 && 0.0 < p < 1.0) ?
                             (p * (1.0 - p) / neff) / (1.0 - p)^2 : NaN
 
-        # wchg hazards. FC (SIPP_BBG_WINDOWS) uses the BBG π̂/correction-factor
-        # path; the redesign COVID windows use the raw earnings hazard.
+        # wchg hazards. BBG windows: π̃ = (π̂−ᾱ)/(γ̄−ᾱ), so the variance is
+        # _haz_var evaluated at the raw break rate π̂, divided by corrfac² = (γ̄−ᾱ)².
         is_bbg = wname in SIPP_BBG_WINDOWS
         for (mname, neff_col, pihat_col, corrfac_col) in
                 ((:wchg_rate_U, :neff_U, :bbg_pihat_U, :bbg_corrfac_U),
@@ -152,14 +131,10 @@ function compute_sampling_variances()
             end
         end
 
-        # ee_rate_S variance = across-quarter variance of the J2J quarterly
-        # hazards, Var = sd². The quarter-to-quarter dispersion equals
-        # Var(genuine within-window movement) + Var(per-quarter sampling), so
-        # this single number carries both sources at full scale. It is NOT
-        # divided by n_quarters: that would form the SE of the window mean and
-        # average the genuine-movement component away. The micro binomial
-        # variance is deliberately not used — its near-zero value would let an
-        # administrative moment dominate a variance-weighted objective.
+        # ee_rate_S: across-quarter variance sd² of the J2J series, NOT divided by
+        # n_quarters. It carries genuine within-window movement plus sampling
+        # noise; the near-zero micro binomial variance would let an
+        # administrative moment dominate the objective.
         if !isnothing(j2j_er) && nrow(j2j_er) > 0 &&
            hasproperty(j2j_er, :ee_rate_S_sd) && hasproperty(j2j_er, :n_quarters)
             sd  = Float64(j2j_er[1, :ee_rate_S_sd])
@@ -175,7 +150,7 @@ function compute_sampling_variances()
             @warn "    No J2J data for $wname; ee_rate_S variance left NaN"
         end
 
-        # ee_step_S mean → Var(mean) = sd²/neff from the weighted sd + Kish neff.
+        # ee_step_S (weighted mean): Var = sd²/N_eff.
         if !isnothing(sipp_er) && nrow(sipp_er) > 0 &&
            hasproperty(sipp_er, :ee_step_sd) && hasproperty(sipp_er, :neff_step)
             sd   = Float64(sipp_er[1, :ee_step_sd])
@@ -191,40 +166,23 @@ function compute_sampling_variances()
             @warn "    No SIPP data for $wname; ee_step_S variance left NaN"
         end
 
-        # ── Per-moment sampling variance σ̂²_samp (one 1/N footing) ────────────
-        # W = Diagonal(1/σ̂²_samp) acts on the RAW deviation vector g_k = m_k − m̂_k
-        # (raw moment units), so every entry is a raw-unit 1/N sampling variance.
         svar  = Dict{Symbol,Float64}()
 
-        # (a) CPS-Basic shares — exact analytic Kish-effective-N weighted-proportion
-        #     variance on the pooled window cross-section, each on the exact
-        #     numerator/denominator masks moments.jl uses (O(N) in the window size).
-        #     Pooled arrays and masks built once.
+        # (a) CPS shares: person-clustered, on the masks moments.jl uses.
         cw   = Float64.(coalesce.(cps_w.WTFINL, 0.0))
         unemp = Vector{Bool}(cps_w.unemployed)
         skl   = Vector{Bool}(cps_w.skilled)
         inlf  = hasproperty(cps_w, :in_lf) ? Vector{Bool}(coalesce.(cps_w.in_lf, false)) : trues(nrow(cps_w))
         intr  = hasproperty(cps_w, :in_training) ? Vector{Bool}(coalesce.(cps_w.in_training, false)) : falses(nrow(cps_w))
         lfx   = inlf .& .!intr                        # LF ∩ ¬train (ur_total, ur_U, skilled_share)
-        # Person-clustered: CPS Basic is a 4-8-4 rotating panel, so the pooled
-        # window sample repeats each person 4-8 times. See _kish_prop_var_clustered
-        # in setup.jl for why the unclustered form understates these by 2.2-5.6x.
         cid = Int64.(coalesce.(cps_w.CPSIDP, 0))
         svar[:ur_total]      = _kish_prop_var_clustered(cw, lfx, lfx .& unemp, cid)
         svar[:ur_U]          = _kish_prop_var_clustered(cw, lfx .& .!skl, lfx .& .!skl .& unemp, cid)
         svar[:ur_S]          = _kish_prop_var_clustered(cw, inlf .& skl, inlf .& skl .& unemp, cid)
         svar[:skilled_share] = _kish_prop_var_clustered(cw, lfx, lfx .& skl, cid)
-        # training_share: read from the target file alongside the level. It is an
-        # administrative near-census, so the honest uncertainty is the
-        # across-Fall-year dispersion of the series, not a survey sampling
-        # variance — same convention as ee_rate_S above.
         svar[:training_share] = _load_training_share_target(wname).sampling_var
-        # Unemployment-duration profile. Each usurv{t}_j is a proportion within
-        # market j's unemployed pool, so it takes the same person-clustered Kish
-        # form as the unemployment rates; only the denominator pool and the
-        # threshold change. Pools match _compute_duration_moments: the U pool
-        # excludes trainees (as ur_U does), the S pool needs no such exclusion.
-        # ltu_share_S is the S survivor at 27 weeks and reuses that variance.
+        # Duration survivors: shares within each market's unemployed pool (U
+        # excludes trainees, as in moments.jl); ltu_share_S reuses usurv27_S.
         if hasproperty(cps_w, :DURUNEMP)
             durw  = _durw.(cps_w.DURUNEMP)
             pools = ("U" => unemp .& .!skl .& .!intr, "S" => unemp .& skl)
@@ -240,30 +198,17 @@ function compute_sampling_variances()
             svar[:ltu_share_S] = NaN
         end
 
-        # (b) ASEC wage moments — analytic 1/N sampling variances (NO bootstrap):
-        #     closed forms on the pooled ASEC log-wage sample, each divided by the
-        #     Kish N_eff of the relevant sector pool.
+        # (b) ASEC wage moments on the pooled window sample of log wages.
         aw    = Float64.(coalesce.(asec_w.ASECWT, 0.0))
         alogw = log.(max.(Float64.(asec_w.wage_norm), 1e-14))
         askl  = Vector{Bool}(asec_w.skilled)
         u_mask = .!askl
-        # Per-sector pooled log-wage arrays and weights (built once).
         xu = alogw[u_mask]; wu = aw[u_mask]
         xs = alogw[askl];   ws = aw[askl]
-        # ASEC person-clustering. The March supplement has a designed two-year
-        # overlap: a household in ASEC one March is in it again the next, so the
-        # pooled window sample repeats people (measured: 1.21-1.29 records per
-        # person, ~15-29% appearing twice, essentially nobody three times). Every
-        # ASEC variance below is of the form ·/N_eff, so the whole correction is a
-        # single deflator on N_eff: with k records per person and within-person
-        # correlation ρ, the design effect is 1 + (k−1)ρ. Log wages are highly
-        # persistent within person, so ρ = 0.9 is the relevant end and the honest
-        # correction is a ~20-27% variance inflation.
-        #
-        # This matters mostly RELATIVE to the CPS block, which is clustered above
-        # at 2.2-5.6×. Correcting one and not the other would tilt the objective
-        # between the wage moments (which identify β off the wage step at a job
-        # move) and the unemployment/transition moments by a factor of 2-3.
+        # Person clustering through N_eff: the supplement's two-year overlap
+        # repeats people, so N_eff is divided by 1 + (k − 1)ρ. Leaving ASEC
+        # unclustered while CPS is clustered would tilt the objective between
+        # the wage and the labour-flow moments by a factor of 2–3.
         _asec_deff(id, w) = begin
             n = count(!iszero, w)
             n == 0 && return 1.0
@@ -277,11 +222,7 @@ function compute_sampling_variances()
         @info @sprintf("    ASEC person-clustering: deff_U=%.3f deff_S=%.3f (ρ=%.1f)",
                        deff_u, deff_s, ASEC_CLUSTER_RHO)
 
-        # Analytic sector-moment variances. `_mom_vars(x, w, neff)` returns
-        # (Var(mean), Var(m2), Var(m3)) with:
-        #   Var(mean) = μ2 / N_eff
-        #   Var(m2)   = (μ4 − μ2²) / N_eff
-        #   Var(m3)   = (μ6 − μ3² − 6·μ4·μ2 + 9·μ2³) / N_eff
+        # (Var(mean), Var(m2), Var(m3)) = (μ2, μ4 − μ2², μ6 − μ3² − 6μ4μ2 + 9μ2³) / N_eff
         function _mom_vars(x, w, neff)
             (neff <= 0.0 || length(x) == 0) && return (NaN, NaN, NaN)
             μ2 = _wcm(x, w, 2); μ3 = _wcm(x, w, 3)
@@ -296,9 +237,7 @@ function compute_sampling_variances()
         svar[:mean_wage_U] = vmU; svar[:emp_var_U] = vm2U; svar[:emp_cm3_U] = vm3U
         svar[:mean_wage_S] = vmS; svar[:emp_var_S] = vm2S; svar[:emp_cm3_S] = vm3S
 
-        # Quantile variances p(1−p)/(N_eff·f(q̂)²): use the SHIPPED quantile point
-        # estimates (moment_vals) as q̂, densities via kde_at_point on the sector
-        # pool (Silverman bandwidth, Kish N_eff).
+        # Quantiles at the shipped point estimates q̂.
         for (sym, x, w, p) in ((:p10_wage_U, xu, wu, 0.10), (:p10_wage_S, xs, ws, 0.10),
                                (:p25_wage_U, xu, wu, 0.25), (:p25_wage_S, xs, ws, 0.25),
                                (:p50_wage_U, xu, wu, 0.50), (:p50_wage_S, xs, ws, 0.50),
@@ -308,14 +247,12 @@ function compute_sampling_variances()
             svar[sym] = _wquantile_var(x, w, qhat, p)
         end
 
-        # wage_premium = mean_S − mean_U over disjoint subsamples → variances add.
+        # wage_premium = mean_S − mean_U on disjoint subsamples: variances add.
         svar[:wage_premium] = (isfinite(vmU) && isfinite(vmS)) ? vmU + vmS : NaN
 
-        # Overlap moments — analytic two-sample forms with the estimated-median
-        # correction. overlap_UgtS = P(logw_U > m_S), m_S = skilled median:
-        #   Var = q(1−q)/N_eff_U + [f_U(m_S)²/f_S(m_S)²]·(1/4)/N_eff_S
-        # (first term: binomial sampling of the U tail; second: propagation of the
-        # sampling error in the estimated m_S, whose own variance is (1/4)/(N_eff_S·f_S²)).
+        # Overlap: binomial term plus the propagated error of the estimated
+        # median of the other market, e.g. for overlap_UgtS = P(logw_U > m_S):
+        #   q(1−q)/N_U + [f_U(m_S)/f_S(m_S)]²·(1/4)/N_S
         m_S = get(moment_vals, :p50_wage_S, NaN)
         m_U = get(moment_vals, :p50_wage_U, NaN)
         q_UgtS = get(moment_vals, :overlap_UgtS, NaN)
@@ -335,9 +272,7 @@ function compute_sampling_variances()
             svar[:overlap_SltU] = NaN
         end
 
-        # (c) Flow hazards jfr/sep — delta method on the transition proportion
-        #     with the pooled at-risk Kish N (neff_jfr/neff_sep summed across the
-        #     window's months, written by Stage 4). Same form as the SIPP hazards.
+        # (c) Flow hazards: delta method with the at-risk Kish N summed over months.
         for (mname, neff_col) in ((:jfr_U, :neff_jfr), (:jfr_S, :neff_jfr),
                                   (:sep_rate_U, :neff_sep), (:sep_rate_S, :neff_sep))
             skv = mname in (:jfr_S, :sep_rate_S)
@@ -351,10 +286,8 @@ function compute_sampling_variances()
             end
         end
 
-        # (d) θ = V/U — delta-method ratio dominated by the CPS unemployment
-        #     sampling error: Var(θ) ≈ θ²·Var(U_count)/U_count², with the pooled
-        #     binomial relative count variance (1−p)/(p·N_lf), p = ur_j, N_lf the
-        #     Kish N of the market LF. V (JOLTS aggregate) is treated as measured.
+        # (d) θ = V/U: Var ≈ θ²(1−p)/(p N_lf), p = ur_j, N_lf the Kish N of the
+        #     market's labour force; V is treated as measured.
         for (mname, ur_name, sub) in ((:theta_U, :ur_U, .!skl), (:theta_S, :ur_S, skl))
             th = get(moment_vals, mname, NaN); p = get(moment_vals, ur_name, NaN)
             wlf = cw[inlf .& sub]
@@ -363,8 +296,7 @@ function compute_sampling_variances()
                           th^2 * (1.0 - p) / (p * N_lf) : NaN
         end
 
-        # (e) SIPP moments — already sampling variances; copy the raw-unit values
-        #     built above (FC wchg is the BBG-inflated variance).
+        # (e) SIPP and J2J moments, built above.
         for m in (:wchg_rate_U, :wchg_rate_S, :ee_rate_S, :ee_step_S)
             svar[m] = get(sipp_rawvar, m, NaN)
         end

@@ -1,48 +1,32 @@
 ############################################################
-# transition_solver.jl — RoySearch backward–forward transition
+# transition_solver.jl — the perfect-foresight transition between two steady states
 #
-# Solves the perfect-foresight path from a pre-switch stationary equilibrium z₀ to a
-# post-switch one z₁ after an unanticipated change in the parameters at date 0
-# (transition_spec.md; notes, sec:transition).  Free entry holds at every date, so the
-# path is off steady state, not off equilibrium: vacancies are a jump variable and
-# V_j(t) = 0 throughout.
+# The path from the stationary equilibrium z₀ to z₁ after an unanticipated change in the
+# parameters at date 0, with free entry at every date (vacancies jump; V_j(t) = 0). Labels
+# "spec ..." refer to the transition specification. Entry points: `solve_transition`,
+# `solve_transition_path`; also `path_statistics`, `policy_reversals`.
 #
-# Algorithm (spec Part 4)
-#   Step 0  z₀, z₁ solved externally (transition_simulation.jl).
-#   Step 1  Initialise: tightness at z₁, every mass at z₀ (date 0⁻), values at z₁ (date N).
-#   Step 2  Backward pass  — time-dependent values at the given θ path (transition_values.jl).
-#   Step 3  Forward pass   — at each date, reallocate with that date's policies, then
-#                            advance the laws of motion with that date's rates.
-#   Step 4  Free entry     — θ_j(n) = (μ_j 𝒥_j(n)/k_j)², from date n's values and its
-#                            masses after the reallocation; damped update.
-#   Step 5  Iterate 2–4 until the free-entry gap max_n |ln θ^new − ln θ| < tol.
+#   1. Initialise: tightness at z₁, every mass at z₀ (date 0⁻), values at z₁ (date N).
+#   2. Backward pass: the values at the tightness path (transition_values.jl).
+#   3. Forward pass: at each date, reallocate under the date's policies, then advance the
+#      laws of motion at the date's rates.
+#   4. Free entry at every date from its values and post-reallocation masses; damped update.
+#   5. Repeat 2–4 until max_n |ln θ^new − ln θ| < tol in both markets.
 #
-# Masses, per type (aU,aS) and per slice of the cell (see transition_values.jl):
-#   u_U  unskilled unemployed (searching slice)      t    in training
-#   e_U^s, e_U^τ  unskilled matches of the two slices, each a measure over p with an
-#        atom at p = 1 (a new match starts there; the redraws spread it over G)
-#   u_S  skilled unemployed                           m_S  skilled segment
-#   ê_S  per-aS unit shape of skilled employment over p (exact as a column aggregate
-#        for every type that stays skilled; see Known gaps in the changelog)
-#
-# Reallocations at a date (spec L6), in this order:
-#   (a) the frontier encloses the share (τ−τ⁻)/(1−τ⁻) of the searching slice: its
-#       unemployed enter training, its matches join the training slice; the share
-#       (τ⁻−τ)/τ⁻ of the training slice's matches returns (training is never abandoned);
-#   (b) every unskilled match below its slice's cutoff ends — into u_U from the searching
-#       slice, into training from the training slice — and so does every match that
-#       changed slice and lies below the new slice's cutoff;
-#   (c) every skilled match below the cutoff ends into u_S.
-# Laws of motion between reallocations (spec L1–L5), explicit Euler:
+# Masses per type (aU,aS): u_U unskilled unemployed (searching slice), t in training,
+# e_U^s and e_U^τ the matches of the two slices (measures over p with an atom at p = 1),
+# u_S skilled unemployed, m_S skilled segment, ê_S the per-aS unit shape of skilled
+# employment over p. Reallocations (spec L6), in this order: (a) the frontier sweeps the
+# share (τ−τ⁻)/(1−τ⁻) of the searching slice into training and returns the share (τ⁻−τ)/τ⁻
+# of the training slice's matches; (b) unskilled matches below their slice's cutoff end;
+# (c) skilled matches below the cutoff end into u_S. Laws of motion (spec L1–L5), explicit:
 #   ∂_t u_U = (1−τ)νℓ + D^s − κ_U u_U^h − ν u_U,       D^s = (ξ_U + λ_U G(p*^s)) e_U^s
 #   ∂_t t   = τνℓ + D^τ − (φ+ν) t
 #   ∂_t e_U^s(dp) = κ_U (u_U^h + χ d u_S) δ₁ + λ_U e_U^s dG 1{p ≥ p*^s} − (λ_U+ξ_U+ν) e_U^s(dp)
 #   ∂_t u_S = φ t + (ξ_S + λ_S Γ_s(p*_S)) e_S − (ν + (1−d) κ_S (1−Γ_o(p*_S)) + d κ_U χ) u_S
 #   ∂_t m_S = φ t − ν m_S − d κ_U χ u_S
-# u_U^h is the hired branch of u_U (`hired_unemployed`) and χ the hired fraction of the
-# cell (`hire_fraction`): a crosser is hired where an unskilled match forms, like anyone.
-# Each law is linear, so the population identity u_U + t + e_U^s + e_U^τ + m_S = ℓ holds
-# at every date to rounding, with no residual stock.
+# u_U^h is the hired branch of u_U (`hired_unemployed`), χ the hired fraction (`hire_fraction`).
+# The laws are linear, so u_U + t + e_U^s + e_U^τ + m_S = ℓ holds at every date to rounding.
 ############################################################
 
 
@@ -75,11 +59,10 @@ end
 """
     _init_path!(path, model_z0, model_z1)
 
-Masses at every date start at z₀ (date 0⁻, spec B1), tightness at z₁ (the spec's first
-guess), values at date N at z₁.  z₀'s unskilled employment is spread over quality at z₀'s
-own stationary shape, slice by slice: the atom of the slice's hires/(λ_U+ξ_U+ν) at p = 1
-and the redraws over the accepted part of G, which is a fixed point of the law of motion
-at z₀'s rates.
+Step 1: the masses at every date at z₀ (date 0⁻), the tightnesses at z₁, the values at
+date N at z₁ (`_seed_terminal_values!`), and the base state the first reallocation reads.
+z₀'s unskilled employment is spread over p at z₀'s own stationary shape, slice by slice
+(atom hires/(λ_U+ξ_U+ν) at p = 1, the rest over the accepted part of G).
 """
 function _init_path!(path::TransitionPath, model_z0::Model, model_z1::Model)
     Nt  = length(path.tgrid)
@@ -139,8 +122,12 @@ end
 #  Step 3: Forward pass
 # ════════════════════════════════════════════════════════════
 
-# Fraction of a node's mass that a cutoff moving from `pold` to `pnew` leaves in place:
-# the ratio of the two coverage weights where the cutoff rose into or past the node.
+"""
+    _kept_share(pj, pold, pnew, p, j, Np) -> Float64
+
+Share of node j's mass that a cutoff moving from `pold` to `pnew` leaves in place: the ratio
+of the new to the old coverage weight, at most 1.
+"""
 @inline function _kept_share(pj::Float64, pold::Float64, pnew::Float64,
                              p::Vector{Float64}, j::Int, Np::Int)
     ωo = _soft_weight(pj, pold, p, j, Np);  ωn = _soft_weight(pj, pnew, p, j, Np)
@@ -150,11 +137,10 @@ end
 """
     _end_below!(e, pold, pnew, p, atom_kept) -> ended mass
 
-End, in place, the part of an unskilled quality measure that a cutoff moving from `pold`
-to `pnew` places below reservation (spec L6a), and the share `1 − atom_kept` of the atom at
-p = 1.  The atom is not judged by the cutoff: p* = 1 says only that no quality below 1 is
-accepted, and on a row the hiring margin crosses the matches at p = 1 of the hired share
-have positive surplus.
+End, in place, the part of an unskilled quality measure `e` that a cutoff moving from
+`pold` to `pnew` places below reservation (spec L6a), and the share `1 − atom_kept` of the
+atom at p = 1, which is judged by the hired share, not the cutoff (p* = 1 says only that no
+quality below 1 is accepted). Returns the ended mass.
 """
 function _end_below!(e::AbstractVector{Float64}, pold::Float64, pnew::Float64,
                      p::Vector{Float64}, atom_kept::Float64)
@@ -172,9 +158,9 @@ end
 """
     _crosser_hire_shares(path, χU, d, n) → (h, ω)
 
-Per cell at date n, the share ω of its crossers the training frontier encloses
-(`enclosed_crossers`) and their hired share h = (1−ω) χ + ω χ_t: the searching slice's
-row share χ and the training slice's own.
+Per cell at date n: the share ω of its crossers the training frontier encloses
+(`enclosed_crossers`) and their hired share h = (1−ω) χ + ω χ_t (the searching slice's row
+share χ, the training slice's own χ_t).
 """
 function _crosser_hire_shares(path::TransitionPath, χU::Vector{Float64}, d::Matrix{Float64},
                               n::Int)
@@ -187,9 +173,9 @@ end
 """
     _redraw_weights!(ω, pstar, p, wG, α) -> (wsum, G)
 
-The accepted part of the redraw distribution for a cutoff: the covered share ω of each
-node's cell, the accepted mass Σ ω·dG, and the exact mass G(p*) below the cutoff.  One
-evaluation serves every cell that shares the cutoff.
+The accepted part of the redraw distribution at cutoff `pstar`: writes the covered share
+ω of each node's cell and returns the accepted mass Σ ω·dG and the exact mass G(p*) below
+the cutoff.
 """
 function _redraw_weights!(ω::Vector{Float64}, pstar::Float64, p::Vector{Float64},
                           wG::Vector{Float64}, α::Float64)
@@ -203,10 +189,9 @@ end
 """
     _advance_unskilled!(e, hires, ω, rw, wG, λ, ξ, ν, dt) -> separations
 
-One explicit step of an unskilled quality measure (spec L1): hires into the atom at p = 1,
-the λ_U redraw of every match spread over the accepted part of G (`ω`, `rw` from
-`_redraw_weights!`), exits at λ_U + ξ_U + ν.  The accepted redraws are scaled to the exact
-mass 1 − G(p*), as the stationary balance counts them, and the returned separations are
+One explicit step of an unskilled quality measure `e` (spec L1): hires into the atom at
+p = 1, the λ_U redraws over the accepted part of G (`ω`, `rw` from `_redraw_weights!`),
+scaled to the exact mass 1 − G(p*), and exits at λ_U + ξ_U + ν. Returns the separations
 (ξ_U + λ_U G(p*))·e.
 """
 function _advance_unskilled!(e::AbstractVector{Float64}, hires::Float64, ω::Vector{Float64},
@@ -228,9 +213,8 @@ end
     _forward_state(path) -> NamedTuple
 
 The forward pass's state at date 0⁻: the base masses per cell (unskilled matches by p,
-atom at p = 1 last), the policies they were formed under, which the first reallocation
-judges them against, the cell mass each reallocation moves into training (`into_T`), and
-scratch.
+atom at p = 1 last), the policies they were formed under (the first reallocation judges
+against them), the mass each reallocation moves into training (`into_T`), and scratch.
 """
 function _forward_state(path::TransitionPath)
     Nx = size(path.uU0, 1);  NpU1 = size(path.eU0p, 3)
@@ -246,11 +230,11 @@ end
 """
     _reallocate!(st, path, model, χU, d, n) -> (ended, quit, swept, ended_S)
 
-The reallocation at date n (spec L6) of the forward state `st` under the date's policies.
-Each moved or remaining mass is judged against the cutoff it was accepted under and the
-cutoff of the slice it is in now.  Returns the unskilled matches ended into u_U and into
-training, the unemployed swept into training and the skilled matches ended; `st.into_T`
-holds each cell's mass entering training.
+The reallocation at date n (spec L6) of the forward state `st` under the date's policies:
+each moved or remaining mass is judged against the cutoff it was accepted under and the
+cutoff of the slice it is in now. Returns the unskilled matches ended into u_U and into
+training, the unemployed swept into training and the skilled matches ended; writes each
+cell's mass entering training to `st.into_T`.
 """
 function _reallocate!(st, path::TransitionPath, model::Model, χU::Vector{Float64},
                       d::Matrix{Float64}, n::Int)
@@ -263,12 +247,9 @@ function _reallocate!(st, path::TransitionPath, model::Model, χU::Vector{Float6
         σ  = sweep_share(τ0, τ);  ς = return_share(τ0, τ)
         ps = path.pUs[i, j, n];  pt = path.pUt[i, j, n]
         es = view(Es, i, j, :);  et = view(Et, i, j, :)
-        # The atom of each slice is its hired share: the row's χ in the searching slice
-        # (S_U(a,1) ≥ 0 exactly above a^h), which moves only when the primitives switch,
-        # and χ_t in the training slice, which moves with the slice's own surplus.  A
-        # share below the one an atom was formed under ends the matches it no longer
-        # covers: `kt` for the training slice's own atom, `km` for the searching slice's
-        # atom the frontier moves into it.
+        # Kept shares of the p = 1 atoms, from the hired shares: `ks` the searching slice's
+        # (χ moves only when the primitives switch, at n = 1), `kt` the training slice's
+        # own, `km` the searching atom the frontier moves into the training slice.
         ks = n == 1 && path.χU0[i] > 0.0 ? min(χU[i] / path.χU0[i], 1.0) : 1.0
         kt = st.χt_prev[i, j] > 0.0 ? min(path.χUt[i, j, n] / st.χt_prev[i, j], 1.0) : 1.0
         km = χU[i] > 0.0 ? min(path.χUt[i, j, n] / χU[i], 1.0) : 1.0
@@ -301,7 +282,8 @@ end
     _advance!(st, path, model, χU, hX, d, wG, n, dt)
 
 One explicit sub-step of length `dt` of the laws of motion (spec L1–L5) at date n's rates
-and policies.
+and policies. u_S, m_S and t are snapshotted first, so every block reads start-of-step
+stocks.
 """
 function _advance!(st, path::TransitionPath, model::Model, χU::Vector{Float64}, hX,
                    d::Matrix{Float64}, wG::Vector{Float64}, n::Int, dt::Float64)
@@ -317,7 +299,11 @@ function _advance!(st, path::TransitionPath, model::Model, χU::Vector{Float64},
     return nothing
 end
 
-# The policies of date n become the ones the next reallocation judges the masses against.
+"""
+    _carry_policies!(st, path, n)
+
+Make date n's policies the ones the next reallocation judges the masses against.
+"""
 function _carry_policies!(st, path::TransitionPath, n::Int)
     copyto!(st.τprev, view(path.τT, :, :, n))
     copyto!(st.pUs_prev, view(path.pUs, :, :, n));  copyto!(st.pUt_prev, view(path.pUt, :, :, n))
@@ -326,7 +312,11 @@ function _carry_policies!(st, path::TransitionPath, n::Int)
     return nothing
 end
 
-# The sub-steps of the step from date n to n+1: equal, of at most FORWARD_SUBSTEP.
+"""
+    _substeps(path, n) -> (nsub, dt)
+
+The equal sub-steps, of at most `FORWARD_SUBSTEP`, of the step from date n to n+1.
+"""
 function _substeps(path::TransitionPath, n::Int)
     Δ = path.tgrid[n + 1] - path.tgrid[n]
     nsub = max(ceil(Int, Δ / FORWARD_SUBSTEP - 1e-9), 1)
@@ -336,9 +326,9 @@ end
 """
     _forward_pass!(path, model_z1, tp)
 
-March the masses from z₀ through the path: at each date the reallocations of the date's
-policies, the stock record (the masses free entry and the statistics read), then the laws
-of motion at the date's rates to the next date.
+Step 3: march the masses from z₀ through the path. At each date: the reallocation under the
+date's policies, the stock record (the masses free entry and the statistics read, and the
+mean unskilled log wage), then the laws of motion at the date's rates to the next date.
 """
 function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
     Nt  = length(path.tgrid)
@@ -390,9 +380,8 @@ end
 
 One explicit step of every cell's unskilled stocks at date n's rates: births split by τ,
 hires out of the hired branch of u_U and out of the crossers (each slice at its own hired
-share, `_crosser_hire_shares`), each slice's quality measure,
-and each slice's separations, into u_U from the searching slice and into training from the
-training slice.  Rows are independent, so they are threaded.
+share), each slice's quality measure, and each slice's separations, into u_U from the
+searching slice and into training from the training slice. Threaded over rows.
 """
 function _advance_unskilled_cells!(uU::Matrix{Float64}, tU::Matrix{Float64},
                                    Es::Array{Float64,3}, Et::Array{Float64,3},
@@ -403,8 +392,8 @@ function _advance_unskilled_cells!(uU::Matrix{Float64}, tU::Matrix{Float64},
     up = model.unsk_par;  ν = model.common.ν;  φ = model.common.φ
     W2 = model.grids.copula.W2
     @threads for i in 1:Nx
-        # Cells of a row share the searching slice's cutoff wherever they search at every
-        # later date, so its redraw weights are formed once per row and per cutoff.
+        # The redraw weights are formed once per row and re-formed only where a cell's
+        # cutoff differs from the row's.
         ws = zeros(Float64, NpU);  wt = zeros(Float64, NpU)
         ps_row = path.pstar_U[i, n]
         rs = _redraw_weights!(ws, ps_row, ug.p, wG, up.α_U)
@@ -434,8 +423,8 @@ end
     _end_skilled_below!(eS, uS, mS, d, pold, pnew, sg) -> ended mass
 
 End every skilled match a cutoff moving from `pold` to `pnew` places below reservation
-(spec L6b).  ê is the per-aS unit shape of the non-draining types, so the ended unit mass
-of a column moves each cell's (1−d)·m_S share of it into that cell's u_S.
+(spec L6c), in the unit shape `eS`: each cell's (1−d)·m_S share of a column's ended unit mass
+moves into its u_S. Returns the ended mass.
 """
 function _end_skilled_below!(eS::Matrix{Float64}, uS::Matrix{Float64}, mS::Matrix{Float64},
                              d::Matrix{Float64}, pold::AbstractVector{Float64},
@@ -459,11 +448,10 @@ end
 """
     _advance_skilled_masses!(uS, mS, tU, uS_n, mS_n, d, κU, κS, h, model, pstar, dt)
 
-One step of `u_S` and `m_S` from the date-n stocks: training completions in, the
-destruction hazard on the employed, and the outflow branched on the crossing choice.  The
-destruction hazard uses the SHOCK mass below reservation and the hiring outflow the
-OFFER mass above it (`_skilled_margin_masses`); a crosser leaves at the unskilled hiring
-rate of her cell, κ_U h (`_crosser_hire_shares`).
+One step of `u_S` and `m_S` from the start-of-step stocks: training completions in,
+destruction (SHOCK mass below reservation) on the employed, hires (OFFER mass above it,
+`_skilled_margin_masses`) on the stayers, and crossers out at their cell's unskilled
+hiring rate κ_U h.
 """
 function _advance_skilled_masses!(uS::Matrix{Float64}, mS::Matrix{Float64}, tU::Matrix{Float64},
                                   uS_n::Matrix{Float64}, mS_n::Matrix{Float64},
@@ -488,14 +476,11 @@ end
 """
     _advance_skilled_shape!(eS, uS_n, mS_n, mS_next, d, κS, model, pstar, poj, part, dt)
 
-One step of the per-aS unit density ê_S(aS,p), the time-dependent form of the stationary
-balance (notes eq:eSbalance).  Above the reservation quality a cell gains hires out of
-unemployment `κ_S γ_o(p) û`, redraws `λ_S γ_s(p) ∫ê` and poached workers from below
-`κ_S γ_o(p) ∫_{p*}^p s* ê`, and loses `(ν + λ_S + ξ_S + s* κ_S Ω_o(p)) ê`, Ω_o(p) the offer
-mass strictly above the cell.  The step is taken in levels, `e = ê m₀` with m₀ the
-non-draining column mass, and divided by the column mass it reaches, so `û + ∫ê = 1`
-holds at every date: the `u_S` and `m_S` steps are the same balance in levels.  Mass
-below the cutoff was ended by the reallocation and stays zero.
+One step of the per-aS unit density ê_S(aS,p) (the time-dependent stationary balance,
+notes eq:eSbalance). Above the reservation quality a cell gains hires `κ_S γ_o(p) û`,
+redraws `λ_S γ_s(p) ∫ê` and poached workers `κ_S γ_o(p) ∫_{p*}^p s* ê`, and loses
+`(ν + λ_S + ξ_S + s* κ_S Ω_o(p)) ê`, Ω_o(p) the offer mass above the cell. The step is taken
+in levels e = ê m₀ and divided by the column mass it reaches, so `û + ∫ê = 1` holds.
 """
 function _advance_skilled_shape!(eS::Matrix{Float64}, uS_n::Matrix{Float64},
                                  mS_n::Matrix{Float64}, mS_next::Matrix{Float64},
@@ -541,11 +526,9 @@ end
 """
     _skilled_margin_masses(model, pstar) -> (accept_offer, shock_below)
 
-The two reservation margins of the skilled block, per aS: the OFFER mass a worker
-accepts, `∫ ω dΓ_o`, and the SHOCK mass that lands below reservation and destroys the
-match, `1 − ∫ ω dΓ_s`, integrated from the soft cutoff with the coverage the surplus uses,
-as `solve_stationary_skilled!` integrates them.  Reading `Γ` at the node instead would
-relocate the cutoff to the nearest node below.
+Per aS, the OFFER mass a worker accepts, `∫ ω dΓ_o`, and the SHOCK mass that lands below
+reservation, `1 − ∫ ω dΓ_s`, integrated from the soft cutoff as `solve_stationary_skilled!`
+integrates them.
 """
 function _skilled_margin_masses(model::Model, pstar::AbstractVector{Float64})
     sg = model.skl_grids;  pre = model.skl_pre
@@ -567,8 +550,8 @@ end
 """
     _nondrain_unemp_fraction(path, dmat, n, Nx) -> Vector{Float64}
 
-Unit unemployed fraction `û(aS)` of the non-draining types at date `n`; the draining mass
-is unemployed in the OTHER market and is counted there, in the unskilled seeker pool.
+Unit unemployed fraction `û(aS)` of the non-draining types at date `n` (the draining mass
+is counted in the unskilled seeker pool).
 """
 function _nondrain_unemp_fraction(path::TransitionPath, dmat::Matrix{Float64},
                                   n::Int, Nx::Int)
@@ -596,15 +579,12 @@ _d_matrix(path::TransitionPath, model::Model, n::Int) =
 """
     _free_entry_tightness(path, model_z1) -> (θU, θS)
 
-The tightness free entry implies at every date (spec F1–F3): θ_j = (μ_j 𝒥_j / k_j)² at
-η_j = 1/2, from the date's values and its masses after the reallocation.
-
-Unskilled: a vacancy meets every seeker in `u_U + d u_S` and is filled by those of them an
-unskilled match forms with, the hired branch `u_U^h` and the crossers' hired share of the
-slice they join (`_crosser_hire_shares`), at the firm value `(1−β_U) S(a,1)` of that slice:
-the searching slice, and for the crossers the frontier encloses the training slice.  Skilled: `compute_Jbar_skilled`
-on the date's composition, with the destination values of the path installed as both
-firm values, `J = (1−β_S)·ω[s S¹ + (1−s) S⁰]⁺`, the object `skilled_inner_loop!` hands it.
+Step 4: the tightness free entry implies at every date (spec F1–F3), q_j(θ_j) 𝒥_j = k_j,
+from the date's values and post-reallocation masses. Unskilled: a vacancy meets every
+seeker in `u_U + d u_S` and is filled by the hired branch `u_U^h` and the crossers' hired
+share, at the firm value `(1−β_U) S(a,1)` of the slice each joins. Skilled:
+`update_theta_skilled` on the date's composition installed in `model_z1`'s skilled cache,
+with `J⁰ = J¹ = (1−β_S)·S_dest`. Mutates `model_z1.skl_cache`.
 """
 function _free_entry_tightness(path::TransitionPath, model::Model)
     Nt = length(path.tgrid);  Nx = length(model.grids.x)
@@ -653,15 +633,13 @@ end
 """
     solve_transition(model_z0, model_z1, tp; scenario) -> TransitionResult
 
-Backward–forward transition from stationary equilibrium `model_z0` to `model_z1` under the
-post-switch (`z₁`) parameters, after an unanticipated change in the parameters at date 0.
-Both models must share the ability grid, its weights and both quality grids.  Iterates
-until the free-entry gap `max_n |ln θ^new − ln θ|` over both markets is below `tp.tol`.
+The transition from the steady state `model_z0` to `model_z1` (the post-switch
+parameters) on the dates of `tp`. Both models must share the ability grid, its weights and
+both quality grids. Iterates until the free-entry gap `max_n |ln θ^new − ln θ|` over both
+markets is below `tp.tol`.
 
-CONSUMES ITS MODELS.  Free entry installs each date's composition into `model_z1`'s
-skilled cache, so on return it holds the terminal date's path state, not the stationary
-solution; `_init_path!` takes the base state from `model_z0`'s caches.  A second pair
-needs fresh models.
+Consumes its models: on return `model_z1`'s skilled cache holds the last date's path state,
+so pass copies.
 """
 solve_transition(model_z0::Model, model_z1::Model, tp::TransitionParams;
                  scenario::Symbol = :unnamed) =
@@ -701,7 +679,8 @@ end
 """
     _iterate_transition!(path, model_z1, tp, scenario) -> TransitionResult
 
-The outer fixed point on the tightness paths from the path's current guess (Steps 2–5).
+Steps 2–5: the damped fixed point on the tightness paths from the path's current guess;
+the gap is tested before the update, so the returned path is the one whose gap passed.
 """
 function _iterate_transition!(path::TransitionPath, model_z1::Model, tp::TransitionParams,
                               scenario::Symbol)
@@ -738,12 +717,10 @@ end
 """
     _build_result(path, model_z1, tp, scenario, converged, n_iter, final_dist)
 
-Collapse the path into aggregate series and ability-marginal profiles, every one read off
-the date's masses (no stationary identity).  Mean wages are mean LOG wages, the units of the
-data moments `mean_wage_U/S`, of the rebargained wages of the spec (V8),
-`β·output + (1−β) z`, with z the date's flow value of unemployment: unskilled over each
-slice's quality measure (recorded by the forward pass), skilled over ê_S with the OJS wage
-on the searching share.
+The `TransitionResult` of the path: aggregate series and ability profiles read off each
+date's masses (no stationary identity). Mean wages are mean LOG wages (the data moments'
+units) of the rebargained wage `β·output + (1−β) z` (spec V8): unskilled as recorded by the
+forward pass, skilled over ê_S with the OJS wage on the searching share.
 """
 function _build_result(path::TransitionPath, model_z1::Model, tp::TransitionParams,
                        scenario::Symbol, converged::Bool, n_iter::Int, final_dist::Float64)
@@ -822,11 +799,10 @@ end
 """
     _frontier_floor(path, model, n) -> Float64
 
-Lowest point of the training frontier at date n: the skilled ability at which the least
-unskilled-able worker is indifferent between training and search, the crossing of
-`−c(aS) + T` against the searching slice's value in the bottom aU row: its first crossing,
-on the line through the two nodes that bracket it.  Returns the grid ends when the frontier
-leaves the grid.
+Lowest point of the training frontier at date n: the a_S at which the least
+unskilled-able worker is indifferent between training and search (first crossing of
+`−c(aS) + T` against C in the bottom a_U row, linear between the bracketing nodes); a grid
+end when the frontier leaves the grid.
 """
 function _frontier_floor(path::TransitionPath, model::Model, n::Int)
     x = model.grids.x;  Nx = length(x)
@@ -849,19 +825,13 @@ end
 """
     path_statistics(path, model_z1) -> NamedTuple of length-Nt vectors
 
-The flows between states at every date and the rate moments measured on them.  Each date
-is read from its masses after its reallocation and its own rates (per month); no
-steady-state identity is used (spec, Path statistics).
-
-Flows are the laws of motion's own terms: hires out of unskilled unemployment, crossers'
-hires, separations by slice, entries into and completions of training, skilled hires,
-separations and job-to-job moves; the date's reallocations (ended matches, quits and
-sweeps into training) are the masses `_forward_pass!` recorded.  The rate moments are
-measured as `compute_equilibrium_objects` measures them, cell by cell from the date's
-hazards: the mean monthly transition probability over the moment's universe as a hazard,
-and the job-to-job rate as the monthly equivalent of the quarterly move probability.
-Duration, survival and wage-dispersion moments have no counterpart off the steady state in
-this form and are not reported.
+The flows between states at every date (per month, the laws of motion's own terms, and
+the reallocations `_forward_pass!` recorded) and the rate moments measured on them, read
+off each date's post-reallocation masses and rates without a steady-state identity. Rates
+are measured as `compute_equilibrium_objects` measures them: the mean monthly transition
+probability over the moment's universe, as a hazard; job-to-job as the monthly equivalent
+of the quarterly move probability. Duration, survival and dispersion moments are not
+reported.
 """
 function path_statistics(path::TransitionPath, model::Model)
     Nt = length(path.tgrid);  Nx = length(model.grids.x)
@@ -928,13 +898,16 @@ function path_statistics(path::TransitionPath, model::Model)
             ee_rate_S = ee_rate_S, wchg_rate_U = wchg_rate_U, wchg_rate_S = wchg_rate_S)
 end
 
-# A covered fraction that moves by less than this between dates has not changed direction:
-# a steady state holds its fractions to about 1e-8 of a cell (the stationary solve's own
-# tolerance), and a millionth of a cell is above that and below any mass that matters.
+# A covered fraction moving by less than this has not changed direction: above a steady
+# state's noise (~1e-8 of a cell), below any mass that matters.
 const REVERSAL_TOL = 1e-6
 
-# Directions a series takes, each opened by a move of more than `tol` away from the extreme
-# reached in the current direction; a reversal is every direction after the first.
+"""
+    _directions(seq, tol) -> Int
+
+Number of directions `seq` takes, each opened by a move of more than `tol` away from the
+extreme reached in the current direction.
+"""
 function _directions(seq::AbstractVector{Float64}, tol::Float64)
     n_dirs = 0;  dir = 0;  ext = seq[1]
     @inbounds for v in seq
@@ -952,12 +925,11 @@ end
 """
     policy_reversals(path, model_z1) -> NamedTuple
 
-How often each re-made choice changes direction along the path (spec A14).  For the crossing
-choice: the cells whose covered fraction d is ever positive, the number of reversals (a change
-of direction after the first change, counted on the covered fraction at `REVERSAL_TOL`), the
-cells reversing, the node-level count (U_S^(1) > U_S^(0) switching back after its first
-switch), and the skilled mass on the cells that reverse.  For training: node-level reversals
-of `−c + T ≥ C`.  For on-the-job search: reversals of the participation weight.
+How often each re-made choice changes direction along the path (spec A14); a reversal is
+every direction after the first. Crossing: the cells with d ever positive, the reversals of
+d at `REVERSAL_TOL` and the cells reversing, the node-level count of U_S^(1) > U_S^(0), and
+the largest skilled mass on reversing cells. Training: node-level reversals of
+`−c + T ≥ C`. On-the-job search: reversals of the participation weight.
 """
 function policy_reversals(path::TransitionPath, model::Model)
     Nt = length(path.tgrid);  Nx = length(model.grids.x)

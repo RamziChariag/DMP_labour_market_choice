@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs ON THE VM inside tmux. Run, push, shut down — including on a crash.
-#
-# RUN SETTINGS LIVE HERE. Edit the exports below; nothing is passed by hand.
+# ops/vm_run.sh — runs on the VM inside tmux (started by vm_go.sh). Runs smm_main.jl for
+# ROYSEARCH_WINDOW on branch vm-<window>, then commits output/estimates and output/logs,
+# pushes and shuts down, also on a crash. The run settings are the exports below.
 set -u
 
 WINDOW="${ROYSEARCH_WINDOW:-base_covid}"
@@ -21,7 +21,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 mkdir -p output/logs
 LOG="output/logs/${WINDOW}_vm.log"
 
-# Fires however the script ends: clean exit, julia crash, or kill.
+# Runs however the script ends: clean exit, Julia crash, or kill.
 finish () {
     git add -A output/estimates output/logs 2>/dev/null
     git -c user.name="RoySearch VM" -c user.email="vm@roysearch.local" \

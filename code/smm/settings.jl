@@ -1,23 +1,13 @@
 ############################################################
-# smm/settings.jl — the environment-settings layer, declared once
+# smm/settings.jl — run settings read from the environment
 #
-# Every run setting that can be driven from outside the source passes through
-# `env_setting` here, and every such setting is declared in SETTINGS_REGISTRY below.
-# The two halves do different jobs and neither duplicates the other:
+# Every setting that can be set from outside the source is read through
+# `env_setting(:KEY, default)`, which reads ROYSEARCH_<KEY>, and has one row in
+# SETTINGS_REGISTRY. The call site carries the default; the registry carries the
+# consumer and whether its code path is live under the shipped configuration.
+# code/gates/check_forwarding.jl fails when the two disagree. See SETTINGS.md.
 #
-#   the call site  carries the DEFAULT and the comment justifying it, because that is
-#                  where a reader asking "why this value" looks;
-#   the registry   carries the CLASSIFICATION the source cannot express — which
-#                  consumer the value has to reach, and whether that consumer's code
-#                  path is live under the shipped configuration.
-#
-# `check_forwarding.jl` reads both and fails when they disagree: a key read with no
-# registry row, or a row no code reads. That is what makes adding a setting a single
-# declaration rather than four disconnected edits (env key, struct field, keyword
-# argument, header print), which is how four SA settings came to be computed and never
-# forwarded between v18.4.0 and v19.0.0.
-#
-# See SETTINGS.md at the repo root for the lifecycle rules these types enforce.
+# Entry points: env_setting, assert_no_legacy_env, print_env_settings.
 ############################################################
 
 # ============================================================
@@ -27,20 +17,15 @@
 """
     SettingDecl
 
-Classification of one `ROYSEARCH_*` environment setting.
+Classification of one `ROYSEARCH_*` setting.
 
 Fields
   key      :: Symbol   the key without the `ROYSEARCH_` prefix
-  consumer :: String   the function that READS the value, `file:function` form. The
-                       chain from the key to this function is what a forwarding audit
-                       has to verify; naming it makes the intended endpoint explicit
-                       rather than inferred from a grep.
-  status   :: Symbol   :live      reached and used under the shipped configuration
-                       :inert     forwarded correctly, but its code path is not taken
-                                  under the shipped method (documented, not a defect)
-  note     :: String   why an :inert setting is inert, or what a :live one selects.
-                       Required for :inert — an unexplained inert switch is
-                       indistinguishable from a broken one.
+  consumer :: String   the function that reads the value, `file:function`
+  status   :: Symbol   :live (used under the shipped configuration) or :inert (forwarded,
+                       but its code path is not taken under the shipped configuration)
+  note     :: String   what a :live setting selects, or why an :inert one is inert
+                       (required for :inert)
 """
 struct SettingDecl
     key      :: Symbol
@@ -50,11 +35,8 @@ struct SettingDecl
 end
 
 """
-Every `ROYSEARCH_*` key the estimation and standard-error entry points read.
-
-Grouped by consumer. A new setting is not finished until it has a row here and
-`check_forwarding.jl` runs clean — that check is what turns this table from
-documentation into a gate.
+Every `ROYSEARCH_*` key the estimation and standard-error entry points read, grouped by
+consumer. A new setting needs a row here and a clean `check_forwarding.jl` run.
 """
 const SETTINGS_REGISTRY = [
     # ── smm_main.jl: window, weighting and seeding ──────────────────────────
@@ -123,9 +105,6 @@ const SETTINGS_REGISTRY = [
                 * "true, which is the shipped default"),
     SettingDecl(:DE_ADAPT_FCR,    "smm.jl:_run_de", :live,
                 "selects whether DE_F and DE_CR are used as set or read off the draws"),
-    # DE_PATIENCE retired v19.5.0: it claimed :live and _run_de never read it. The DE stall
-    # test is DE_REHEAT_FLAT + DE_REHEAT_RATE. The de_patience field survives in
-    # SMMRunParams for bundle compatibility only; see CHANGELOG.md.
     SettingDecl(:DE_AVG_TOL,      "smm.jl:_run_de", :inert,
                 "0 disables, which is the shipped default: the measure ranks a "
                 * "prematurely converged run as the most converged one (ρ = +0.915 "
@@ -138,11 +117,7 @@ const SETTINGS_REGISTRY = [
     SettingDecl(:DE_REHEAT_RATE,  "smm.jl:_run_de", :live, "improved-member rate below which a reheat fires"),
     SettingDecl(:DE_MAX_REHEATS,  "smm.jl:_run_de", :live, "reheat cap; a barren reheat ends the run first"),
 
-    # ── Nelder-Mead ────────────────────────────────────────────────────────
-    # The shipped method is :sa_de, which never enters the Nelder-Mead branch of
-    # run_smm. Every NM_* key is therefore inert by PATH, not broken: each is
-    # forwarded correctly and would be read the moment method changed to
-    # :neldermead / :lbfgs / :bfgs.
+    # ── Nelder-Mead: inert by path, forwarded and read once method is NM/LBFGS/BFGS ──
     SettingDecl(:NM_MAX_ITER,     "smm.jl:run_smm (:neldermead branch)", :inert,
                 "the shipped method is :sa_de, which never enters this branch"),
     SettingDecl(:NM_F_TOL,        "smm.jl:run_smm (:lbfgs / :bfgs branches)", :inert,
@@ -174,8 +149,6 @@ const SETTINGS_REGISTRY = [
     SettingDecl(:MCMC_DELTA,      "demc.jl:run_demc", :live, "difference pairs per proposal"),
     SettingDecl(:MCMC_B_MULT,     "demc.jl:run_demc", :live, "multiplicative jitter on the difference vector"),
     SettingDecl(:MCMC_B_ADD,      "demc.jl:run_demc", :live, "additive isotropic jitter"),
-    # Was read via env_setting with no registry row — caught by check_forwarding.jl when
-    # the stop rule was added, not by the change that introduced it. The audit works.
     SettingDecl(:MCMC_OUTLIER_BURN_ONLY, "demc.jl:run_demc", :live,
                 "false = LMR timing (replacement every generation, mpi_mcmc_mod.f90:421-427); " *
                 "true = burn-in only, which keeps the retained sample reversible"),
@@ -185,7 +158,7 @@ const SETTINGS_REGISTRY = [
     SettingDecl(:MCMC_PRIOR,      "MCMC_main.jl:logposterior", :live,
                 ":flat_t (LMR's target, −Q/2) or :flat_theta (−Q/2 + logjac_box); changes the sampled density, so a table must say which"),
     SettingDecl(:MCMC_WIDTHS_CSV, "MCMC_main.jl:init widths", :live,
-                "path to the criterion-width table for MCMC_INIT = :widths; empty means the default name for this window. Produced by code/tools/width_audit.jl. UNREACHABLE in v20.0.0: MCMC_INIT = :widths requires MCMC_SPACE = :theta, which is disabled"),
+                "path to the criterion-width table for MCMC_INIT = :widths; empty means the default name for this window; one row per free parameter with columns lb, ub, theta, wQ1_up, wQ1_dn. UNREACHABLE in v20.0.0: MCMC_INIT = :widths requires MCMC_SPACE = :theta, which is disabled"),
     SettingDecl(:MCMC_SPACE,      "MCMC_main.jl:logposterior", :live,
                 ":t (the only working value, and the shipped default) samples the logistic preimage and is the v20.x estimand. :theta would sample the natural parameter with the economic box enforced by prior rejection, but is DISABLED by a guard: the proposal has no per-coordinate scale in θ and the constrained-vector flag reaches only logposterior, so it runs and reports nonsense. Selects the ESTIMAND, not just the numerics — a table must say which"),
     SettingDecl(:MCMC_T_BOX,      "MCMC_main.jl:logposterior", :live,
@@ -242,8 +215,6 @@ that settles near 1e-2, so 1.0 overshoots by about a factor of 4 here. One const
                  squares plane on a cloud of radius rel_step·(ub−lb), which makes the derivative \
                  depend on the search box and measured a median moment R² of 0.771 at the \
                  shipped radius"),
-    # :live as of v19.3.0 — the shipped MCMC_INIT is :screen, so all three are read.
-    # They were :inert only because the default was :at_seed.
     SettingDecl(:MCMC_INIT,         "demc.jl:run_demc", :live,
                 ":at_seed, :screen, :widths or :resume; :screen draws a cloud and keeps the " *
                 "feasible points; :resume continues the run in the window's chain file, " *
@@ -256,9 +227,8 @@ that settles near 1e-2, so 1.0 overshoots by about a factor of 4 here. One const
                 "radius cap in width units; required because b_S's width is enormous in t"),
     SettingDecl(:MCMC_SCREEN_FLOOR, "MCMC_main.jl:_screen_scale", :live,
                 "guards a zero or absent curvature width"),
-    # Note built with `*` rather than a backslash continuation: check_structure.jl's string
-    # tracker resets at each newline, so a multi-line literal inside a call leaves its
-    # closing paren uncounted and the whole file then reads as unbalanced.
+    # Built with `*`, not a backslash continuation: check_structure.jl's string tracker resets
+    # at each newline, so a multi-line literal inside a call unbalances the file.
     SettingDecl(:CORNER_PARAMS,     "MCMC_main.jl:top level", :live,
                 "parameters DECLARED to sit at a corner, chosen by hand as SKIP_MOMENTS is; " *
                 "a label only — it fills the results CSV's corner_declared column and changes " *
@@ -266,39 +236,34 @@ that settles near 1e-2, so 1.0 overshoots by about a factor of 4 here. One const
 ]
 
 """
-Keys that were renamed or retired, mapped to what replaced them: the new key, or the
-constant that now carries the choice.
-
-A rename is the one lifecycle step that cannot be made safe by a default: the old key
-still parses, still sets nothing, and the run proceeds under a configuration the
-operator believes they overrode. `assert_no_legacy_env` turns that silence into an
-error, which is the whole reason this table exists rather than a line in a changelog.
-
-Entries are removed once no shell script, note or launcher in circulation could still
-carry the old spelling — not on the next release.
+Keys that were renamed or retired, mapped to what replaced them. A renamed key still set
+in the environment would set nothing while the operator believes it did, so
+`assert_no_legacy_env` makes it an error. Remove an entry only when no script in
+circulation can still carry the old spelling.
 """
 const LEGACY_ENV_KEYS = Dict(
     "ROYSEARCH_JAC_ONLY"      => "ROYSEARCH_MCMC_JAC_ONLY",
     "ROYSEARCH_SCREEN_FRAC"   => "ROYSEARCH_MCMC_SCREEN_FRAC",
     "ROYSEARCH_SCREEN_CAP"    => "ROYSEARCH_MCMC_SCREEN_CAP",
     "ROYSEARCH_SCREEN_FLOOR"  => "ROYSEARCH_MCMC_SCREEN_FLOOR",
-    "ROYSEARCH_WIDTH_BASE"    => "POINT_ESTIMATE in code/tools/width_audit.jl",
+    "ROYSEARCH_WIDTH_BASE"    => "nothing: retired, no entry point reads a width base",
 )
 
 # ============================================================
 # Reading a setting
 # ============================================================
 
-# What each `env_setting` call actually resolved to, in call order. The authoritative
-# settings print is generated from this log rather than from the caller's own
-# variables: a print sourced from what the caller MEANT to read cannot detect a key
-# that was misspelled or never consulted, and one sourced from the resolution itself
-# cannot miss it.
+# Every resolution `env_setting` made, in call order: the settings print is generated from
+# what was resolved, so a misspelled or unread key cannot hide.
 const _ENV_LOG = Vector{NamedTuple{(:key, :value, :from_env),Tuple{String,Any,Bool}}}()
 
+"""
+    _env_parse(T, s) → T
+
+Parse the environment string `s` as a value of type `T` (Symbol, Vector{Symbol}, Bool,
+Float64, Int). A `Vector{Symbol}` is comma-separated, entries trimmed and empties dropped.
+"""
 _env_parse(::Type{Symbol},  s::AbstractString) = Symbol(s)
-# A set-valued setting, comma-separated: ROYSEARCH_CORNER_PARAMS="b_S,alpha_U". Entries are
-# trimmed and empties dropped, so "" and "a, ,b" both behave as a reader would expect.
 _env_parse(::Type{Vector{Symbol}}, s::AbstractString) =
     Symbol[Symbol(t) for t in strip.(split(s, ',')) if !isempty(t)]
 _env_parse(::Type{Bool},    s::AbstractString) = parse(Bool, s)
@@ -308,12 +273,9 @@ _env_parse(::Type{Int},     s::AbstractString) = parse(Int, s)
 """
     env_setting(key, default) → value
 
-Read `ROYSEARCH_<key>` from the environment, falling back to `default` and taking the
-return type from it. `key` is given WITHOUT the `ROYSEARCH_` prefix, so the spelling in
-the source matches the registry row and a grep for either finds both.
-
-Every resolution is recorded for `print_env_settings`, so the log reports the value the
-run is using rather than the value its caller intended to set.
+Read `ROYSEARCH_<key>` from the environment, or return `default`; the value takes the type
+of `default`, and a value that does not parse as it is an error. `key` is given without the
+prefix, as in the registry. Every resolution is logged for `print_env_settings`.
 """
 function env_setting(key::Symbol, default::T) where {T}
     full = "ROYSEARCH_$(key)"
@@ -334,9 +296,7 @@ end
 """
     assert_no_legacy_env()
 
-Fail on any renamed key still set in the environment. Silently ignoring the old
-spelling is exactly the defect class this module exists to remove: the operator would
-get a run configured by the defaults while believing they had overridden them.
+Raise if any key of `LEGACY_ENV_KEYS` is set in the environment, naming its replacement.
 """
 function assert_no_legacy_env()
     stale = [(old, new) for (old, new) in LEGACY_ENV_KEYS if haskey(ENV, old)]
@@ -351,10 +311,8 @@ end
 """
     print_env_settings()
 
-Report the environment overrides in force, from the resolution log rather than from
-any caller's copy. Defaults are counted, not listed: the shipped defaults are readable
-in the source, whereas an override is the part of a run that cannot be recovered from
-the repository afterwards.
+Print the settings overridden from the environment, from the resolution log; defaults are
+counted, not listed.
 """
 function print_env_settings()
     overrides = [e for e in _ENV_LOG if e.from_env]

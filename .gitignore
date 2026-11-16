@@ -8,7 +8,7 @@
 #                                 of what a run did, and a bundle without its log is a
 #                                 parameter vector with no history. Same commit as the
 #                                 bundle it describes.
-#   output/transition/  ignored   read by plots_and_tables/transition.jl, but one transition file is
+#   output/transition/  ignored   read by code/counterfactuals/ and the plotting scripts, but one transition file is
 #                                 about 1.6 GB (18 arrays over every (a_U, a_S) pair at each of 293
 #                                 dates), over GitHub's limit. It stays on the machine that ran it.
 #   output/backups/     ignored   local safety copies; nothing reads them.
@@ -54,7 +54,7 @@ literature.zip
 /output/backups/
 /output/transition/*.jls
 
-# Migration staging. migrate_bundles.jl and the v19.6.0 relocation stage here, at the repo
+# Migration staging. Bundle rebuilds and the v19.6.0 relocation stage here, at the repo
 # root and OUTSIDE output/, and remove it on success: a migration that succeeds leaves
 # nothing, one that fails leaves everything. The rules that used to hide migration traces
 # inside output/smm/ (_migration/, *.jls.pre_migration, *.jls.pre_vm) are gone with the

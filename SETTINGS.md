@@ -58,7 +58,7 @@ when they disagree, which is what makes place 2 a gate rather than a comment.
 **Place 3 has a hard constraint.** Julia's serialiser reads structs positionally by field
 count, so *adding a field to `SMMRunParams` makes every `.jls` bundle already on disk
 unreadable* — verified, not assumed. A new setting that must persist therefore forces a
-bundle migration in the same pass (`code/tools/migrate_bundles.jl`); one that need not
+bundle migration in the same pass; one that need not
 persist travels as a keyword argument on `run_smm` instead. `sa_subset_k`, `sa_halflife`,
 `sa_rate_tol` and `sa_rate_span` are keyword arguments for exactly this reason, which is
 also why they were forwardable-and-not-forwarded in the first place.
@@ -98,7 +98,7 @@ mechanism rather than a hazard.
 
 The tension is real and is why this is a criterion rather than a blanket rule: removing a
 default breaks every call site that legitimately omits the argument, including the smoke
-tests and `test_generator.jl`, which construct these consumers directly. Remove a default
+tests, which construct these consumers directly. Remove a default
 only together with a pass over every call site, and treat it as the MINOR-or-higher change
 it is.
 
@@ -174,7 +174,7 @@ each estimate has a file of its own (`estimate_path`, `code/paths.jl`; the file 
   relative-deviation loss Diagonal(weight_k/m̂_k²). It also names every estimate, chain and
   transition file, `…_diagonalW…` or `…_equalW…`. One reader, `run_weighting`
   (`code/smm/moments.jl`), serves every entry point (`smm_main.jl`, `MCMC_main.jl`,
-  `transition_main.jl`, `policy_main.jl`, the tables and panels, the gates and `width_audit.jl`),
+  `transition_main.jl`, `counterfactuals_main.jl`, `model_main.jl` and the gates),
   so they cannot disagree on which files they read. The run records it in
   `SMMRunParams.weighting`. Any other value stops the run.
 - **`CRISIS_BASE`** (`smm_main.jl`, directly below `WINDOW`; `:smm` or `:mcmc`, default
@@ -229,13 +229,13 @@ rejected that pair: ρ_x = −0.4568189183164799 in the backup against −0.4941
 pinned in the crisis estimate. Replaced by `POINT_ESTIMATE`, which reads both windows of a
 pair through `estimate_path` at the same point. The backup stays on disk, untouched.
 
-### `ROYSEARCH_WIDTH_BASE` — the base point of `width_audit.jl`
-**Retired in v57.0.0.** An environment key read only by `code/tools/width_audit.jl`, through
-`ENV` rather than `env_setting`: `postmean` audited the posterior-mean bundle when one
+### `ROYSEARCH_WIDTH_BASE` — the base point of the width audit
+**Retired in v57.0.0.** An environment key read only by the width-audit tool (since removed
+from the repository), through `ENV` rather than `env_setting`: `postmean` audited the posterior-mean bundle when one
 existed and fell back to the SMM bundle without stopping, `seed` audited the SMM bundle.
 Replaced by the tool's `POINT_ESTIMATE` constant (`:mcmc`, `:smm`), which reads the file
 it names or stops. The key is in `LEGACY_ENV_KEYS`, so an exported value stops
-`width_audit.jl`, `smm_main.jl` and `MCMC_main.jl` with a pointer to the constant.
+`smm_main.jl` and `MCMC_main.jl`.
 
 ### `local_k` — fixed-sparsity DE population construction
 **Retired before v19.0.0; last remnant (a stale comment in `_run_de`) removed with this
@@ -420,10 +420,9 @@ block and the global loop only (`unskilled.jl:496,499`, `solver.jl:308`; see the
 skilled-block entry below). `anderson_reg` stays as a field but is not read:
 `anderson1_update!` (`solver/grids.jl:465`) applies its own fixed guard, `denom < 1e-12`.
 
-The six sites were the field itself (`solver/params.jl:310`) and five constructions of a
-`SimParams`: `solver/params.jl:441` inside `initialise_model`, `solver/model_main.jl:164`,
-`smm/smm_main.jl:149`, `policy/policy_main.jl:202` and
-`transition/transition_simulation.jl:132`. Removal followed the standing pattern above for
+The six sites were the field itself (`solver/params.jl`) and five constructions of a
+`SimParams`: a model initialiser in `solver/params.jl` and the policy entry point (both since
+removed), `solver/model_main.jl`, `smm/smm_main.jl` and `transition/transition_simulation.jl`. Removal followed the standing pattern above for
 a serialised field — it waited for a migration that was happening anyway, here the
 addition of `RunProvenance.migrated_from`.
 
@@ -489,9 +488,9 @@ collapses to 45/361, because the unskilled block stops converging (304 of 316 fa
 **`damp_pstar_S` is live from v45.0.0.** Before, it was read only on the non-Anderson skilled
 branch, which no shipped entry point selected, so its value did nothing. It now weights every
 skilled cutoff install. The stored bundles and `smm_main.jl`/`model_main.jl` carry `0.50`,
-which is the value every v45.0.0 measurement used. `policy_main.jl` and `initialise_model`
-carry `1.00` (undamped cutoffs); the policy settings converge at all four estimates with
-either value. `damp_pstar_U` is still read only when `use_anderson = false`.
+which is the value every v45.0.0 measurement used. The policy entry point and the model
+initialiser of that version, both since removed, carried `1.00` (undamped cutoffs); the policy
+settings converged at all four estimates with either value. `damp_pstar_U` is still read only when `use_anderson = false`.
 
 ### `DAMP_POJ_S` — extra under-relaxation on p^oj_S
 **Retired in v45.0.0.** A module-level `Ref(1.0)` that blended p^oj_S toward its previous

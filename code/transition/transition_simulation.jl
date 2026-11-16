@@ -1,35 +1,20 @@
 ############################################################
-# transition_simulation.jl — Run a single-scenario RoySearch
-#                             transition and persist the result.
+# transition_simulation.jl — one transition, from the stored estimates to the saved bundle
 #
-# LIBRARY FILE — loaded by transition_main.jl (the only supported entry
-# point); it does not auto-execute when included.
-#
-# Public API
-#   run_transition_simulation(scenario, w_suffix; point, T_max, N_steps, tol, maxit, damp)
-#     1. Loads the two windows' estimates at the same `point` (:smm or :mcmc) and checks
-#        that the pair is one: the same grids and the same ability distribution and
-#        demographic rates.
-#     2. Solves the selected stationary equilibrium of each window at its own grid and
-#        its own estimation settings.
-#     3. Chooses the horizon by an accuracy test and solves the transition there.
-#     4. Adds every type's values and masses at date 0 and at the baseline (date0_types).
-#     5. Serialises the bundle to <TRANS_OUT_DIR>/transition_<scenario><W>_<point>.jls.
-#
-# Expects in scope (provided by transition_main.jl): the solver, SMM and transition
-# modules, paths.jl and JSON3.
+# Library file, loaded by transition_main.jl. `run_transition_simulation` reads both
+# windows of a pair at the same point estimate, checks they are one pair, solves each
+# window's selected steady state, chooses the horizon by an accuracy test, solves the path
+# there, adds the per-type date-0 values (`date0_types`) and serialises the bundle
+# (`transition_file`). Expects the solver, SMM and transition files, paths.jl and JSON3.
 ############################################################
 
-# Bundle shape of the transition output.  Bumped only when its field set changes.
+# Shape of the transition bundle; bumped only when its field set changes.
 const TRANSITION_SCHEMA = 3
 
-# The horizon test: the horizon doubles, from the fine grid's span, until no reported
-# series moves on the first HORIZON_TEST_MONTHS by more than HORIZON_TOL relative to its
-# own scale; HORIZON_MAX bounds the search.  A series in logs is held to HORIZON_TOL in log
-# units instead: its change is relative already, and dividing it by the size of the log
-# (about 6.5 for the wages at the estimates) would loosen the test that many times.  The
-# tolerance is ten times the outer loop's default free-entry tolerance, so the test is not
-# reading the iteration's own noise.
+# The horizon test (`solve_with_horizon`): the horizon doubles until no reported series moves
+# on the first HORIZON_TEST_MONTHS by more than HORIZON_TOL relative to its scale, or in log
+# units for a series in logs (its change is relative already). HORIZON_TOL is ten times the
+# outer tolerance, above the iteration's own noise.
 const HORIZON_TEST_MONTHS = 36.0
 const HORIZON_TOL         = 1e-3
 const HORIZON_MAX         = 7680.0
@@ -39,7 +24,11 @@ const REPORTED_SERIES = (:θU, :θS, :ur_U, :ur_S, :ur_total, :skilled_share,
                          :training_share, :mean_wage_U, :mean_wage_S)
 const LOG_SERIES      = (:mean_wage_U, :mean_wage_S)
 
-# A scenario is a transition pair of paths.jl (PAIRS): from the base window to `crisis_<pair>`.
+"""
+    _scenario_windows(scenario) -> (base window, crisis window)
+
+The two data windows of the transition pair `scenario` (one of `PAIRS`).
+"""
 function _scenario_windows(scenario::Symbol)
     String(scenario) in PAIRS ||
         error("Unknown scenario: $scenario. Must be one of :" * join(PAIRS, ", :") * ".")
@@ -50,8 +39,8 @@ end
 """
     crisis_window_months(window) -> (months, ym_start, ym_end, label)
 
-The crisis window's length in months, from `data/derived/windows.json`, the list every
-other layer uses.
+The length in months, the first and last months and the label of `window`, from
+`data/derived/windows.json`.
 """
 function crisis_window_months(window::Symbol)
     w  = JSON3.read(read(joinpath(PROJECT_ROOT, "data", "derived", "windows.json"), String))
@@ -64,12 +53,11 @@ end
 """
     point_estimate(window, w_suffix, point) -> (bundle, θ, source)
 
-The estimate a data window is read at, from the estimate of the window that holds it
-(`estimation_window`): `:smm` the SMM estimate, `estimate_<window><W>_smm.jls`; `:mcmc` the
-chain's, `estimate_<window><W>_mcmc.jls` (the posterior mean of the retained draws). A
-baseline period is read as its own estimate (`period_bundle`). Both windows of a pair are
-read at the same `point`. The bundle must be an estimate under this code
-(`require_current_estimate`), and a chain's from a chain that did not abort.
+The estimate of data window `window` at `point` (`:smm` the SMM estimate, `:mcmc` the
+chain's posterior mean), read from the bundle of the estimation window that holds it, as
+that period's own estimate for a baseline period (`period_bundle`). Errors unless the
+bundle is current (`require_current_estimate`) and, for a chain, did not abort. Returns the
+bundle, the parameter vector and the file name.
 """
 function point_estimate(window::Symbol, w_suffix::String, point::Symbol)
     point in (:smm, :mcmc) || error("POINT_ESTIMATE must be :smm or :mcmc, got :$point.")
@@ -89,9 +77,8 @@ end
 """
     check_pair(base, crisis, wb, wc)
 
-A transition runs on one grid and one population, so the two windows must share the grid
-sizes of their runs, the demographic and training rates, and every parameter the crisis
-window holds at the baseline estimate (`CRISIS_HELD`).
+Error unless the two windows can share a transition: the same grid sizes, the same r, ν, φ,
+and every `CRISIS_HELD` parameter equal. Returns the grid sizes `(Nx, Np_U, Np_S)`.
 """
 function check_pair(base, crisis, wb::Symbol, wc::Symbol)
     rb = base.bundle.spec.run;  rc = crisis.bundle.spec.run
@@ -113,9 +100,9 @@ end
 """
     solve_endpoint(pt, grid, label) -> equilibrium
 
-The equilibrium at the window's point (`equilibrium_at`): the solve at its tightnesses, with
-its vacancy costs computed there, on its own grid and under its own estimation settings,
-verbosity aside.  The path holds each window's costs fixed from those.
+The selected equilibrium at the window's point (`equilibrium_at`), on `grid` and under the
+window's own estimation settings (verbosity aside), with its vacancy costs computed there;
+the path holds those costs fixed.
 """
 function solve_endpoint(pt, grid, label::String)
     spec = pt.bundle.spec
@@ -132,11 +119,9 @@ end
 """
     stationary_record(model) -> TransitionResult
 
-The series the transition reports, at the steady state `model`: a one-step transition of
-the model to itself, whose dates both hold that steady state to the stationary solve's
-tolerance (the self-transition property).  It is the pre-switch value of every reported
-series, read with the path's own definitions; date 0 of a path is not, because it comes
-after the date-0 reallocation.
+The reported series at the steady state `model`, from a one-step transition of the model
+to itself: the pre-switch value of every series under the path's own definitions (date 0
+of a path comes after the date-0 reallocation and is not).
 """
 stationary_record(model) =
     solve_transition(deepcopy(model), deepcopy(model),
@@ -146,12 +131,11 @@ stationary_record(model) =
 """
     solve_with_horizon(sel0, sel1, scenario; T_max, N_steps, tol, maxit, damp)
 
-Solve the transition at a horizon chosen by its accuracy test.  The first trial ends at the
-fine grid's span; each next one doubles the horizon (the fine grid is shared, so the dates
-of the test window coincide) and starts from the previous tightness path, interpolated onto
-its dates.  The test passes when no reported series moves by more than HORIZON_TOL on the
-first HORIZON_TEST_MONTHS: relative to its scale, or in log units for the series in logs.
-Returns the accepted solve and the record of every trial.
+The transition at a horizon chosen by the accuracy test: the first trial ends at `T_max`,
+each next one doubles the horizon and starts from the previous tightness path, and a trial
+is accepted when no reported series moves by more than `HORIZON_TOL` on the first
+`HORIZON_TEST_MONTHS` against the previous one. Returns the accepted trial
+`(tp, path, res, model_z1)` and the record of every trial.
 """
 function solve_with_horizon(sel0, sel1, scenario::Symbol; T_max, N_steps, tol, maxit, damp)
     trials = NamedTuple[]
@@ -191,10 +175,10 @@ end
                               T_max = 120.0, N_steps = 240, tol = 1e-4, maxit = 200,
                               damp = 0.3) -> String
 
-Solve the backward–forward transition for one scenario and serialise the bundle to
-`transition_file(scenario, w_suffix, point)`.  Both windows of the scenario are read at
-`point` (`point_estimate`).  `T_max`, `N_steps` are the fine grid; the horizon is
-chosen by the test in `solve_with_horizon`.  Returns the path of the saved file.
+Solve the transition of the pair `scenario` with both windows read at `point` and
+serialise it to `transition_file(scenario, w_suffix, point)`. `T_max`, `N_steps` are the
+fine grid, `tol`, `maxit`, `damp` the outer fixed point; the horizon is chosen by
+`solve_with_horizon`. Returns the saved file's path.
 """
 function run_transition_simulation(scenario::Symbol, w_suffix::String;
                                    point::Symbol = :smm, T_max::Real = 120.0,
@@ -278,9 +262,7 @@ function run_transition_simulation(scenario::Symbol, w_suffix::String;
     return out_file
 end
 
-# ──────────────────────────────────────────────────────────
-# Stand-alone safety net — this file is a library.
-# ──────────────────────────────────────────────────────────
+# This file is a library.
 if abspath(PROGRAM_FILE) == @__FILE__
     error("transition_simulation.jl is a library and cannot be run standalone. " *
           "Use transition_main.jl as the entry point.")

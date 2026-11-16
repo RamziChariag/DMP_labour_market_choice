@@ -12,11 +12,13 @@ One named entry point per task; each prints a version banner before it loads any
 
 | task | entry point |
 |---|---|
+| data pipeline: moments, sampling variances, ν, φ | `code/data_and_descriptives/data_processing_main.jl` |
 | SMM estimation for one window | `code/smm/smm_main.jl` |
 | standard errors (DE-MC) | `code/mcmc/MCMC_main.jl` |
-| single equilibrium solve + plots | `code/solver/model_main.jl` |
-| transition path | `code/transition/transition_main.jl` |
-| policy experiments | `code/policy/policy_main.jl` |
+| single equilibrium solve and fit table | `code/solver/model_main.jl` |
+| transition paths of both crises | `code/transition/transition_main.jl` |
+| welfare, incidence, held margin, training cost | `code/counterfactuals/counterfactuals_main.jl` (after `transition_main.jl`) |
+| figures and tables | `code/plots_and_tables/plots_and_tables_main.jl` (skeleton; no exhibit yet) |
 
 Run from the repository root with the pinned environment:
 
@@ -113,9 +115,9 @@ on a crisis window, so it can stay set while the window changes. `MCMC_main.jl` 
 read it.
 
 `POINT_ESTIMATE` is a constant at the top of each script that reads an estimate
-(`transition_main.jl`, `model_main.jl`, `policy_main.jl` and the tools in `code/tools/`):
-`:smm` reads `estimate_<w>W_smm.jls`, `:mcmc` reads `estimate_<w>W_mcmc.jls`. A transition
-reads both windows of a pair at the same point, never one of each.
+(`transition_main.jl` and `counterfactuals_main.jl`, default `:mcmc`; `model_main.jl`, default
+`:smm`): `:smm` reads `estimate_<w>W_smm.jls`, `:mcmc` reads `estimate_<w>W_mcmc.jls`. A
+transition reads both windows of a pair at the same point, never one of each.
 
 The warm start (`INIT_MODE = :warmstart`, §8a of `smm_main.jl`) scores every candidate
 under the current code, prints one line per candidate with its Q, and starts from the
@@ -151,16 +153,12 @@ tables, a crisis window's run and its chain, and the gates.
 | threaded evaluation | `code/gates/check_threading.jl` | a solve inside `Threads.@threads` returning a non-finite objective, or one that is not bitwise equal to the serial value |
 | unskilled hiring margin | `code/gates/check_hire_margin.jl` | a node, farther than 1e-6 relative from a^h = b̃_U/P_U, where the solved p*_U < 1 and the closed-form hireable set a_U > a^h disagree |
 | output-tree layout | `code/gates/check_output_tree.jl` | a `.csv` in `tables/`, an artifact under `code/`, a `savefig` outside `plots_and_tables/`, a hardcoded output path, an `smm → mcmc` include |
-| bundle compatibility | `code/tools/migrate_bundles.jl` | a rebuilt bundle not reproducing the reference Q recorded at extract time |
 | transition path runs | `code/smoke/smoke_transition.jl` | a terminal steady state that does not solve, or a non-finite series on the path |
-| transition solves a *transitory* path | `code/tools/transition_audit.jl` | the path drifts off the steady state it started from under a null shock (`TA_NULL=true`), sits on the segment between its endpoints, or misses the post-switch equilibrium at the terminal date |
 
 A bundle written before v40.0.0 will not load: `SimParams` lost a field in each of v39.3.0
 (`anderson_m`) and v40.0.0 (`tol_global`), and Julia's serialiser reads structs
-positionally. Carry it across with `migrate_bundles.jl extract` on
-the code that wrote it, then `rebuild` on this code — `provenance.migrated_from` then names
-the version that produced the estimate, while `provenance.version` names the code that
-last wrote the file.
+positionally. A rebuilt bundle records in `provenance.migrated_from` the version that
+produced the estimate, while `provenance.version` names the code that last wrote the file.
 
 ## What "converged" means
 
@@ -202,61 +200,46 @@ entry object is read at p = 1 itself, which is not a quadrature node: `entry_sur
 gives the closed-form S_U(a_U,1), so J_U(a_U,1) rises continuously from zero at a^h, and the
 hiring atom `eU_entry` is paid the entry wage w_U(a_U,1).
 
-`transition_audit.jl` is the gate the smoke test cannot be: finiteness does not distinguish
-a transition from a sequence of steady states. `TA_NULL=true` runs a window against itself,
-where the true path is the constant one, so any drift measures the gap between the forward
-laws of motion and the stationary KFE with no economics mixed in. Run it after any change
-to either. Per-date series land in `output/logs/transition_audit_{pair}[_null].csv`.
-
 ## Transition path
 
-`code/transition/transition_main.jl` solves, for each scenario in `SCENARIOS`, the perfect-
-foresight path from the baseline window's equilibrium to the crisis window's after an
+`code/transition/transition_main.jl` solves, for each pair in `PAIRS` (`:fc`, `:covid`), the
+perfect-foresight path from the baseline window's equilibrium to the crisis window's after an
 unanticipated, lasting change of every estimated parameter, the vacancy costs included, at
-date 0, then draws the panels
-and tables. Its settings are the constants in its section 1:
+date 0, and saves it. It plots nothing. Its settings are the constants below its module loads:
 
 | setting | meaning |
 |---|---|
-| `SCENARIOS` | any of the transition pairs `PAIRS` (`code/paths.jl`), three per event: `:fc`, `:covid` run to the crisis estimate, `:fc_cf1`, `:covid_cf1` to the cf1 estimate, `:fc_cf2`, `:covid_cf2` to the cf2 estimate; default `[:fc, :covid]` |
-| `POINT_ESTIMATE` | `:smm` reads both windows of each pair at their SMM estimates, `estimate_<w>W_smm.jls`; `:mcmc` at their chains' estimates, `estimate_<w>W_mcmc.jls` (the posterior mean of the retained draws), and stops for a window whose chain aborted or never ran |
-| `TR_T_MAX`, `TR_N_STEPS` | the fine time grid (120 months in half-month steps) |
-| `TR_TOL`, `TR_MAXIT`, `TR_DAMP` | the outer loop on the tightness paths: tolerance on max over dates of \|ln θ^new − ln θ\|, iteration cap, damping |
+| `POINT_ESTIMATE` | `:mcmc` (default) reads both windows of each pair at their chains' estimates, `estimate_<w>W_mcmc.jls` (the posterior mean of the retained draws), and stops for a window whose chain aborted or never ran; `:smm` at their SMM estimates, `estimate_<w>W_smm.jls` |
+| `T_MAX`, `N_STEPS` | the fine time grid (120 months in half-month steps) |
+| `TOL`, `MAXIT`, `DAMP` | the outer loop on the tightness paths: tolerance on max over dates of \|ln θ^new − ln θ\|, iteration cap, damping |
 
 The grids are each bundle's own estimation grid (`spec.run`); the run stops if the two windows
 differ in the grid or in the ability distribution and demographic rates, which a crisis window
-holds at its paired baseline (and a counterfactual window the training cost too), or if either file is not an estimate under this code (written by
-another MAJOR version and its Q does not reproduce). The tables
-phase reads the transition files of the `POINT_ESTIMATE` it runs under, stops on one that records
-another point, and reads the two estimate files each records, so it reports exactly the points
-the paths were solved at. Each endpoint is the solve at its window's tightnesses
+holds at its paired baseline, or if either file is not an estimate under this code (written by
+another MAJOR version and its Q does not reproduce). Each endpoint is the solve at its window's tightnesses
 (`equilibrium_at`), under that window's estimation settings (`spec.sim`), and its vacancy costs
 are computed there; along the path the costs switch at date 0 and the tightness paths θ_U(t),
 θ_S(t) are solved from free entry at every date. The horizon is not a setting: it doubles from
 120 months, with a geometric tail beyond the fine grid, until no reported series moves by more
 than 1e-3 of its scale over the first 36 months, and neither mean log wage by more than 1e-3 in
-log units (`solve_with_horizon`, `transition_simulation.jl`); every trial is recorded. A cf1
-scenario runs under the cf1 model on the whole path: its endpoint model carries the held
-choices, so at every date τ and d are the held arrays and every envelope over training or over
-the market is the held branch (`transition_values.jl`, `_d_matrix` in `transition_solver.jl`).
+log units (`solve_with_horizon`, `transition_simulation.jl`); every trial is recorded. A model
+that carries held choices (`Model.held`, used by `code/counterfactuals/held_margin.jl`) runs
+under them on the whole path: at every date τ and d are the held arrays and every envelope over
+training or over the market is the held branch (`transition_values.jl`, `_d_matrix` in
+`transition_solver.jl`).
 
-The output is `output/transition/transition_{scenario}{W}_{point}.jls`, one NamedTuple (`schema =
-2`), the same field set for every scenario: version and provenance; scenario, point, bundle files and the point of each window; both
+The output is `output/transition/transition_{pair}{W}_{point}.jls`, one NamedTuple (`schema =
+3`), the same field set for every pair: version and provenance; pair, point, bundle files and the point of each window; both
 windows' parameters; settings, horizon and the horizon trials; the crisis window (its length in
-months from `windows.json` and a per-date marker); `result` (the `TransitionResult` the panels
-plot; its mean wages are mean log wages, the units of the data moments they are plotted against);
-`baseline`, the same series at the pre-switch steady state, which the panels draw before the
-switch; `path`, every value function, policy and mass by date (`TransitionPath`, by field name);
+months from `windows.json` and a per-date marker); `result` (the `TransitionResult`; its mean
+wages are mean log wages, the units of the data moments); `baseline`, the same series at the
+pre-switch steady state; `path`, every value function, policy and mass by date (`TransitionPath`, by field name);
 `statistics`, the flows and the rate moments at every date; `reversals`, how often the crossing,
-training and on-the-job-search choices change direction; and both endpoint models with their
-equilibrium objects. Every table and plot of the run ends in the same `{W}_{point}`
-(`model_fit_A_diagonalW_smm.tex`, `transition_panel_covid_diagonalW_mcmc.png`), so the runs at the
-two points sit side by side; `transition_file` and `read_transition` (`transition_params.jl`) name
-and read the file. The data standard error printed under each data moment of the model-fit tables
-(`model_fit_A`, `model_fit_B`, `make_model_fit_tables` in `plots_and_tables/transition.jl`) and
-drawn as the panels' bands is the moment's sampling SD σ̂_k, the square root of its entry in
-`data/derived/sampling_var_{window}.csv` (`load_sampling_variances`, `code/smm/moments.jl`), the
-same σ̂_k the diagonal weighting divides by.
+training and on-the-job-search choices change direction; both endpoint models with their
+equilibrium objects; and `types`, every type's value and mass in each state at date 0 and at the
+baseline (`transition_types.jl`), which the incidence exercise reads. The file name ends in
+`{W}_{point}`, so the runs at the two points sit side by side; `transition_file` and
+`read_transition` (`transition_params.jl`) name and read the file.
 
 ## The tightnesses as parameters
 
@@ -352,8 +335,7 @@ One is on the match-quality grid: the on-the-job-search cutoff `p^oj`, whose cov
 fraction `_soft_oj_weight` (`solver/grids.jl:322-331`) is read by the stationary solve
 (`solver/skilled.jl:373`), by the wage split and the E-to-E flow in the moment layer
 (`solver/equilibrium.jl:197-219`, `:330-347`), by the transition's poaching outflow
-(`transition/transition_solver.jl:448`) and by the two wage consumers in `policy/` and
-`plots_and_tables/`. One hard read of `p^oj` survives — `Γ` evaluated at the cutoff's grid
+(`transition/transition_solver.jl`). One hard read of `p^oj` survives — `Γ` evaluated at the cutoff's grid
 node (`solver/equilibrium.jl:314`) — and it is what remains of the jump below.
 
 From v57.0.0 the top node's cell is [p_N, 1] in both covered-fraction rules (`_soft_weight`,
@@ -372,9 +354,9 @@ serve figures only.
 | is the ΔQ jump solve precision or a threshold? | `output/logs/drain_jump_tolerance_invariance_base_fc.csv` | the jump measured at `tol_global` = 1e-4, 1e-6, 1e-8 with all other settings held fixed; it moves by < 1e-5 relative across four orders of magnitude, against the factor 1e-4 a precision artefact would give, so it is a property of the criterion. Produced under the pre-v40.0.0 global tolerance, which no longer exists; a fresh run sweeps the block tolerances instead (`PROBE_TOL`) and is not comparable rung-for-rung |
 
 Softening the moment layer's two `p^oj` reads in v27.0.0 cut that jump by 15.9× and the
-per-moment steps behind it by 31–2070×. Everything below is produced by
-`code/tools/ojs_continuity_probe.jl` (`PROBE_MODE` ∈ `moments`, `jump`, `crossing`,
-`jacobian`), run once against a pre-v27 copy of the tree and once against this one.
+per-moment steps behind it by 31–2070×. Everything below was produced by an OJS-continuity
+probe (modes `moments`, `jump`, `crossing`, `jacobian`), no longer in the repository, run once
+against a pre-v27 copy of the tree and once against the v27 tree.
 
 | object | file | what it establishes |
 |---|---|---|

@@ -1,19 +1,13 @@
 #!/usr/bin/env julia
 ############################################################
-# gates/check_hire_margin.jl — the solved hiring margin must be the closed form's
+# gates/check_hire_margin.jl — the solved hiring margin must be the closed form's.
 #
-# WHAT THIS CATCHES. The unskilled hiring margin is not solved for: by the hireable-set
-# lemma a type is hired iff a_U > a^h = b̃_U / P_U, at every tightness, and the solver
-# weights each ability cell by its covered fraction above a^h (`hire_fraction`). The
-# reservation quality p*_U is solved, and the lemma says p*_U(a_U) < 1 exactly on the
-# same set. If the two ever disagree away from a^h, either the lemma's premises have
-# been broken by a model change (a non-degenerate entry quality, a new term in the
-# surplus) or the p*_U update has, and `hire_fraction` is then weighting the wrong set
-# with no error raised anywhere.
-#
-# A node within PRECISION of a^h may disagree: there 1 − p*_U is of the order of the
-# solve tolerance, so the node's classification is decided by rounding. That case is
-# reported, not failed — the closed form is exact and is what the solver uses.
+# A new unskilled match starts at p = 1, so a type is hired iff a_U > a^h = b̃_U/P_U at
+# every tightness; the solver weights each cell by its covered fraction above a^h
+# (`hire_fraction`). At every stored estimate this checks that the solved p*_U is below 1
+# exactly on that set. A disagreement away from a^h means a model change broke the
+# premise and `hire_fraction` weights the wrong set. A node within PRECISION of a^h is
+# reported, not failed: there the classification is rounding.
 #
 #   julia --project=. code/gates/check_hire_margin.jl
 ############################################################
@@ -37,17 +31,17 @@ for f in ("moments", "smm_params", "bundle", "smm")
 end
 
 const W_SUFFIX = weighting_suffix(run_weighting())
-# Relative distance to a^h inside which a node's p*_U classification is rounding. 1 − p*_U
-# is first order in (a_U − a^h)/a^h, so a node that close sits under the 1e-10 classification
-# threshold or the solve error; measured at the base_fc estimate, that band is 1.0e-10 wide.
+# Relative distance to a^h inside which a node's p*_U classification is rounding: 1 − p*_U
+# is first order in it (the band measured at the base_fc estimate is 1.0e-10 wide).
 const PRECISION = 1e-6
 
 """
     hire_margin_report(model) -> NamedTuple
 
-The closed-form hired set against the solved one at a converged model: the straddling
-cell and its χ, and every node where `x_i > a^h` and `p*_U(x_i) < 1` disagree, with its
-relative distance to `a^h`.
+Compare the closed-form hired set with the solved one at a converged `model`. Returns
+`(aʰ, k, χk, disagree, gap, one_minus_p)`: the threshold, the straddling cell and its
+covered fraction (`nothing`/NaN if none), the nodes where `x_i > a^h` and
+`p*_U(x_i) < 1 − 1e-10` disagree, their relative distance to `a^h`, and `1 − p*_U` there.
 """
 function hire_margin_report(model::Model)
     x  = model.grids.x

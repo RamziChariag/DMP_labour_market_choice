@@ -1,22 +1,23 @@
 ############################################################
-# data_processing/validation.jl
+# code/data_and_descriptives/validation.jl
 #
-# Stage 9 — validation and diagnostics, run at the very end of the
-# pipeline. Prints the moment table, published-benchmark range checks,
-# cross-window direction checks, and the stationary-identity gap. Reads
-# the in-memory results, which hold training_share as the saved CSVs do.
+# End-of-pipeline diagnostics (printed only, nothing written).
 #
-# Reads:  phi_calibration.csv, nu_estimation.csv (+ in-memory moments)
-# Writes: — (prints only)
-#
-# Plain include() file: definitions only, no top-level execution.
-# `using` packages and path consts come from data_processing_main.jl.
+# Entry points:
+#   print_ee_source_comparison()  SIPP vs J2J ee_rate_S by window
+#   run_validation(all_moments)   moment table, benchmark ranges, crisis
+#                                 signatures, stationary-identity gap
+# Reads j2j_ee_rates.csv, sipp_ee_rates.csv, phi_calibration.csv, nu_estimation.csv.
+# Definitions only; packages and path constants come from data_processing_main.jl.
 ############################################################
 
-# ee_rate_S source comparison. Reads the two derived EE-rate CSVs and prints,
-# per window, the SIPP main-job-change hazard against the shipped Census J2J E4
-# hazard, their ratio, and the percentage by which J2J exceeds SIPP. Called from
-# the driver right after the SIPP EE stage. Guards a missing CSV or window.
+"""
+    print_ee_source_comparison()
+
+Print, per window, the SIPP main-job-change rate against the shipped J2J E4
+rate, their ratio and the percentage by which J2J exceeds SIPP. Missing files
+or windows print NaN.
+"""
 function print_ee_source_comparison()
     j2j_path  = joinpath(DERIVED_DIR, "j2j_ee_rates.csv")
     sipp_path = joinpath(DERIVED_DIR, "sipp_ee_rates.csv")
@@ -45,6 +46,15 @@ function print_ee_source_comparison()
     return nothing
 end
 
+"""
+    run_validation(all_moments)
+
+Print the validation report for `all_moments` (window → moment table from
+`make_moments`): (1) the moments side by side; (2) values outside published or
+data-implied ranges; (3) each crisis pair's change in ur_U, θ_U and θ_S,
+classified as a move along the Beveridge curve or an outward shift; (4) the
+stationary-identity gap skilled_share·(1 − t) vs (φ/ν)·t on the shipped t.
+"""
 function run_validation(all_moments)
     @info "Stage 9: Validation diagnostics..."
 
@@ -62,20 +72,14 @@ function run_validation(all_moments)
     end
     display(wide)
 
-    # ── 2. Sanity checks with published / data-implied benchmarks ──
-    # Wage moments are RAW log real weekly earnings (no within-window
-    # normalisation; the model's aggregate scale A absorbs the dollar level).
-    # base_covid targets, for reference: mean_wage_U≈6.67, mean_wage_S≈7.06,
-    # p25≈6.31/6.74, p50≈6.68/7.06, p75 one quartile up, emp_var≈0.31/0.27. The level bands below
-    # bracket plausible US log weekly earnings (~e^6 = $400 to ~e^7.6 = $2000).
+    # ── 2. Benchmark ranges ───────────────────────────────────────
+    # Wage bands are for raw log real weekly earnings (≈ e^6 = $400 to
+    # e^7.6 = $2000), since wages are not normalised.
     println("\n── 2. Benchmark comparisons ──")
     benchmarks = Dict(
         :skilled_share => (name="Skilled share (BA+)", lo=0.20, hi=0.50),
-        # The upper bound is the model's own ceiling ν/(φ+ν): above it
-        # training_share is unattainable at ANY parameter vector, so a target
-        # there is a construction defect rather than a hard fit. At φ = 1/48 the
-        # ceiling is 0.134 for the FC pair and 0.139 for COVID; 0.134 is the
-        # binding one.
+        # Upper bound = the model's ceiling ν/(φ+ν) at φ = 1/48 (0.134 for the
+        # FC pair, the binding one): above it no parameter vector can match.
         :training_share => (name="Training share (4-year undergraduate)", lo=0.02, hi=0.134),
         :theta_U => (name="Unskilled tightness V/U", lo=0.1, hi=5.0),
         :theta_S => (name="Skilled tightness V/U", lo=0.1, hi=10.0),
@@ -84,7 +88,6 @@ function run_validation(all_moments)
         :sep_rate_U => (name="Unskilled EU sep rate (monthly)", lo=0.005, hi=0.05),
         :sep_rate_S => (name="Skilled EU sep rate (monthly)", lo=0.002, hi=0.03),
         :ee_rate_S => (name="Skilled EE rate (monthly)", lo=0.005, hi=0.05),
-        # Wage levels — RAW log real weekly earnings (not normalised).
         :mean_wage_U => (name="Mean log wage unskilled", lo=6.0, hi=7.2),
         :mean_wage_S => (name="Mean log wage skilled", lo=6.4, hi=7.6),
         :p10_wage_U => (name="p10 log wage unskilled", lo=5.6, hi=6.8),
@@ -97,13 +100,10 @@ function run_validation(all_moments)
         :p75_wage_S => (name="p75 log wage skilled", lo=6.6, hi=7.8),
         :p90_wage_U => (name="p90 log wage unskilled", lo=6.4, hi=7.6),
         :p90_wage_S => (name="p90 log wage skilled", lo=6.8, hi=8.0),
-        # Wage dispersion (includes σ_w measurement component on the data side).
         :emp_var_U => (name="Var log wage unskilled", lo=0.10, hi=0.50),
         :emp_var_S => (name="Var log wage skilled", lo=0.10, hi=0.50),
         :wage_premium => (name="Log skill premium", lo=0.20, hi=0.80),
-        # Cross-market / duration moments — data-implied bands (base_covid
-        # targets ≈ 0.239 / 0.206 / 0.256). LTU rises in crisis windows, so the
-        # upper band is wider than the baseline value.
+        # Data-implied bands; LTU rises in crises, hence its wide upper band.
         :overlap_UgtS => (name="P(w_U > med w_S) overlap", lo=0.05, hi=0.45),
         :overlap_SltU => (name="P(w_S < med w_U) overlap", lo=0.05, hi=0.45),
         :ltu_share_S => (name="Skilled long-term-unemp share (≥27wk)", lo=0.05, hi=0.50),
@@ -129,16 +129,10 @@ function run_validation(all_moments)
     println("  Flagged: $n_flags values outside expected ranges")
 
     # ── 3. Crisis signatures ──────────────────────────────────────
-    # Unemployment rises in both crises; what separates them is where the
-    # economy sits relative to the Beveridge curve. A movement ALONG the curve
-    # (u up, θ down) is a symmetric demand contraction; an OUTWARD shift
-    # (u up, θ up) is a matching-efficiency or reallocation shock.
-    #
-    # This block deliberately does not encode a single expected direction for
-    # θ. An earlier version asserted "θ_U should fall" in both pairs, which
-    # flagged the COVID pattern as an anomaly — it is the finding, not a data
-    # defect. What IS asserted is the part common to any crisis: unemployment
-    # rises. The θ direction is reported and classified, not judged.
+    # The only assertion is that a crisis raises unemployment. The direction of
+    # θ is classified, not judged: u up and θ down is a move along the Beveridge
+    # curve (demand contraction), u up and θ up an outward shift (matching or
+    # reallocation shock). Telling the two crises apart is the finding.
     println("\n── 3. Crisis signatures (Beveridge position) ──")
     for (lab, wb, wc) in (("FC", :base_fc, :crisis_fc),
                           ("COVID", :base_covid, :crisis_covid))
@@ -148,8 +142,6 @@ function run_validation(all_moments)
         t1, t2 = get_m(wb, :theta_U), get_m(wc, :theta_U)
         s1, s2 = get_m(wb, :theta_S), get_m(wc, :theta_S)
         (!isfinite(u1) || !isfinite(u2) || !isfinite(t1) || !isfinite(t2)) && continue
-        # The one assertion: a crisis raises unemployment. If this fails the
-        # window definitions are wrong, not the economics.
         flag = u2 > u1 ? "✓" : "⚠ CHECK WINDOWS"
         sig  = t2 < t1 ? "along the curve  (symmetric demand contraction)" :
                          "OUTWARD shift    (matching / reallocation shock)"
@@ -159,16 +151,11 @@ function run_validation(all_moments)
     println("  The two pairs must not receive the same classification: telling")
     println("  them apart is what the model is for.")
 
-    # ── 4. Stationary-identity gap by window ──────────────────────
-    # Model identity (d ≡ 0 in stationary equilibrium, strict
-    # training_share convention):
-    #     skilled_share * (1 - training_share)
-    #   = (φ/ν) * training_share
-    # A small residual is informative; a large residual flags
-    # non-stationarity in the window. Computed on the SHIPPED training_share
-    # (the enrolment-based target), which is the quantity the SMM is asked to match — an
-    # earlier version ran it on the raw CPS count and reported gaps roughly
-    # three times larger, for a number no estimation ever sees.
+    # ── 4. Stationary-identity gap ────────────────────────────────
+    # Stationarity implies skilled_share·(1 − t) = (φ/ν)·t. A positive gap means
+    # a larger skilled stock than the training flow sustains, a negative one a
+    # larger trainee stock than the skilled stock reflects. Computed on the
+    # shipped training_share; each crisis window uses its baseline's ν.
     println("\n── 4. Stationary-identity gap (skilled_share / training_share / φ / ν) ──")
 
     phi_cal = let p = joinpath(DERIVED_DIR, "phi_calibration.csv")
@@ -183,7 +170,6 @@ function run_validation(all_moments)
             nu_lookup[Symbol(r.window)] = r.nu
         end
     end
-    # Each crisis pair shares the ν of its baseline
     nu_for = Dict(
         :base_fc      => get(nu_lookup, :base_fc, NaN),
         :crisis_fc    => get(nu_lookup, :base_fc, NaN),
@@ -202,12 +188,6 @@ function run_validation(all_moments)
             lhs = ss * (1 - ts)
             rhs = (phi_cal / nu) * ts
             gap = lhs / rhs - 1
-            # Sign is the informative part. LHS > RHS (gap > 0) means the data
-            # carry a larger skilled stock than the calibrated flow into it can
-            # sustain — the model must find the extra skilled mass somewhere
-            # other than the training margin. LHS < RHS means the opposite:
-            # more training than the skilled stock reflects, i.e. the trainee
-            # state is larger than a stationary read of φ/ν implies.
             side = gap > 0 ? "skilled stock > flow implies" :
                              "training stock > flow implies"
             @printf("    %-14s  ν = %.6f  gap = %+.3f   %s\n",

@@ -1,36 +1,27 @@
 ############################################################
-# smm.jl — SMM objective and optimisation loops
+# smm/smm.jl — the SMM objective and the optimisers
 #
-# Main entry points
-#   run_smm(spec; method, rng,
-#           seed_bank, prev_optimum)   single-run estimation; seed_bank seeds
-#                                      SA/DE from candidate clusters
+# The objective Q(θ) = g′Wg / q_scale, g the raw deviations of the model moments at the
+# equilibrium θ fixes from their targets (`equilibrium_at`, `smm_objective`). The
+# optimisers work in the unconstrained (logit) coordinates of the free parameters:
+#   :sa            simulated annealing with a measured per-coordinate proposal
+#   :de            differential evolution with a measured, yield-allocated population
+#   :sa_de         annealing, then DE from its point
+#   :neldermead    Optim's Nelder-Mead from a feasible simplex
+#   :lbfgs, :bfgs  gradient polish with a measured finite-difference gradient
+# Annealing is written here rather than taken from Optim, whose SA mishandles Inf
+# proposals; here an Inf proposal is always rejected.
 #
-# Methods
-#   :de           differential evolution (default global search)
-#   :sa           simulated annealing
-#   :neldermead   Nelder–Mead from Optim.jl (local polish)
-#   :lbfgs, :bfgs gradient-based polish
-#
-# SA is implemented here rather than delegated to Optim.jl because
-# Optim's SA rejects Inf proposals silently and stalls in regions
-# where many parameter draws produce non-converging models.  This
-# loop handles Inf correctly (always reject, never update).
-#
-# The SMM objective operates on the stationary-equilibrium moment
-# vector. The discrete cross-market policy d(x) is identically zero
-# in stationary equilibrium and is therefore not subject to any
-# feasibility filter here; if the solver returns a non-zero d for some
-# parameter draw, the resulting moments still enter the objective
-# normally.
+# Entry points: run_smm, smm_objective, equilibrium_at, select_equilibrium,
+# attracting_check, write_checkpoint, save_results, period_bundle, point_in_spec.
 ############################################################
 
 """
-    _load_smm_bundle(path; delete_on_fail=false, label="file") → Union{Nothing, NamedTuple}
+    _load_smm_bundle(path; delete_on_fail = false, label = "file") → NamedTuple | nothing
 
-Safely deserialise an SMM .jls bundle of the form
-    (result = ::SMMResult, spec = ::SMMSpec, sim = ::SimParams).
-Returns the bundle on success, or `nothing` on failure / stale format.
+The bundle at `path` if it deserialises to a NamedTuple with non-`nothing` `result` and
+`spec`; otherwise `nothing`, with a warning naming `label`, and the file deleted when
+`delete_on_fail`.
 """
 function _load_smm_bundle(path::String; delete_on_fail::Bool=false, label::String="file")
     if !isfile(path)
@@ -72,14 +63,14 @@ function _load_smm_bundle(path::String; delete_on_fail::Bool=false, label::Strin
 end
 
 """
-    point_in_spec(b, spec; estimated_only = true) -> (θ, unmatched, clamped)
+    point_in_spec(b, spec; estimated_only = true) → (θ, unmatched, clamped)
 
 The point of bundle `b` as an unconstrained vector of `spec`. Where `b`'s free set and box
 are `spec`'s, `θ` is `b`'s own vector, bit for bit. Otherwise each free parameter of `spec`
-takes `b`'s value of the same (block, name), pulled into `spec`'s box (listed in `clamped`).
-With `estimated_only`, a parameter `b`'s run did not estimate keeps `spec`'s own start and
-is listed in `unmatched`; without it, every value is read off `b`'s decoded blocks, which
-gives the pinned value where `b`'s run pinned one.
+takes `b`'s value of the same (block, name), pulled into `spec`'s box (listed in
+`clamped`); with `estimated_only`, a parameter `b`'s run did not estimate keeps `spec`'s
+start (listed in `unmatched`), and without it every value is read off `b`'s decoded point,
+pinned values included. A joint spec is filled period by period.
 """
 function point_in_spec(b, spec::SMMSpec; estimated_only::Bool = true)
     same = [(ps.block, ps.name, ps.lb, ps.ub) for ps in b.spec.free] ==
@@ -87,9 +78,8 @@ function point_in_spec(b, spec::SMMSpec; estimated_only::Bool = true)
     same && return (θ = collect(float.(b.result.theta_opt)), unmatched = String[],
                     clamped = String[])
     if is_joint(spec)
-        # Period by period: the baseline starts from another baseline estimate, each period's
-        # coordinates from that estimate's same period. A common parameter is written by every
-        # period, with one value.
+        # Each period from the same period of `b`; a common parameter is written by every
+        # period with one value.
         θ = fill(NaN, length(spec.free));  unmatched = String[];  clamped = String[]
         for (w, s, idx) in period_list(spec)
             pt = point_in_spec(period_bundle(b, w), s; estimated_only = estimated_only)
@@ -120,11 +110,10 @@ end
 # ============================================================
 
 """
-    active_moment_keys(spec) -> Vector{Symbol}
+    active_moment_keys(spec) → Vector{Symbol}
 
-Keys of the moments the objective actually scores, in the order the deviation
-vector (and hence `spec.W`) is built.  Single source of truth for that order:
-`compute_loss_matrix` and `smm_objective`'s `moments_out` both use it.
+The moments the objective scores (weight > 0), in the order of the deviation vector and of
+`spec.W`.
 """
 active_moment_keys(spec::SMMSpec) =
     Symbol[k for k in keys(spec.moments) if spec.moments[k].weight > 0.0]
@@ -133,26 +122,9 @@ active_moment_keys(spec::SMMSpec) =
 """
     compute_loss_matrix(m_model, spec, W) → Float64
 
-    Q(θ) = g(θ)' W g(θ) / q_scale,   where g_k = m_k^model − m̂_k   (RAW deviations)
-
-Single weighted-loss path for every weighting scheme.  The deviation
-vector is in RAW moment units (no |m̂_k| division); all per-moment
-scaling lives entirely in `W`:
-
-  • Equal weight (relative):  W = Diagonal(weight_k / m̂_k²)
-        ⟹ g' W g = Σ_k weight_k · (g_k / m̂_k)²
-        i.e. the scale-normalised relative-deviation loss.
-  • Diagonal-σ:                W = Diagonal(1 / σ̂²_samp,k)
-
-`W` is built once, outside the hot loop, by `build_smm_spec`
-(equal-weight case) or `load_weight_matrix` (diagonal-σ).
-
-`spec.q_scale` is a DISPLAY-ONLY positive constant (default 1.0) that
-divides the reported Q.  Because it is constant across all θ, dividing
-Q by it does NOT move the argmin — it only rescales the reported number
-to a human-readable magnitude.  The optimiser, gradients, and acceptance
-ratios all see the same rescaled-by-a-constant surface, so optimisation
-is mathematically identical to the un-normalised objective.
+Q = g′Wg / q_scale with g_k = m_k − m̂_k over the active moments, in raw moment units; all
+scaling lives in `W` (Diagonal(weight_k / m̂_k²) for equal weights, Diagonal(1/σ̂²_k) for
+the diagonal weighting). Raises if `W` does not match the number of active moments.
 """
 function compute_loss_matrix(
     m_model::NamedTuple,
@@ -190,23 +162,15 @@ end
 const _NO_EQUILIBRIUM = (Q = Inf, moments = nothing, model = nothing, label = :none, eq = nothing)
 
 """
-    equilibrium_at(θ_unc, spec; Nx, Np_U, Np_S, constrained, sim) → NamedTuple
+    equilibrium_at(θ_unc, spec; Nx, Np_U, Np_S, constrained, sim) → (Q, moments, model, k)
 
-The equilibrium the estimation scores at θ, and everything a consumer needs from it:
-`(Q, moments, model, k)`.  θ carries the tightnesses, so the point is one equilibrium,
-solved in one pass (`solve_model(...; tightness)`), with the vacancy costs free entry
-implies there, `k = (U = k_U, S = k_S)`, installed in `model`'s parameter blocks.  The
-point is infeasible — `Q = Inf`, `model = nothing`, `k = (U = NaN, S = NaN)` — when the
-solve fails, the residual battery does not certify it, or a scored moment is not finite.
-
-Minimising Q over (ω, θ_U, θ_S) is the best-fitting-equilibrium estimator exactly: at
-given costs the model may have several equilibria, and each is the solution at its own
-tightnesses.
-
-For the baseline's joint spec each period is solved at its own coordinates and Q is the sum
-of the periods' Q; `moments` are keyed `<moment>@<window>` as in the spec, and `model` and
-`k` hold one entry per period, keyed by its data window. The point is infeasible when any
-period is.
+The equilibrium the estimation scores at θ. θ includes the tightnesses, so the point is one
+equilibrium, solved in one pass (`solve_model(...; tightness)`), with the vacancy costs free
+entry implies there, `k = (U, S)`, installed in `model`. Minimising Q over (ω, θ_U, θ_S) is
+therefore the best-fitting-equilibrium estimator. Infeasible (`Q = Inf`, `model = nothing`,
+`k` NaN) when the solve fails, the residual battery does not certify it, or a scored moment
+is not finite. For the joint spec each period is solved at its own coordinates, `Q` is the
+sum, moments are keyed `<moment>@<window>` and `model`, `k` hold one entry per period.
 """
 function equilibrium_at(
     θ_unc :: AbstractVector{Float64},
@@ -221,7 +185,6 @@ function equilibrium_at(
                                                    Np_S = Np_S, constrained = constrained,
                                                    sim = sim)
     none = (Q = Inf, moments = nothing, model = nothing, k = (U = NaN, S = NaN))
-    # constrained = true: θ_unc is θ itself, not the unconstrained t. See unpack_θ.
     cp, up, sp, tight = unpack_θ(θ_unc, spec; constrained = constrained)
     local model, m_model
     try
@@ -232,15 +195,18 @@ function equilibrium_at(
     catch
         return none
     end
-    # A moment the equilibrium could not compute leaves Q undefined.
     all(k -> isfinite(getproperty(m_model, k)), active_moment_keys(spec)) || return none
     Q = compute_loss_matrix(m_model, spec, spec.W)
     return (Q = Q, moments = m_model, model = model,
             k = (U = model.unsk_par.k, S = model.skl_par.k))
 end
 
-# The periods in turn, never in parallel: an evaluation is the same whether it runs alone or
-# inside threaded work, and the periods' solves already thread internally.
+"""
+    _joint_equilibrium_at(θ_unc, spec; Nx, Np_U, Np_S, constrained, sim) → NamedTuple
+
+`equilibrium_at` for the joint spec. The periods are solved in turn, never in parallel, so
+an evaluation is the same alone or inside threaded work.
+"""
 function _joint_equilibrium_at(θ_unc, spec::SMMSpec; Nx, Np_U, Np_S, constrained, sim)
     pl  = period_list(spec)
     ws  = Tuple(w for (w, _, _) in pl)
@@ -257,21 +223,15 @@ function _joint_equilibrium_at(θ_unc, spec::SMMSpec; Nx, Np_U, Np_S, constraine
 end
 
 """
-    select_equilibrium(model, spec; branch) → NamedTuple
+    select_equilibrium(model, spec; branch = :best) → (Q, moments, model, label, eq)
 
-At given vacancy costs, the attracting skilled equilibrium with the lowest Q, and
-everything a consumer needs from it: `(Q, moments, model, label, eq)`.  `model` is solved
-at those costs (`solve_model!`); `skilled_equilibria` finds every attracting skilled
-equilibrium there (one, or the pair L and H), and only a root the full residual battery
-certifies is eligible.  When none is, `Q = Inf`, `model = nothing`.  For exercises that hold
-the costs fixed (counterfactuals, comparative statics); the estimation does not select,
-because its θ fixes the equilibrium (`equilibrium_at`).
-
-`branch` restricts the choice to one side of the hump: `:best` takes the lowest Q; `:L` or
-`:H` takes that equilibrium, and a lone root qualifies when it is on that side or the map
-has no hump (`:U`), so a branch that does not exist gives `Inf` rather than a switch to the
-other one.  `label` is the selected root's (`:L`, `:H` or `:U`, `:none` when infeasible);
-`eq` is the detector's report.
+At the vacancy costs of `model`, the attracting skilled equilibrium with the lowest Q, for
+exercises that hold the costs fixed (counterfactuals, comparative statics). Every
+attracting root `skilled_equilibria` finds (one, or L and H) is eligible if the residual
+battery certifies it. `branch = :L` or `:H` restricts the choice to that side; a lone root
+qualifies when on that side or when the map has no hump (`:U`), so a missing branch gives
+`Q = Inf` rather than the other one. `label` is the selected root's (`:none` when
+infeasible); `eq` is the detector's report.
 """
 function select_equilibrium(model::Model, spec::SMMSpec; branch::Symbol = :best)
     local eq
@@ -291,7 +251,6 @@ function select_equilibrium(model::Model, spec::SMMSpec; branch::Symbol = :best)
         catch
             continue
         end
-        # A moment the equilibrium could not compute leaves Q undefined; the root is rejected.
         all(k -> isfinite(getproperty(m_model, k)), active_moment_keys(spec)) || continue
         Q = compute_loss_matrix(m_model, spec, spec.W)
         Q < best.Q && (best = (Q = Q, moments = m_model, model = r.model, label = r.label, eq = eq))
@@ -302,24 +261,20 @@ end
 """
     equilibrium_tag(sel) → String
 
-The equilibrium `select_equilibrium` selected, in a run report: "unique" or e.g. "H of 2".
+The equilibrium `select_equilibrium` selected, for a report: "unique", e.g. "H of 2", or
+"none".
 """
 equilibrium_tag(sel) = sel.eq === nothing || sel.model === nothing ? "none" :
                        length(sel.eq.roots) == 1 ? "unique" :
                        @sprintf("%s of %d", sel.label, length(sel.eq.roots))
 
 """
-    smm_objective(θ_unc, spec) → Float64
+    smm_objective(θ_unc, spec; Nx, Np_U, Np_S, moments_out, constrained) → Float64
 
-Q(θ) at the equilibrium θ fixes (`equilibrium_at`).  Returns Inf (never throws) on any
-failure or non-convergence, and where a scored moment is not finite.  The solver runs
-silently regardless of spec.sim.verbose.
-
-A corner equilibrium — nobody trains, everybody trains, a market holding
-no one — is an equilibrium and is scored like any other: its within-market
-moments are read at the limit of the market's composition as it empties.
-A market with no vacancies employs no one even in that limit, and its wage
-moments are 0.
+Q at the equilibrium θ fixes (`equilibrium_at`); Inf, never an exception, on any failure.
+Corner equilibria (nobody trains, everybody trains, a market holding no one) are scored like
+any other. When `moments_out` is given, it is filled with the scored moments in
+`active_moment_keys` order.
 """
 function smm_objective(
     θ_unc :: AbstractVector{Float64},
@@ -334,9 +289,6 @@ function smm_objective(
     ev = equilibrium_at(θ_unc, spec; Nx = Nx, Np_U = Np_U, Np_S = Np_S, constrained = constrained)
     isfinite(ev.Q) || return Inf
 
-    # Hand back the scored moments when the caller supplies a buffer (the MCMC
-    # driver needs them per draw for the Jacobian regression); order matches
-    # spec.W via active_moment_keys.
     if moments_out !== nothing
         ks = active_moment_keys(spec)
         @assert length(moments_out) == length(ks)
@@ -347,21 +299,19 @@ function smm_objective(
     return ev.Q
 end
 
-# Step of the attracting check, in ln θ_j: wide against the sawtooth OJS entry puts on the
-# skilled free-entry map (≈3e-4 per type, solver.jl), narrow against its curvature.
+# Step of the attracting check in ln θ_j: wide against the sawtooth OJS entry puts on the
+# skilled free-entry map (≈3e-4 per type), narrow against its curvature.
 const ATTRACT_STEP = 0.01
 
 """
     attracting_check(θ_unc, spec) → (D, market, joint)
     attracting_check(D) → (D, market, joint)
 
-Whether the equilibrium at θ is attracting under a tâtonnement in the tightnesses at its
-own vacancy costs.  `D[i,j] = ∂ ln k_i / ∂ ln θ_j` (i, j ∈ U, S), at the other parameters
-held, by central differences of `ATTRACT_STEP` in ln θ (4 solves).  Market by market the
-equilibrium attracts when each market's cost falls in its own tightness, `D_UU < 0` and
-`D_SS < 0`; jointly when `D` is stable as a 2×2 system, `tr D < 0` and `det D > 0`.  The
-second method takes a `D` measured elsewhere (MCMC_main reads it off the Jacobian).  For
-the baseline's joint spec, one check per period, keyed by its data window.
+Whether the equilibrium at θ attracts under a tâtonnement in the tightnesses at its own
+vacancy costs. `D[i,j] = ∂ ln k_i / ∂ ln θ_j` (i, j ∈ U, S) by central differences of
+`ATTRACT_STEP` (4 solves). `market`: D_UU < 0 and D_SS < 0; `joint`: tr D < 0 and
+det D > 0. The second method takes a `D` measured elsewhere. For the joint spec, one check
+per period, keyed by data window.
 """
 function attracting_check(θ_unc::AbstractVector{Float64}, spec::SMMSpec)
     if is_joint(spec)
@@ -395,8 +345,8 @@ attracting_check(D::AbstractMatrix{Float64}) =
 """
     attracting_line(chk) → String
 
-The one line a run prints about the attracting check, one per failing period of the
-baseline: empty when every verdict holds.
+The line a run prints about an attracting check, one per failing period of the baseline;
+empty when every verdict holds.
 """
 attracting_line(chk) = !haskey(chk, :D) ?
     join(["$w " * attracting_line(c) for (w, c) in pairs(chk) if !isempty(attracting_line(c))],
@@ -411,6 +361,14 @@ attracting_line(chk) = !haskey(chk, :D) ?
 # Result type
 # ============================================================
 
+"""
+    SMMResult
+
+An estimate: the unconstrained point `theta_opt`, the free parameters there keyed
+`block_name` (`params_opt`), its Q (`loss_opt`), whether the run finished on a deliberate
+stop (`converged`), the iteration count and the spec. Serialised positionally in every
+bundle: do not change its fields.
+"""
 struct SMMResult
     theta_opt  :: Vector{Float64}
     params_opt :: NamedTuple
@@ -422,14 +380,13 @@ end
 
 
 # ============================================================
-# Corner count (params within `tol` of either bound, in constrained space)
+# Corner reporting
 # ============================================================
 
 """
-    _count_corners(theta_unc, spec; tol=0.02) → Int
+    _count_corners(theta_unc, spec; tol = 0.02) → Int
 
-Count free parameters whose constrained value lies within `tol`
-(fraction of bound width) of either `lb` or `ub`.
+The number of free parameters within `tol` (a fraction of the box width) of a bound.
 """
 function _count_corners(
     theta_unc :: AbstractVector{Float64},
@@ -450,12 +407,10 @@ end
 
 
 """
-    _corner_tags(theta_unc, spec; tol=0.02) → String
+    _corner_tags(theta_unc, spec; tol = 0.02) → String
 
-Inline companion to `_count_corners`: lists which free parameters sit within
-`tol` of a bound and whether it is the lower or upper bound, e.g.
-` [skl:μ(lower), unsk:tight(upper)]`.  Returns "" when nothing is cornered, so it
-can be appended straight after a `corners=%d/%d` field with a single `%s`.
+The parameters `_count_corners` counts, with the bound each sits at, e.g.
+` [skl:μ(lower), unsk:tight(upper)]`; "" when none.
 """
 function _corner_tags(
     theta_unc :: AbstractVector{Float64},
@@ -484,8 +439,7 @@ end
 """
     _random_theta(spec, rng) → Vector{Float64}
 
-A single random start in unconstrained space: draw each free parameter
-uniformly within its bounds, then map to the logit scale.
+A random start: each free parameter uniform in its box, in unconstrained coordinates.
 """
 function _random_theta(spec::SMMSpec, rng)
     theta_j = Vector{Float64}(undef, length(spec.free))
@@ -502,17 +456,11 @@ end
 """
     RateStop(tol, span)
 
-Stop when the incumbent improves at less than `tol` per 100 evaluations, sustained
-over `span` PRODUCTIVE evaluations.
-
-The accounting is continuous rather than windowed, and the distinction that makes it
-work is between an evaluation that improved the incumbent and one that did not.  A
-flat stretch PAUSES the budget — neither advancing nor resetting it — because in this
-many dimensions a run can sit against an infeasible wall for thousands of evaluations
-and then recover; counting those would stop a descent that has not finished, and
-resetting on them would never stop at all.  The position mark advances on every call,
-so paused evaluations are discarded rather than deferred: without that the next
-productive evaluation absorbs the whole paused gap and the pause is counted after all.
+State of the rate-based stop shared by SA and Nelder-Mead: stop when the incumbent improves
+at less than `tol` per 100 evaluations, sustained over `span` PRODUCTIVE evaluations. A
+stretch without improvement pauses the count — neither advancing nor resetting it — since
+the search can sit against an infeasible wall and recover; the position mark advances on
+every call, so a paused stretch is discarded rather than counted later.
 """
 mutable struct RateStop
     tol      :: Float64
@@ -525,9 +473,10 @@ end
 RateStop(tol::Float64, span::Int) = RateStop(tol, span, Inf, 0, 0, Inf)
 
 """
-    rate_stop!(rs, Q_best, iter) -> Bool
+    rate_stop!(rs, Q_best, iter) → Bool
 
-Feed the current incumbent and evaluation count; true when the rule fires.
+Update `rs` with the incumbent `Q_best` at evaluation `iter`; true when the rule fires.
+Disabled when `rs.tol` ≤ 0 or `Q_best` is not finite.
 """
 function rate_stop!(rs::RateStop, Q_best::Float64, iter::Int)
     (rs.tol > 0 && isfinite(Q_best)) || return false
@@ -552,47 +501,26 @@ end
 
 # ============================================================
 # Proposal scale from measured yield
+#
+# The annealing mask and the DE population share two measurements at a point: how far
+# each coordinate can move before Q rises by WIDTH_DQ (`_feasible_widths`), and how many
+# coordinates a productive move touches.
 # ============================================================
-# Both proposals — the annealing mask and the DE population — need the same two
-# measurements at a point: how far each coordinate can move before Q rises by 1
-# (`_feasible_widths`), and how many coordinates a productive move touches. The three
-# helpers below compute them, and both proposals call these rather than carrying their
-# own copy, so the two cannot drift apart on the scale convention.
 
-# Bisection cap for `_feasible_widths`, in transformed units, shared by both proposals so
-# the measurement means one thing. Deliberately non-binding: bisection always returns a
-# feasible step, so raising it cannot produce an infeasible width — it only limits how
-# far the widest coordinates may reach. Measured half-widths at the base_fc optimum have
-# a median of 0.021, and three coordinates (b_S, δ_S, ξ_S) sit at the cap: it binds on
-# those three and on nothing else.
+# Bisection cap of `_feasible_widths` in transformed units, shared by SA and DE. Not
+# meant to bind (it does only on b_S, δ_S, ξ_S at base_fc): a bisection always returns a
+# feasible step.
 const _WIDTH_CAP = 0.20
 
 """
     _sparsity_draws!(cand, ksrc, seed, widths, per_k, sigma, rng;
-                     match_total_displacement = false) -> (cand, ksrc)
+                     match_total_displacement = false) → (cand, ksrc)
 
-Fill `cand` with `per_k` draws at every sparsity `k = 1:d`, each chosen coordinate
-displaced by a multiple of its own measured half-width, and record in `ksrc` which
-sparsity each draw came from.
-
-`sigma` is a units-free fraction of a measured scale, not a scale itself, so the same
-value means the same thing at every point and under any weighting matrix.
-
-`match_total_displacement` decides what the draws at different `k` have in common, and
-the two callers want different things.
-
-  false  every coordinate moves by `sigma` widths, so total displacement grows as
-         `sigma·sqrt(k)`. This is what a POPULATION wants: the members must span the
-         local geometry, and a k-sparse member's spread is what the DE difference
-         vector inherits coordinate by coordinate.
-
-  true   `sigma_k = sigma/sqrt(k)`, so total width-normalised displacement is `sigma`
-         at every `k`. This is what COMPARING sparsities requires. Under the false
-         rule a draw at k = 23 moves 4.8x as far as one at k = 1, so a comparison of
-         yields across k is partly a comparison of move sizes — and since acceptance
-         and expected squared jump are both functions of `k·sigma_k^2` to second order,
-         that confound is the whole difference. Holding the product fixed removes it and
-         leaves the sparsity effect alone.
+Fill `cand` with `per_k` draws around `seed` at every sparsity `k = 1:d`, each of k random
+coordinates displaced by N(0, (σ_k·|width|)²), and record each draw's k in `ksrc`.
+σ_k = `sigma` (a population: total displacement grows as √k), or `sigma/√k` with
+`match_total_displacement` (comparing sparsities at equal total displacement, since
+acceptance depends on k·σ_k²).
 """
 function _sparsity_draws!(cand::Vector{Vector{Float64}}, ksrc::Vector{Int},
                           seed::Vector{Float64}, widths::Vector{Float64},
@@ -614,15 +542,11 @@ function _sparsity_draws!(cand::Vector{Vector{Float64}}, ksrc::Vector{Int},
 end
 
 """
-    _sparsity_score(Qs, ksrc, d, Q_ref) -> (score, n_feas)
+    _sparsity_score(Qs, ksrc, d, Q_ref) → (score, n_feas)
 
-Mean improvement below `Q_ref` that each sparsity delivers over its feasible draws.
-
-The score deliberately does NOT count improvements. Improvements are threshold events
-and they vanish near an optimum — exactly the state in which the measurement is most
-often taken — so a count-based rule is undefined where it is needed. When no sparsity
-improves anywhere the score falls back to ranking by mean damage, i.e. which sparsity
-does least harm, which is the only ordering left.
+Per sparsity k, the mean improvement below `Q_ref` over its feasible draws, and the number
+of feasible draws. Improvements are not counted (they vanish near an optimum). When no
+sparsity improves, the score is 1/(1 + mean damage) instead.
 """
 function _sparsity_score(Qs::Vector{Float64}, ksrc::Vector{Int}, d::Int, Q_ref::Float64)
     score = zeros(d); n_feas = zeros(Int, d); dmg = zeros(d)
@@ -638,15 +562,10 @@ function _sparsity_score(Qs::Vector{Float64}, ksrc::Vector{Int}, d::Int, Q_ref::
 end
 
 """
-    _kstar(basis, d) -> Int
+    _kstar(basis, d) → Int
 
-The sparsity a yield basis favours, as the basis-weighted mean of `k`.
-
-The mean rather than `argmax`: the yield table is routinely near-flat and ties at the
-top, where `argmax` returns the FIRST maximum — k = 1 whenever k = 1 and k = 2 tie,
-reporting a proposal that moves a single coordinate. The weighted mean uses the whole
-distribution and cannot be decided by an arbitrary tie. A basis that is everywhere
-zero carries no ranking at all, and the honest reading of that is the full dimension.
+The sparsity a basis favours: its basis-weighted mean k, rounded into 1:d (the mean, not
+argmax, which breaks ties of a near-flat table toward k = 1); `d` when the basis is zero.
 """
 _kstar(basis::AbstractVector, d::Int) =
     sum(basis) > 0 ? clamp(round(Int, sum((1:d) .* basis) / sum(basis)), 1, d) : d
@@ -654,86 +573,41 @@ _kstar(basis::AbstractVector, d::Int) =
 """
     SAScale
 
-The annealing proposal, measured at a point rather than set: a per-coordinate step and
-the probability that any one coordinate moves. Built by `sa_proposal_scale`; runtime
-state only, never serialised.
+The annealing proposal measured at a point (`sa_proposal_scale`); runtime only.
+
+Fields
+  step    per-coordinate proposal SD, the seed of the Corana steps
+  widths  measured ΔQ half-widths, signed
+  p_move  Bernoulli mask probability
+  k_star  sparsity favoured by the diagnostic scan (0 when not run)
+  n_meas  coordinates whose width could be measured
+  n_feas  feasible draws in the scan
+  n_imp   scan draws that improved on the seed
+  feas_k  feasibility per sparsity, k = 1:d (its spread is the assumption p_move rests on)
 """
 struct SAScale
-    step   :: Vector{Float64}   # per-coordinate proposal sd — the Corana state's seed
-    widths :: Vector{Float64}   # measured ΔQ = 1 half-widths, signed
-    p_move :: Float64           # Bernoulli mask probability, k*/d
+    step   :: Vector{Float64}
+    widths :: Vector{Float64}
+    p_move :: Float64
     k_star :: Int
-    n_meas :: Int               # coordinates whose width the bisection could measure
-    n_feas :: Int               # feasible draws in the sparsity scan
-    n_imp  :: Int               # of which improved on the seed
-    # Feasibility per sparsity, k = 1:d. Recorded because its SPREAD is the assumption
-    # p_move rests on: a saturated feasibility (measured 0.958-1.000 across k at
-    # base_fc) is what rules out adapting p_move against feasibility during the walk. A
-    # later point where this spreads out would reopen that option, and the only way to
-    # notice is to keep measuring it.
+    n_meas :: Int
+    n_feas :: Int
+    n_imp  :: Int
     feas_k :: Vector{Float64}
 end
 
 """
-    sa_proposal_scale(seed, spec; per_k, sigma, cap, step_fallback, rng, verbose) -> SAScale
+    sa_proposal_scale(seed, spec; p_move_scale, per_k, sigma, cap, step_fallback, rng, verbose)
+        → SAScale
 
-Measure the annealing proposal at `seed`.
-
-Two measurements, one per property the proposal needs.
-
-`step`: each coordinate's own step, `sigma` times its measured ΔQ = 1 half-width. The
-half-widths span 91x at the base_fc optimum (0.0022 to 0.20, median 0.021) and 10 of 23
-coordinates fall below the 0.01 that the retired scalar path clamped at, so a single
-scalar is not a compromise between them — it overshoots the narrow coordinates and
-freezes the wide ones simultaneously. A coordinate the bisection cannot move has no
-measured scale and takes `step_fallback`, which keeps it in the search instead of
-freezing it at zero (0 of 23 needed it here).
-
-`p_move`: `p_move_scale / d`, so the mask moves the forced coordinate plus a
-Binomial(d−1, p_move) tail — a random count, unbounded above, with a mean of
-`1 + (d−1)·p_move` ≈ 2 at the default. Dimensionless in `d` rather than an absolute
-probability, so it means the same thing when the free set changes size.
-
-WHY p_move IS PINNED HERE AND NOT ADAPTED DURING THE WALK
-
-Because nothing the walk observes identifies it. To second order the Metropolis
-exponent has mean `-(σ²/2T)·Σ h_jj` and variance `(σ²/T²)·Σ g_j²` over the moved set,
-both LINEAR in the number moved at fixed σ² — so acceptance is a function of the
-product `k·σ²` alone, and so is expected squared jump distance, `k·σ²` by construction.
-Corana already adapts the step against acceptance. Adapting `p` against acceptance too
-would be two knobs on one equation: the pair drifts anywhere along `k·σ² = const`,
-which looks like it is working while nothing pins where it lands.
-
-Feasibility is the one quantity outside that expansion, since a proposal moving k
-coordinates has k independent chances to land infeasible. It was measured here as a
-candidate signal AND FOUND SATURATED: across k = 1…23 at two displacement scales,
-P(feasible) ranges only 0.958–1.000. At this point the feasible set is not perforated
-on the scale the proposal works at, so feasibility carries no usable gradient in k
-either.
-
-WHERE THE DEFAULT COMES FROM, AND WHAT IT OVERRULED
-
-From annealing chains, not from a one-shot scan — because the two disagree and the
-chains are the object being configured. At matched displacement a single scan of
-one-shot gains from the incumbent ranks sparsity 11-12 of 23 best, with k = 1 some
-3.2-3.4 standard errors below the best. Run as actual chains at equal solve budget
-(250 iterations, 3 seeds, `output/smm/sa_proposal_arm_comparison_base_fc.csv`) the
-ordering reverses: mean ΔQ is 81.2 at a fixed k = 3, 87.8 for the mask at p = 0.52
-(the scan's own recommendation), 90.3 for the mask at this default, and 91.5 for a
-strictly single-coordinate move. The low-p mask also moves FURTHER — mean
-width-normalised path 12.4 against 9.9 — so this is not the acceptance artefact that
-a shorter proposal produces.
-
-The reason the scan misleads is that it measures the gain a proposal makes FROM THE
-INCUMBENT in one step, while a chain compounds accepted moves and lets Corana retune
-each coordinate's step against its own acceptance record. A large joint move is the
-better single bet and the worse thing to repeat. `sa_scale_per_k > 0` still runs the
-scan as a diagnostic — it is what measures the feasibility saturation above — but its
-`k*` no longer sets anything.
-
-Cost is `24·d` solves for the widths, plus `per_k·d` for the optional scan, both
-embarrassingly parallel. One measurement per chain, against a scalar step that logged
-0 acceptances in 50 iterations at full feasibility on this problem.
+Measure the annealing proposal at `seed`: per coordinate, `sigma` times its measured
+half-width (`_feasible_widths`, cap `cap`), or `step_fallback` where no width can be
+measured; and the mask probability `p_move = p_move_scale / d` (one forced coordinate plus
+a Binomial(d−1, p_move) tail, mean 1 + (d−1)·p_move). p_move is fixed, not adapted during
+the walk: to second order acceptance and jump distance depend on k·σ² alone, which Corana
+already steers through σ, and feasibility across k was measured flat (0.958–1.000).
+`per_k > 0` runs a diagnostic sparsity scan at equal total displacement (`per_k·d` solves)
+that sets nothing. Costs 24·d solves for the widths.
 """
 function sa_proposal_scale(seed::Vector{Float64}, spec::SMMSpec;
                           p_move_scale  :: Float64 = 1.0,
@@ -756,19 +630,11 @@ function sa_proposal_scale(seed::Vector{Float64}, spec::SMMSpec;
     step   = [abs(widths[j]) > 0 ? sigma * abs(widths[j]) : step_fallback for j in 1:d]
     p_move = clamp(p_move_scale / d, 1.0 / d, 1.0)
 
-    # The sparsity scan is a DIAGNOSTIC and off by default. Its k* was measured against
-    # actual chains and lost (see above), so it no longer sets p_move; what it still
-    # measures is the feasibility spread across sparsities, which is the assumption
-    # holding p_move fixed. Worth its per_k·d solves when that assumption is in
-    # question — at a new window, or a materially different point — not on every run.
     k_star = 0
     n_feas = 0
     n_imp  = 0
     feas_k = Float64[]
     if per_k > 0
-        # Matched total displacement: the scan compares sparsities, and at unmatched
-        # displacement a draw at k = d moves sqrt(d) times as far as one at k = 1, so
-        # the comparison would partly be reading move size back to itself.
         cand = Vector{Vector{Float64}}(undef, per_k * d)
         ksrc = Vector{Int}(undef, per_k * d)
         _sparsity_draws!(cand, ksrc, seed, widths, per_k, sigma, rng;
@@ -778,8 +644,7 @@ function sa_proposal_scale(seed::Vector{Float64}, spec::SMMSpec;
             Qs[i] = smm_objective(cand[i], spec)
         end
 
-        # An infeasible seed leaves no incumbent to improve on, so the worst feasible
-        # draw is the only finite reference the shortfalls can be measured against.
+        # An infeasible seed leaves the worst feasible draw as the only finite reference.
         Q_seed = smm_objective(seed, spec)
         feas   = [i for i in eachindex(Qs) if isfinite(Qs[i])]
         Q_ref  = isfinite(Q_seed) ? Q_seed : (isempty(feas) ? Inf : maximum(Qs[feas]))
@@ -793,9 +658,6 @@ function sa_proposal_scale(seed::Vector{Float64}, spec::SMMSpec;
     sc = SAScale(step, widths, p_move, k_star, count(!=(0.0), widths),
                  n_feas, n_imp, feas_k)
     if verbose
-        # Widths and steps are reported separately and labelled as such: the step is
-        # sigma times the width, so printing one under the other's name understates the
-        # measured geometry by that factor and makes the two lines uncomparable.
         wm = [abs(w) for w in widths if abs(w) > 0]
         @printf("  [SA scale]  %.0fs:  widths %d/%d measurable, median %.3g, range %.2g‥%.2g;  step median %.3g, range %.2g‥%.2g;  p_move=%.4f (%.1f/d, mean %.1f coords/iter)%s\n",
                 time() - t0, sc.n_meas, d,
@@ -812,12 +674,9 @@ function sa_proposal_scale(seed::Vector{Float64}, spec::SMMSpec;
 end
 
 """
-    _step_field(step_vec) -> String
+    _step_field(step_vec) → String
 
-The proposal-scale field of the SA trace. Six decimals rather than scientific notation:
-enough to show the relative floor and easier to compare down a column of trace lines.
-Before the first Corana update every coordinate still carries its seeded step, so the
-range is only degenerate when every measured width was equal — it never is.
+The step-range field of the SA trace.
 """
 @inline function _step_field(step_vec::Vector{Float64})
     lo, hi = extrema(step_vec)
@@ -826,16 +685,10 @@ range is only degenerate when every measured width was equal — it never is.
 end
 
 """
-    _moved_field(n_moved) -> String
+    _moved_field(n_moved) → String
 
-The REALISED moved-coordinate distribution, from the histogram the loop accumulates:
-mean and range of the number of coordinates each proposal actually perturbed. Reported
-instead of the nominal `p_move` because the mask makes that count a random variable —
-printing the parameter would restate the configuration, not the behaviour, and a mask
-that never realises its nominal mean is exactly the failure this line has to show.
-
-`n_moved` is offset by one: `n_moved[m + 1]` counts iterations that moved `m`
-coordinates.
+Mean and range of the number of coordinates each proposal actually moved, from the
+histogram `n_moved` (`n_moved[m + 1]` counts proposals that moved m coordinates).
 """
 function _moved_field(n_moved::Vector{Int})
     n = sum(n_moved)
@@ -847,11 +700,29 @@ function _moved_field(n_moved::Vector{Int})
 end
 
 """
-    _sa_loop(spec, theta_start; ...) → (theta_best, Q_best, iters)
+    _sa_loop(spec, theta_start; T0, step, max_iter, cooling_rate, cooling_exp,
+             reheat_patience, reheat_factor, max_reheats, adapt_window, scale, corana_Ns,
+             corana_c, step_floor_rel, rate_tol, rate_span, cooling_halflife, t0_rel,
+             t0_accept, reheat_reset_tol, show_trace, trace_stride, checkpoint_path, rng)
+        → (theta_best, Q_best, iters)
 
-One simulated-annealing chain in unconstrained (logit) space, started
-from `theta_start`.  This is the single-chain engine used both for a lone
-start and for each parallel start in `_run_sa`.
+One simulated-annealing chain in unconstrained coordinates from `theta_start`.
+
+- T0 ≤ 0: T0 solves exp(−t0_rel·Q0/T0) = t0_accept, anchored to the objective level.
+- Cooling: T = T_reheat·2^(−t/H) for `cooling_halflife` H > 0; otherwise the logarithmic
+  T_reheat·(log1p(rate)/log1p(rate·t))^exp, normalised so T(1) = T_reheat. Floor 1e-8.
+- Proposal: a Bernoulli(p_move) mask plus one forced coordinate (no no-op proposals), each
+  moved coordinate by N(0, step_j²). Inf proposals are rejected.
+- Corana update every ≈ `corana_Ns` outcomes per coordinate: steer each coordinate's step
+  toward acceptance 0.4–0.6 (factor `corana_c`), clamped to [step_floor_rel × its seeded
+  step, its measured width]; coordinates not drawn are left alone.
+- Stops on the rate rule (`rate_tol`, `rate_span`), on `max_iter`, or when the reheats are
+  exhausted and the walk has not improved for `reheat_patience` steps.
+- Reheat after `reheat_patience` steps without improvement: checkpoint the incumbent, then
+  T ← T·`reheat_factor` (no cap), snapping back to the incumbent when the walk is more than
+  `reheat_reset_tol` above Q_best.
+
+`scale` is the measured proposal (`sa_proposal_scale`), measured here when `nothing`.
 """
 function _sa_loop(
     spec             :: SMMSpec,
@@ -865,9 +736,6 @@ function _sa_loop(
     reheat_factor    :: Float64 = 2.0,
     max_reheats      :: Int     = 5,
     adapt_window     :: Int     = 50,
-    # The measured proposal (per-coordinate step and p_move). Nothing means measure it
-    # here at the start point; `_run_sa` measures once and passes the same scale to
-    # every chain so the warm-up chains are comparable.
     scale            :: Union{Nothing,SAScale} = nothing,
     corana_Ns        :: Int     = 20,
     corana_c         :: Float64 = 2.0,
@@ -880,8 +748,6 @@ function _sa_loop(
     reheat_reset_tol :: Float64 = 0.25,
     show_trace       :: Bool    = true,
     trace_stride     :: Int     = 100,
-    # Written at every reheat so a killed run resumes from the incumbent instead of
-    # from the stale bundle it started from. Empty disables checkpointing.
     checkpoint_path  :: String  = "",
     rng                         = Random.default_rng(),
 )
@@ -896,19 +762,8 @@ function _sa_loop(
     steps_since_improvement = 0
 
     if T0 <= 0.0
-        # Anchor T0 to the OBJECTIVE LEVEL, not to probed uphill move sizes.
-        # Probing ΔQ fails here: the proposal distribution straddles the
-        # feasibility boundary, so a probe that lands near it returns a ΔQ two
-        # orders of magnitude above a typical local move, and any statistic of
-        # that sample (median or quantile) inherits the tail.  A T0 set that way
-        # exceeds Q itself by orders of magnitude, the walk then accepts moves
-        # that multiply the objective, and it random-walks into a bad region it
-        # cannot descend out of once T falls.
-        #
-        # Instead: T0 solves exp(−t0_rel·Q / T0) = t0_accept, i.e. a move costing
-        # t0_rel of the current objective is accepted with probability t0_accept.
-        # Scale-free in Q, so it survives a change of weighting matrix, and it
-        # costs no extra solves because Q is already in hand.
+        # Anchored to Q, not to probed move sizes: probes straddle the feasibility edge and
+        # their ΔQ inherits a tail orders of magnitude above a local move.
         Q_anchor = isfinite(Q) ? abs(Q) : 1.0
         T0 = -t0_rel * Q_anchor / log(t0_accept)
         if show_trace
@@ -921,25 +776,13 @@ function _sa_loop(
     T_current = T0
     T_reheat  = T0
     t_local   = 0
-    # Numerator that normalises the cooling law to T(1) = T_reheat (see below).
     _COOL_NUM = log1p(cooling_rate)
 
     win_fin = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
     win_acc = adapt_window > 0 ? zeros(Bool, adapt_window) : Bool[]
 
-    # Per-coordinate proposal state. The step vector is SEEDED from the measured ΔQ = 1
-    # half-widths, not from a scalar: those widths span two orders of magnitude here
-    # (0.0022 to 0.20 at the base_fc optimum, 91x), and 10 of 23 coordinates sit below
-    # the 0.01 an old scalar floor imposed, so a shared step overshoots the narrow
-    # coordinates and freezes the wide ones at the same time. Corana adaptation (Corana,
-    # Marchesi, Martini & Ridella 1987) then steers each coordinate from its own
-    # acceptance record, so the measurement sets where the search starts and the run
-    # refines it from there.
-    #
-    # Each coordinate's floor and ceiling are its own: the floor relative to its seeded
-    # step, the ceiling at its measured width. One absolute pair cannot be small enough
-    # for a_ℓ and large enough for σ_S simultaneously, which is what pinned the narrow
-    # coordinates before.
+    # Per-coordinate proposal state, seeded from the measured widths (they span two orders
+    # of magnitude, so no single step fits); floor and ceiling are each coordinate's own.
     d_free     = length(theta)
     sc         = scale === nothing ?
                  sa_proposal_scale(collect(float.(theta)), spec;
@@ -952,9 +795,9 @@ function _sa_loop(
     moved_idx  = Int[]                # this iteration's moved coordinates, reused
     n_prop     = zeros(Int, d_free)   # proposals per coordinate since the last update
     n_acc_j    = zeros(Int, d_free)   # of which accepted
-    n_moved    = zeros(Int, d_free + 1)  # realised moved-count histogram, offset by one
-    # Iterations to give each coordinate corana_Ns outcomes on average. A coordinate is
-    # drawn with probability p_move by the mask, plus 1/d as the forced index.
+    n_moved    = zeros(Int, d_free + 1)  # moved-count histogram, offset by one
+    # Iterations for each coordinate to collect corana_Ns outcomes on average: drawn with
+    # probability p_move by the mask, plus 1/d as the forced index.
     corana_win = max(1, ceil(Int, corana_Ns / (p_move + (1 - p_move) / d_free)))
     rate_stop  = RateStop(rate_tol, rate_span)
     win_idx = 0
@@ -963,14 +806,7 @@ function _sa_loop(
 
     if show_trace
         n_corners_init = _count_corners(theta_best, spec)
-        # Printed from INSIDE the optimiser, off the values it actually holds, not from
-        # what the caller computed. print_spec takes its SA settings as its own kwargs,
-        # so between v18.4.0 and v19.0.1 it reported subset_k = 3 and a 5000-iteration
-        # cooling half-life on runs where run_smm had received neither and was using its
-        # own defaults of 0 — a settings block asserting a configuration the optimiser was
-        # not running. A print sourced from the caller cannot detect that; one sourced here
-        # cannot miss it. Every proposal setting that governs the walk appears on this
-        # line, which is why p_move and its provenance are on it too.
+        # Printed from the values the walk holds: the authoritative record of its settings.
         @printf("  [SA config]  mask p_move=%.4f (mean %.1f of %d coords/iter, Bernoulli + 1 forced);  per-coordinate step from measured widths, %d/%d measurable, Corana Ns=%d every %d iters;  cooling %s;  early stop %s\n",
                 p_move, 1 + (d_free - 1) * p_move, d_free, sc.n_meas, d_free,
                 corana_Ns, corana_win,
@@ -983,10 +819,8 @@ function _sa_loop(
                 isfinite(Q) ? @sprintf("%.6e", Q) : "Inf (rejected start)",
                 T0, _step_field(step_vec),
                 n_corners_init, length(spec.free), _corner_tags(theta_best, spec))
-        # A rejected start abandons the seed and restarts from the first accepted
-        # proposal, so the run is no longer the warm start it reports being.  The
-        # vector is printed at full precision, in the same block/name form as the
-        # bundle CSV, so it can be diffed against the θ̂ the seed was meant to be.
+        # A rejected start is printed in full so it can be compared with the warm-start
+        # bundle it was meant to be.
         if !isfinite(Q)
             println("             rejected θ (compare against the warm-start bundle):")
             for (i, ps) in enumerate(spec.free)
@@ -1002,35 +836,11 @@ function _sa_loop(
         actual_iters = t
 
         t_local  += 1
-        # Cooling.  cooling_halflife > 0 selects geometric decay, T = T_reheat·2^(−t/H):
-        # the fall is a constant factor per H iterations however long the run, so the
-        # profile is set by one number in the units of the budget.  The logarithmic
-        # alternative front-loads the whole descent — at rate = 1, exp = 2 it drops by
-        # a factor of 12 within ten iterations and is within 2x of its floor by a
-        # hundred, which leaves the remaining budget running as a hill-climber.
-        #
-        # The logarithmic branch is normalised: the bare form T_reheat/log(1+rate·t)^exp
-        # divides by a number BELOW ONE while 1+rate·t < e, so it *heats* over the first
-        # (e−1)/rate steps.  Dividing by log(1+rate)^exp pins T(1) = T_reheat exactly for
-        # every (rate, exp), so those two knobs control only the decay profile.
         T_current = cooling_halflife > 0 ?
             T_reheat * 2.0^(-(t_local - 1) / cooling_halflife) :
             T_reheat * (_COOL_NUM / log1p(cooling_rate * t_local))^cooling_exp
         T_current = max(T_current, 1e-8)
 
-        # Proposal: an independent Bernoulli(p_move) draw per coordinate plus one forced
-        # index, each moved coordinate by its OWN adapted step. This is DE's crossover
-        # mask (_run_de, below) with the difference vector replaced by a per-coordinate
-        # Gaussian, and it is that shape for the same reason: the number of coordinates
-        # moving is Binomial(d, p_move) conditioned to be at least one — random and
-        # unbounded above, with a mean of p_move·d that the yield scan sets. A fixed count
-        # is a restriction the surface does not justify; moving all d at once compounds d
-        # independent chances of overshooting at a scale no single coordinate wants.
-        #
-        # The forced index is what makes the mask a proposal rather than sometimes a
-        # no-op: at p_move = 0.52 and d = 23 an all-zero mask is rare, but a proposal
-        # identical to the incumbent would be accepted and counted, inflating the
-        # acceptance rate with iterations that moved nothing.
         theta_prop = copy(theta)
         empty!(moved_idx)
         for j in 1:d_free
@@ -1080,24 +890,14 @@ function _sa_loop(
             steps_since_improvement += 1
         end
 
-        # Trailing acceptance and feasibility, for the trace only. There is no scalar
-        # step left for them to steer: adaptation is per coordinate, below.
+        # Trailing acceptance and feasibility, for the trace only.
         if adapt_window > 0
             win_idx          = mod1(win_idx + 1, adapt_window)
             win_fin[win_idx] = is_fin
             win_acc[win_idx] = is_fin && accept
         end
 
-        # Corana step-vector update.  Each coordinate is steered toward a 0.4-0.6
-        # acceptance rate by its own record: too many accepts means the step is
-        # small enough to be wasteful, too few means it overshoots that
-        # coordinate's feasible width.  Coordinates the mask never drew are left
-        # alone rather than adapted on no evidence.
-        #
-        # The clamp is per coordinate — floor at step_floor_rel of that coordinate's own
-        # seeded step, ceiling at its measured ΔQ = 1 width. A step beyond the width is
-        # by construction a move the objective cannot absorb, so the ceiling is the
-        # measurement rather than a tuning constant.
+        # Corana step update.
         if t % corana_win == 0
             for j in 1:d_free
                 n_prop[j] == 0 && continue
@@ -1114,9 +914,7 @@ function _sa_loop(
             fill!(n_acc_j, 0)
         end
 
-        # Rate stop: the descent has flattened below what the moments can resolve.
-        # Checked before the reheat logic, since a run this flat gains nothing from
-        # being reheated into the same basin.
+        # Rate stop before the reheat logic: a run this flat gains nothing from a reheat.
         if rate_stop!(rate_stop, Q_best, t)
             if show_trace
                 n_corners_rs = _count_corners(theta_best, spec)
@@ -1146,39 +944,18 @@ function _sa_loop(
            (max_reheats == 0 || n_reheats < max_reheats)
 
             n_reheats += 1
-            # Checkpoint BEFORE raising T. The incumbent is what a resume wants; the
-            # reheat is about to move the walk away from it.
+            # Checkpoint before raising T: the incumbent is what a resume wants.
             write_checkpoint(checkpoint_path, theta_best, Q_best, spec;
                              tag = @sprintf("SA reheat %d, iter %d", n_reheats, t))
             T_before   = T_current
-            # reheat_cap ceilings the temperature a reheat may reach. The multiplicative
-            # rule is unbounded above, and that is measured to be fatal once T0 is
-            # calibrated correctly: at T0 = 2.76 with factor 2 and five reheats, T reaches
-            # 88 against a plateau of 3.32, almost every uphill move is accepted, and the
-            # walk closes 0% of the gap at every barrier height tested. Capping at T0
-            # makes a reheat UN-COOL — return to the start temperature — rather than
-            # overheat past it, which is the only reheat design that beat no reheat at all
-            # (66.7% vs 56.7% closed at the deepest barrier tested).
-            #
-            # NOT IMPLEMENTED YET, DELIBERATELY. The cap must land in the SAME change that
-            # recalibrates T0 against the plateau, never before it: under the shipped
-            # T0 = 0.060 the reheats are the ONLY source of warmth (with them the walk
-            # closes 31.7% at B = 0.5, without them 0.0%), so a cap at 0.060 would remove
-            # that warmth and make the optimiser strictly worse. Adding it now as an inert
-            # keyword would thread a fourth argument through three _sa_loop call sites for
-            # no usable behaviour, which is how the forwarding bugs got in.
+            # No cap on the reheated temperature. A cap at T0 helps only together with a T0
+            # recalibrated against the plateau; under the shipped T0 the reheats are the
+            # walk's only warmth.
             T_current  = T_current * reheat_factor
             T_reheat   = T_current
             t_local    = 0
-            # Reheat from the best point rather than in place.  Raising T only
-            # helps if the walk is sitting somewhere worth escaping from; when it
-            # has already drifted far above Q_best — which is what happens once a
-            # high T has let it accept a sequence of uphill moves — reheating in
-            # place pushes it further away instead.  Snapping back to
-            # (theta_best, Q_best) whenever the current point is more than
-            # reheat_reset_tol worse keeps the extra energy aimed at the
-            # neighbourhood of the incumbent.  Within that tolerance the walk
-            # keeps its position, so a genuine basin escape is still possible.
+            # Snap back to the incumbent when the walk has drifted far above it; within the
+            # tolerance it reheats in place, so a basin escape stays possible.
             if isfinite(Q_best) && (!isfinite(Q) || Q > (1.0 + reheat_reset_tol) * abs(Q_best))
                 theta .= theta_best
                 Q      = Q_best
@@ -1225,27 +1002,16 @@ end
 
 
 """
-    _run_sa(spec; starts, parallel_steps, seed, ...) → (theta_best, Q_best, iters)
+    _run_sa(spec; starts, parallel_steps, seed, random_init, scale_p_move, scale_per_k,
+            scale_sigma, …) → (theta_best, Q_best, iters)
 
-Multi-start simulated annealing.  When `starts` holds more than one point
-(one per cluster), every start runs for the first `parallel_steps`
-iterations; the best chain (lowest Q_best) is then continued to completion.
-Because each start sits in a distinct cluster, pruning to the best chain
-selects the best basin, not merely the best individual candidate.
-
-The warm-up chains run sequentially (not threaded over) — each model solve
-already uses the solver's internal multithreading, and nesting thread pools
-oversubscribes the workers and can stall the run.
-
-With zero or one start the routine reduces to a single chain: seeded from
-`starts[1]`, or — if `starts` is empty — from a random draw
-(`random_init=true`) or `pack_theta(spec)`.
-
-Per-chain RNGs are seeded deterministically as `Xoshiro(seed + j)`, and the
-continuation chain uses `Xoshiro(seed)`, so a run is replicable.  Note the
-continuation restarts the temperature schedule from the best basin's
-incumbent rather than resuming the pruned chain's internal SA state — a
-fresh anneal from the selected basin.
+Simulated annealing from `starts` (one per cluster), or from a single start — a uniform draw
+with `random_init`, `pack_theta(spec)` otherwise — when `starts` is empty. The proposal is
+measured once, at the first start, and shared by every chain so their Q_best are comparable.
+With several starts, each runs `parallel_steps` warm-up iterations, sequentially and without
+checkpointing, with `Xoshiro(seed + j)`; the best is then annealed afresh for the remaining
+budget with `Xoshiro(seed)`, and the better of the two results is returned. The remaining
+keywords are `_sa_loop`'s.
 """
 function _run_sa(
     spec             :: SMMSpec;
@@ -1276,30 +1042,21 @@ function _run_sa(
     random_init      :: Bool    = false,
     show_trace       :: Bool    = true,
     trace_stride     :: Int     = 100,
-    # Written at every reheat so a killed run resumes from the incumbent instead of
-    # from the stale bundle it started from. Empty disables checkpointing.
     checkpoint_path  :: String  = "",
     rng                         = Random.default_rng(),
 )
-    # Assemble the start set.
     start_set = if !isempty(starts)
         starts
     else
         [random_init ? _random_theta(spec, rng) : pack_theta(spec)]
     end
 
-    # The proposal is measured ONCE, at the first start, and handed to every chain. Two
-    # reasons. It costs 24·d + scale_per_k·d solves, which is a warm-up chain's whole
-    # budget; and the multistart prunes on Q_best across chains, so chains proposing at
-    # different measured scales would not be comparable — the pruning would partly rank
-    # the measurements rather than the basins.
     scale = sa_proposal_scale(collect(float.(start_set[1])), spec;
                               p_move_scale = scale_p_move,
                               per_k = scale_per_k, sigma = scale_sigma,
                               step_fallback = step,
                               rng = rng, verbose = show_trace)
 
-    # Single start → original single-chain behaviour.
     if length(start_set) <= 1
         return _sa_loop(spec, start_set[1];
                         T0 = T0, step = step, max_iter = max_iter,
@@ -1317,12 +1074,6 @@ function _run_sa(
                         trace_stride = trace_stride, rng = rng)
     end
 
-    # Multi-start warm-up, then prune to the best basin.  Chains run
-    # SEQUENTIALLY, not threaded over: each smm_objective already uses the
-    # solver's internal multithreading, so wrapping the chains in another
-    # Threads.@threads nests thread pools — with few chains that starves the
-    # inner solver and can stall the run.  Sequential chains keep every model
-    # solve fully parallel internally (where the speed actually comes from).
     nch     = length(start_set)
     p_steps = min(parallel_steps, max_iter)
 
@@ -1343,10 +1094,7 @@ function _run_sa(
                              reheat_patience = reheat_patience, reheat_factor = reheat_factor,
                              max_reheats = max_reheats, adapt_window = adapt_window,
                              scale = scale,
-                             # Warm-up chains deliberately do NOT checkpoint. They are
-                             # short exploratory runs from dispersed starts, so their best
-                             # point is routinely worse than the incumbent the bundle
-                             # already holds — writing it would demote the warm start.
+                             # A short dispersed chain would overwrite a better incumbent.
                              checkpoint_path = "",
                              corana_Ns = corana_Ns, corana_c = corana_c,
                              step_floor_rel = step_floor_rel,
@@ -1377,7 +1125,6 @@ function _run_sa(
         return chain_theta[jbest], chain_Q[jbest], p_steps
     end
 
-    # Continue the best basin to completion.
     tb, qb, iters = _sa_loop(spec, chain_theta[jbest];
                              T0 = T0, step = step, max_iter = remaining,
                              cooling_rate = cooling_rate, cooling_exp = cooling_exp,
@@ -1401,7 +1148,11 @@ function _run_sa(
 end
 
 
-# Alias for the unicode pack_θ defined in smm_params.jl
+"""
+    pack_theta(spec) → Vector{Float64}
+
+ASCII alias of `pack_θ` (smm_params.jl).
+"""
 pack_theta(spec) = pack_θ(spec)
 
 
@@ -1409,6 +1160,11 @@ pack_theta(spec) = pack_θ(spec)
 # Differential evolution
 # ============================================================
 
+"""
+    _pick3(rng, n, exclude) → (a, b, c)
+
+Three distinct indices in 1:n, all different from `exclude`.
+"""
 @inline function _pick3(rng, n::Int, exclude::Int)
     a = exclude
     while a == exclude
@@ -1427,11 +1183,11 @@ end
 
 
 """
-    _count_basins(pop, Q_pop, spec; min_size) → Int
+    _count_basins(pop, Q_pop, spec; min_size = 5) → Int
 
-Count distinct parameter-space basins among the feasible members
-using complete-linkage hierarchical clustering on pairwise Euclidean
-distances in [0, 1]^d-normalised constrained space.
+The number of clusters of at least `min_size` feasible members, by complete-linkage
+hierarchical clustering in normalised constrained coordinates cut at the largest gap; 0
+with fewer than 2·min_size feasible members. Trace only.
 """
 function _count_basins(
     pop      :: Vector{Vector{Float64}},
@@ -1483,44 +1239,29 @@ end
 
 
 """
-    _run_de(spec; ...) → (theta_best, Q_best, iters)
+    generate_population(seed, spec, n_slots; per_k, sigma, cap, fill_from, fill_Q,
+                        prev_widths, require_improvement, verbose, rng) → (pop, f, cr, table)
 
-DE/rand/1/bin in unconstrained (logit) space.
-"""
+A DE population of `n_slots` members around `seed`, and the DE parameters the same draws
+imply; used for the initial population and for every reheat.
 
-"""
-    generate_population(seed, spec, n_slots; per_k, sigma, cap, rng) → (pop, f, cr, table)
+- Widths: re-measured at `seed` (`_feasible_widths`, cap `cap`), so a reheat at a better
+  point draws a tighter cloud; a coordinate with no measurable width keeps `prev_widths`.
+- Draws: `per_k` at each sparsity k = 1:n_free, each moved coordinate by `sigma` widths.
+- Allocation: slots by weight score_k·k/n_free (`_sparsity_score`), filled with the best
+  draws of each k; shortfalls spill in descending weight. Admissible: improvements on the
+  seed under `require_improvement` (a reheat), feasible draws otherwise or when the seed
+  itself is infeasible. Then feasible non-improving draws, the best members of `fill_from`,
+  infeasible draws and, last, seed copies. `pop[1]` is the seed.
+- Barren (a reheat where nothing improves): half new feasible draws and half `fill_from`,
+  both in random order; the caller treats the next stall as convergence.
+- cr = `_kstar(score)/n_free` (of the weight on a barren call); f matches the DE step
+  f·s_k·√2 to `sigma`·width over coordinates with a spread (fresh members only on a barren
+  call), median, clamped to [0.1, 1.5].
 
-Build a DE population around `seed`, and read the proposal parameters off the same
-draws. Used identically for the initial population and for a reheat; only the seed
-differs.
-
-WHY IT IS BUILT THIS WAY
-
-`_feasible_widths` measures, per coordinate, the displacement that raises Q by 1.0 at
-`seed`. That is the per-parameter scale and it is re-measured on every call, so a
-reheat at a better point automatically produces a tighter cloud: near an optimum the
-surface is more curved, the widths shrink, and `sigma` — a units-free fraction of a
-width, not a scale — keeps meaning the same thing. This is the whole scale-adaptation
-mechanism; nothing anneals on a schedule.
-
-Candidates are drawn at every sparsity `k = 1:n_free`, `per_k` of them, and the slots
-are allocated by measured yield rather than by a shape chosen in advance. A move that
-touches more coordinates is worth more because a proposal must be able to re-price what
-it disturbs (a market's free-entry pair, the boundary controls), which is why the weight
-carries the factor `k/n_free`.
-
-The score deliberately does NOT count improvements. Improvements are threshold events
-and they vanish near an optimum — which is exactly the state that triggers a reheat, so
-a count-based rule would be undefined at the moment it is called. Scoring the mean
-shortfall below the incumbent is continuous, and when nothing improves it falls back to
-ranking by mean damage, i.e. which sparsity does least harm.
-
-`f` and `cr` come out of the same table. The generator has just measured which
-displacement is productive, namely `sigma * width`; the DE step in coordinate k is
-`f * (b_k - c_k)` with standard deviation `f * s_k * sqrt(2)` for a population spread
-`s_k`, so matching the two gives `f`. `cr` is the winning sparsity as a fraction of the
-free count. Recomputing both at each reheat replaces adaptive-parameter schemes.
+`table` reports the allocation (`slots`, `slots_imp`, `n_carried`, `n_padded`, `barren`,
+`widths`, …): `n_carried` > 0 means the fresh draws could not fill the population;
+`n_padded` > 0 means the draw budget was too small.
 """
 function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
                              per_k       :: Int     = 30,
@@ -1534,10 +1275,6 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
                              rng                   = Random.default_rng())
     npar = length(spec.free)
 
-    # Both phases cost hundreds of solves — minutes at full size — so each announces
-    # itself and its cost up front: a silent generator is indistinguishable from a hung
-    # one. _feasible_widths runs 12 bisections per direction, two directions per
-    # coordinate, so its price is 24 solves per free parameter.
     if verbose
         @printf("  [DE pop]  starting population generator: %d slots, %d free parameters\n",
                 n_slots, npar)
@@ -1549,11 +1286,7 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
     widths = _feasible_widths(seed, spec, cap)
     Q_seed = smm_objective(seed, spec)
 
-    # A coordinate the bisection cannot move at this point has no usable scale. Keeping
-    # the previous call's width is better than a zero, which would freeze the coordinate
-    # in the new population and remove it from the search for the rest of the run. The
-    # first call has no previous width, and none is needed: at the seed every coordinate
-    # is measurable by construction.
+    # A zero width would freeze the coordinate for the rest of the run.
     n_reverted = 0
     if prev_widths !== nothing
         for j in 1:npar
@@ -1578,10 +1311,6 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
         flush(stdout)
     end
 
-    # Draw per_k candidates at each sparsity, then evaluate the whole block at once so
-    # the solves thread over the full set rather than per k. The draw is the same helper
-    # the annealing scale uses, so the two proposals cannot disagree on what `sigma`
-    # means.
     cand = Vector{Vector{Float64}}(undef, per_k * npar)
     ksrc = Vector{Int}(undef, per_k * npar)
     _sparsity_draws!(cand, ksrc, seed, widths, per_k, sigma, rng)
@@ -1591,8 +1320,6 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
         Qs[i] = smm_objective(cand[i], spec)
     end
     if verbose
-        # Counted against the same reference the pool uses, so the printed numbers and the
-        # allocation cannot disagree when the seed itself did not solve.
         nf = count(isfinite, Qs)
         nb = isfinite(Q_seed) ? count(q -> isfinite(q) && q < Q_seed, Qs) : nf
         @printf("  [DE pop]  %d candidates in %.0fs: %d feasible, %d better than the seed  (selecting on %s)\n",
@@ -1602,13 +1329,8 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
             @printf("  [DE pop]  BARREN: no candidate improves on the incumbent. Building the final\n")
             @printf("  [DE pop]          population as a 50/50 random mix with the previous generation.\n")
         end
-        # Below roughly twice the slot count the allocation stops being a choice: filling
-        # the population takes nearly every feasible candidate at every sparsity, so the
-        # slots track feasibility (which favours low k) rather than the yield weight, and
-        # the shape flattens. Measured at 53% feasibility, per_k must be about 2·n_slots/
-        # (0.53·n_free) for the weight to bind.
-        # The headroom that matters is in the pool the fill actually draws from, which is
-        # the improving candidates at a reheat and the feasible ones at initialisation.
+        # Below about twice the slot count the fill takes nearly every admissible draw, and
+        # the allocation tracks feasibility rather than the weight.
         n_pool = require_improvement ? nb : nf
         if n_pool > 0 && n_pool < 2 * n_slots
             @printf("  [DE pop]  WARNING: only %d %s for %d slots (%.1fx). The weight cannot\n",
@@ -1620,29 +1342,8 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
         flush(stdout)
     end
 
-    # Score each sparsity on the mean improvement its feasible candidates deliver. A k
-    # that improves nothing scores zero and earns no slots — that is the mechanism by
-    # which cr falls as the run advances: large joint moves stop paying first, so the
-    # allocation migrates to smaller k on its own and the proposal narrows with it.
-    #
-    # Two things would break that and neither is here. A per-k damage fallback would give
-    # a non-improving high k a positive score for being least-bad, which competes with
-    # genuine improvements at low k and sends cr back UP once high k stops paying. And a
-    # floor of one slot per k would park 20-odd members at high sparsity forever, holding
-    # cr up by construction. The damage ranking is kept only for the case where NOTHING
-    # improves anywhere, where it is the only ordering available.
-    # Admissible pool. At a reheat the seed is theta_best, a point the run has already
-    # worked to reach, so a candidate that merely solves is not new material — only an
-    # improvement is. At initialisation the seed is the warm start and feasibility is the
-    # only filter available, because the first population has to be built from whatever
-    # the solver returns. Both counts are reported either way.
-    #
-    # An infeasible seed is possible — a warm start whose spec has since changed may not
-    # solve. There is then no incumbent to improve on, so every feasible draw is new
-    # material and the pool reverts to feasibility. Treating it as "nothing improved"
-    # would declare the run finished on its first reheat; using the best draw as the
-    # reference would be worse still, since nothing can beat a minimum by construction.
-    # Q_ref exists so the score's shortfalls stay finite in that case.
+    # Admissible pool: improvements at a reheat, feasible draws at initialisation or when
+    # the seed itself does not solve (Q_ref then keeps the score's shortfalls finite).
     feas_idx = [i for i in eachindex(Qs) if isfinite(Qs[i])]
     seed_ok  = isfinite(Q_seed)
     Q_ref    = seed_ok ? Q_seed :
@@ -1653,38 +1354,23 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
 
     score, n_feas = _sparsity_score(Qs, ksrc, npar, Q_ref)
 
-    # Each fallback covers the case the one before it cannot. A non-finite or all-zero
-    # weight has to be caught explicitly rather than by `all(w .<= 0)`: NaN <= 0 is false,
-    # so a NaN would pass straight through every guard into round(Int, ·) and abort the
-    # run. The bare k-shape is the last resort — the quotas are advisory once no sparsity
-    # has candidates, since the fill loops can only take what exists.
+    # Allocation weight, with fallbacks for a non-finite (NaN ≤ 0 is false) or zero weight.
     w = score .* (collect(1:npar) ./ npar)
     all(isfinite, w) || (w = float.(n_feas))
     all(w .<= 0)     && (w = float.(n_feas))     # nothing scored: rank by feasibility
     (all(isfinite, w) && any(w .> 0)) || (w = collect(1:npar) ./ npar)
     want = round.(Int, n_slots .* w ./ sum(w))
 
-    # Fill from each k's best candidates. A k that cannot supply its quota passes the
-    # shortfall on, so the population is always full even when feasibility is poor —
-    # but the shortfall must follow the WEIGHT, not the index. Walking k upward from 1
-    # hands every unmet slot to the lowest sparsities, which have the most spare
-    # candidates precisely because they are the most feasible: the redistribution then
-    # inverts the allocation it was meant to top up. Spilling in descending weight order
-    # keeps the shape the weight expresses.
-    # Two tiers, and the distinction is the point. Improvements are what the allocation is
-    # measuring, so they are drawn first and counted separately in taken_imp, which the
-    # log reports so a fallback is visible. Feasible non-improving draws are usable members
-    # (they carry a spread and can win a later comparison), so they fill whatever the
-    # improvements could not, but they say nothing about which sparsity is paying and are
-    # therefore counted only in taken. Filling from the second tier before reaching back
-    # to the previous generation keeps the population as fresh as the draws allow.
+    # Tier 1, admissible draws of each k up to its quota, then shortfalls in descending
+    # weight (ascending k would hand them to the most feasible sparsities); tier 2, the
+    # feasible draws outside the pool. `taken_imp` counts tier 1 only.
     order = Dict(k => sort([i for i in eachindex(Qs) if ksrc[i] == k && i in pool],
                            by = i -> Qs[i]) for k in 1:npar)
     spare = Dict(k => sort([i for i in feas_idx if ksrc[i] == k && !(i in pool)],
                            by = i -> Qs[i]) for k in 1:npar)
     pop   = Vector{Vector{Float64}}()
-    taken = zeros(Int, npar)          # every member drawn at k, whatever its tier
-    taken_imp = zeros(Int, npar)      # improving members only — the yield signal
+    taken = zeros(Int, npar)
+    taken_imp = zeros(Int, npar)
 
     for k in 1:npar, i in order[k][1:min(want[k], length(order[k]))]
         push!(pop, cand[i]); taken[k] += 1; taken_imp[k] += 1
@@ -1704,34 +1390,14 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
             length(pop) >= n_slots && break
         end
     end
-    # Every feasible draw is spent and the population is still short. Duplicating the
-    # seed would fill the slots with a single point and collapse the difference vectors
-    # the DE step is built from, so the remainder comes from the best members of the
-    # generation that preceded this call: real, feasible, and already spread. On the
-    # first call there is no such generation and the seed is the only thing available.
     n_carried = 0
     n_fresh   = 0        # members of a barren mix that came from the new draws
 
-    # A BARREN reheat: a freshly scaled population drawn at the best point improved on it
-    # nowhere. Two things are then known — the previous population was stale, and the new
-    # scale finds nothing — so neither source alone is worth another pass. The response is
-    # one last population that is half new draws and half the previous generation, mixed
-    # at random rather than by rank: the run has no ranking signal left to exploit, and
-    # randomness is the only source of new directions remaining. If a stall follows this,
-    # it is convergence and the caller exits.
     if barren
-        # fill_from is required here: without a previous generation there is no second
-        # half to mix with, and silently falling through would build the final population
-        # out of non-improving draws and seed copies. The reheat call site always passes
-        # the live population, so this is a contract check rather than a branch.
         if fill_from === nothing || isempty(fill_from)
             error("generate_population: a barren reheat needs fill_from, the previous generation")
         end
         empty!(pop); fill!(taken, 0); fill!(taken_imp, 0)
-        # Half new, half carried — or as close as the draws allow. When fewer than half
-        # the slots are feasible the new half is short and the previous generation covers
-        # the remainder, so the population is always full; n_fresh records what the split
-        # actually was rather than what was asked for.
         for i in shuffle(rng, feas_idx)               # feasible, since none improve
             length(pop) >= n_slots ÷ 2 && break
             push!(pop, cand[i]); taken[ksrc[i]] += 1
@@ -1743,6 +1409,8 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
         end
     end
 
+    # Short of members: the previous generation's best, which keeps the difference vectors
+    # spread where seed copies would collapse them.
     if length(pop) < n_slots && fill_from !== nothing && !isempty(fill_from)
         rank = fill_Q === nothing ? eachindex(fill_from) :
                sort(eachindex(fill_from), by = i -> fill_Q[i])
@@ -1752,11 +1420,8 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
         end
     end
 
-    # Still short, and there is nothing left to carry — the first call, or a reheat whose
-    # predecessor was itself small. Infeasible draws are admissible members: DE evaluates
-    # the population and an infeasible member simply never wins a comparison, whereas a
-    # duplicated seed contributes a zero difference vector and silently narrows the step.
-    # Taking them in ascending k keeps the pad away from the sparsities the weight wants.
+    # Still short: infeasible draws (they never win a comparison), in ascending k, then seed
+    # copies.
     n_padded = 0
     if length(pop) < n_slots
         for k in 1:npar, i in [j for j in eachindex(Qs) if ksrc[j] == k && !isfinite(Qs[j])]
@@ -1769,37 +1434,14 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
     end
     pop[1] = copy(seed)
 
-    # cr: the sparsity the allocation favours, as a fraction of the free count, summarised
-    # by `_kstar` — the same statistic the annealing mask reads its p_move off, so the two
-    # proposals report sparsity on one convention.
-    #
-    # cr summarises which sparsity is PAYING, and it is read off `score` — the mean
-    # improvement each sparsity delivered across all its draws. Two alternatives were
-    # measured on simulated yields and both are worse.
-    #
-    # Allocated slots look like the natural basis but collapse spuriously. A quota is
-    # capped by the improving draws actually available, and as improvements grow scarce
-    # the high sparsities hit that cap first, so the allocation tilts low for a reason
-    # that has nothing to do with which sparsity pays. Under a uniform thinning that
-    # leaves the true cr unchanged, slot-based cr fell 16% while score-based fell 3%.
-    #
-    # The allocation weight `w` is score·k/n_free, so it counts the k-preference twice —
-    # once in the score and once in the multiplier — and reads high throughout. It is
-    # still the only signal left on a barren call, where every score is zero: on such a
-    # call `taken` describes a random shuffle of half a population rather than a
-    # yield-driven allocation, so summarising it would report a sparsity nothing measured.
+    # cr from the score, not the slots (quotas are capped by the improving draws available,
+    # which biases them low) nor the weight (which counts k twice); the weight only on a
+    # barren call, where every score is zero.
     k_star = _kstar(barren ? w : score, npar)
     cr_out = clamp(k_star / npar, 1.0 / npar, 1.0)
 
-    # f: match the DE step to the displacement just measured as productive. Coordinates
-    # whose realised spread is degenerate carry no information and are skipped.
-    #
-    # On a barren call the population is part carried-over members whose spread was set at
-    # a different point, so the realised spread is not the one the widths were measured
-    # against. Only the fresh members speak to the current scale, and n_fresh is however
-    # many the draws actually supplied — not n_slots÷2, which is only the target. With
-    # fewer than two fresh members there is no spread to measure and the whole population
-    # is the only estimate available.
+    # f: match the DE step to the displacement measured as productive. On a barren call only
+    # the fresh members' spread was drawn at the current widths.
     P  = (barren && n_fresh >= 2) ? reduce(hcat, pop[1:n_fresh]) : reduce(hcat, pop)
     fs = Float64[]
     for j in 1:npar
@@ -1807,21 +1449,13 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
         (s_j > 0 && isfinite(widths[j])) &&
             push!(fs, sigma * abs(widths[j]) / (s_j * sqrt(2)))
     end
-    # The clamp bounds a step multiplier that would otherwise be set by a spread the
-    # widths were not measured against. Hitting a bound means the estimate was outside the
-    # usable range rather than merely large, so it is reported: silently returning a bound
-    # would present a rejected estimate as a measurement.
     f_raw   = isempty(fs) ? 0.7 : median(fs)
     f_out   = clamp(f_raw, 0.1, 1.5)
     f_clamp = f_out != f_raw
 
     if verbose
-        # Which sparsities won, and whether the allocation had to fall back. Both are
-        # judgements about the run: an all-zero score means no candidate beat the seed,
-        # and a floored k* means the yield estimates were too noisy to rank.
         top = sortperm(taken, rev = true)[1:min(5, npar)]
-        # Improving slots first, total in parentheses when the two differ — the gap is the
-        # feasible fallback, and cr is read off the first number only.
+        # Improving slots first, total in parentheses when they differ.
         @printf("  [DE pop]  top sparsities by allocated slots: %s\n",
                 join([taken_imp[k] == taken[k] ?
                       @sprintf("k=%d→%d", k, taken[k]) :
@@ -1837,13 +1471,6 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
         flush(stdout)
     end
 
-    # n_carried counts members taken from the PREVIOUS generation, and only that. The
-    # caller reads it as "this was the last productive reheat": the fresh draws could not
-    # supply a population, so re-measuring the scale has nothing left to offer and the
-    # next stall is convergence. n_padded is kept separate because padding with
-    # infeasible draws or seed copies means the BUDGET was too small, which is a
-    # configuration problem rather than evidence about the surface — conflating them
-    # would let a thin initial draw declare the run finished.
     table = (k = collect(1:npar), n_feasible = n_feas, score = score,
              weight = w, slots = taken, slots_imp = taken_imp,
              n_carried = n_carried, n_padded = n_padded,
@@ -1852,6 +1479,21 @@ function generate_population(seed::Vector{Float64}, spec::SMMSpec, n_slots::Int;
     return pop, f_out, cr_out, table
 end
 
+"""
+    _run_de(spec; max_iter, pop_size, f, cr, avg_tol, local_sigma, local_sigma_cap,
+            gen_per_k, adapt_fcr, reheat_flat, reheat_rate, max_reheats, seed_bank,
+            prev_optimum, show_members, show_gens, trace_stride, checkpoint_path, rng)
+        → (theta_best, Q_best, gens)
+
+DE/rand/1/bin in unconstrained coordinates from `pack_theta(spec)`, with a forced crossover
+coordinate, greedy parent-child selection and per-member RNGs. The initial population comes
+from `generate_population` (`seed_bank` members replace it when supplied; `prev_optimum`
+takes slot 1); `adapt_fcr` takes f and cr from the generator. A stall — Q_best flat for
+`reheat_flat` generations AND an improved-member rate below `reheat_rate` — rebuilds the
+population at the best point and checkpoints it; the run stops at the first stall after a
+barren reheat, after `max_reheats` reheats, at `max_iter`, or (when `avg_tol` > 0) when the
+population mean is within `avg_tol` of Q_best.
+"""
 function _run_de(
     spec         :: SMMSpec;
     max_iter     :: Int     = 5000,
@@ -1859,23 +1501,18 @@ function _run_de(
     f            :: Float64 = 0.65,
     cr           :: Float64 = 0.85,
     avg_tol      :: Float64 = 0.01,
-    local_sigma  :: Float64 = 0.33,   # perturbation as a fraction of each coordinate's
-                                      # own ΔQ<1 width
+    local_sigma  :: Float64 = 0.33,
     local_sigma_cap :: Float64 = 0.20,
-    gen_per_k    :: Int     = 30,     # candidates drawn at each sparsity k = 1:n_free
-    adapt_fcr    :: Bool    = false,  # derive f and cr from the draws, or keep the
-                                      # values passed in
-    reheat_flat  :: Int     = 6,      # reheat after this many generations with no
-                                      # improvement in Q_best, and
-    reheat_rate  :: Float64 = 0.04,   # an improved-member rate below this
+    gen_per_k    :: Int     = 30,
+    adapt_fcr    :: Bool    = false,
+    reheat_flat  :: Int     = 6,
+    reheat_rate  :: Float64 = 0.04,
     max_reheats  :: Int     = 50,
     seed_bank    :: Union{Nothing,SeedBank}        = nothing,
     prev_optimum :: Union{Nothing,Vector{Float64}} = nothing,
     show_members :: Bool    = false,
     show_gens    :: Bool    = true,
     trace_stride :: Int     = 10,
-    # Written at every reheat so a killed run resumes from the incumbent instead of
-    # from the stale bundle it started from. Empty disables checkpointing.
     checkpoint_path :: String = "",
     rng                     = Random.default_rng(),
 )
@@ -1888,16 +1525,8 @@ function _run_de(
         [Random.Xoshiro(s) for s in seeds]
     end
 
-    # Base population.  A uniform draw over the box is the wrong scale by three
-    # orders of magnitude — the box spans ±4 in unconstrained space while the
-    # measured feasible half-widths run from 6e-5 to 1e-1 — so essentially every
-    # member is infeasible and the difference vectors carry no local geometry.
-    # generate_population instead draws at every sparsity and allocates the slots by
-    # measured yield, returning the f and cr those same draws imply.
-    # adapt_fcr decides only where f and cr come from. The generator always builds the
-    # population — its per-coordinate scale is the thing that makes the draws feasible at
-    # all — but the derived f and cr are a summary of the yield table, and a near-flat
-    # allocation summarises poorly. With the switch off the externally set values stand.
+    # A uniform draw over the box is the wrong scale by orders of magnitude; the generator
+    # draws at the measured local widths.
     pop, f_gen, cr_gen, gen_table = generate_population(theta0, spec, pop_size;
                                                        per_k = gen_per_k, sigma = local_sigma,
                                                        cap = local_sigma_cap,
@@ -1911,14 +1540,10 @@ function _run_de(
         flush(stdout)
     end
 
-    # The generated population is already anchored on theta0 at its measured local scale,
-    # so a cluster bank drawn over the whole box would reintroduce the very scale error
-    # the generator removes. It is applied only when one was supplied.
     if seed_bank === nothing
         pop[1] = copy(theta0)
     else
-        # Seed from clusters (round-robin, best-Q first); the random draws above
-        # remain as the top-up for any slots the bank cannot fill.
+        # Cluster members round-robin, best Q first; generated members fill the rest.
         seeded = _seed_pop_from_bank(seed_bank, pop_size)
         for (j, θ) in enumerate(seeded)
             pop[j] = θ
@@ -1930,7 +1555,6 @@ function _run_de(
         end
     end
 
-    # Guaranteed previous-optimum member (when supplied and valid).
     if prev_optimum !== nothing
         pop[1] = copy(prev_optimum)
     end
@@ -1976,7 +1600,7 @@ function _run_de(
     actual_gens  = 0
     n_reheats    = 0
     Q_prev       = Q_best
-    reheats_done = false        # set once a reheat has to carry members forward
+    reheats_done = false        # set by a barren reheat: the next stall is convergence
     last_widths  = gen_table.widths
 
     for gen in 1:max_iter
@@ -2034,14 +1658,8 @@ function _run_de(
         n_imp  = n_improved[]
         n_eval = n_evals[]
 
-        # Stagnation is measured on Q_BEST, not on the improved-member count. A member
-        # improving on its own parent is routine deep into a run — measured minimum 1 of
-        # 48 per generation over 165 generations, never 0 — so counting zero-improvement
-        # generations would never fire. What stalls is the best point.
-        #
-        # The test is strict: no threshold on the size of the improvement. The generator
-        # already sets its own scale from measured improvement, so a second tolerance
-        # here would be the same judgement applied twice.
+        # Stagnation of Q_best, strict: members improve on their parents in every
+        # generation, so the improved count alone never reaches zero.
         if Q_best < Q_prev
             stagnation = 0
         else
@@ -2065,23 +1683,11 @@ function _run_de(
             flush(stdout)
         end
 
-        # Stall handling. A DE population contracts as it converges, and once the
-        # spread falls below the scale on which Q still varies, every proposal is a
-        # step the surface cannot resolve. Rebuilding the population at the current
-        # best re-measures the widths there — a more curved surface yields a tighter
-        # cloud — so the scale follows the descent with no schedule to tune.
-        #
-        # The trigger needs both conditions: Q_best alone goes flat for up to 12
-        # generations mid-descent, and the improved-member rate alone dips on ordinary
-        # generations. Together they were 9 generations late on the one run traced
-        # through a genuine stall, which is the right side of the error trade — a
-        # false reheat costs one generator call and keeps the best point, while a
-        # missed stall costs every remaining generation.
+        # Stall: both conditions (Q_best alone is flat for up to 12 generations mid-descent;
+        # the improved rate alone dips on ordinary generations). The reheat rebuilds the
+        # population at the best point, re-measuring the widths there.
         stalled = stagnation >= reheat_flat && n_imp / pop_size < reheat_rate
         if stalled
-            # reheats_done: the generator has already reported that its draws could not
-            # fill a population, so re-measuring the scale has nothing left to offer.
-            # This stall is convergence, and the best point is the estimate.
             if reheats_done
                 show_gens && @printf("  [DE]  stop: converged — stalled after the final reheat, Q=%.6e\n",
                                      Q_best)
@@ -2095,9 +1701,6 @@ function _run_de(
             end
             Q_before  = Q_best
             n_reheats += 1
-            # The last generation is the fill source: when the fresh draws fall short,
-            # its best members are better material than duplicates of the seed, and
-            # prev_widths keeps a coordinate alive that this point cannot measure.
             pop, f_gen, cr_gen, gen_table =
                 generate_population(theta_best, spec, pop_size;
                                     per_k = gen_per_k, sigma = local_sigma,
@@ -2118,10 +1721,8 @@ function _run_de(
             theta_best = copy(pop[i_best])
             stagnation = 0
 
-            # A BARREN reheat — zero improvements on theta_best, whatever the feasibility —
-            # is the last one. The population it built is the 50/50 random mix, so the run
-            # continues and searches it; exiting here would discard a population never
-            # tried. The next stall is convergence and the loop breaks at the top.
+            # A barren reheat is the last: its population is searched, and the next stall
+            # ends the run.
             if gen_table.barren
                 reheats_done = true
             end
@@ -2165,13 +1766,13 @@ end
 
 
 # ============================================================
-# Seed-bank helpers (candidate-cluster seeding for SA / DE)
+# Seed-bank helpers
 # ============================================================
 
 """
     _bank_clusters(bank) → Vector{Vector{Int}}
 
-Group candidate indices by cluster label, each group sorted by ascending Q.
+Candidate indices grouped by cluster label, each group sorted by ascending Q.
 """
 function _bank_clusters(bank::SeedBank)
     groups = Vector{Vector{Int}}()
@@ -2186,9 +1787,8 @@ end
 """
     _sa_starts_from_bank(bank, prev_optimum) → Vector{Vector{Float64}}
 
-One SA start per cluster (the best-Q member), optionally with `prev_optimum`
-appended.  Returns an empty vector when there is no bank and no previous
-optimum (the caller then falls back to a single start).
+One SA start per cluster (its best-Q member), then `prev_optimum` when given; empty when
+neither is given.
 """
 function _sa_starts_from_bank(bank::Union{Nothing,SeedBank},
                               prev_optimum::Union{Nothing,Vector{Float64}})
@@ -2196,7 +1796,7 @@ function _sa_starts_from_bank(bank::Union{Nothing,SeedBank},
     if bank !== nothing
         for grp in _bank_clusters(bank)
             isempty(grp) && continue
-            push!(starts, copy(bank.candidates[grp[1]]))   # best-Q member
+            push!(starts, copy(bank.candidates[grp[1]]))
         end
     end
     prev_optimum !== nothing && push!(starts, copy(prev_optimum))
@@ -2206,9 +1806,8 @@ end
 """
     _seed_pop_from_bank(bank, pop_size) → Vector{Vector{Float64}}
 
-Round-robin fill across clusters (best-Q first within each), skipping dry
-clusters, up to `pop_size` members.  May return fewer than `pop_size`; the
-caller tops up the remainder with random draws.
+Up to `pop_size` bank members taken round-robin across clusters, best Q first within each;
+fewer when the bank runs out.
 """
 function _seed_pop_from_bank(bank::SeedBank, pop_size::Int)
     groups  = _bank_clusters(bank)
@@ -2223,60 +1822,42 @@ function _seed_pop_from_bank(bank::SeedBank, pop_size::Int)
             advanced = true
             length(pop) >= pop_size && break
         end
-        advanced || break   # all clusters exhausted
+        advanced || break
     end
     return pop
 end
 
 
+# ============================================================
+# Feasible widths and the Nelder-Mead simplex
+# ============================================================
+
 """
     FeasibleSimplexer(spec, step) <: Optim.Simplexer
 
-Initial Nelder-Mead simplex whose vertices the objective actually accepts.
-
-Optim's default `AffineSimplexer` places vertex j at `(1 + 0.5)·t_j + 0.025` — a step
-proportional to the coordinate's own value, which in transformed space bears no relation
-to how far that coordinate can move. Measured at the base_fc optimum, all 25 default
-vertices are infeasible on arrival, overshooting the feasible half-width by a median of
-296× and up to 20 000×. Nelder-Mead then spends thousands of evaluations shrinking a
-simplex whose vertices all score `Inf`, which is the "slow start" before real descent
-begins around evaluation 5 000.
-
-This simplexer instead bisects each coordinate outward from θ̂ until it finds the
-largest step the objective still scores finite, capped at `step` in transformed units.
-Every vertex is therefore feasible by construction and carries information from the
-first evaluation.
+Initial Nelder-Mead simplex with vertex j the seed moved along coordinate j by its measured
+width (`_feasible_widths`, capped at `step` in transformed units), so every vertex has a
+finite Q near the seed's. Optim's AffineSimplexer placed every vertex outside the feasible
+region here.
 """
 struct FeasibleSimplexer{S} <: Optim.Simplexer
     spec :: S
     step :: Float64
 end
 
-"""
-    _feasible_widths(θ, spec, cap; nbisect=12, dq=1.0) -> Vector{Float64}
-
-Largest step per coordinate, in the better of the two directions, that keeps the
-objective finite AND within `dq` of Q(θ).  Signed: negative where the downward
-direction is the wider one.
-
-The ΔQ criterion is what makes the result useful rather than merely legal.  A
-merely-feasible step is a median 762x beyond the scale on which Q varies here, so a
-simplex built on feasibility alone puts its vertices where Q is enormous — measured
-at the base_fc optimum, 1/25 vertices beat the seed under feasibility against 9/25
-under ΔQ<1, with vertex Q running to 2.5e4 in the first case and staying inside
-[Q0, Q0+1] in the second.
-
-Embarrassingly parallel: d·nbisect solves once, against the thousands a bad simplex
-wastes on uninformative vertices.
-"""
-# The contour the population's step scale is measured against: how far a coordinate
-# can move before Q rises by `dq`. ABSOLUTE, not a fraction of Q, because Q's level
-# here is dominated by moments the model cannot fit — a relative target would track
-# that irreducible floor rather than local curvature. 1.0 sits just above the
-# measured evaluation noise floor (0.59), so a step at this contour does damage the
-# objective can actually resolve. Settable to experiment:
+# The ΔQ contour the step scales are measured against, absolute in Q units (Q's level is
+# dominated by moments the model cannot fit), just above the measured evaluation-noise
+# floor of 0.59.
 const _WIDTH_DQ = Ref(env_setting(:WIDTH_DQ, 1.0))
 
+"""
+    _feasible_widths(θ, spec, cap; nbisect = 12, dq = WIDTH_DQ) → Vector{Float64}
+
+Per coordinate, the largest step in [0, cap] (better of the two directions, signed negative
+when downward) keeping Q finite and below Q(θ) + `dq`, by `nbisect` bisections per
+direction: 2·nbisect·d solves, threaded over coordinates. A merely feasible step is far
+beyond the scale on which Q varies, hence the ΔQ criterion.
+"""
 function _feasible_widths(θ::AbstractVector, spec::SMMSpec, cap::Float64;
                           nbisect::Int = 12,
                           dq::Float64 = _WIDTH_DQ[])
@@ -2298,14 +1879,17 @@ function _feasible_widths(θ::AbstractVector, spec::SMMSpec, cap::Float64;
     return w
 end
 
+"""
+    Optim.simplexer(S::FeasibleSimplexer, initial_x) → Vector
+
+The simplex of `FeasibleSimplexer`; a coordinate with no usable step keeps the seed value
+(a degenerate direction).
+"""
 function Optim.simplexer(S::FeasibleSimplexer, initial_x::Tx) where {Tx}
     d       = length(initial_x)
     simplex = Tx[copy(initial_x) for _ in 1:d+1]
     w       = _feasible_widths(initial_x, S.spec, S.step)
     for j in 1:d
-        # A coordinate with no usable step at all keeps the seed value: the simplex
-        # is then degenerate in that direction, which is the honest representation of a
-        # parameter the objective cannot move.
         simplex[j+1][j] += w[j]
     end
     @printf("  [NM simplex]  %d/%d coordinates admit a step within ΔQ<1 (cap %.3g)\n",
@@ -2319,119 +1903,49 @@ end
 # ============================================================
 
 """
-    run_smm(spec; method=:de, rng=default_rng()) → SMMResult
+    run_smm(spec; method = :de, seed_bank, prev_optimum, checkpoint_path, rng, theta_start,
+            fd_step, max_iter, g_tol, nm_rate_tol, nm_rate_span, nm_simplex_step,
+            sa_scale_p_move, sa_scale_per_k, sa_scale_sigma, sa_corana_Ns, sa_corana_c,
+            sa_step_floor_rel, sa_rate_tol, sa_rate_span, sa_halflife) → SMMResult
 
+Minimise Q for `spec` by `method` (:sa, :de, :sa_de, :neldermead, :lbfgs, :bfgs), print and
+return the estimate. Optimiser settings come from `spec.run`, except those passed as
+keywords here (SMMRunParams cannot gain fields), each named as the field that feeds it.
 
-Run SMM estimation.  All settings come from `spec.run`.
+- `seed_bank`, `prev_optimum`: SA starts and DE members (:sa, :de, :sa_de).
+- `checkpoint_path`: bundle overwritten with the incumbent at every SA and DE reheat.
+- `theta_start`: start of the Optim methods (default `pack_theta(spec)`), avoiding a
+  θ → t → θ round trip.
+- `fd_step`: central-difference step of the :lbfgs/:bfgs gradient, in t units; 1e-6 is
+  measured (columns stable over [3e-7, 3e-6]).
+- `max_iter`: iteration cap of the Optim methods; 0 keeps `spec.run.nm_max_iter`.
+- `g_tol` > 0: stop on ‖∇Q‖∞ ≤ g_tol, with the function and step tolerances and the
+  rate/no-improvement callback all off; 0 keeps the Nelder-Mead rules.
+- `nm_rate_tol`, `nm_rate_span`: the `RateStop` rule of the Optim methods.
+- `nm_simplex_step`: cap of `FeasibleSimplexer`; ≤ 0 keeps Optim's AffineSimplexer.
+- `sa_scale_*`: the SA proposal measurement (`sa_proposal_scale`); `sa_corana_*`,
+  `sa_step_floor_rel`: its step adaptation; `sa_rate_*`, `sa_halflife`: its stop and cooling.
 """
 function run_smm(
     spec         :: SMMSpec;
     method       :: Symbol = :de,
     seed_bank    :: Union{Nothing,SeedBank}        = nothing,
     prev_optimum :: Union{Nothing,Vector{Float64}} = nothing,
-    # Reheat checkpoints are written here, at every SA and DE reheat. smm_main passes
-    # the window's own bundle path — exactly where INIT_MODE=:warmstart reads — so a
-    # killed run resumes from its own incumbent rather than from the stale bundle it
-    # started from. Empty disables checkpointing.
     checkpoint_path :: String = "",
     rng                  = Random.default_rng(),
-    # Gradient-based polish (method = :lbfgs or :bfgs). All three default to the previous
-    # behaviour, so every existing call is unaffected.
-    #
-    #   theta_start  start point for the Optim branch. Needed because that branch begins at
-    #                pack_theta(spec), while prev_optimum only seeds the DE population and
-    #                the SA starts — so a polish stage had no way to start at the point it
-    #                is polishing except by rebuilding the spec, and rebuilding it means a
-    #                θ→t→θ round trip whose rounding this codebase has already been bitten
-    #                by (check_tau_margin.jl documents a 1e-15 round trip flipping a cell).
-    #   fd_step      central-difference step for the gradient, in t units. MEASURED rather
-    #                than conventional: at v23.0.0 every one of the 23 columns is stable to
-    #                4–5 significant figures for h ∈ [3e-7, 3e-6], and several break by
-    #                h = 1e-4, where λ_S's derivative changes sign. Optim's own default is
-    #                cbrt(eps) ≈ 6e-6, just outside the verified band.
-    #   max_iter     iteration cap for the Optim branch; 0 keeps r.nm_max_iter. An LBFGS
-    #                iteration is not an evaluation — it costs 2d solves for the gradient
-    #                plus a line search — so the Nelder-Mead cap is the wrong scale.
-    #   g_tol        positive value switches the Optim branch to a GRADIENT-NORM stop:
-    #                g_abstol = g_tol, with the function and step tolerances and the rate
-    #                callback all disabled. That combination is the point of a polish —
-    #                the target is a stationary point, not a small step — and the
-    #                Nelder-Mead tolerances are actively wrong for it: measured, they
-    #                halted LBFGS after ONE iteration having recovered ΔQ = 0.005 while
-    #                max|dQ/dt| was still ~806. 0 keeps the Nelder-Mead rules.
     theta_start  :: Union{Nothing,Vector{Float64}} = nothing,
     fd_step      :: Float64 = 1e-6,
     max_iter     :: Int     = 0,
     g_tol        :: Float64 = 0.0,
-    # Rate-based Nelder-Mead stop. Keyword arguments rather than SMMRunParams fields:
-    # Julia's serialiser reads structs positionally by field COUNT, so adding a field
-    # to SMMRunParams makes every bundle already on disk unreadable — verified, not
-    # assumed. Defaults reproduce the previous behaviour when omitted.
-    #
-    # Two knobs, both in units the objective is measured in:
-    #   nm_rate_tol   improvement budget per window. Q is a chi-square, so ΔQ = 1 is
-    #                 one moment moving by one sampling standard error; 0.05 is one
-    #                 twentieth of that. Measured solver noise is ΔQ ≈ 1e-6, six
-    #                 orders below, so this threshold is statistical, not numerical.
-    #   nm_rate_span  how many slow evaluations to tolerate before stopping.
-    #
-    # The span is checked in fixed 100-evaluation sub-windows rather than as one long
-    # window, and that granularity is not cosmetic. A window with NO improvement at
-    # all resets the streak, because a flat stretch is the simplex against an
-    # infeasible wall — in 25 dimensions it can persist for thousands of evaluations
-    # and then recover, so it needs patience rather than a stop. Sub-windows short
-    # enough to isolate those exact zeros preserve that reset; one long window
-    # averages them together with neighbouring small moves and reports 'small but
-    # positive', which is exactly the state the rule stops on.
-    #
-    # Replaying a full base_fc trace (11 800 evaluations, 1289.45 → 1275.38) shows the
-    # cost: 100-evaluation sub-windows stop at ~10 600 leaving 0.35 in Q, while a
-    # single 300-evaluation window stops at 4 000 during a plateau the descent later
-    # escapes, discarding 10 units. Any span from 200 to 800 lands within 10 500-11 100
-    # on that trace, so the rule is insensitive to the span and sensitive to the
-    # sub-window — hence one exposed knob and one fixed constant.
     nm_rate_tol    :: Float64 = 0.05,
     nm_rate_span   :: Int     = 300,
-    # Initial-simplex bisection cap in transformed units. Optim's default places every
-    # vertex far outside the useful region here, so the first thousands of evaluations
-    # score Inf and only shrink the simplex. A positive value bisects each coordinate
-    # for the largest step keeping Q within 1 of the seed; 0 restores Optim's
-    # AffineSimplexer. The ΔQ criterion binds well below this cap on every coordinate
-    # (measured half-widths top out at 1.1e-1 at base_fc), so the cap is inert — it
-    # matters only under a pure feasibility test, where coordinates stay finite out to
-    # ±4 and the cap alone keeps vertices near the seed.
     nm_simplex_step :: Float64 = 0.2,
-    # Simulated-annealing proposal. Mirrors DE's crossover: an independent
-    # Bernoulli(p_move) draw per coordinate plus one forced index, so the number of
-    # coordinates moving is Binomial(d, p_move) conditioned to be at least one — random
-    # and unbounded above, with a measured mean. Every proposal costs one solve however
-    # many coordinates it touches.
-    #
-    # p_move and the per-coordinate step are BOTH measured at the start point by
-    # `sa_proposal_scale`, off a sparsity scan at the measured ΔQ = 1 half-widths: no
-    # fixed coordinate count and no scalar step to set. These two knobs configure that
-    # measurement and mirror the DE generator's own pair (de_gen_per_k, de_local_sigma);
-    # the bisection cap is not a third, since both proposals share `_WIDTH_CAP`.
-    #
-    # corana_Ns is the outcomes-per-coordinate the step update waits for; below ~10 the
-    # estimated acceptance rate is too noisy to steer it.
     sa_scale_p_move :: Float64 = 1.0,
     sa_scale_per_k  :: Int     = 0,
     sa_scale_sigma  :: Float64 = 0.33,
     sa_corana_Ns    :: Int     = 20,
     sa_corana_c     :: Float64 = 2.0,
     sa_step_floor_rel :: Float64 = 1e-4,
-    # Annealing stop and schedule, in the same units as the Nelder-Mead rate rule
-    # above and sharing its implementation (RateStop): stop when the incumbent
-    # improves at less than sa_rate_tol per 100 iterations, sustained over
-    # sa_rate_span PRODUCTIVE iterations, with flat stretches pausing rather than
-    # counting. sa_halflife > 0 replaces the logarithmic schedule with
-    # T = T0·2^(−t/H): the logarithmic one spends its whole descent in the first
-    # hundred iterations, leaving the rest of the budget effectively greedy.
-    #
-    # These three names match SMMRunParams' fields exactly, and must keep matching:
-    # check_forwarding.jl pairs caller to callee BY NAME, so a keyword argument spelled
-    # differently from the field feeding it is a forwarding gap the check cannot see.
     sa_rate_tol     :: Float64 = 0.0,
     sa_rate_span    :: Int     = 0,
     sa_halflife     :: Int     = 0,
@@ -2444,8 +1958,8 @@ function run_smm(
     @printf("\nStarting SMM  (%s,  %d free params)\n", method, npar)
     flush(stdout)
 
-    # SA and DE are written as stages because :sa_de runs both, and a second copy of
-    # either argument list would be a second place to update when a setting is added.
+    # One call site per stage, shared by :sa, :de and :sa_de, so a setting reaches every
+    # branch or none.
     _sa_stage(sp, starts) = _run_sa(
         sp;
         starts          = starts,
@@ -2502,18 +2016,8 @@ function run_smm(
     )
 
     if method == :sa_de
-        # Two stages with complementary jobs. Annealing is a global search: it accepts
-        # uphill moves and crosses the box, which is what takes Q from ~1e6 at a cold
-        # start down to the right basin. It moves few coordinates at a time, so it cannot
-        # construct the joint directions this criterion needs once inside that basin —
-        # which is where DE takes over, building its steps from differences between
-        # population members.
-        # The starting point is an incumbent, not just a place to begin. On a warm start
-        # it is a previous optimum with a known Q, and annealing is free to wander uphill
-        # from it — that is what lets it leave a basin, but it means SA can return worse
-        # than it was given, and on a short budget it may not come back. Keeping the start
-        # in contention costs one solve and makes the whole path monotone: the reported Q
-        # can never exceed the Q the run was handed.
+        # Annealing crosses the box; DE then builds the joint moves inside the basin. The
+        # start stays in contention, so the reported Q never exceeds the start's.
         θ_start = pack_theta(spec)
         Q_start = smm_objective(θ_start, spec)
 
@@ -2521,17 +2025,8 @@ function run_smm(
         θ_sa, Q_sa, it_sa = _sa_stage(spec, _sa_starts_from_bank(seed_bank, prev_optimum))
 
         if isfinite(Q_start) && !(isfinite(Q_sa) && Q_sa <= Q_start)
-            # The REVERT is unconditional — it is what makes the path monotone. Only the
-            # MESSAGE is gated, and on the objective's own determinism floor.
-            #
-            # Q_start and Q_sa are two SEPARATE evaluations, and when SA accepts nothing they
-            # are two evaluations of the SAME θ. Repeats at identical θ agree only to about
-            # 12 ulp — measured 2026-08-26: sd 1.90e-12, range 3.98e-12 over four repeats,
-            # from non-associativity in the threaded reductions. So this comparison is a coin
-            # flip on a warm start with no accepted moves, and the line appeared in one of two
-            # otherwise-identical reference runs. Reverting to θ_start is then a no-op and
-            # harmless; claiming "above the start" over a few ulp is not, because a log that
-            # asserts something it cannot know is worse than a log that says nothing.
+            # The revert is unconditional; only the message is gated, at 1e-9, since two
+            # evaluations of the same θ differ by a few ulp (threaded reductions).
             if !isfinite(Q_sa) || (Q_sa - Q_start) > 1e-9
                 @printf("[stage 1/2]  annealing ended at Q=%s, above the start; DE continues from the start\n",
                         isfinite(Q_sa) ? @sprintf("%.6e", Q_sa) : "Inf")
@@ -2542,19 +2037,13 @@ function run_smm(
             println("[stage 1/2]  annealing returned no feasible point; handing the original start to DE")
             flush(stdout)
         end
-        # DE starts where SA stopped. The spec's init is the handover: the generator
-        # measures its widths at that point, so the population is scaled to the basin SA
-        # found rather than to the original warm start. The seed bank is deliberately NOT
-        # forwarded — its members are spread over the whole box, which would reintroduce
-        # the scale error the generator exists to remove.
+        # DE starts from SA's point through the spec init; the seed bank is not forwarded
+        # (its box-wide spread would undo the generator's local scale).
         spec_de = isfinite(Q_sa) ? _spec_with_init(spec, θ_sa) : spec
         @printf("\n[stage 2/2]  differential evolution  (SA gave Q=%.6e)\n",
                 Q_sa); flush(stdout)
         θ_de, Q_de, it_de = _de_stage(spec_de, nothing, nothing)
 
-        # Report the best of the three points the run actually holds. DE returns Inf only
-        # if every member was infeasible, and the start is already known-feasible, so this
-        # cannot report worse than the run began with.
         cands = [(Q_start, θ_start), (Q_sa, θ_sa), (Q_de, θ_de)]
         filter!(c -> isfinite(c[1]), cands)
         loss_opt, theta_opt = isempty(cands) ? (Inf, θ_start) : cands[argmin(first.(cands))]
@@ -2590,21 +2079,6 @@ function run_smm(
         conv_why  = isfinite(loss_opt) ? "de-stop" : "infeasible"
 
     elseif method == :sa
-        # THE SAME CALL :sa_de's first stage makes — not a copy of its argument list.
-        #
-        # Until v19.7.0 this branch held its own 28-keyword copy, and the copy had drifted:
-        # it omitted checkpoint_path. run_smm accepted the argument and this branch dropped
-        # it, so _sa_loop took the "" default and wrote nothing. The checkpoint fires at
-        # every reheat (smm.jl:960) — the events a long anneal is made of — so an :sa run
-        # serialised only at the very end and a kill lost the point. Invisible while :sa_de
-        # was the shipped method, because that branch forwarded it.
-        #
-        # The comment above _sa_stage already predicted this: "a second copy of either
-        # argument list would be a second place to update when a setting is added." The
-        # duplicate is gone rather than repaired, so :sa and :sa_de's first stage cannot
-        # diverge again — they are one call site, and a new SA setting reaches both or
-        # neither. check_forwarding passed throughout, because it checks that a setting
-        # arrives at run_smm, not that every branch hands it on.
         theta_opt, loss_opt, niters =
             _sa_stage(spec, _sa_starts_from_bank(seed_bank, prev_optimum))
         converged = isfinite(loss_opt)
@@ -2614,13 +2088,10 @@ function run_smm(
         theta0        = theta_start === nothing ? pack_theta(spec) : copy(theta_start)
         iter_count    = Ref(0)
         best_loss     = Ref(Inf)
-        best_theta    = Ref(copy(theta0))   # incumbent (best) point, for corner reporting
-        last_improve  = Ref(0)       # eval count at which best_loss last improved
-        stopped_early = Ref(false)   # set when the no-improvement knob halts NM
-        stop_reason   = Ref(:none)   # which early-stop rule fired
-        # Rate-rule state, tracked continuously rather than in windows: the best Q
-        # and evaluation count at the last point the descent was moving fast enough,
-        # and how many PRODUCTIVE evaluations have accumulated since.
+        best_theta    = Ref(copy(theta0))   # incumbent, for corner reporting
+        last_improve  = Ref(0)       # evaluation at which best_loss last improved
+        stopped_early = Ref(false)
+        stop_reason   = Ref(:none)
         nm_rate       = RateStop(nm_rate_tol, nm_rate_span)
 
         function obj_traced(theta)
@@ -2643,16 +2114,8 @@ function run_smm(
             return isfinite(Q) ? Q : 1e16
         end
 
-        # Two early stops, both returning true to halt Optim, and both requiring a
-        # finite incumbent so a run that has not yet found a feasible point is never
-        # cut short.
-        #
-        #  · no-improve: the best Q has not moved for nm_no_improve evaluations.
-        #  · rate: the best Q improved at less than nm_rate_tol per 100 evaluations,
-        #    sustained over nm_rate_span PRODUCTIVE evaluations. Evaluations that did
-        #    not move the best Q are paused out of the count rather than counted or
-        #    reset — that is the simplex against an infeasible wall, not convergence,
-        #    and it can persist for thousands of evaluations before recovering.
+        # Early stops (true halts Optim), only once a finite incumbent exists:
+        # no improvement for nm_no_improve evaluations, or the rate rule.
         function nm_stop_cb(_state)
             isfinite(best_loss[]) || return false
 
@@ -2679,30 +2142,18 @@ function run_smm(
             return false
         end
 
-        # nm_simplex_step ≤ 0 keeps Optim's AffineSimplexer; a positive value builds a
-        # simplex whose every vertex the objective accepts, so descent starts at the
-        # first evaluation instead of after thousands of Inf-scored contractions.
+        # BackTracking for the gradient methods: HagerZhang evaluates the gradient (2d
+        # solves) at every trial step, and with the pinned Optim/LineSearches pair it
+        # raises a BoundsError before the first iteration.
         opt_method = (method == :neldermead) ?
                        (nm_simplex_step > 0 ?
                           Optim.NelderMead(initial_simplex =
                               FeasibleSimplexer(spec, nm_simplex_step)) :
                           Optim.NelderMead()) :
-                     # BackTracking rather than Optim's default HagerZhang, for two
-                     # independent reasons. Cost: HagerZhang re-evaluates the GRADIENT at
-                     # each trial step, and a gradient here is 2d = 46 solves, while
-                     # BackTracking needs only the objective — one solve per trial. And
-                     # correctness: with the pinned Optim/LineSearches pair, HagerZhang's
-                     # ϕdϕ destructures value_gradient!(df, x) as a 2-tuple while Optim's
-                     # ManifoldObjective returns the value alone, so that path raises a
-                     # BoundsError before the first iteration completes. BackTracking uses
-                     # ϕ and the directional derivative at 0 only, and never touches it.
                      (method == :lbfgs) ?
                        Optim.LBFGS(linesearch = Optim.LineSearches.BackTracking()) :
                        Optim.BFGS(linesearch  = Optim.LineSearches.BackTracking())
 
-        # A positive g_tol means "stop on the gradient", so the function tolerance, the step
-        # tolerance and the rate callback are all switched off: each of them stops on a small
-        # MOVE, and near a stationary point the moves are small while the gradient may not be.
         options   = Optim.Options(iterations = (max_iter > 0 ? max_iter : r.nm_max_iter),
                                   f_reltol      = (g_tol > 0 ? 0.0 : r.nm_f_tol),
                                   x_abstol      = (g_tol > 0 ? 0.0 : r.nm_x_tol),
@@ -2710,26 +2161,15 @@ function run_smm(
                                   callback      = (g_tol > 0 ? nothing : nm_stop_cb),
                                   show_trace = false)
 
-        # Nelder-Mead needs no gradient. LBFGS and BFGS do, and left to itself Optim would
-        # finite-difference one at its own default step — see fd_step above for why that
-        # step is a measured property of this criterion rather than a free choice.
-        #
-        # The gradient calls smm_objective directly instead of obj_traced so that its 2d
-        # evaluations per iteration do not inflate the evaluation counter, which is the unit
-        # the rate stop is defined in: at d = 23 a single iteration would otherwise consume
-        # half of a 100-evaluation window and the rule would fire on arithmetic rather than
-        # on stalling. The line search still runs through obj_traced, so the incumbent and
-        # the corner reporting stay correct.
+        # The gradient calls smm_objective rather than obj_traced, so its 2d solves do not
+        # count as evaluations of the rate rule; the line search runs through obj_traced.
         result = if method === :neldermead
             Optim.optimize(obj_traced, theta0, opt_method, options)
         else
-            # One line per LBFGS iteration, printed from inside the gradient because that is
-            # where the gradient exists — no extra solves. The first call is at theta_start,
-            # so the first line is the baseline the polish has to reduce, and the last line
-            # is the answer to whether a stationary point was reached. ‖g‖∞ is the quantity
-            # g_tol is compared against; ‖g‖₂ is reported beside it because a single large
-            # component and a broadly large gradient call for different reads.
             grad_calls = Ref(0)
+            # Central differences; one-sided where one side is infeasible, zero where
+            # neither solves, both counted in the printed line (a one-sided difference
+            # across a jump is huge and corrupts the LBFGS memory).
             function polish_grad!(Gv, t)
                 q0 = smm_objective(t, spec)
                 n_onesided = 0
@@ -2739,12 +2179,6 @@ function run_smm(
                     tm = copy(t);  tm[k] -= fd_step
                     qp = smm_objective(tp, spec)
                     qm = smm_objective(tm, spec)
-                    # One-sided where a side is infeasible, which is the only option for a
-                    # coordinate resting on a bound; zero where neither side solves, so the
-                    # step carries no descent claim it cannot support. Both fallbacks are
-                    # COUNTED and reported: a one-sided difference across a discontinuity
-                    # divides a jump by fd_step and returns a huge component, which then
-                    # enters LBFGS's curvature memory and corrupts every later direction.
                     Gv[k] = if isfinite(qp) && isfinite(qm)
                         (qp - qm) / (2 * fd_step)
                     elseif isfinite(qp) && isfinite(q0)
@@ -2776,12 +2210,8 @@ function run_smm(
         end
         theta_opt = Optim.minimizer(result)
         loss_opt  = smm_objective(theta_opt, spec)
-        # Either deliberate early stop counts as a valid finish, mirroring the SA
-        # convention: a finite incumbent was found and the rule that halted the run is
-        # the one we asked for. `rel_stall` is the fallback for a run that hit the
-        # iteration cap having plainly stopped moving — 500 evaluations without any
-        # improvement — and is independent of nm_no_improve so that disabling that
-        # knob does not make the test fire at zero.
+        # A deliberate early stop counts as converged; so does an iteration cap reached
+        # 500 evaluations after the last improvement (independent of nm_no_improve).
         rel_stall = isfinite(best_loss[]) &&
                     (iter_count[] - last_improve[]) >= 500
         converged = (Optim.converged(result) || stopped_early[] || rel_stall) &&
@@ -2811,14 +2241,18 @@ end
 # Result display and saving
 # ============================================================
 
+"""
+    print_results(res; why = "", k = nothing)
+
+Print the estimate `res`: free parameters (the vacancy costs `k` in place of the
+tightnesses), fixed parameters, Q, convergence and its reason `why`. The reason and the
+costs are arguments because `SMMResult` cannot gain fields.
+"""
 function print_results(res::SMMResult; why::AbstractString = "", k = nothing)
     @printf("\n╔══════════════════════════════════════════════════════╗\n")
     @printf("║  SMM Estimates                                       ║\n")
     @printf("╠══════════════════════════════════════════════════════╣\n")
-    # Column widths are set so 2 + 12 + 20 + 20 = 54, the frame's interior width: the
-    # estimate column right-aligns flush with the frame's right edge and the rule spans the
-    # table exactly. @printf needs literal widths, so the rule's sum below is the one place
-    # the three are written together — change a column and change it there too.
+    # Column widths 2 + 12 + 20 + 20 = 54, the frame's interior width.
     @printf("  %s%s%20s\n", padr("block", 12), padr("param", 20), "estimate")
     @printf("  %s\n", "─"^(12 + 20 + 20))
     for ps in res.spec.free
@@ -2827,8 +2261,6 @@ function print_results(res::SMMResult; why::AbstractString = "", k = nothing)
         val = hasproperty(res.params_opt, key) ? res.params_opt[key] : NaN
         @printf("  %s%s%20.5f\n", padr(ps.block, 12), padr(param_symbol(ps), 20), val)
     end
-    # The vacancy costs are estimated parameters like the rest; the optimiser moves the
-    # tightness pair, which is not printed, and the solve computes the costs from it.
     if k !== nothing
         for ((blk, _, _, sym), v) in zip(vacancy_cost_rows(res.spec), k_values(k))
             @printf("  %s%s%20.5f\n", padr(blk, 12), padr(sym, 20), v)
@@ -2838,14 +2270,9 @@ function print_results(res::SMMResult; why::AbstractString = "", k = nothing)
     if length(pinned) > 0
         @printf("\n  Fixed:\n")
         for (_, sym, v) in pinned
-            # 4 + 30 + 20 = 54 as well, so the fixed values right-align on the same edge as
-            # the estimates above them despite the deeper indent.
             @printf("    %s%20.5f\n", padr(sym, 30), v)
         end
     end
-    # The reason and the vacancy costs are passed in rather than stored on SMMResult: adding
-    # a field would break every bundle already serialised, and the costs are recomputed
-    # from θ by anyone who needs them (equilibrium_at).
     @printf("\n  Q = %.8e  |  converged = %s%s  |  iters = %d\n",
             res.loss_opt, res.converged, isempty(why) ? "" : @sprintf(" (%s)", why), res.iterations)
     @printf("╚══════════════════════════════════════════════════════╝\n\n")
@@ -2854,18 +2281,11 @@ end
 
 
 """
-    write_checkpoint(path, θ, Q, spec; tag)
+    write_checkpoint(path, θ, Q, spec; tag = "")
 
-Serialise the incumbent to `path` so a killed run resumes from it instead of from
-the stale bundle it started from. Called at every reheat, SA and DE.
-
-Written to a temp file and renamed: `rename` is atomic on the same filesystem, so a
-kill during the write leaves the previous checkpoint intact rather than a truncated
-file at the path warmstart reads.
-
-Carries `result` + `spec` + `provenance` — the fields the warm-start reader touches.
-It deliberately does NOT carry `sim`, so it is a resume artifact and not a
-substitute for the end-of-run bundle that plots and MCMC consume.
+Write the incumbent (θ, Q) to `path` as an `:smm_checkpoint` bundle (no `sim`: a resume
+point, not an estimate), with provenance parsed from the path; nothing when `path` is
+empty. A failure warns and the run continues.
 """
 function write_checkpoint(path::String, θ::AbstractVector, Q::Float64,
                           spec::SMMSpec; tag::String = "")
@@ -2873,10 +2293,6 @@ function write_checkpoint(path::String, θ::AbstractVector, Q::Float64,
     try
         res = SMMResult(collect(float.(θ)), _params_to_namedtuple(collect(float.(θ)), spec),
                         Q, false, 0, spec)
-        # Via write_bundle since v19.6.0: one shape for every writer, and the atomic
-        # temp-then-mv it does is the same one this function used to do inline. The
-        # `checkpoint = true` flag is gone — `stage = :smm_checkpoint` says it, and says
-        # WHICH kind of checkpoint, which the boolean could not.
         write_bundle(path; result = res, spec = spec, stage = :smm_checkpoint,
                      provenance = provenance_from_path(path), tag = tag)
         @printf("  [checkpoint]  %s  Q=%.6e -> %s\n", tag, Q, basename(path))
@@ -2886,11 +2302,15 @@ function write_checkpoint(path::String, θ::AbstractVector, Q::Float64,
     end
 end
 
+"""
+    save_results(res, path; k)
+
+Write the estimate `res` to the CSV `path`: one row per free parameter (block, name, label,
+estimate, bounds, symbol), per vacancy cost (`k`, no bounds) and per pinned parameter, then
+Q, convergence and iterations as comment lines.
+"""
 function save_results(res::SMMResult, path::String; k)
     open(path, "w") do io
-        # `symbol` is the market-suffixed display name (β_S rather than the bare β that
-        # `name` carries for both markets), appended so tables and plots can label rows
-        # without re-deriving the suffix. Existing columns keep their names and order.
         println(io, "block,name,label,estimate,lb,ub,fixed,symbol")
         for ps in res.spec.free
             key = Symbol(string(ps.block) * "_" * string(ps.name))
@@ -2898,7 +2318,6 @@ function save_results(res::SMMResult, path::String; k)
             @printf(io, "%s,%s,%s,%.8f,%.8f,%.8f,false,%s\n",
                     ps.block, ps.name, ps.label, val, ps.lb, ps.ub, param_symbol(ps))
         end
-        # The vacancy costs have no box: the optimiser moves the tightnesses.
         for ((blk, nm, label, sym), v) in zip(vacancy_cost_rows(res.spec), k_values(k))
             @printf(io, "%s,%s,%s,%.8f,,,false,%s\n", blk, nm, label, v, sym)
         end
@@ -2917,7 +2336,11 @@ end
 # Internal helpers
 # ============================================================
 
-# The free parameters at an unconstrained θ, keyed `block_name`.
+"""
+    _params_to_namedtuple(θ_unc, spec) → NamedTuple
+
+The free parameters at the unconstrained point `θ_unc`, constrained, keyed `block_name`.
+"""
 function _params_to_namedtuple(θ_unc::AbstractVector{Float64}, spec::SMMSpec)
     d = Dict{Symbol, Float64}()
     for (i, ps) in enumerate(spec.free)
@@ -2927,6 +2350,11 @@ function _params_to_namedtuple(θ_unc::AbstractVector{Float64}, spec::SMMSpec)
 end
 
 
+"""
+    _spec_with_init(spec, theta_unc) → SMMSpec
+
+`spec` with its starting values set to the unconstrained point `theta_unc`.
+"""
 function _spec_with_init(spec::SMMSpec, theta_unc::Vector{Float64})
     new_free = [
         ParamSpec(ps.block, ps.name, ps.lb, ps.ub,
@@ -2940,11 +2368,11 @@ end
 """
     period_bundle(b, window) → bundle
 
-Bundle `b` as one data window sees it. For the baseline's estimate, its period `window` as a
-single-period estimate: that period's coordinates and spec, and its share of every record
-kept per period or per coordinate — the standard errors, the vacancy costs and the
-attracting check. Its `result.loss_opt` is NaN, because the stored Q is the joint one. Any
-other bundle is returned unchanged.
+Bundle `b` as data window `window` sees it. For the baseline's estimate, period `window` as
+a single-period estimate: that period's coordinates and spec, and its share of every
+per-period or per-coordinate record (standard errors, vacancy costs, attracting check); its
+`result.loss_opt` is NaN, since the stored Q is the joint one. Any other bundle is returned
+unchanged.
 """
 function period_bundle(b, window::Symbol)
     (b.spec === nothing || !is_joint(b.spec)) && return b

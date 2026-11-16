@@ -1,24 +1,16 @@
 #!/usr/bin/env julia
 ############################################################
-# smoke_transition.jl — the transition path still runs on the shipped estimate.
+# smoke/smoke_transition.jl — the transition path runs on a stored estimate.
 #
 #   RSROOT=<tree> julia --project=. -t 6 code/smoke/smoke_transition.jl
 #
-# The transition solver reconstructs the skilled employed density itself rather than
-# calling the stationary routine, so it carries its own copy of every margin the
-# stationary solve has — and a change to a margin in `solver/` can leave the path
-# consuming the old one. This is the gate that catches that: both steady states solve,
-# `solve_transition` completes, and every reported series is finite.
-#
-# The terminal regime is a −3% shift in the aggregate productivity A rather than the
-# crisis bundle, so the test needs one estimate on disk and exercises the same code
-# path a scenario run would. The outer loop is capped short: this establishes that the
-# path runs and stays finite, NOT that it converged.
-#
-# The grid is the ESTIMATION grid, not a coarser one. base_fc's skilled block does
-# not converge at Nx = 60, so the gate at the old default failed on the steady state
-# and never reached the path it exists to test. Two solves plus six outer iterations
-# at Nx = 120 cost about a minute.
+# The transition solver rebuilds the skilled employed density itself, so it carries its
+# own copy of every stationary margin; this catches a margin changed in solver/ but not
+# in the path. It solves the steady state at the window's SMM estimate and one with the
+# stored log productivity scaled by 0.97 (cp.A is ln A), runs `solve_transition` between
+# them with the outer loop capped, and requires every reported series to be finite. It
+# does not test convergence. The grid is the estimation grid: base_fc's skilled block
+# does not converge at Nx = 60. About a minute.
 #
 # Optional: SMOKE_NX (default 120), SMOKE_MAXIT (6), ROYSEARCH_WINDOW (base_fc).
 ############################################################
@@ -50,8 +42,7 @@ println("\n$RULE\nSMOKE — transition path on the $WINDOW estimate (v$ROYSEARCH
 bundle = period_bundle(read_bundle(estimate_path(estimation_window(WINDOW), "_diagonalW"; point = :smm)),
                        Symbol(WINDOW))
 cp, up, sp, tight = unpack_θ(bundle.result.theta_opt, bundle.spec)
-# @with_kw gives no copy-with-changes constructor, so the fields are splatted by name
-# and the override follows — the same idiom model_main.jl uses.
+# @with_kw has no copy-with-changes constructor: splat the fields, then override A.
 cp1 = CommonParams(; (f => getfield(cp, f) for f in fieldnames(CommonParams))...,
                    A = 0.97 * cp.A)
 sim = bundle.spec.sim

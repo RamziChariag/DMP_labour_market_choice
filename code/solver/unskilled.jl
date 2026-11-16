@@ -1,57 +1,31 @@
 ############################################################
-# unskilled.jl — Unskilled block solver (RoySearch)
+# unskilled.jl — Unskilled block, training margin and career choices
 #
-# Under pure-Roy every unskilled-market VALUE object of a type that searches is a
-# function of the unskilled aptitude aU alone (notes §231, §276): U^search, E_U, J_U,
-# p* read aU.  The two-dimensional type enters through
-#   (i)   the training value T(aU,aS) = [b_T + φ U_S(aU,aS)] / (r+φ+ν), priced on the
-#         skilled unemployment value U_S = max{U_S^(0)(aS), U_S^(1)(aU,aS)}, and the
-#         frontier τ(aU,aS) = 1{−c(aS) + T(aU,aS) ≥ U^search(aU)};
-#   (ii)  the trained workers hired into the unskilled market.  Such a worker is an
-#         unskilled worker like any other, so her outside option when the match ends is
-#         U_U = max{U^search(aU), −c(aS) + T(aU,aS)}: where the frontier encloses her
-#         type it is training, and her match values, reservation quality and wages read
-#         the whole type (career_choices!);
-#   (iii) the augmented seeker pool ũ_U = ∬ (u_U + d u_S), and
-#   (iv)  the stationary densities u_U(aU,aS), t(aU,aS) on the copula grid.
+# The values of a searching type read aU alone (U^search, E_U, J_U, p*_U). The full
+# type (aU, aS) enters through the training value T(aU,aS) = [b_T + φ U_S]/(r+φ+ν) and the
+# training choice τ, through the trained workers hired into the unskilled market (the
+# career choices), through the seeker pool ũ_U = ∬ (u_U + d u_S), and through the
+# stationary densities on the copula grid. Training is not gated by d.
 #
-# The training decision is NOT gated by d.  b_T discipline comes purely
-# from comparative advantage (notes Prop bT): the would-be stipend
-# farmers are high-aU / low-aS types who forgo a good unskilled job by
-# training, so raising b_T shifts only the marginal genuine trainee at
-# the frontier.  (The single-ability code gated τ by d as an explicit
-# refinement; RoySearch does not need it and does not use it.)
+# The outer loop iterates on (θ_U, p*_U, u_U, t); the inner loop settles
+# (U^search, E_U(·,1), J_U(·,1)) at fixed (θ_U, p*_U). d·u_S is carried from the skilled
+# block in uc.duS_carry and held fixed within one unskilled solve.
 #
-# Outer loop iterates on (θ_U, p*(aU), u_U, t); the inner loop settles
-# (U^search, E_U(·,1), J_U(·,1)) at fixed (θ_U, p*).  The cross-market
-# pool d·u_S is supplied by the skilled block via uc.duS_carry and held
-# fixed within one unskilled solve.
-#
-# Functions
-#   build_unskilled_G_weights        dG(p) quadrature weights, G=Beta(α_U,1)
-#   G_cdf_unskilled                  G(p) = p^{α_U}
-#   solve_unskilled_surplus_on_grid! surplus S_U(aU,·) on the p-grid
-#   entry_surplus_unskilled          surplus S_U(aU,1) of a fresh match
-#   training_frontier!, training_policy!, training_value!   the training margin
-#   training_choice!, drain_choice!  τ and d at the installed values, or held (Model.held)
-#   unskilled_inner_loop!            iterate values at (θ_U, p*)
-#   hire_fraction                    hired fraction χ(aU) of each ability cell
-#   unemployment_split_unskilled     per-row unemployed share and its hired part
-#   hired_unemployed                 hired branch of a cell's unemployed stock
-#   career_choices!                  U_S^(1), T, τ, d and the training-slice matches
-#   HeldChoices(model)               a solved model's choices, for another model to hold
-#   solve_stationary_unskilled!      stationary u_U, t of the searching types
-#   stationary_masses!               every stationary mass, crossers included
-#   update_pstar_from_surplus!       reservation-quality update
-#   update_theta_unskilled           free-entry tightness update
-#   solve_unskilled_block!           outer loop
+# Entry points: solve_unskilled_block!, career_choices!, stationary_masses,
+# install_stationary_masses!, update_theta_unskilled, vacancy_cost_unskilled,
+# HeldChoices(model).
 ############################################################
 
 
 # ---------------------------------------------------------------------------
-# dG quadrature weights and CDF for the damage shock
-#   G = Beta(α_U, 1),  g(p) = α_U p^{α_U−1},  G(p) = p^{α_U}
+# Damage-shock distribution G = Beta(α_U, 1), G(p) = p^α_U
 # ---------------------------------------------------------------------------
+
+"""
+    build_unskilled_G_weights(pgrid, wp, α) → wG
+
+Quadrature weights of dG on the unskilled grid, `wp_j g(p_j)` with `g(p) = α p^(α−1)`.
+"""
 function build_unskilled_G_weights(pgrid::Vector{Float64}, wp::Vector{Float64}, α::Float64)
     wG = similar(wp)
     @inbounds for j in eachindex(pgrid)
@@ -62,6 +36,11 @@ function build_unskilled_G_weights(pgrid::Vector{Float64}, wp::Vector{Float64}, 
     return wG
 end
 
+"""
+    G_cdf_unskilled(p, α) → G(p)
+
+Damage-shock CDF `p^α` on [0, 1].
+"""
 @inline function G_cdf_unskilled(p::Float64, α::Float64)
     (p <= 0.0) && return 0.0
     (p >= 1.0) && return 1.0
@@ -70,24 +49,17 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Unskilled surplus on the p-grid, for one aU
-#
-# Closed-form reduction of the surplus HJB (notes eq:surplusU):
-#   (r+ν+λ+ξ) S(p) = A P_U aU p − (r+ν) U^search(aU) + λ ∫_{p*}^1 S dG,
-#   S(p) = max( [A P_U aU p − (r+ν) U^search + λ I] / (r+ν+λ+ξ), 0 ),
-# with the scalar tail integral I = ∫_{p*}^1 S dG solved analytically.
-# The exogenous separation ξ_U enters only the base rate: the worker's
-# +ξ_U U^search continuation and the firm's asset extinction combine to
-# −ξ_U S, which nets into the base (mirror skilled.jl ϱ_S).  The reservation
-# FORMULA in update_pstar_from_surplus! is therefore unchanged by ξ_U — no ξ
-# appears in it — but p* itself is not: it reads the tail integral I, which is
-# computed off this denominator.  Measured at the Q = 488 base_fc point,
-# ξ_U 0 → 0.00634 moves median p*_U from 0.4228 to 0.4582.
-# Soft thresholding around p* keeps S(·) continuous in p*.
-#
-# `PUeff` is the effective productivity A P_U aU already carrying exp(A)
-# and the ability level, i.e. the linear-in-aU loading of production.
+# Surplus
 # ---------------------------------------------------------------------------
+
+"""
+    solve_unskilled_surplus_on_grid!(Svec, pgrid, wG, PUeff, r, ν, λ, Ux, pstar_x, ξ = 0) → I
+
+Surplus `S_U(aU, ·)` on the grid for one aU, from the closed form of the surplus HJB
+`(r+ν+λ+ξ) S(p) = PUeff p − (r+ν) Ux + λ I`, with the tail integral `I = ∫_{p*}^1 S dG`
+solved analytically and the soft weight at `pstar_x`. `PUeff = exp(A) P_U aU`, `Ux` the
+outside option U^search(aU). ξ_U enters only the discount. Writes `Svec`; returns `I`.
+"""
 function solve_unskilled_surplus_on_grid!(
     Svec::Vector{Float64}, pgrid::Vector{Float64}, wG::Vector{Float64},
     PUeff::Float64, r::Float64, ν::Float64, λ::Float64,
@@ -119,27 +91,24 @@ end
 """
     entry_surplus_unskilled(PUeff, flow, λ, I, D) → S_U(aU, 1)
 
-Surplus of a fresh unskilled match, which starts at the top of the quality support, p = 1:
-`max((A P_U aU · 1 + flow + λ I) / D, 0)`.  `flow` is the rest of the numerator, which does
-not involve p (`−(r+ν) U^search` in a steady state; the transition adds its continuation),
-`I` the tail integral on the grid and `D` the discount.  p = 1 lies above the top quadrature
-node, so reading the grid surface there instead would price entry at `p_N < 1` and leave a
-band of hired types, `a^h < aU < a^h/p_N`, at zero surplus.  Evaluated at p = 1, the surplus
-is continuous in aU and vanishes at `a^h`, as the hireable-set lemma says.
+Surplus of a fresh unskilled match, which starts at p = 1: `max((PUeff + flow + λ I) / D, 0)`,
+`flow` the p-free rest of the numerator (`−(r+ν) U^search` in a steady state), `I` the tail
+integral, `D` the discount. Evaluated in closed form at p = 1, above the top grid node, so it
+is continuous in aU and vanishes at a^h.
 """
 @inline entry_surplus_unskilled(PUeff::Float64, flow::Float64, λ::Float64, I::Float64, D::Float64) =
     max((PUeff + flow + λ * I) / D, 0.0)
 
 
 # ---------------------------------------------------------------------------
-# The training margin
+# Training margin
 # ---------------------------------------------------------------------------
-"""
-    training_frontier!(T, US, bT, φ, r, ν)
 
-Training value `(r + φ + ν) T(a) = b_T + φ U_S(a)`, cell by cell.  Extracted so the
-choices and the equilibrium residual that checks them share one implementation: a residual
-computed from a second copy of a formula tests the copy, not the solver.
+"""
+    training_frontier!(T, US, bT, φ, r, ν) → T
+
+Training value `T = (b_T + φ U_S) / (r + φ + ν)`, cell by cell, on the skilled
+unemployment value `US`. Shared by the choices and the residual battery.
 """
 function training_frontier!(T::AbstractMatrix{Float64}, US::AbstractMatrix{Float64},
                             bT::Float64, φ::Float64, r::Float64, ν::Float64)
@@ -151,17 +120,11 @@ function training_frontier!(T::AbstractMatrix{Float64}, US::AbstractMatrix{Float
 end
 
 """
-    training_policy!(τT, Utr, C, x)
+    training_policy!(τT, Utr, C, x) → τT
 
-Training choice `τ(a_U, a_S)`: the covered fraction of each cell on which the training
-option `Utr(a_U, a_S)` beats the value of searching `C(a_U, a_S)` (covered_fraction!, along
-each a_U row).  Utr is increasing in aS where T is the stay-skilled branch's, so the
-training set is then an upper interval; where crossing pays T reads aU as well, and each
-sign change is located where it lies.  A hard 0/1 at the nodes made every composition
-aggregate a step function of the parameters (v22.0.0: one of 14400 cells flipping moved Q
-by 0.18).
-
-Shared by the iteration, the equilibrium residual and the transition, for the reason above.
+Training choice τ(aU, aS): along each aU row, the covered fraction of each cell on which the
+training option `Utr` beats the value of searching `C` (`covered_fraction!`). Shared by the
+iteration, the residual battery and the transition.
 """
 function training_policy!(τT::AbstractMatrix{Float64}, Utr::AbstractMatrix{Float64},
                           C::AbstractMatrix{Float64}, x::AbstractVector{Float64})
@@ -176,8 +139,7 @@ end
 """
     training_value!(Utr, model) → Utr
 
-Value of entering training, net of its cost: `T(a_U, a_S) − c(a_S)`.  The one expression
-every reader of the training margin compares against the value of searching.
+Value of entering training net of its cost, `T(aU, aS) − c(aS)`, at the installed T.
 """
 function training_value!(Utr::AbstractMatrix{Float64}, model::Model)
     cp = model.common;  gp = model.grids;  uc = model.unsk_cache
@@ -187,15 +149,18 @@ function training_value!(Utr::AbstractMatrix{Float64}, model::Model)
     return Utr
 end
 
-# The value of searching on the (aU, aS) grid, constant along each row.
+"""
+    searching_value(model) → Matrix{Float64}
+
+U^search(aU) on the (aU, aS) grid, constant along each row.
+"""
 searching_value(model::Model) = repeat(model.unsk_cache.Usearch, 1, length(model.grids.x))
 
 """
-    training_choice!(τT, model, Utr = −c + T) → τT
+    training_choice!(τT, model, Utr = T − c) → τT
 
-The training choice at the installed values, `training_policy!` of `Utr` against the value of
-searching, or the held τ where the model holds its choices (`Model.held`).  The one call every
-reader of the choice makes, so a held choice is held everywhere at once.
+The training choice at the installed values (`training_policy!` of `Utr` against the value
+of searching), or the held τ when `model.held` is set. Every reader of the choice calls this.
 """
 function training_choice!(τT::AbstractMatrix{Float64}, model::Model,
                           Utr::AbstractMatrix{Float64} = training_value!(similar(model.unsk_cache.T), model))
@@ -206,15 +171,12 @@ end
 """
     marginal_training_cells(model; entering, admit = nothing) → Matrix{Float64}
 
-Composition of a market that holds no one, as the limit of its composition while it
-empties.  Markets empty through the training margin, and the last cells to cross it are
-the first to cross back: for the skilled market (`entering = true`) the cells with the
-largest training gain `Utr(a_U, a_S) − U^search(a_U)`, for the unskilled labour force
-(`entering = false`) those with the smallest.  Returns a unit mass on those cells, for
-the model's own stationary formulas to turn into a composition — unit so that its size
-never depends on how thin the copula is at the marginal cells, and only its ratios carry
-meaning.  Cells tied to a relative 1e-12 share it in proportion to `W2`.  `admit`
-restricts the candidate cells; with none admitted the result is zero.
+Limit composition of a market that holds no one, as a unit mass on the (aU, aS) grid. The
+last cells to leave through the training margin are the first to return: for the skilled
+market (`entering = true`) the cells with the largest training gain `Utr − U^search`, for
+the unskilled labour force (`entering = false`) the smallest. Cells tied to a relative 1e-12
+share the mass in proportion to `W2`. `admit` restricts the candidates; with none admitted
+the result is zero.
 """
 function marginal_training_cells(model::Model; entering::Bool,
                                  admit::Union{Nothing,AbstractMatrix{Bool}} = nothing)
@@ -240,17 +202,17 @@ end
 
 # ---------------------------------------------------------------------------
 # Inner loop
-#
-# Given θ_U and p*(aU) fixed, iterate on (U^search, E_U(·,1), J_U(·,1))
-# until convergence.
-#
-# At p = 1, Nash bargaining gives J_U(aU,1) = (1−β) S_U(aU,1),
-# E_U(aU,1) = U^search(aU) + β S_U(aU,1); the search-value update consumes
-# E_U(aU,1) via (r+ν+κ_U) U^search = b_U + κ_U E_U(aU,1).  The training value
-# T is formed here on the supplied skilled unemployment value U_S(aU,aS), and the
-# frontier τ from it for the distribution step; neither feeds the searchers'
-# outside option, which is U^search(aU) alone (notes §276).
 # ---------------------------------------------------------------------------
+
+"""
+    unskilled_inner_loop!(model; US_in) → (κ, Ivec, E1vec, status, converged, iters)
+
+Iterate (U^search, J_U(·,1), E_U(·,1)) at fixed θ_U and p*_U:
+`(r+ν+κ_U) U^search = b_U + κ_U E_U(aU,1)`, with Nash sharing of the entry surplus at p = 1.
+T is set once from the skilled unemployment value `US_in` (it does not feed U^search), and its
+step enters the first pass's residual. On exit installs the training choice τ. `status` is
+`:converged`, `:diverged` (no contraction over `inner_K` sweeps after `inner_B`) or `:maxit`.
+"""
 function unskilled_inner_loop!(model::Model; US_in::AbstractMatrix{Float64})
     cp = model.common;  gp = model.grids;  up = model.unsk_par
     ug = model.unsk_grids;  uc = model.unsk_cache;  sim = model.sim
@@ -266,15 +228,11 @@ function unskilled_inner_loop!(model::Model; US_in::AbstractMatrix{Float64})
     Ivec  = zeros(Float64, Nx)
     E1vec = zeros(Float64, Nx)
 
-    # Fixed partition of the aU grid for the surplus fan-out below.  Computed once per
-    # call rather than per iteration: at fixed Nx it is the same partition every time,
-    # which is what makes the block bitwise reproducible across schedules.
+    # Partition fixed per call, for bitwise reproducibility across schedules (index_chunks).
     chunks = index_chunks(Nx)
 
     Usearch_old = copy(uc.Usearch)
 
-    # T reads only US_in, which is fixed within the loop, so it is set once; its step
-    # enters the first pass's residual, so a pass that moved T never counts as converged.
     T_old = copy(uc.T)
     training_frontier!(uc.T, US_in, bT, φ, r, ν)
     dT = supnorm(uc.T, T_old)
@@ -287,9 +245,7 @@ function unskilled_inner_loop!(model::Model; US_in::AbstractMatrix{Float64})
     for it in 1:sim.maxit_inner
         copyto!(Usearch_old, uc.Usearch)
 
-        # Match surplus at the current U^search outside option → J_U(aU,1), E_U(aU,1).
-        # One `Svec` scratch vector per CHUNK, allocated inside the task: see
-        # `index_chunks` for why this is a @spawn fan-out and not `@threads :static`.
+        # Surplus at the current U^search → J_U(aU,1), E_U(aU,1); scratch per task.
         @sync for rng in chunks
             Threads.@spawn begin
                 Svec = zeros(Float64, Np)
@@ -331,10 +287,6 @@ function unskilled_inner_loop!(model::Model; US_in::AbstractMatrix{Float64})
         end
     end
 
-    # Training frontier τ(aU,aS): the POPULATION FRACTION of cell (aU,aS) that trains,
-    # from Utr(aU,aS) = −c(aS) + T(aU,aS) > U^search(aU), with no d-gate (b_T discipline is
-    # by comparative advantage).  c(aS) is a psychological cost in fixed utility units, NOT
-    # scaled by A, so the training margin shifts with the wage level.
     training_choice!(uc.τT, model)
 
     return (κ = κ, Ivec = Ivec, E1vec = E1vec,
@@ -345,22 +297,17 @@ end
 # ---------------------------------------------------------------------------
 # Hiring margin
 #
-# A fresh unskilled match starts at the top of the quality support, p = 1, so
-# a meeting is accepted with probability one or zero: a type is hired iff
-# J_U(aU,1) > 0.  By the hireable-set lemma that holds iff A P_U aU > b_U,
-# i.e. aU > a^h = b̃_U / P_U (A cancels), at every tightness — the hireable
-# set is fixed by primitives.  Never-hired types search, are unemployed and
+# A fresh match starts at p = 1, so a type is hired iff J_U(aU,1) > 0, i.e. iff
+# aU > a^h = b_U / P_U at every tightness. Never-hired types search, are unemployed and
 # stay in the seeker pool; they leave only at ν.
 # ---------------------------------------------------------------------------
+
 """
     hire_fraction(model) → Vector{Float64}
 
-Hired fraction χ(a_U) of each ability cell: the part of the node's midpoint interval
-above the hiring threshold `a^h = b̃_U / P_U`, by the quadrature τ_T uses.  A per-node
-indicator 1{p*_U < 1} would move a whole row between the hired and never-hired branches
-as `a^h` crosses a node, making every aggregate a step function of `b̃_U / P_U`; χ is
-continuous and piecewise linear in it, and equals that indicator whenever `a^h` sits on a
-cell edge.
+Hired fraction χ(aU) of each ability cell: the part of the cell above the hiring threshold
+`a^h = b_U / P_U` (`fraction_above`). Continuous in a^h, equal to the node indicator when
+a^h is on a cell edge.
 """
 function hire_fraction(model::Model)
     x  = model.grids.x
@@ -372,17 +319,10 @@ end
 """
     unemployment_split_unskilled(pstar, κ, model) → (χ, usurv, hired)
 
-Per a_U row, the stationary unemployment of its searching population, split into the
-hired branch (fraction χ) and the never-hired branch (1 − χ):
-- `usurv = χ υʰ + (1 − χ)`, the unemployed share of the searching population, with
-  `υʰ = (δ+ν)/(κ+δ+ν)` and `δ = ξ_U + λ_U G(p*)`.  The never-hired branch is wholly
-  unemployed.
-- `hired = χ υʰ / usurv`, the hired branch's share of the row's unemployed: the share that
-  leaves at κ_U + ν rather than ν.
-
-`υʰ` reads the node's own p* and `κ` whatever the node's classification, so the hired
-sliver of a node below `a^h` takes the node's values (p* = 1), as a τ cell does.  Both
-are row properties, so they apply to any composition over a_S.
+Per aU row, the stationary unemployment of its searching population: `usurv = χ υʰ + (1−χ)`
+the unemployed share, with `υʰ = (δ+ν)/(κ+δ+ν)`, `δ = ξ_U + λ_U G(p*)`, and the never-hired
+branch wholly unemployed; `hired = χ υʰ / usurv` the hired branch's share of the row's
+unemployed. υʰ uses the node's own p* and κ whatever its classification.
 """
 function unemployment_split_unskilled(pstar::AbstractVector{Float64}, κ::Float64, model::Model)
     ν = model.common.ν
@@ -402,11 +342,9 @@ end
 """
     hired_unemployed(u, χ, τ, ℓ) → Float64
 
-The hired branch of a cell's unemployed mass `u`, read off the stock.  The never-hired
-branch is the part of the cell's searching slice below `a^h`, `(1 − χ)(1 − τ)ℓ`, and is
-wholly unemployed, so the rest of `u` is the hired branch's.  In a stationary state this
-equals `hired · u` (`unemployment_split_unskilled`); off one it is the split the
-transition carries, since there the row's unemployed are not at their stationary shares.
+Hired branch of a cell's unemployed stock `u`: `u` less the never-hired part of the
+searching slice, `(1 − χ)(1 − τ)ℓ`. Equals `hired · u` in a stationary state; the transition
+uses it off one.
 """
 @inline hired_unemployed(u::Float64, χ::Float64, τ::Float64, ℓ::Float64) =
     max(u - (1.0 - χ) * (1.0 - τ) * ℓ, 0.0)
@@ -415,35 +353,27 @@ transition carries, since there the row's unemployed are not at their stationary
 # ---------------------------------------------------------------------------
 # Career choices of the trained
 #
-# A trained worker who searches the unskilled market and is hired there becomes an
-# unskilled worker: she loses trained status, and when the match ends her outside option
-# is that of any unskilled worker of her type.  Outside the training set that is
-# U^search(aU), and her match is the row's own (p*_U, E_U(aU,1), hire share χ).  Inside it
-# her separations re-enter training, so her match is valued at the outside option
-# Utr = −c(aS) + T(aU,aS): it has its own reservation quality p*_t(aU,aS), entry surplus
-# S_t(aU,aS,1) and hiring margin S_t ≥ 0 (the training slice).  The value of searching
-# the unskilled market as a trained worker is
-#   (r+ν+κ_X) U_S^(1) = b_S + κ_X E_U(aU,aS,1),   κ_X = κ_U χ_X,
-# with E_U = U_U + β_U S(·,1)⁺, U_U = max{U^search, Utr}, and χ_X the hired share of the
-# match she would enter.  Since T = [b_T + φ max{U_S^(0), U_S^(1)}]/(r+φ+ν) prices
-# U_S^(1) and U_S^(1) reads T through U_U, a cell inside the training set that crosses
-# solves one scalar fixed point.
-#
-# A cell's draining share d splits as the transition splits it: the share enclosed by
-# the training frontier, max(d+τ−1, 0)/d, joins the training slice and the rest the
-# searching slice (`enclosed_crossers`).
+# A trained worker hired into the unskilled market becomes an unskilled worker: when the
+# match ends her outside option is U_U = max{U^search(aU), Utr}, Utr = −c(aS) + T(aU,aS).
+# Outside the training set her match is the row's. Inside it her separations re-enter
+# training, so the match is valued at Utr (the training slice: p*_t, S_t(·,1), χ_t). The
+# value of crossing is (r+ν+κ_X) U_S^(1) = b_S + κ_X E_U(aU,aS,1), κ_X = κ_U χ_X. T prices
+# U_S^(1) and U_S^(1) reads T, so a cell inside the training set solves a scalar fixed point.
 # ---------------------------------------------------------------------------
+
 """
     enclosed_crossers(d, τ) → Float64
 
-Share of a cell's draining fraction `d` that lies inside its training fraction `τ`: the
-drain set is the lower part of the cell in aS and the training set the upper part, so they
-overlap on `max(d + τ − 1, 0)` of the cell.
+Share of a cell's drain fraction `d` inside its training fraction `τ`, `max(d+τ−1, 0)/d`:
+the drain set is the lower part of the cell in aS, the training set the upper part.
 """
 @inline enclosed_crossers(d::Float64, τ::Float64) = d > 0.0 ? max(d + τ - 1.0, 0.0) / d : 0.0
 
-# Suffix sums of the dG quadrature, Σ_{k≥j} wG_k and Σ_{k≥j} p_k wG_k, so that the tail
-# integral at any reservation quality is O(1) after a bisection for the cutoff node.
+"""
+    unskilled_tails(p, wG) → (CM, CP)
+
+Suffix sums `Σ_{k≥j} wG_k` and `Σ_{k≥j} p_k wG_k` (length Np+1, zero at the end).
+"""
 function unskilled_tails(p::AbstractVector{Float64}, wG::AbstractVector{Float64})
     Np = length(p)
     CM = zeros(Float64, Np + 1);  CP = zeros(Float64, Np + 1)
@@ -454,9 +384,13 @@ function unskilled_tails(p::AbstractVector{Float64}, wG::AbstractVector{Float64}
     return (CM = CM, CP = CP)
 end
 
-# Tail integral I = ∫_{p*}^1 S dG of the match with outside option O at reservation
-# quality pst: solve_unskilled_surplus_on_grid!'s I, with its soft weight on the node
-# straddling pst and full weight above.
+"""
+    unskilled_tail_integral(pst, O, PUeff, p, wG, tails, r, ν, λ, D) → I
+
+Tail integral `∫_{p*}^1 S dG` of the match with outside option `O` at reservation quality
+`pst`, as in `solve_unskilled_surplus_on_grid!` (soft weight on the straddling node), from
+the suffix sums `tails`.
+"""
 function unskilled_tail_integral(pst::Float64, O::Float64, PUeff::Float64,
                                  p::AbstractVector{Float64}, wG::AbstractVector{Float64},
                                  tails, r::Float64, ν::Float64, λ::Float64, D::Float64)
@@ -476,11 +410,9 @@ end
 """
     unskilled_match_at(O, PUeff, p0, p, wG, tails, r, ν, λ, D) → (pstar, S1)
 
-The unskilled match of a worker with outside option `O`: its reservation quality, the
-fixed point of `p* = [(r+ν) O − λ I(p*)] / (A P_U aU)` (`update_pstar_from_surplus!`'s map
-at a given outside option), started from `p0`, and its entry surplus at p = 1 before the
-positive part.  The map's slope at the fixed point is λ S(p*) g(p*) = 0, so it converges
-in a few steps.
+Unskilled match of a worker with outside option `O`: the reservation quality, fixed point of
+`p* = [(r+ν) O − λ I(p*)] / PUeff` started at `p0`, and the entry surplus at p = 1 before the
+positive part. The map has zero slope at the fixed point, so it converges in a few steps.
 """
 function unskilled_match_at(O::Float64, PUeff::Float64, p0::Float64,
                             p::AbstractVector{Float64}, wG::AbstractVector{Float64}, tails,
@@ -499,14 +431,12 @@ function unskilled_match_at(O::Float64, PUeff::Float64, p0::Float64,
 end
 
 """
-    hire_profile(SU1, model, D) → NamedTuple
+    hire_profile(SU1, model, D) → (Srow, χ, knot_x, knot_S, x, xlo, xhi)
 
-The unskilled entry surplus S_U(aU,1) of a searching type along aU before the positive
-part, from its positive part `SU1`: below the hiring threshold a^h a type is never hired,
-so its continuation and tail are zero and S_U(aU,1) = (A P_U aU − b_U)/D, `D` the
-discount of the surplus.  The profile runs linearly through the nodes and through its
-exact zero at a^h, which is a knot.  Read by `crosser_hire_share`, in the stationary state
-and at every date of the transition.
+Entry surplus S_U(aU,1) of a searching type along aU before the positive part, from its
+positive part `SU1`: below a^h it is `(exp(A) P_U aU − b_U)/D`. The profile is linear between
+the nodes and has an exact zero knot at a^h. Read by `crosser_hire_share`, here and in the
+transition.
 """
 function hire_profile(SU1::AbstractVector{Float64}, model::Model, D::Float64)
     cp = model.common;  up = model.unsk_par;  x = model.grids.x
@@ -526,11 +456,9 @@ end
 """
     crosser_hire_share(hp, i, S1) → Float64
 
-Hired share of cell `a_U` for a match whose entry surplus at the node is `S1` (before the
-positive part).  Its surplus across the cell is taken as the searching type's profile
-(`hire_profile`) shifted by `Δ = S_U(a_U,1) − S1`, so the share is the cell's fraction
-above the ability at which the profile reaches `Δ`.  At `Δ = 0` that ability is `a^h`
-and the share is `χ(a_U)` exactly.
+Hired share of cell `i` for a match whose entry surplus at the node is `S1` (before the
+positive part): the searching profile `hp` shifted by `Δ = S_U(aU,1) − S1`, so the share is
+the cell's fraction above the ability where the profile reaches Δ. At Δ = 0 it is χ(aU).
 """
 function crosser_hire_share(hp, i::Int, S1::Float64)
     Δ = hp.Srow[i] - S1
@@ -554,9 +482,8 @@ end
 """
     crossing_context(model, κU, EU1) → NamedTuple
 
-The objects the career choices of the trained read: the unskilled match of a type that
-searches (`E_U(a_U,1)`, `p*_U`, its hire profile), the quadrature and constants the
-training-slice matches are solved with, and the held choices (`Model.held`) if any.
+Everything the career choices read: κ_U and E_U(aU,1) of the searching match, its hire
+profile, the dG quadrature and suffix sums, the scaled flows and rates, and `model.held`.
 """
 function crossing_context(model::Model, κU::Float64, EU1::AbstractVector{Float64})
     cp = model.common;  up = model.unsk_par;  sp = model.skl_par
@@ -570,22 +497,37 @@ function crossing_context(model::Model, κU::Float64, EU1::AbstractVector{Float6
             bT = up.bT * exp(cp.A), bS = sp.bS * exp(cp.A), c = cp.c, held = model.held)
 end
 
-# The two node choices the values read, U_U = max{U^search, Utr} and
-# U_S = max{U_S^(0), U_S^(1)}, at node (i, j): chosen when `held` is nothing, else held.
-# Shared with the transition's backward pass.
+"""
+    trains_at(held, i, j, Utr, Us) → Bool
+
+Node choice in U_U = max{U^search, Utr} at (i, j): chosen when `held === nothing`, else held.
+Shared with the transition.
+"""
 @inline trains_at(held, i::Int, j::Int, Utr::Float64, Us::Float64) =
     held === nothing ? !(Utr <= Us) : held.trains[i, j]
+
+"""
+    drains_at(held, i, j, U0, U1) → Bool
+
+Node choice in U_S = max{U_S^(0), U_S^(1)} at (i, j): chosen when `held === nothing`, else
+held. Shared with the transition.
+"""
 @inline drains_at(held, i::Int, j::Int, U0::Float64, U1::Float64) =
     held === nothing ? !(U1 <= U0) : held.drains[i, j]
+
+"""
+    skilled_value_at(held, i, j, U0, U1) → Float64
+
+U_S at (i, j): `max(U0, U1)`, or the held branch. Shared with the transition.
+"""
 @inline skilled_value_at(held, i::Int, j::Int, U0::Float64, U1::Float64) =
     held === nothing ? max(U0, U1) : (held.drains[i, j] ? U1 : U0)
 
 """
     training_slice_match(ctx, model, i, j, Utr) → (pstar, S1, χ)
 
-The unskilled match of a trained hire whose separations re-enter training: valued at the
-outside option `Utr`, its reservation quality, entry surplus before the positive part and
-hired share.
+Unskilled match of a trained hire whose separations re-enter training, valued at the outside
+option `Utr`: reservation quality, entry surplus before the positive part, hired share.
 """
 function training_slice_match(ctx, model::Model, i::Int, j::Int, Utr::Float64)
     m = unskilled_match_at(Utr, ctx.PU * ctx.x[i], model.unsk_cache.pstar[i], ctx.p, ctx.wG,
@@ -594,11 +536,10 @@ function training_slice_match(ctx, model::Model, i::Int, j::Int, Utr::Float64)
 end
 
 """
-    crossing_value(ctx, model, i, j, T) → Float64
+    crossing_value(ctx, model, i, j, T) → U_S^(1)
 
-U_S^(1) of type (a_U, a_S) when the value of training is `T`: the match she would enter is
-the row's where searching beats training at the node (or is the held choice there), the
-training slice's otherwise.
+U_S^(1) of cell (i, j) at training value `T`: through the row's match where searching beats
+training at the node (or is the held choice), through the training-slice match otherwise.
 """
 function crossing_value(ctx, model::Model, i::Int, j::Int, T::Float64)
     uc  = model.unsk_cache
@@ -613,23 +554,31 @@ function crossing_value(ctx, model::Model, i::Int, j::Int, T::Float64)
     return (ctx.bS + κX * E) / (ctx.r + ctx.ν + κX)
 end
 
-# The skilled unemployment value U_S(aU,aS) = max{U_S^(0)(aS), U_S^(1)(aU,aS)} at the
-# installed state, or the held branch of each node; U_S^(0) read from the global link sc.U.
+"""
+    skilled_unemployment_value(model) → Matrix{Float64}
+
+U_S(aU, aS) = max{U_S^(0)(aS), U_S^(1)(aU,aS)} at the installed state, or the held branch;
+U_S^(0) is read from the global link `sc.U`.
+"""
 function skilled_unemployment_value(model::Model)
     U0 = transpose(model.skl_cache.U);  U1 = model.skl_cache.U1
     return model.held === nothing ? max.(U0, U1) : ifelse.(model.held.drains, U1, U0)
 end
 
-# Training value on U_S, the max of the two branches or the held one.
+"""
+    training_value_on(ctx, i, j, U0, U1) → T
+
+Training value on U_S, the max of the two branches or the held one.
+"""
 @inline training_value_on(ctx, i::Int, j::Int, U0::Float64, U1::Float64) =
     (ctx.bT + ctx.φ * skilled_value_at(ctx.held, i, j, U0, U1)) / (ctx.r + ctx.φ + ctx.ν)
 
 """
     crossing_fixed_point(ctx, model, i, j, U0) → (U1, T)
 
-U_S^(1) and T of cell (i, j) solved jointly: at the training value of the stay-skilled
-branch when crossing does not pay (or the held choice is to stay), otherwise at the fixed
-point U_S^(1) = crossing_value(T(U_S^(1))), a contraction of modulus below φ/(r+φ+ν).
+U_S^(1) and T of cell (i, j) jointly: at the stay-skilled training value when crossing does
+not pay (or the held choice is to stay), else the fixed point U_S^(1) = crossing_value(T(U_S^(1))),
+a contraction of modulus below φ/(r+φ+ν).
 """
 function crossing_fixed_point(ctx, model::Model, i::Int, j::Int, U0::Float64)
     T  = training_value_on(ctx, i, j, U0, U0)
@@ -648,11 +597,10 @@ end
 """
     career_choices!(model, κU, EU1)
 
-The choices of the trained and of the untrained at the installed values: U_S^(1), T, the
-training choice τ, the drain d, and the training-slice match (p*_t, S_t(·,1), χ_t) of every
-cell that trains.  Called once the skilled block has settled U_S^(0); writes `sc.U1`,
-`uc.T`, `uc.τT`, `sc.d`, `uc.pstar_t`, `uc.S1_t`, `uc.χ_t`.  A model that holds its choices
-(`Model.held`) installs the held τ and d and values every node at its held branches.
+Choices of the trained and untrained at the installed values, once the skilled block has
+settled U_S^(0): writes `sc.U1`, `uc.T`, `uc.τT`, `sc.d` and the training-slice match
+`uc.pstar_t`, `uc.S1_t`, `uc.χ_t` of every cell that trains. With `model.held` set, installs
+the held τ and d and values every node at its held branch.
 """
 function career_choices!(model::Model, κU::Float64, EU1::AbstractVector{Float64})
     uc = model.unsk_cache;  sc = model.skl_cache;  x = model.grids.x
@@ -683,8 +631,8 @@ end
 """
     drain_choice!(d, model) → d
 
-The choice of market at the installed values, `drain_fraction!` of U_S^(1) against U_S^(0),
-or the held d (`Model.held`).
+The choice of market at the installed values (`drain_fraction!` of U_S^(1) against
+U_S^(0)), or the held d.
 """
 function drain_choice!(d::AbstractMatrix{Float64}, model::Model)
     model.held === nothing || return copyto!(d, model.held.d)
@@ -695,9 +643,8 @@ end
 """
     HeldChoices(model) → HeldChoices
 
-The education choices of the solved `model`, for another model to hold (`Model.held`): its
-τ and d, and the node choices behind them at its own values.  A model that holds its choices
-returns those.
+Education choices of the solved `model`, for another model to hold: τ, d and the node
+choices behind them. A model that already holds its choices returns those.
 """
 function HeldChoices(model::Model)
     model.held === nothing || return model.held
@@ -711,9 +658,9 @@ end
 """
     implied_training_value(model, κU, EU1) → Matrix{Float64}
 
-The training value the career choices imply at the installed state: U_S^(1) re-evaluated
-at the installed T, and T on max{U_S^(0), U_S^(1)} (on the held branch where the model holds
-its choices).  Equal to `uc.T` in equilibrium (R5).
+Training value the career choices imply at the installed state: U_S^(1) re-evaluated at the
+installed T, then T on max{U_S^(0), U_S^(1)} (or the held branch). Equals `uc.T` in
+equilibrium (residual R5).
 """
 function implied_training_value(model::Model, κU::Float64, EU1::AbstractVector{Float64})
     uc = model.unsk_cache;  sc = model.skl_cache;  Nx = length(model.grids.x)
@@ -733,7 +680,7 @@ end
 
 Rate at which a draining trained worker of each cell is hired into the unskilled market,
 `k = κ_U d [(1 − ω) χ + ω χ_t]`, split into the searching slice `ks` and the training slice
-`kt` by the enclosed share ω (`enclosed_crossers`).  The never-hired share stays trained.
+`kt` by the enclosed share ω. The never-hired share stays trained.
 """
 function crossing_rates(model::Model, d::AbstractMatrix{Float64} = model.skl_cache.d)
     uc = model.unsk_cache;  up = model.unsk_par
@@ -750,21 +697,24 @@ function crossing_rates(model::Model, d::AbstractMatrix{Float64} = model.skl_cac
     return (k = ks .+ kt, ks = ks, kt = kt)
 end
 
-# The total crossing hire rate k alone, the denominator of m_S.
+"""
+    crossing_rate(model, d = sc.d) → Matrix{Float64}
+
+Total crossing hire rate `k` of `crossing_rates`, the denominator of m_S.
+"""
 crossing_rate(model::Model, d::AbstractMatrix{Float64} = model.skl_cache.d) = crossing_rates(model, d).k
 
 
 # ---------------------------------------------------------------------------
 # Stationary composition on the copula grid
-#
-# Match rates depend only on aU, and the frontier τ(aU,aS) determines who
-# trains, so the balance is solved per (aU,aS) cell with aU-indexed rates
-# and the joint population weight ℓ(aU,aS) = W2[i,j] (notes §332).
-#
-# τ = 1 (train):   u_U = 0,  t = ν W2 / (φ + ν).
-# τ = 0 (search):  u_U = W2 [χ (δ+ν)/(κ_U+δ+ν) + (1−χ)],  t = 0,
-#                  δ = ξ_U + λ_U G(p*(aU)),  χ = hire_fraction.
 # ---------------------------------------------------------------------------
+
+"""
+    solve_stationary_unskilled!(u_out, t_out, W2, τ, pstar, κ, model)
+
+Stationary unemployed and training densities with no crossers: each cell's weight `W2`
+splits by its training fraction τ, `u_U = W2 usurv (1 − τ)` and `t = ν W2 τ / (φ + ν)`.
+"""
 function solve_stationary_unskilled!(
     u_out::Matrix{Float64}, t_out::Matrix{Float64},
     W2::Matrix{Float64}, τ::Matrix{Float64},
@@ -776,10 +726,6 @@ function solve_stationary_unskilled!(
 
     @inbounds for i in 1:Nx                       # aU index
         for j in 1:Nx                             # aS index
-            # τ is the population fraction of the cell that trains, so the cell's weight
-            # splits between the two branches rather than being assigned wholly to one.
-            # Thresholding at 0.5 here would discard the fractional boundary node and put
-            # the step function back, whatever the frontier does upstream.
             τij = clamp(τ[i, j], 0.0, 1.0)
             u_out[i, j] = W2[i, j] * usurv[i] * (1.0 - τij)
             t_out[i, j] = ν * W2[i, j] / (φ + ν) * τij
@@ -793,16 +739,14 @@ end
     stationary_masses(model, κ) → (u, uh, t, et, mS)
 
 Every stationary density on the copula grid at the installed policies: u_U and its hired
-branch, t, the unskilled employment of the training slice and the trained mass m_S.  A
-cell no trained worker leaves by an unskilled hire has the closed forms above and
-m_S = φ t / ν.  A cell whose trained workers are hired into the unskilled market at rate
-k = ks + kt (`crossing_rates`) balances, with δ = ξ_U + λ_U G(p*) on each slice's own p*,
-  (φ + ν) t      = ν τ ℓ + δ_t e_t              separations of the training slice retrain
+branch, t, the training slice's employment and the trained mass m_S. A cell with no crossers
+has the closed forms of `solve_stationary_unskilled!` and m_S = φ t / ν. A cell whose trained
+cross at rate k = ks + kt balances, with δ = ξ_U + λ_U G(p*) on each slice's own p*,
+  (φ + ν) t      = ν τ ℓ + δ_t e_t
   (ν + k) m_S    = φ t
   (δ_t + ν) e_t  = kt m_S,
-and u_U is (1 − τ) ℓ usurv plus δ_s ks m_S υʰ / (ν (δ_s + ν)), the searching slice's
-separations, which join the row's hired unemployed; the searching slice's employment is
-the cell's remainder.
+and the searching slice's separations, δ_s ks m_S υʰ / (ν (δ_s + ν)), join the row's hired
+unemployed.
 """
 function stationary_masses(model::Model, κ::Float64)
     cp = model.common;  up = model.unsk_par;  uc = model.unsk_cache;  d = model.skl_cache.d
@@ -839,8 +783,12 @@ function stationary_masses(model::Model, κ::Float64)
     return (u = u, uh = uh, t = t, et = et, mS = mS)
 end
 
-# The unskilled block's own densities at the installed policies; the links m_S and
-# d u_S stay as installed.
+"""
+    install_unskilled_masses!(model, κ) → NamedTuple
+
+Install the unskilled block's own stationary densities (u, uh, t, et) in the cache and
+return `stationary_masses`; m_S and d·u_S stay as installed.
+"""
 function install_unskilled_masses!(model::Model, κ::Float64)
     uc = model.unsk_cache
     ms = stationary_masses(model, κ)
@@ -851,9 +799,8 @@ end
 """
     install_stationary_masses!(model, κ)
 
-Install `stationary_masses` in the caches, with the cross-market seeker pool
-duS_carry = d m_S: the draining trained are all unemployed, and all seek in the unskilled
-market.
+Install `stationary_masses` in the caches, m_S included, with the seeker pool
+`duS_carry = d m_S` (the draining trained are all unemployed and seek in the unskilled market).
 """
 function install_stationary_masses!(model::Model, κ::Float64)
     uc = model.unsk_cache;  sc = model.skl_cache
@@ -866,13 +813,15 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Reservation-quality update
-#
-# Solves S_U(aU, p*) = 0 for p*(aU) (notes eq:pstarUformula):
-#   p*(aU) = [(r+ν) U^search(aU) − λ I(aU)] / (A P_U aU),
-# recomputing U^search against the proposed θ_new so the new p* is
-# consistent with the tightness the outer loop installs.
+# Reservation quality and free entry
 # ---------------------------------------------------------------------------
+
+"""
+    update_pstar_from_surplus!(pstar_new, model, Ivec; θ_new, E1)
+
+Reservation quality from S_U(aU, p*) = 0, `p* = [(r+ν) U^search − λ I] / (exp(A) P_U aU)`,
+with U^search recomputed at the proposed tightness `θ_new` from `E1` = E_U(·,1).
+"""
 function update_pstar_from_surplus!(
     pstar_new::AbstractVector{Float64}, model::Model, Ivec::AbstractVector{Float64};
     θ_new::Float64, E1::AbstractVector{Float64},
@@ -895,37 +844,22 @@ function update_pstar_from_surplus!(
     return nothing
 end
 
-
-# ---------------------------------------------------------------------------
-# Free entry: the tightness a vacancy cost implies, and its inverse
-#
-#   q_U(θ_U) = k_U π̄_U ũ_U / J̄_U,   ũ_U = ∬ (u_U + d u_S),
-#   J̄_U = ∬ J_U(aU,1) [u_U^h + (1−ω) χ d u_S] + J_t(aU,aS,1) ω χ_t d u_S.
-# A vacancy meets every seeker in ũ_U, never-hired types included, but a
-# meeting with a never-hired type yields no match: its J_U is zero, exactly
-# as at a node below a^h.  So the value of a meeting weights J_U by the
-# hired branch u_U^h of u_U, and a draining trained seeker by her own hired
-# share and match: the row's for the searching slice, the training slice's
-# J_t = (1−β_U) S_t(·,1)⁺ for the share ω her cell's frontier encloses.  The
-# dollar posting cost is k_U π̄_U (k_U dimensionless, π̄_U the mean output of a
-# new unskilled match).  d·u_S is carried in uc.duS_carry.
-# ---------------------------------------------------------------------------
 """
     unskilled_meeting_value(model; u_hired = nothing) → (Jbar, U_total)
 
-The two sides of unskilled free entry at the installed composition: the firm value a
-vacancy's meetings yield, J̄_U, and the seeker pool it meets, ũ_U = ∬ (u_U + d u_S).
-`u_hired` is the hired branch of `uc.u` on the (aU,aS) grid; by default it is the
-installed stationary one, `uc.uh` (`stationary_masses`).  The transition passes the stock
-split of its own date.
+The two sides of unskilled free entry at the installed composition,
+`q_U(θ_U) = k_U π̄_U ũ_U / J̄_U`: the seeker pool ũ_U = ∬ (u_U + d u_S), never-hired types
+included, and the firm value of its meetings,
+`J̄_U = ∬ J_U(aU,1) [u_U^h + (1−ω) χ d u_S] + J_t(·,1) ω χ_t d u_S`, which weights J_U by the
+hired branch only. `u_hired` defaults to the stationary `uc.uh`; the transition passes its
+date's stock split. Under `corner_limit` with no seekers, the limit composition is used.
 """
 function unskilled_meeting_value(model::Model; u_hired::Union{Nothing,AbstractMatrix{Float64}} = nothing)
     uc = model.unsk_cache;  up = model.unsk_par
     κ   = meeting_rate(uc.θ, up.μ, up.η)
     u   = uc.u;  duS = uc.duS_carry;  uʰ = u_hired === nothing ? uc.uh : u_hired
-    # At a converged corner with everyone training there are no seekers; a vacancy then
-    # meets the limit composition of the labour force as it empties (see solve_model!).
-    # That composition is stationary, so its hired branch is the stationary split.
+    # Corner with everyone training: price the limit composition of the labour force,
+    # with its stationary hired split.
     if model.corner_limit && sum(u .+ duS) <= EMPTY_MASS
         w = marginal_training_cells(model; entering = false)
         u = similar(w);  duS = zero(w)
@@ -946,12 +880,18 @@ function unskilled_meeting_value(model::Model; u_hired::Union{Nothing,AbstractMa
     return (Jbar = Jbar, U_total = U_total)
 end
 
+"""
+    _no_meeting_value(v) → Bool
+
+Whether a meeting value from `unskilled_meeting_value` is empty or not finite.
+"""
 _no_meeting_value(v) = v.Jbar < 1e-14 || v.U_total < 1e-14 || !isfinite(v.Jbar) || !isfinite(v.U_total)
 
 """
     update_theta_unskilled(model; u_hired = nothing) → θ_U
 
-Free-entry tightness at the installed composition (`unskilled_meeting_value`).
+Free-entry tightness at the installed composition (`unskilled_meeting_value`), clamped to
+[1e-14, 100]; 1e-14 where a meeting is worth nothing.
 """
 function update_theta_unskilled(model::Model; u_hired::Union{Nothing,AbstractMatrix{Float64}} = nothing)
     up = model.unsk_par
@@ -965,9 +905,9 @@ end
 """
     vacancy_cost_unskilled(model) → k_U
 
-The vacancy cost free entry implies at the installed tightness and composition, the
-inverse of `update_theta_unskilled`: k_U = q_U(θ_U) J̄_U / (π̄_U ũ_U), in months of mean
-new-match output.  Zero where a meeting is worth nothing.
+Vacancy cost free entry implies at the installed tightness and composition,
+`k_U = q_U(θ_U) J̄_U / (π̄_U ũ_U)`, the inverse of `update_theta_unskilled`. Zero where a
+meeting is worth nothing.
 """
 function vacancy_cost_unskilled(model::Model)
     uc = model.unsk_cache;  up = model.unsk_par
@@ -978,16 +918,20 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Outer loop on (θ_U, p*, u_U, t)
-#
-# Per iteration: inner values → stationary composition → raw (θ, p*) from
-# free entry and S_U(aU,p*)=0 → joint Anderson(m=1) install (or damped
-# Picard).  Convergence on (Δθ, Δp*, Δu_U).  Sustained inner divergence
-# rejects the parameter; an outer stall hands back to the global loop.
-#
-# `θU_fixed` imposes the unskilled tightness instead of solving free entry for
-# it: θ_U is held there on every pass and only (p*, u_U) iterate.
+# Outer loop
 # ---------------------------------------------------------------------------
+
+"""
+    solve_unskilled_block!(model; US_in, θU_fixed = nothing) → (converged, rejected)
+
+Outer loop on (θ_U, p*_U, u_U, t) given the skilled unemployment value `US_in`. Each pass:
+inner values, stationary masses, free-entry θ_U under-relaxed by `DAMP_THETA_U`, p*_U from
+S_U(aU,p*) = 0, then a joint Anderson(1) install on [θ_U; p*_U] (or damped Picard on p*_U).
+Converges on max(Δθ_U, Δp*_U, Δu_U) < `tol_outer_U` for `conv_streak` passes. `inner_K`
+diverged inner solves in a row reject the parameter; an outer stall hands back to the global
+loop. `θU_fixed` holds θ_U and iterates only (p*_U, u_U). Every exit re-runs the inner loop
+and reinstalls the masses.
+"""
 function solve_unskilled_block!(model::Model; US_in::AbstractMatrix{Float64},
                                 θU_fixed::Union{Nothing,Float64} = nothing)
     gp = model.grids;  uc = model.unsk_cache;  sim = model.sim
@@ -1023,10 +967,7 @@ function solve_unskilled_block!(model::Model; US_in::AbstractMatrix{Float64},
 
         install_unskilled_masses!(model, inner.κ)
 
-        # Under-relaxed free entry, as in the skilled block: the damped map is what both
-        # the Anderson and the plain branch iterate on, so acceleration sees a contraction
-        # the raw map is not.  The bracket is the one update_theta_unskilled itself
-        # enforces, reapplied here because the blend can only land inside it.
+        # Under-relaxed free entry: both branches below iterate the damped map.
         w_θ = DAMP_THETA_U[]
         θ_raw = θU_fixed !== nothing ? θU_fixed :
                 clamp(w_θ * update_theta_unskilled(model) + (1.0 - w_θ) * θ_old, 1e-14, 100.0)
@@ -1041,9 +982,7 @@ function solve_unskilled_block!(model::Model; US_in::AbstractMatrix{Float64},
             x_old = vcat([θ_old / s_θ], pstar_old ./ s_p)
             f_raw = vcat([θ_raw / s_θ], pstar_new ./ s_p)
             x_new = anderson1_update!(aa_joint, x_old, f_raw)
-            # Same bracket as the free-entry solve: the Anderson step extrapolates, so
-            # without it the installed θ_U left the range its own solve is clamped to —
-            # measured at 107 and 182 against a ceiling of 100.
+            # The Anderson step extrapolates: keep θ_U inside free entry's own bracket.
             uc.θ  = θU_fixed !== nothing ? θU_fixed : clamp(x_new[1] * s_θ, 1e-14, 100.0)
             @inbounds for i in 1:Nx
                 uc.pstar[i] = clamp01(x_new[1 + i] * s_p)

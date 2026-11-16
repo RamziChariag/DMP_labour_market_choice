@@ -1,26 +1,26 @@
 ############################################################
-# data_processing/setup.jl
+# code/data_and_descriptives/setup.jl
 #
-# Shared foundation for the whole pipeline: estimation windows, the
-# canonical MOMENT_NAMES list, classification / wage / weighted-statistics
-# helpers, the IND→JOLTS supersector map, and small IO helpers.
-# write_windows_json() persists the single source of truth for WINDOWS.
+# Shared definitions for the data pipeline: the estimation windows (single
+# source of truth, persisted to derived/windows.json), CPS classification
+# helpers, wage construction, weighted statistics, closed-form sampling-variance
+# helpers, the IND→JOLTS supersector crosswalk and the canonical MOMENT_NAMES.
 #
-# Reads:  —
-# Writes: windows.json
-#
-# Plain include() file: definitions only, no top-level execution.
-# `using` packages and path consts come from data_processing_main.jl.
+# Entry point: write_windows_json()  → derived/windows.json
+# Definitions only; packages and path constants come from data_processing_main.jl.
 ############################################################
 
 # ============================================================
-# Estimation windows — vectorised ym-based filter
-# ----------------------------------------------------------
-# THIS IS THE SINGLE SOURCE OF TRUTH for the four windows.
-# Any other notebook (e.g. descriptive_analysis) should read
-# them from `derived/windows.json`, written below.
+# Estimation windows
 # ============================================================
 
+"""
+    WINDOWS
+
+The four estimation windows: CPS months `ym_start`–`ym_end` (as 100·year + month)
+and the ASEC survey years `asec_years` (income year = survey year − 1). Every
+window-dependent filter in the pipeline derives from this table.
+"""
 const WINDOWS = Dict{Symbol, NamedTuple}(
     :base_fc      => (label = "Pre-FC baseline",
                       ym_start = 200301, ym_end = 200712,
@@ -36,11 +36,21 @@ const WINDOWS = Dict{Symbol, NamedTuple}(
                       asec_years = 2021:2023),
 )
 
+"""Canonical window order for tables and output files."""
 const WINDOWS_ORDER = [:base_fc, :crisis_fc, :base_covid, :crisis_covid]
 
-# Integer ym = 100*year + month for fast comparison
+"""
+    ym_int(year, month) -> Int
+
+Integer calendar month 100·year + month.
+"""
 ym_int(year::Int, month::Int)::Int = 100 * year + month
 
+"""
+    assign_window(year, month) -> Symbol
+
+Window containing the calendar month, or `:none`.
+"""
 function assign_window(year::Int, month::Int)::Symbol
     ym = ym_int(year, month)
     for (wname, wdef) in WINDOWS
@@ -49,6 +59,11 @@ function assign_window(year::Int, month::Int)::Symbol
     return :none
 end
 
+"""
+    assign_asec_window(survey_year) -> Symbol
+
+Window whose `asec_years` contain the ASEC survey year, or `:none`.
+"""
 function assign_asec_window(survey_year::Int)::Symbol
     for (wname, wdef) in WINDOWS
         (survey_year in wdef.asec_years) && return wname
@@ -56,10 +71,11 @@ function assign_asec_window(survey_year::Int)::Symbol
     return :none
 end
 
-# ── Persist WINDOWS for sister notebooks ─────────────────────────
-# `derived/windows.json` is the canonical record used by
-# descriptive_analysis and any downstream consumer. Re-written
-# every time this cell runs so the file never goes stale.
+"""
+    _windows_to_dict() -> Dict
+
+`WINDOWS` and `WINDOWS_ORDER` as a JSON-serialisable dictionary.
+"""
 function _windows_to_dict()
     out = Dict{String, Any}()
     for (k, v) in WINDOWS
@@ -76,6 +92,12 @@ function _windows_to_dict()
     )
 end
 
+"""
+    write_windows_json() -> String
+
+Write `WINDOWS` to derived/windows.json, the copy read by code outside this
+pipeline. Rewritten on every run so it cannot go stale. Returns the path.
+"""
 function write_windows_json()
     mkpath(DERIVED_DIR)
     open(joinpath(DERIVED_DIR, "windows.json"), "w") do io
@@ -86,32 +108,53 @@ function write_windows_json()
 end
 
 # ============================================================
-# Classification helpers
+# CPS classification (IPUMS codes)
 # ============================================================
 
+"""Skilled: CPS `EDUC >= 111` (bachelor's degree or higher)."""
 is_skilled(educ::Integer)::Bool = educ >= 111
+
+"""Working age, `lo ≤ age ≤ hi` (default 16–64)."""
 in_age_range(age::Integer; lo::Int=16, hi::Int=64)::Bool = lo <= age <= hi
-is_civilian_lf(labforce::Integer)::Bool = labforce == 2
+
+"""Employed: `EMPSTAT ∈ {10, 12}`."""
 is_employed(empstat::Integer)::Bool = empstat in (10, 12)
+
+"""Unemployed: `EMPSTAT ∈ {20, 21, 22}`."""
 is_unemployed(empstat::Integer)::Bool = empstat in (20, 21, 22)
+
+"""Not in the labour force: `EMPSTAT ∈ {30, …, 36}`."""
 is_nilf(empstat::Integer)::Bool = empstat in (30, 31, 32, 33, 34, 36)
+
+"""Wage and salary worker: `CLASSWKR ∈ {22, 25, 27, 28}`."""
 is_wage_worker(classwkr::Integer)::Bool = classwkr in (22, 25, 27, 28)
 
-# Enrolled in college without a BA: SCHLCOLL code 3 = college full-time,
-# code 4 = college part-time; EDUC < 111 excludes those who already hold a BA.
+"""
+    is_enrolled_no_ba(schlcoll, educ) -> Bool
+
+Enrolled in college (`SCHLCOLL` 3 full-time, 4 part-time) without a bachelor's
+degree. Implies no trainee is skilled, which several pool definitions rely on.
+"""
 is_enrolled_no_ba(schlcoll::Integer, educ::Integer)::Bool = schlcoll in (3, 4) && educ < 111
 
+"""
+    valid_match_mish(mish) -> Bool
+
+Month-in-sample whose next calendar month is also in sample (4-8-4 rotation).
+"""
 valid_match_mish(mish::Integer)::Bool = mish in (1, 2, 3, 5, 6, 7)
 
-# ============================================================
-# COVID BLS misclassification correction
-# ============================================================
+"""
+    apply_covid_correction(empstat, year, month, whyabsnt) -> Integer
 
+BLS misclassification fix for March–June 2020: employed-but-absent workers with
+`WHYABSNT == 15` are recoded to unemployed on temporary layoff (21).
+"""
 function apply_covid_correction(empstat::Integer, year::Int, month::Int,
                                 whyabsnt::Integer)::Integer
     (year == 2020 && 3 <= month <= 6) || return empstat
     if is_employed(empstat) && whyabsnt == 15
-        return 21  # unemployed, temporary layoff
+        return 21
     end
     return empstat
 end
@@ -120,18 +163,31 @@ end
 # Wage construction
 # ============================================================
 
+"""
+    compute_hourly_wage(incwage, wkswork1, uhrsworkly) -> Float64
+
+Annual wage income over annual hours; NaN if any input is non-positive.
+"""
 function compute_hourly_wage(incwage, wkswork1, uhrsworkly)::Float64
     (wkswork1 <= 0 || uhrsworkly <= 0 || incwage <= 0) && return NaN
     return Float64(incwage) / (Float64(wkswork1) * Float64(uhrsworkly))
 end
 
+"""
+    deflate_wage(nominal_wage, cpi_t, cpi_base) -> Float64
+
+Real wage `nominal × cpi_base / cpi_t` for a standard increasing price index
+(used by SIPP with CPI-U). Not valid for IPUMS CPI99, which runs the other way.
+"""
 deflate_wage(nominal_wage::Float64, cpi_t::Float64, cpi_base::Float64)::Float64 =
     nominal_wage * (cpi_base / cpi_t)
 
-# ============================================================
-# Trimming
-# ============================================================
+"""
+    trim_bounds(wages, weights; lo_pct = 0.01, hi_pct = 0.99) -> (lo, hi)
 
+Weighted `lo_pct` and `hi_pct` percentile values of `wages`; `(NaN, NaN)` for an
+empty sample or non-positive total weight.
+"""
 function trim_bounds(wages::AbstractVector{Float64}, weights::AbstractVector{Float64};
                      lo_pct::Float64=0.01, hi_pct::Float64=0.99)
     n = length(wages)
@@ -159,11 +215,22 @@ end
 # Weighted statistics
 # ============================================================
 
+"""
+    wmean(x, w) -> Float64
+
+Weighted mean; NaN for non-positive total weight.
+"""
 function wmean(x::AbstractVector, w::AbstractVector)::Float64
     sw = sum(w); sw <= 0.0 && return NaN
     return sum(x .* w) / sw
 end
 
+"""
+    wmedian(x, w) -> Float64
+
+Weighted median: the first sorted observation whose cumulative normalised
+weight reaches 0.5.
+"""
 function wmedian(x::AbstractVector, w::AbstractVector)::Float64
     n = length(x); n == 0 && return NaN
     idx = sortperm(x)
@@ -176,11 +243,13 @@ function wmedian(x::AbstractVector, w::AbstractVector)::Float64
     return Float64(x[idx[end]])
 end
 
-# Weighted percentile — the first observation whose cumulative normalised weight
-# reaches p, which is the convention wmedian applies at p = 0.5. One estimator
-# serves the whole reported wage-percentile block (p10 … p90), so the points
-# cannot drift apart; p50 keeps its own name because the cross-market overlap
-# moments read the median directly.
+"""
+    wpercentile(x, w, p) -> Float64
+
+Weighted p-quantile: the first sorted observation whose cumulative weight
+reaches p·Σw, the convention `wmedian` applies at p = 0.5. One estimator serves
+the whole p10–p90 block so the points cannot drift apart.
+"""
 function wpercentile(x::AbstractVector, w::AbstractVector, p::Real)::Float64
     n = length(x); n == 0 && return NaN
     ord = sortperm(x)
@@ -194,27 +263,46 @@ function wpercentile(x::AbstractVector, w::AbstractVector, p::Real)::Float64
     return Float64(xs[i])
 end
 
+"""Weighted 10th percentile (`wpercentile` at 0.10)."""
 wpercentile10(x::AbstractVector, w::AbstractVector)::Float64 = wpercentile(x, w, 0.10)
+"""Weighted 25th percentile (`wpercentile` at 0.25)."""
 wpercentile25(x::AbstractVector, w::AbstractVector)::Float64 = wpercentile(x, w, 0.25)
+"""Weighted 75th percentile (`wpercentile` at 0.75)."""
 wpercentile75(x::AbstractVector, w::AbstractVector)::Float64 = wpercentile(x, w, 0.75)
+"""Weighted 90th percentile (`wpercentile` at 0.90)."""
 wpercentile90(x::AbstractVector, w::AbstractVector)::Float64 = wpercentile(x, w, 0.90)
 
+"""
+    wvar(x, w) -> Float64
 
+Weighted variance Σw(x − x̄)²/Σw (no small-sample correction).
+"""
 function wvar(x::AbstractVector, w::AbstractVector)::Float64
     m = wmean(x, w); sw = sum(w)
     sw <= 0.0 && return NaN
     return sum(w .* (x .- m).^2) / sw
 end
 
+"""Weighted standard deviation `sqrt(wvar)`."""
 wsd(x::AbstractVector, w::AbstractVector)::Float64 = sqrt(max(wvar(x, w), 0.0))
 
+"""
+    wcm3(x, w) -> Float64
+
+Weighted third central moment Σw(x − x̄)³/Σw.
+"""
 function wcm3(x::AbstractVector, w::AbstractVector)::Float64
     m = wmean(x, w); sw = sum(w)
     sw <= 0.0 && return NaN
     return sum(w .* (x .- m).^3) / sw
 end
 
-# Kernel density at a point (for influence function of weighted median)
+"""
+    kde_at_point(x, w, point; bw = NaN) -> Float64
+
+Weighted Gaussian kernel density of `x` at `point`. With `bw = NaN` the
+bandwidth is Silverman's 1.06·sd·N_eff^(−1/5) on the Kish N_eff.
+"""
 function kde_at_point(x::AbstractVector, w::AbstractVector, point::Float64;
                       bw::Float64=NaN)::Float64
     n = length(x)
@@ -234,12 +322,17 @@ function kde_at_point(x::AbstractVector, w::AbstractVector, point::Float64;
     return density / (sw * bw)
 end
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Closed-form sampling-variance helpers (pure functions of the data).
-#
-# setup.jl is included first by data_processing_main.jl; sampling_variances.jl uses them.
-# ─────────────────────────────────────────────────────────────────────────────
+# ============================================================
+# Closed-form sampling-variance helpers (used by sampling_variances.jl
+# and the decision audit)
+# ============================================================
 
+"""
+    _kish_prop_var(w, denom, numer) -> Float64
+
+Variance p̂(1−p̂)/N_eff of the weighted share of `numer` within `denom`, treating
+records as independent draws (Kish N_eff).
+"""
 function _kish_prop_var(w::Vector{Float64}, denom::AbstractVector{Bool},
                         numer::AbstractVector{Bool})::Float64
     sw = 0.0; sw2 = 0.0; snum = 0.0
@@ -255,14 +348,22 @@ function _kish_prop_var(w::Vector{Float64}, denom::AbstractVector{Bool},
     return p * (1.0 - p) / neff
 end
 
-# Kish effective sample size N_eff = (Σw)² / Σw² of a weight vector.
+"""
+    _kish_neff(w) -> Float64
+
+Kish effective sample size (Σw)²/Σw²; 0 for an all-zero weight vector.
+"""
 function _kish_neff(w::AbstractVector{<:Real})::Float64
     sw = 0.0; sw2 = 0.0
     @inbounds for wi in w; sw += wi; sw2 += wi^2; end
     sw2 > 0.0 ? sw^2 / sw2 : 0.0
 end
 
-# r-th weighted central moment μ_r = Σ w (x − μ̂)^r / Σ w  (μ̂ = weighted mean).
+"""
+    _wcm(x, w, r) -> Float64
+
+r-th weighted central moment Σw(x − x̄)^r / Σw.
+"""
 function _wcm(x::AbstractVector{<:Real}, w::AbstractVector{<:Real}, r::Int)::Float64
     m = wmean(x, w); sw = sum(w)
     sw <= 0.0 && return NaN
@@ -271,9 +372,12 @@ function _wcm(x::AbstractVector{<:Real}, w::AbstractVector{<:Real}, r::Int)::Flo
     return s / sw
 end
 
-# Sampling variance of a weighted sample quantile q̂ at probability p:
-#   Var(q̂) = p(1−p) / (N_eff · f(q̂)²),  f = Gaussian-kernel density (Silverman
-#   bandwidth on the weighted sample, via kde_at_point) evaluated at q̂.
+"""
+    _wquantile_var(x, w, qhat, p) -> Float64
+
+Sampling variance p(1−p)/(N_eff·f(q̂)²) of a weighted p-quantile, with f the
+`kde_at_point` density at `qhat` and N_eff the Kish size of `w`.
+"""
 function _wquantile_var(x::AbstractVector{<:Real}, w::AbstractVector{<:Real},
                         qhat::Float64, p::Float64)::Float64
     neff = _kish_neff(w)
@@ -283,24 +387,16 @@ function _wquantile_var(x::AbstractVector{<:Real}, w::AbstractVector{<:Real},
     return p * (1.0 - p) / (neff * f^2)
 end
 
-# Cluster-robust version of _kish_prop_var: the linearised variance of a weighted
-# ratio when observations arrive in clusters rather than as independent draws.
-#
-#     Var(p̂) = Σ_g (t_g − p̂·s_g)² / (Σ_g s_g)²
-#
-# with g indexing clusters, s_g the cluster's total weight in the denominator and
-# t_g its total weight in the numerator. CPS Basic is a 4-8-4 rotating panel: one
-# person supplies 4-8 monthly records over a window (measured: 4.05-4.75 records
-# per person; 1.83-2.18 within the skilled-unemployed pool). _kish_prop_var counts
-# each record as an independent draw, so N_eff is overstated and the variance
-# understated by a measured factor of 2.2-5.6. Clustering on CPSIDP removes that.
-#
-# With singleton clusters this becomes the Huber-White linearisation of the same
-# proportion: Σ wᵢ²(numerᵢ − p̂)²/(Σw)² against Kish's p̂(1−p̂)Σw²/(Σw)². The two
-# are equal iff Σ_numer w²·(1−p̂) = Σ_not w²·p̂, which holds in expectation but not
-# sample-by-sample — they coincide exactly only at p̂ = ½ and differ by a few
-# percent otherwise. Both estimate the same variance; only the CLUSTERED form
-# also removes the panel repeats, which is the point.
+"""
+    _kish_prop_var_clustered(w, denom, numer, id) -> Float64
+
+Cluster-robust linearised variance of the weighted share of `numer` within
+`denom`, Σ_g (t_g − p̂ s_g)² / (Σ_g s_g)², with clusters `id` (s_g, t_g the
+cluster's weight in the denominator and numerator). Used with `id = CPSIDP`
+because CPS Basic is a 4-8-4 rotating panel: the unclustered Kish form
+understates these variances by 2.2–5.6×. With singleton clusters it is the
+Huber-White form, equal to Kish in expectation but not sample by sample.
+"""
 function _kish_prop_var_clustered(w::Vector{Float64}, denom::AbstractVector{Bool},
                                   numer::AbstractVector{Bool},
                                   id::AbstractVector{<:Integer})::Float64
@@ -330,20 +426,27 @@ function _kish_prop_var_clustered(w::Vector{Float64}, denom::AbstractVector{Bool
     return ss / sw^2
 end
 
-# DURUNEMP == 999 is the IPUMS NIU code, not a duration. It is numerically larger
-# than every long-term-unemployment threshold, so an unguarded `>= 27` test counts
-# every NIU record as long-term unemployed. Measured on the live extract: 5,899
-# unemployed records carry 999, of which 5,629 are the Mar-Jun 2020 COVID recodes
-# (EMPSTAT == 12, "has job, not at work" → temporary layoff; 1,756 skilled).
-# Those workers stay in the at-risk denominator — the BLS reclassification asserts
-# they WERE unemployed — but their spells are short by construction, so 0 is the
-# right duration to give them.
+"""
+    _durw(d) -> Float64
+
+Unemployment duration in weeks from `DURUNEMP`, with the IPUMS NIU code 999 (and
+missing) mapped to 0. Unguarded, 999 exceeds every duration threshold and counts
+NIU records, mostly the March–June 2020 COVID recodes, as long-term unemployed.
+"""
 @inline _durw(d) = (x = Float64(coalesce(d, 0.0)); x == 999.0 ? 0.0 : x)
 
 # ============================================================
-# IND-to-JOLTS supersector mapping (verified against 2024 ACS)
+# IND → JOLTS supersector crosswalk
 # ============================================================
 
+"""
+    ind_to_jolts_supersector(ind) -> String
+
+JOLTS supersector key for a Census IND code (2002/2012/2017 schemes, checked
+against the 2024 ACS). Mining and logging uses the internal key "100000"; all
+public administration maps to "920000". Agriculture, private households and the
+military return "EXCLUDED"; unrecognised codes (e.g. the 1990 scheme) "UNKNOWN".
+"""
 function ind_to_jolts_supersector(ind::Int)::String
     ind == 0                 && return "EXCLUDED" # N/A / not-applicable code
     ind == 270               && return "100000"  # Logging → Mining & Logging
@@ -374,36 +477,32 @@ function ind_to_jolts_supersector(ind::Int)::String
 end
 
 # ============================================================
-# Moment name list — 35 moments
-#
-# The cross-market wage-overlap pair (overlap_UgtS, overlap_SltU), the skilled
-# long-term-unemployment share (ltu_share_S), the within-job wage-change pair
-# (wchg_rate_U, wchg_rate_S; SIPP) and the skilled EE-move wage step (ee_step_S;
-# SIPP) occupy the final positions; the vector order defines each moment's index.
+# Moment names
 # ============================================================
-# ──────────────────────────────────────────────────────────────────────────
-# Category: unemployment-duration profile (CPS DURUNEMP)
-#
-# usurv{t}_j = weighted share of market j's unemployed whose ONGOING spell has
-# lasted at least t weeks — the survivor function of the duration stock, read at
-# four thresholds. The existing ltu_share_S is this object for j = S at t = 27,
-# so the category NESTS it and usurv27_S must reproduce it exactly; the pipeline
-# checks that rather than assuming it.
-#
-# Why these thresholds. CPS respondents round durations, so mass heaps at 4, 13,
-# 26 and 52 weeks. A threshold placed ON a heap makes the moment depend on which
-# side of the comparison the heap falls; each threshold below therefore sits one
-# week above a heap, which is the convention ltu_share_S already follows with 27.
-# In months the four points are roughly 1, 3, 6 and 12.
-#
-# Why the survivor rather than bin shares. Bin shares within a market sum to one,
-# so any complete set of them is exactly collinear and the block would be
-# singular by construction. Survivor values carry no adding-up constraint.
+
+"""
+    DURATION_THRESHOLDS_WK
+
+Thresholds (weeks) of the unemployment-duration survivor moments usurv{t}_j, the
+share of market j's unemployed whose ongoing spell has lasted at least t weeks.
+Each sits one week above a CPS reporting heap (4, 13, 26, 52) so the moment does
+not depend on which side of a heap the comparison falls; t = 27 nests
+`ltu_share_S`. Survivor values rather than bin shares, which would sum to one
+and make the block collinear. Mirrored in smm/moments.jl and solver/equilibrium.jl.
+"""
 const DURATION_THRESHOLDS_WK = [5.0, 14.0, 27.0, 53.0]
 
+"""Duration moment names, usurv{t}_U then usurv{t}_S."""
 const DURATION_MOMENT_NAMES =
     [Symbol("usurv$(Int(t))_$(m)") for m in ("U", "S") for t in DURATION_THRESHOLDS_WK]
 
+"""
+    MOMENT_NAMES
+
+Canonical moment order (35 base moments, then the duration block); the position
+is each moment's index in every moments_{w}.csv and sampling_var_{w}.csv.
+smm/moments.jl uses the identical order.
+"""
 const MOMENT_NAMES = [
     :ur_total, :ur_U, :ur_S,
     :skilled_share, :training_share,
@@ -420,15 +519,18 @@ const MOMENT_NAMES = [
     DURATION_MOMENT_NAMES...,
 ]
 
+"""Number of moments before the duration block."""
 const N_MOMENTS_BASE = 35
 
 @assert length(MOMENT_NAMES) == N_MOMENTS_BASE + length(DURATION_MOMENT_NAMES) """
 Expected $(N_MOMENTS_BASE + length(DURATION_MOMENT_NAMES)) moments, \
 got $(length(MOMENT_NAMES))"""
 
-# ──────────────────────────────────────────────────────────────────────────
-# Helper: load a derived Arrow file → DataFrame
-# ──────────────────────────────────────────────────────────────────────────
+"""
+    _load_arrow(filename) -> DataFrame
+
+Read derived/`filename`; an empty DataFrame (with a warning) if it is absent.
+"""
 function _load_arrow(filename::String)::DataFrame
     path = joinpath(DERIVED_DIR, filename)
     !isfile(path) && (@warn "$filename not found"; return DataFrame())

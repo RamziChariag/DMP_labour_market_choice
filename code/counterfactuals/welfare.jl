@@ -1,24 +1,21 @@
 ############################################################
 # welfare.jl — social flow and present value along a transition (RoySearch)
 #
-# LIBRARY FILE — loaded by counterfactuals_main.jl; `run_welfare` is the exercise, and
-# `welfare_pv` / `steady_state_flow` are reused by held_margin.jl and training_cost.jl.
+# Library file, loaded by counterfactuals_main.jl. `run_welfare` is the exercise;
+# `welfare_pv` and `steady_state_flow` are also used by held_margin.jl and training_cost.jl.
 #
-# The social flow at a date, per month, in levels (the code stores ln A, b_j/A, σ_S/A,
-# ln c and k_j in months of mean new-match output; `level_params` converts):
-#   + output of every match: A P_U a_U p (unskilled), A P_S a_S p (skilled)
-#   + unemployment income: b_U for the unskilled unemployed (the never-hired included),
-#     b_S for every trained worker without a job — those searching the skilled market and
-#     those searching the unskilled market, who keep trained status and collect b_S until
-#     they accept an unskilled job (U_S^(1) in transition_values.jl) — and b_T in training
+# The social flow per month, in levels (`level_params` converts the code's units):
+#   + output of every match, A P_U a_U p and A P_S a_S p
+#   + b_U for the unskilled unemployed (the never-hired included), b_S for every trained
+#     worker without a job (also those searching the unskilled market), b_T in training
 #   − vacancy costs k_U v_U + k_S v_S, v_j = θ_j × the seekers free entry counts
-#   − σ_S for every employed skilled worker who searches on the job
-#   − c(a_S) = (1 − a_S) e^{c̃ − a_S} paid once by every worker who enters training
-# Components are booked by market: U (unskilled output, b_U, crossers' b_S, k_U v_U), S
-# (skilled output, b_S of the skilled-market seekers, k_S v_S, σ_S) and T (b_T, training
-# costs).  The present value is ∫ e^{−rt} flow dt over the path plus the end steady state's
-# flow / r discounted from the horizon, reported in levels, in months of the baseline mean
-# unskilled new-match output A₀ P_U E[a_U], and divided by the date's A.
+#   − σ_S for every employed skilled worker searching on the job
+#   − c(a_S) = (1 − a_S) e^{c̃ − a_S} once per entry into training
+# booked by market: U (unskilled output, b_U, crossers' b_S, k_U v_U), S (skilled output,
+# b_S of the skilled-market seekers, k_S v_S, σ_S), T (b_T, training costs). The present
+# value is ∫ e^{−rt} flow dt over the path plus the end steady state's flow/r from the
+# horizon, reported in levels, in months of the baseline mean unskilled new-match output
+# A₀ P_U E[a_U], over the date's A, and in months of the model's own output.
 ############################################################
 
 const COMPONENTS = (:output_U, :output_S, :uinc_U, :uinc_X, :uinc_S, :uinc_T,
@@ -28,15 +25,26 @@ const COST_COMPONENTS = (:vac_U, :vac_S, :search_S, :train_cost)
 const COMPONENT_MARKET = Dict(:output_U => :U, :uinc_U => :U, :uinc_X => :U, :vac_U => :U,
                               :output_S => :S, :uinc_S => :S, :vac_S => :S, :search_S => :S,
                               :uinc_T => :T, :train_cost => :T)
+"""
+    comp_sign(c) -> Float64
+
+−1 for a cost component, +1 otherwise.
+"""
 comp_sign(c::Symbol) = c in COST_COMPONENTS ? -1.0 : 1.0
+
+"""
+    net_flow(f) -> Float64
+
+The net social value of a vector `f` ordered by `COMPONENTS`.
+"""
 net_flow(f) = sum(comp_sign(COMPONENTS[c]) * f[c] for c in 1:NCOMP)
 
 """
     level_params(model; resource_c = model.common.c) -> NamedTuple
 
-The model's flow parameters in levels per month.  `resource_c` is the ln c at which
-training is costed: the model's own by default; the estimated one when a policy changes c
-and the change is a transfer, not a resource.
+The model's flow parameters in levels per month, and the training cost at each a_S node.
+`resource_c` is the ln c at which training is costed: the model's own by default, the
+estimated one when a policy's change in c is a transfer.
 """
 function level_params(model::Model; resource_c::Float64 = model.common.c)
     cp = model.common;  up = model.unsk_par;  sp = model.skl_par;  A = exp(cp.A)
@@ -49,13 +57,11 @@ end
 """
     flow_components(st, d, θU, θS, part, poj, model, lp) -> Vector
 
-The social flow at the forward state `st` (`_forward_state`) with crossing fractions `d`,
-by `COMPONENTS`, the training cost left at 0 (it is booked from the entries).  Every stock
-is read as the code reads it: unskilled matches from each slice's quality measure, the atom
-at p = 1 in the last slot; skilled matches from the per-a_S unit shape ê_S on the
-non-draining column mass (`path_statistics`); the unskilled seekers u_U + d u_S
-(`_free_entry_tightness`); the skilled seekers the denominator of `compute_Jbar_skilled`,
-û m₀ plus the employed who search on the job, each of whom pays σ_S.
+The social flow by `COMPONENTS` at the forward state `st` (`_forward_state`) with crossing
+fractions `d` and tightnesses (θU, θS), the training cost left at 0 (booked from the
+entries). Stocks are read as the solver reads them: unskilled matches from each slice's
+quality measure; skilled matches from ê_S on the non-draining column mass; the unskilled
+seekers u_U + d u_S; the skilled seekers û m₀ plus the on-the-job searchers, each paying σ_S.
 """
 function flow_components(st, d::Matrix{Float64}, θU::Float64, θS::Float64,
                          part::AbstractVector{Float64}, poj::AbstractVector{Float64},
@@ -88,9 +94,18 @@ function flow_components(st, d::Matrix{Float64}, θU::Float64, θS::Float64,
             lp.kU * θU * seekU, lp.kS * θS * seekS, lp.σS * ojs, 0.0]
 end
 
-disc_int(r, a, h) = (exp(-r * a) - exp(-r * (a + h))) / r      # ∫_a^{a+h} e^{−rt} dt
+"""
+    disc_int(r, a, h) -> Float64
 
-# The largest gap between the forward state and the stocks the path stores at date n.
+∫_a^{a+h} e^{−rt} dt.
+"""
+disc_int(r, a, h) = (exp(-r * a) - exp(-r * (a + h))) / r
+
+"""
+    _stock_gap(st, path, n) -> Float64
+
+The largest gap between the forward state `st` and the stocks `path` stores at date n.
+"""
 function _stock_gap(st, path::TransitionPath, n::Int)
     g = 0.0
     @inbounds for j in axes(st.uU, 2), i in axes(st.uU, 1)
@@ -105,17 +120,14 @@ end
 """
     welfare_pv(path, model, tp; flow_end = nothing, resource_c = model.common.c) -> NamedTuple
 
-The present value at date 0 of the social flow along a solved `path` under `model`, its
-post-switch (z₁) model.  The forward pass is replayed from the path's date-0⁻ masses with
-the path's own policies and tightness, through the same steps `_forward_pass!` takes
-(`_reallocate!`, `_advance!`), and the accounts are booked on the way: within each
-sub-step the flow at its starting stocks, held for the sub-step as the laws of motion hold
-their rates; training costs on every entry, the births and training-slice separations of
-each sub-step read off the training stock's own Euler step, and the mass each reallocation
-moves into training as a lump at its date.  `flow_end` is the end steady state's flow,
-which values the tail (the last date's flow when not given).  Returns the PV by component
-(path, tail, total), the per-date flows at the post-reallocation stocks, the lumps, and the
-largest gap between the replayed and the stored stocks.
+The present value at date 0 of the social flow along the solved `path` under its z₁
+`model`. The forward pass is replayed from date 0⁻ with the path's own policies and
+tightness, through the steps `_forward_pass!` takes, booking within each sub-step the flow
+at its starting stocks and the training cost of its entries (read off the training stock's
+Euler step), and each reallocation's entries into training as a lump at its date. The tail
+is valued at `flow_end` (default: the last date's flow). Returns the PV by component (path,
+tail, total), the per-date flows at the post-reallocation stocks, the lumps, the level
+parameters and the largest gap between the replayed and the stored stocks.
 """
 function welfare_pv(path::TransitionPath, model::Model, tp::TransitionParams;
                     flow_end = nothing, resource_c::Float64 = model.common.c)
@@ -163,8 +175,8 @@ end
 """
     steady_state_flow(model; resource_c) -> (flow, replay)
 
-The social flow of the steady state `model`, from its self-transition (`self_path`): the
-flow at date 1, whose stocks are the steady state's.
+The social flow of the steady state `model`, at the first date of its self-transition
+(`self_path`), and the replay that produced it.
 """
 function steady_state_flow(model::Model; resource_c::Float64 = model.common.c)
     p, tp = self_path(model)
@@ -172,7 +184,12 @@ function steady_state_flow(model::Model; resource_c::Float64 = model.common.c)
     return (flow = w.flows[1, :], replay = w)
 end
 
-# One row per component, net per market, and the total, in the four units.
+"""
+    welfare_rows(crisis, object, pv, πU0, A, πU) -> Vector{NamedTuple}
+
+One row per component of `pv`, the net of each market and the total, in levels, months of
+the baseline mean unskilled new-match output `πU0`, over `A`, and months of `πU`.
+"""
 function welfare_rows(crisis::Symbol, object::AbstractString, pv::AbstractVector, πU0::Float64,
                       A::Float64, πU::Float64)
     rows = NamedTuple[]
@@ -193,10 +210,9 @@ end
 """
     run_welfare(crises)
 
-For each crisis: the present value of the social flow along the stored transition, and of
-the baseline and the crisis steady states held forever, by market and component, with the
-path's per-date stocks and flows.  Writes `welfare_<crisis>.csv`, `path_<crisis>.csv` and
-`flows_ss_<crisis>.csv`.
+For each crisis, the present value of the social flow along the stored transition and of
+both steady states held forever, by market and component, and the path's stocks and flows
+by date. Writes `welfare_<crisis>.csv`, `path_<crisis>.csv` and `flows_ss_<crisis>.csv`.
 """
 function run_welfare(crises)
     dir = cf_log_start(out_counterfactuals(:welfare), "Welfare along the estimated transitions")

@@ -1,18 +1,26 @@
 ############################################################
-# data_processing/cps_basic.jl
+# code/data_and_descriptives/cps_basic.jl
 #
-# Stage 1 — load and clean the raw CPS Basic Monthly extract: sample
-# restrictions, skill/employment/training classification, the COVID
-# misclassification fix, window assignment, and WTFINL-weighted industry
-# skill shares used by the JOLTS vacancy split.
+# Cleans the raw IPUMS CPS Basic Monthly extract: sample restrictions, skill /
+# employment / training flags, the COVID misclassification fix, window
+# assignment, and the WTFINL-weighted industry skill shares used to split JOLTS
+# openings between the two markets.
 #
-# Reads:  data/raw/cps_basic/
-# Writes: cps_basic_clean.arrow, industry_skill_shares.arrow, economy_skill_shares.arrow
-#
-# Plain include() file: definitions only, no top-level execution.
-# `using` packages and path consts come from data_processing_main.jl.
+# Entry point: clean_cps_basic()
+#   reads  data/raw/cps_basic/ (one .arrow or .csv[.gz])
+#   writes cps_basic_clean.arrow, industry_skill_shares.arrow, economy_skill_shares.arrow
+# Definitions only; packages and path constants come from data_processing_main.jl.
 ############################################################
 
+"""
+    clean_cps_basic() -> DataFrame
+
+Load the raw CPS Basic extract and keep ages 16–64 in or out of the labour force
+(NIU dropped; NILF kept for LF→NILF transitions and the trainee count). Adds
+`in_lf`, `skilled`, `employed`/`unemployed` (on the COVID-corrected `EMPSTAT`),
+`in_training`, `valid_match` and `window`; writes the industry and economy-wide
+skill shares of employed non-trainees; saves and returns the cleaned frame.
+"""
 function clean_cps_basic()
     @info "Stage 1: clean_cps_basic — reading raw data..."
 
@@ -35,23 +43,17 @@ function clean_cps_basic()
     # ── 2. Sample restrictions ────────────────────────────────────
     filter!(row -> in_age_range(row.AGE), df)
 
-    # Keep both LF (LABFORCE==2) and NILF (LABFORCE==1); drop NIU (LABFORCE==0).
-    # We need NILF at t+1 in the lookup to observe LF→NILF transitions (for ν)
-    # AND to identify the strict training_share numerator (NILF ∩ enrolled).
+    # LABFORCE: 2 = in LF, 1 = NILF (kept), 0 = NIU (dropped).
     filter!(row -> row.LABFORCE in (1, 2), df)
-    df.in_lf  = df.LABFORCE .== 2          # true = in labour force; false = NILF
-    df.in_age = trues(nrow(df))            # working-age population (16–64); set
-                                            # explicitly so downstream code doesn\'t
-                                            # need to re-apply the age filter.
+    df.in_lf  = df.LABFORCE .== 2
+    df.in_age = trues(nrow(df))
     @info "  After age/civilian restriction: $(nrow(df)) (LF: $(count(df.in_lf)), NILF: $(count(.!df.in_lf)))"
 
-    # Coalesce weights to avoid Missing propagation downstream
     df.WTFINL = coalesce.(df.WTFINL, 0.0)
 
     # ── 3. Classification ─────────────────────────────────────────
     df.skilled = is_skilled.(df.EDUC)
 
-    # COVID BLS misclassification correction (Mar–Jun 2020)
     if hasproperty(df, :WHYABSNT)
         df.EMPSTAT_CORRECTED = [
             apply_covid_correction(df.EMPSTAT[i], df.YEAR[i], df.MONTH[i], df.WHYABSNT[i])
@@ -67,7 +69,6 @@ function clean_cps_basic()
     df.employed   = is_employed.(df.EMPSTAT_CORRECTED)
     df.unemployed = is_unemployed.(df.EMPSTAT_CORRECTED)
 
-    # Training flag: SCHLCOLL ∈ {3, 4} AND EDUC < 111
     if hasproperty(df, :SCHLCOLL)
         df.in_training = is_enrolled_no_ba.(df.SCHLCOLL, df.EDUC)
     else
@@ -77,25 +78,20 @@ function clean_cps_basic()
 
     df.valid_match = valid_match_mish.(df.MISH)
 
-    # ── 4. Window assignment (vectorised) ─────────────────────────
+    # ── 4. Window assignment ──────────────────────────────────────
     df.window = assign_window.(df.YEAR, df.MONTH)
     lf_in_window = count(i -> df.window[i] != :none && df.in_lf[i], 1:nrow(df))
     @info "  LF observations in estimation windows: $lf_in_window / $(count(df.in_lf))"
 
-    # ── 5. Industry skill shares — WTFINL-weighted, LF ∩ ¬train ────
-    # The working-student exclusion mirrors the model labour-force
-    # concept (excludes the training mass agg_t), keeping the industry
-    # skill shares used by the JOLTS allocation aligned with the
-    # skilled_share moment in Stage 7.
+    # ── 5. Industry skill shares (employed, not in training) ──────
+    # Excluding working students mirrors the model's labour force, which
+    # excludes the training mass, so the JOLTS split agrees with skilled_share.
     if hasproperty(df, :IND)
         df.IND_JOLTS = ind_to_jolts_supersector.(df.IND)
 
-        # Only in-window rows can affect a moment. The 2000-2002 buffer is
-        # coded in the 1990 Census industry scheme (IPUMS codes IND by the
-        # contemporary scheme: 1990 for 1992-2002, 2002 for 2003-2008, ...),
-        # which this 2002+ crosswalk does not recognise. Those rows are all
-        # window == :none and never enter the JOLTS allocation, so we restrict
-        # the diagnostic to in-window rows to avoid a spurious warning.
+        # Diagnostic on in-window rows only: the pre-2003 buffer is coded in the
+        # 1990 Census scheme, which the crosswalk does not recognise, but those
+        # rows never enter a moment.
         in_window = df.window .!= :none
         n_unknown  = count(df.IND_JOLTS[in_window] .== "UNKNOWN")
         n_excluded = count(df.IND_JOLTS[in_window] .== "EXCLUDED")
@@ -105,7 +101,6 @@ function clean_cps_basic()
             @warn "  Unknown in-window IND codes: $unknown_inds"
         end
 
-        # Employed AND not a working student, in a known JOLTS supersector
         emp_df = filter(row -> row.employed && !row.in_training &&
                                row.window != :none &&
                                row.IND_JOLTS != "EXCLUDED" && row.IND_JOLTS != "UNKNOWN", df)
@@ -132,8 +127,7 @@ function clean_cps_basic()
     end
 
     # ── 6. Select columns and save ────────────────────────────────
-    # DURUNEMP (weeks unemployed, current spell) feeds the skilled
-    # long-term-unemployment share ltu_share_S (DURUNEMP ≥ 27 → LTU).
+    # CPSIDP: month-pair matching and person clustering; DURUNEMP: duration moments.
     cols_to_keep = intersect(
         [:YEAR, :MONTH, :CPSID, :CPSIDP, :MISH, :WTFINL,
          :EMPSTAT, :EMPSTAT_CORRECTED, :EDUC, :AGE, :SEX, :IND,

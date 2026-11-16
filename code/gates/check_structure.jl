@@ -1,18 +1,14 @@
 #!/usr/bin/env julia
 ############################################################
-# scripts/check_structure.jl — structural checks a parser cannot make
+# gates/check_structure.jl — structural checks a parser cannot make
 #
-# Julia parses an assignment inside an open call as a keyword argument, so a
-# top-level constant accidentally pasted into a constructor is SYNTACTICALLY VALID
-# until something downstream breaks — which is how a misplaced block once closed
-# SMMRunParams early and turned the tracing fields into assignments to `false`.
-# Meta.parseall and Meta.lower both pass on that state; only bracket depth catches it.
+# Julia parses `NAME = value` inside an open call as a keyword argument, so a constant
+# pasted into a constructor, or a constructor closed early, still parses and lowers.
+# Bracket depth per line catches both. Prints every finding; scans every .jl under code/.
 #
-# Run from anywhere:  julia scripts/check_structure.jl
+#   julia code/gates/check_structure.jl
 ############################################################
 
-# repo_root.jl sits at code/ beside paths.jl since v19.6.0: it is shared by gates/,
-# tools/ and ops/, so one path up is the same expression from all three.
 include(joinpath(@__DIR__, "..", "repo_root.jl"))
 const ROOT = find_repo_root()
 const CODE = joinpath(ROOT, "code")
@@ -20,8 +16,8 @@ const CODE = joinpath(ROOT, "code")
 """
     depth_profile(src) -> Vector{Int}
 
-Bracket depth at the START of each line, ignoring brackets inside string literals
-and comments. Depth 0 means top level.
+Bracket depth at the start of each line of `src`, ignoring brackets inside
+double-quoted strings and after `#`. Depth 0 is top level.
 """
 function depth_profile(src::AbstractString)
     depths = Int[]
@@ -45,8 +41,9 @@ end
 """
     orphan_assignments(path) -> Vector{Tuple{Int,String}}
 
-Lines that LOOK like top-level constant assignments (a bare NAME = ... starting in
-column 1) but sit at nonzero bracket depth, i.e. inside an open call.
+Lines of the file at `path` that look like a top-level constant assignment (an
+uppercase `NAME = ...` in column 1) but sit inside an open call. Returns
+`(line number, text)` pairs.
 """
 function orphan_assignments(path::AbstractString)
     src = read(path, String)
@@ -62,10 +59,9 @@ end
 """
     orphan_kwargs(path) -> Vector{Tuple{Int,String}}
 
-Lines that look like a keyword argument — indented `name = value,` with a trailing
-comma — but sit at bracket depth 0. A constructor closed early leaves its remaining
-fields in exactly this state, and Julia then parses `show_trace_members = false,`
-as a tuple assignment rather than a keyword, which is the failure that shipped once.
+Lines of the file at `path` that look like a keyword argument (indented
+`name = value,`) but sit at depth 0, as the remaining fields of a constructor closed
+early do. Returns `(line number, text)` pairs.
 """
 function orphan_kwargs(path::AbstractString)
     src = read(path, String)
@@ -74,8 +70,8 @@ function orphan_kwargs(path::AbstractString)
     for (i, line) in enumerate(split(src, '\n'))
         occursin(r"^\s+[A-Za-z_][A-Za-z0-9_]*\s*=.*,\s*(#.*)?$", line) || continue
         depths[i] == 0 || continue
-        # A multi-line call's OWN first line also ends in a comma at depth 0
-        # (`p = plot(x, y,`), so require the line to close every bracket it opens.
+        # The first line of a multi-line call (`p = plot(x, y,`) also matches; require
+        # the next line to be back at depth 0.
         depths[i + 1] == 0 || continue
         push!(out, (i, strip(line)))
     end
@@ -85,10 +81,16 @@ end
 """
     unbalanced(path) -> Int
 
-Net bracket depth at end of file; anything but 0 means an unclosed construct.
+Net bracket depth at the end of the file at `path`; nonzero means an unclosed construct.
 """
 unbalanced(path::AbstractString) = (p = depth_profile(read(path, String)); isempty(p) ? 0 : last(p))
 
+"""
+    main() -> Int
+
+Run the three checks on every .jl file under code/, print each finding, and return the
+number of findings.
+"""
 function main()
     files = String[]
     for (root, _, fs) in walkdir(CODE), f in fs

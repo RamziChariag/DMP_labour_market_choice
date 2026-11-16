@@ -1,73 +1,36 @@
 ############################################################
-# skilled.jl — Skilled block solver (RoySearch)
+# skilled.jl — Skilled block
 #
-# Every skilled VALUE object reads the skilled aptitude aS alone (notes
-# §382, §420): U_S^(0), E_S^0, E_S^1, J_S^0, J_S^1, p*_S, p^oj_S, I_S.
-# Production is linear, π_S(aS,p) = A P_S aS p (no γ_S).
+# Every skilled value reads aS alone: U_S^(0), E_S^0, E_S^1, J_S^0, J_S^1, p*_S, p^oj_S.
+# Production is π_S = exp(A) P_S aS p. This block solves the stay-skilled branch
+#   U_S^(0)(aS) = (b_S + κ_S β_S I_S(aS)) / (r + ν);
+# the crossing branch U_S^(1)(aU,aS) and the drain d are career choices (unskilled.jl).
+# The employed surplus uses U_S^(0) as outside option: the draining fraction holds no
+# employed mass.
 #
-# The directed-search choice compares the two branches (notes eq:dpolicy):
-#   U_S^(0)(aS)    = (b_S + κ_S β_S I_S(aS)) / (r + ν)       stay skilled
-#   U_S^(1)(aU,aS) = (b_S + κ_U E_U(aU,aS,1)) / (r + ν + κ_U) cross to U
-#   d(aU,aS)       = fraction of cell (aU,aS) with U_S^(1) > U_S^(0)
-# This block solves the stay-skilled branch; the cross branch and d are the
-# career choices of unskilled.jl, since E_U(aU,aS,1) is an unskilled match.
-# The employed surplus uses U_S^(0)(aS) as the outside option: the
-# non-draining fraction 1−d, which carries all the employed mass, has
-# exactly this unemployment value, and the draining fraction d carries
-# none, so its 1D-in-aS surplus is never read by the distribution.
+# Stationary composition: per-aS unit shapes û(aS), ê(aS,p) of a non-draining type,
+# scaled by the trained mass m_S(aU,aS) (stationary_masses). Free entry aggregates over
+# aS with the non-draining column masses Σ_aU (1−d) m_S.
 #
-# Stationary composition factors.  The p-dynamics read only aS, and the
-# flow balance is linear-homogeneous in a type's trained mass, so the
-# split into unemployed/employed is a per-aS UNIT shape scaled by the 2D
-# trained mass m_S(aU,aS):
-#   the 1−d part:  u_S = û(aS) m_S,  e_S(p) = ê(aS,p) m_S
-#   the d part:    u_S = m_S,        e_S ≡ 0     (these seek in U, not S)
-# where m_S(aU,aS) = φ t(aU,aS) / (ν + crossing hire rate) is supplied by
-# the stationary masses (stationary_masses).  Free-entry aggregation reduces to a 1D sum over aS weighted by
-# the non-draining column masses (1−d)·m_S.
-#
-# Functions
-#   build_skilled_precomp        Γ CDFs + cell masses + tail weights
-#   find_cutoff_from_j0          zero-crossing of S^max(aS,·)
-#   find_poj_from_diff_grid      zero-crossing of S^1 − S^0
-#   drain_fraction!              covered fraction of the drain margin
-#   skilled_inner_loop!          iterate (U0, S^0, S^1)
-#   solve_stationary_skilled!    per-aS unit shapes (û, ê)
-#   compute_Jbar_skilled         expected firm value for free entry
-#   update_theta_skilled         free-entry tightness update
-#   solve_skilled_block!         outer loop on (θ_S, p*_S, p^oj_S)
+# Entry points: solve_skilled_block!, cutoff_proposals!, compute_Jbar_skilled,
+# update_theta_skilled, vacancy_cost_skilled, drain_fraction!.
 ############################################################
 
 
-# ---------------------------------------------------------------------------
-# Precompute Γ CDFs, cell masses and tail weights on the skilled p-grid
-# ---------------------------------------------------------------------------
+"""
+    build_skilled_precomp(sg, sp) → SkilledPrecomp
+
+Offer CDF Γ_o = Beta(a_Γ, b_Γ) and shock CDF Γ_s(x) = Γ_o(x/δ) on the skilled grid, their
+cell masses per unit `wp` and tail weights. The Gauss–Legendre nodes and weights stay:
+`wp` is also the Lebesgue measure dp elsewhere.
+"""
 function build_skilled_precomp(sg::SkilledGrids, sp::SkilledParams)
     dist = Beta(sp.a_Γ, sp.b_Γ)
     δ    = sp.δ
 
-    # Offer distribution Γ_o = Beta(a_Γ, b_Γ) on [0,1].
     Γvals = cdf.(dist, sg.p)
-
-    # Shock distribution Γ_s(x) = Γ_o(x/δ) on [0,δ]: the shocked quality is
-    # δ·(offer draw), so the CDF evaluates the offer at x/δ, with zero mass
-    # above δ.  At δ = 1 the map is the identity and the shock arrays
-    # reproduce the offer arrays exactly.
     Γs_vals = cdf.(dist, clamp.(sg.p ./ δ, 0.0, 1.0))
 
-    # Both quality densities are EXACT-CDF CELL MASSES per unit wp, not
-    # pointwise densities (see build_cell_mass_density in grids.jl).  Every
-    # dΓ integral in the model appears as γ_j · wp_j, so each term carries the
-    # exact mass of node j's cell: total mass is 1 by construction and the mass
-    # around the shock density's pole at p = δ is read off the CDF instead of a
-    # pdf sampled at whichever node lands nearest it.  The Gauss–Legendre nodes
-    # and weights are deliberately untouched — sg.wp doubles as the Lebesgue dp
-    # measure elsewhere, and a Gauss–Jacobi swap breaks it (∫ p dp = 0.4731
-    # against the exact 0.5).
-    #
-    # Consequence: γvals and γs_vals must never be read pointwise.  Their error
-    # against γ(p_j) is flat in the grid size (RMS 1.194 at Np_S = 60, 1.202 at
-    # 480) because wp_j is a quadrature weight, not the cell's width.
     γvals   = build_cell_mass_density(x -> cdf(dist, clamp(x,     0.0, 1.0)), sg.p, sg.wp)
     γs_vals = build_cell_mass_density(x -> cdf(dist, clamp(x / δ, 0.0, 1.0)), sg.p, sg.wp)
 
@@ -82,9 +45,15 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Locate p*_S(aS) by linear interpolation of the zero-crossing of
-# S^max(aS,·), scanning from the previous cutoff index.
+# Cutoff location
 # ---------------------------------------------------------------------------
+
+"""
+    find_cutoff_from_j0(pgrid, Smax, j0_prev) → p*_S
+
+Zero of `Smax` on the grid by linear interpolation, scanning from the previous cutoff index
+`j0_prev`: 1.0 if `Smax < 0` at and above it, 0.0 if `Smax ≥ 0` at and below it.
+"""
 function find_cutoff_from_j0(pgrid::Vector{Float64}, Smax::AbstractVector{Float64}, j0_prev::Int)
     Np = length(pgrid)
     if Smax[j0_prev] < 0.0
@@ -107,22 +76,12 @@ function find_cutoff_from_j0(pgrid::Vector{Float64}, Smax::AbstractVector{Float6
     return pgrid[j_neg] + clamp(-S_lo / dS, 0.0, 1.0) * (pgrid[j_pos] - pgrid[j_neg])
 end
 
+"""
+    _quad_crossing(x0, x1, x2, f0, f1, f2) → Float64
 
-# ---------------------------------------------------------------------------
-# Locate p^oj_S(aS) at a zero-crossing of S^1 − S^0 above p*_S.
-#
-# Which crossing is taken is POJ_CROSSING (params.jl): :first is the lowest
-# sign change at or above p*_S, :last the highest.  They coincide unless the
-# difference changes sign more than once above p*_S, which happens at the
-# bottom of the p-grid where the two raw surpluses are nearly equal.
-#
-# Inside the bracketing cell the crossing is interpolated, linearly by default
-# and by the local quadratic under POJ_CROSSING_C1.
-# ---------------------------------------------------------------------------
-
-# Root of the quadratic through (x0,f0), (x1,f1), (x2,f2) lying in [x1, x2], in
-# Newton divided-difference form.  NaN when no real root sits there, so the
-# caller falls back to the linear rule.
+Root in [x1, x2] of the quadratic through the three points, or NaN when none is there
+(the caller then uses the linear rule).
+"""
 function _quad_crossing(x0, x1, x2, f0, f1, f2)
     a1 = (f1 - f0) / (x1 - x0)
     a2 = ((f2 - f1) / (x2 - x1) - a1) / (x2 - x0)
@@ -139,7 +98,12 @@ function _quad_crossing(x0, x1, x2, f0, f1, f2)
     return NaN
 end
 
-# Crossing inside cell j, where diff[j] > 0 >= diff[j+1].
+"""
+    _poj_in_cell(pgrid, diff, j) → Float64
+
+Crossing of `diff` inside cell j, where `diff[j] > 0 >= diff[j+1]`: linear, or quadratic
+under `POJ_CROSSING_C1`.
+"""
 @inline function _poj_in_cell(pgrid::Vector{Float64}, diff::AbstractVector{Float64}, j::Int)
     @inbounds begin
         d_hi = diff[j];  d_lo = diff[j+1];  dD = d_hi - d_lo
@@ -152,6 +116,12 @@ end
     end
 end
 
+"""
+    find_poj_from_diff_grid(pgrid, diff, pstar) → p^oj_S
+
+Zero crossing of `diff` = S¹ − S⁰ at or above `pstar`: the highest (`POJ_CROSSING = :last`)
+or the lowest (`:first`).
+"""
 function find_poj_from_diff_grid(pgrid::Vector{Float64}, diff::AbstractVector{Float64}, pstar::Float64)
     Np = length(pgrid)
     j0 = pcut_index(pgrid, pstar)
@@ -175,40 +145,24 @@ end
 
 
 # ---------------------------------------------------------------------------
-# OJS participation weight on the ability grid.
-#
-# M(aS) = max_{p >= p*_S} (S^1 − S^0)(aS, p) is the participation score: on-the-job
-# search pays for aS at some acceptable match quality iff M(aS) > 0, so the searching
-# set in ability is {M > 0} and its frontier is a zero of M.  The weight of ability
-# cell k is the fraction of the cell that set covers (covered_fraction!) — the
-# ability-grid analogue of the p-coverage _soft_oj_weight returns.
+# Covered-fraction margins on the ability grid
 # ---------------------------------------------------------------------------
+
+"""
+    ojs_participation!(part, M, x) → part
+
+OJS participation weight of each ability cell: the fraction of the cell on which the score
+M(aS) = max_{p ≥ p*_S} (S¹ − S⁰) is positive.
+"""
 ojs_participation!(part::AbstractVector{Float64}, M::AbstractVector{Float64},
                    x::AbstractVector{Float64}) =
     covered_fraction!(part, M, x, node_midpoint_intervals(x)...)
 
-
-# ---------------------------------------------------------------------------
-# Cross-market drain d(aU,aS): the POPULATION FRACTION of cell (aU,aS) that
-# abandons skill and searches in the unskilled market, from U_S^(1)(aU,aS) >
-# U_S^(0)(aS) (notes eq:dpolicy).
-#
-# A hard 0/1 at the nodes made every aggregate that reads d a step function of
-# the skilled parameters: a change too small to move the margin past a node
-# flipped no cell, so the non-draining column masses and the augmented seeker
-# pool were bit-identical and ∂m/∂θ was exactly zero.  d is the covered fraction
-# of each cell, continuous in the margin and equal to the indicator on every cell
-# the margin does not cut.  U_S^(0) is increasing in aS, so where U_S^(1) does not
-# vary with aS the drain set is a lower interval; where U_S^(1) reads aS — the
-# trained enclosed by the training frontier — it need not be, and each sign change
-# is located where it lies.
-# ---------------------------------------------------------------------------
 """
-    drain_fraction!(d, U1, U0, x)
+    drain_fraction!(d, U1, U0, x) → d
 
-Drain `d(a_U, a_S)` from the two branch values on the (aU, aS) grid: the covered fraction
-of each cell on which `U1 > U0`.  Shared by the stationary career choices and the
-transition.
+Drain d(aU, aS): along each aU row, the covered fraction of each cell on which `U1 > U0`.
+Shared by the stationary career choices and the transition.
 """
 function drain_fraction!(d::AbstractMatrix{Float64}, U1::AbstractMatrix{Float64},
                          U0::AbstractMatrix{Float64}, x::AbstractVector{Float64})
@@ -223,11 +177,17 @@ end
 
 # ---------------------------------------------------------------------------
 # Inner loop
-#
-# Given (θ_S, p*_S, p^oj_S) fixed, iterate on the surplus surfaces
-# (S^0_S, S^1_S) and the stay-skilled unemployment value U_S^(0)(aS)
-# until convergence.
 # ---------------------------------------------------------------------------
+
+"""
+    skilled_inner_loop!(model) → (κ, status, converged, iters)
+
+Iterate U_S^(0)(aS) and the surplus surfaces S⁰, S¹ (stored as E0, E1, J0, J1 with the
+reservation soft weight) at fixed θ_S, p*_S, p^oj_S and participation. The unemployed value
+and the poaching gain read the offer tail, the λ_S redraw the shock tail; both tails weight
+the destination by the same search rule as the firm side (`_ojs_share`). Copies U0 into the
+link `sc.U` on exit. `status` as in `unskilled_inner_loop!`.
+"""
 function skilled_inner_loop!(model::Model)
     cp = model.common;  gp = model.grids;  sp = model.skl_par
     sg = model.skl_grids;  pre = model.skl_pre;  sc = model.skl_cache;  sim = model.sim
@@ -242,11 +202,8 @@ function skilled_inner_loop!(model::Model)
     wΓo = pre.γvals   .* sg.wp                      # offer  ∫·dΓ_o
     wΓs = pre.γs_vals .* sg.wp                      # shock  ∫·dΓ_s
 
-    # Fixed partition of the aS grid, with one residual slot per CHUNK.  The tail scratch
-    # pair is allocated inside each task rather than held here, so no two tasks can alias
-    # it; see `index_chunks` for why this is a @spawn fan-out and not `@threads :static`.
-    # Computed once per call: at fixed Nx the partition never changes, so the residual
-    # reduction groups the same terms on every run and every thread count.
+    # Partition fixed per call with one residual slot per chunk, reduced afterwards in
+    # chunk order (index_chunks).
     chunks = index_chunks(Nx)
     dU_ch  = zeros(Float64, length(chunks))
     dS_ch  = zeros(Float64, length(chunks))
@@ -273,19 +230,10 @@ function skilled_inner_loop!(model::Model)
                         j0      = pcut_index(sg.p, pstar)
                         j0_soft = max(j0 - 1, 1)
 
-                        # Tail integrals I_S(aS) = ∫_{p*}^1 S^max dΓ, one per distribution.
-                        # Stored J0/J1 carry the soft weight, so /(1−β) recovers ω·S.
-                        # The destination is valued under the SAME search rule the firm prices and
-                        # the distributions flow, `_ojs_share(part, ·)`.  A pointwise max here would
-                        # be the notes' s* = 1{S¹ ≥ S⁰} read node by node — identical on the exact
-                        # solution, but NOT on a finite grid: γ_o has a pole at p = 0 whenever
-                        # a_Γ < 1, and the pointwise test picks up a spurious sign change in the
-                        # first cell or two.  Measured at the base_fc estimate: the spurious lower
-                        # crossing tracks the cell width (15.93× over a 15.9× refinement at one
-                        # type, exactly 1.00 cells from the floor at every resolution) while the
-                        # upper crossing is stable to 1.1%, as stable as the 76 single-crossing
-                        # types.  The cutoff form reads only the stable boundary, so it is the
-                        # better approximation to s*, not a departure from it.
+                        # Tails ∫_{p*}^1 S^max dΓ, read from one cell below the cutoff node.
+                        # The destination uses the search rule `_ojs_share`, not a pointwise
+                        # max: near the pole of γ_o at p = 0 (a_Γ < 1) the pointwise test
+                        # finds a spurious crossing.
                         acco = 0.0;  accs = 0.0
                         for j in Np:-1:1
                             s_j        = _ojs_share(part, sg.p[j], poj, sg.p, j, Np)
@@ -296,8 +244,7 @@ function skilled_inner_loop!(model::Model)
                         I_o = tailEo[j0_soft]              # offer: fresh-meeting search option
                         I_s = tailEs[j0_soft]              # shock: λ_S redraw option
 
-                        # Stay-skilled unemployment value (self-referential via the
-                        # OFFER integral — an unemployed worker meets fresh offers).
+                        # Stay-skilled unemployment value (offer integral).
                         U0_raw   = (bS + κ * β * I_o) / (r + ν)
                         U0_old   = sc.U0[k]
                         U0_new   = U0_old + αS * (U0_raw - U0_old)
@@ -313,10 +260,10 @@ function skilled_inner_loop!(model::Model)
                                 sc.J0[k, j] = 0.0;     sc.J1[k, j] = 0.0
                                 continue
                             end
-                            # No-search surplus (eq SS0): the λ_S redraw reads the SHOCK integral.
+                            # No-search surplus: λ_S redraw on the shock integral.
                             S0 = smooth_pos((PSeff * pj - (r + ν) * U0_new + λ * I_s) / base)
-                            # OJS surplus (eq SS1): λ_S redraw → shock integral; the
-                            # poaching gain and outflow hazard → OFFER tail.
+                            # OJS surplus: redraw on the shock integral; poaching gain and
+                            # outflow on the offer tail.
                             tail_mass_j = pre.tail_weights[j]
                             tail_Emax_j = tailEo[max(j, j0_soft)]
                             S1 = smooth_pos((PSeff * pj - (r + ν) * U0_new - σ + λ * I_s +
@@ -357,14 +304,17 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Stationary composition — per-aS unit shapes (û, ê)
-#
-# For a d = 0 type of skilled aptitude aS with trained mass 1, solve the
-# flow balance for the employed density ê(aS,p) and unemployed fraction
-# û(aS) (notes eq:uSbalance–eq:eSbalance).  Decompose ê(p) = α(p) û +
-# β(p) and close with 1 = û + ∫ ê dp.  Actual densities scale linearly
-# with the type's true mass m_S(aU,aS), applied in aggregation.
+# Stationary composition
 # ---------------------------------------------------------------------------
+
+"""
+    solve_stationary_skilled!(model)
+
+Per-aS unit shapes of a non-draining type with trained mass 1: the unemployed share
+`sc.u_frac` and the employed density `sc.e_frac` in p, from the flow balance with
+ê(p) = α(p) û + β(p) closed by û + ∫ ê dp = 1. Hires and poaching inflows read the offer
+density, λ_S redraws (out and in) the shock density.
+"""
 function solve_stationary_skilled!(model::Model)
     sg = model.skl_grids;  pre = model.skl_pre;  sc = model.skl_cache
     sp = model.skl_par;    cp = model.common
@@ -394,18 +344,9 @@ function solve_stationary_skilled!(model::Model)
                 ω_j <= 0.0 && continue
                 s_j = _ojs_share(part, pj, poj, sg.p, j, Np)
 
-                # κ·γ terms read the OFFER density; both λ·γ terms read the SHOCK
-                # density (the −λ·γ outflow from the α-basis and the +λ·γ inflow to
-                # the β-basis are the same redraw event, so they must share γ_s and
-                # net to zero mass at δ = 1).
-                # A poached worker must draw a cell STRICTLY ABOVE her own: the
-                # poaching inflow to a cell comes from the searchers below it
-                # (CumAlpha/CumBeta are accumulated after cell j is priced), so the
-                # offsetting outflow is the offer mass above cell j — tail_weights
-                # shifted by one.  With it, ∫inflow = ∫outflow exactly and û is the
-                # u_S balance's own ratio; the continuous CDF Γ_o(p_j) left û 0.65%
-                # above that ratio, and tail_weights[j] counts the source cell in
-                # both directions and is 1.39% off.
+                # A poached worker draws a cell strictly above her own (inflow to cell j comes
+                # from the searchers below it, accumulated after j is priced), so the outflow
+                # is the offer mass above cell j: tail_weights[j + 1]. Inflow equals outflow.
                 acc_mass = j < Np ? pre.tail_weights[j + 1] : 0.0
                 a_j = ν + λ + ξ + s_j * κ * acc_mass
                 num_α = (κ * γoj - λ * γsj) + κ * γoj * CumAlpha   # unit-mass forcing: κ û γ term
@@ -439,12 +380,11 @@ function solve_stationary_skilled!(model::Model)
 end
 
 
-# ---------------------------------------------------------------------------
-# Non-draining column mass of the trained population
-#   mcol0[j] = Σ_i (1 − d[i,j]) m_S[i,j]
-# The 2D→1D reduction that makes free-entry aggregation O(N²).  Linear in d, so
-# a fractional drain splits each cell's mass rather than assigning it wholly.
-# ---------------------------------------------------------------------------
+"""
+    nondrain_column_mass(d, mS) → mcol0
+
+Non-draining trained mass by aS, `mcol0[j] = Σ_i (1 − d[i,j]) m_S[i,j]`.
+"""
 function nondrain_column_mass(d::AbstractMatrix{Float64}, mS::AbstractMatrix{Float64})
     Nx = size(mS, 2)
     mcol0 = zeros(Float64, Nx)
@@ -454,12 +394,13 @@ function nondrain_column_mass(d::AbstractMatrix{Float64}, mS::AbstractMatrix{Flo
     return mcol0
 end
 
-# ---------------------------------------------------------------------------
-# The skilled seekers' composition by aS: the non-draining column mass or, when the
-# market holds none, its limit as the market empties — the admissible cells with the
-# largest training gain (marginal_training_cells), carried through the model's own
-# m_S(t) so the drain split weights them exactly as it would a small positive mass.
-# ---------------------------------------------------------------------------
+"""
+    skilled_stayer_columns(model, d, mS) → mcol0
+
+The skilled seekers' composition by aS: the non-draining column mass, or, when the market
+holds none, its limit as it empties (the admissible cells with the largest training gain,
+`marginal_training_cells`, carried through the model's own m_S(t)).
+"""
 function skilled_stayer_columns(model::Model, d::AbstractMatrix{Float64},
                                 mS::AbstractMatrix{Float64})
     mcol0 = nondrain_column_mass(d, mS)
@@ -471,36 +412,20 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Expected firm value seen by a randomly arriving skilled vacancy.
-#
-# Seekers are non-draining unemployed (mass û(aS) mcol0[aS]) and employed
-# searchers s*(aS,p) with density ê(aS,p) mcol0[aS].  Firm value tails
-# are 1D in aS; the aU-dependence is entirely in mcol0.
-#
-# Which of J^1/J^0 applies, and whether an employed type searches at all, is
-# the same OJS margin solve_stationary_skilled! smooths with _soft_oj_weight,
-# so free entry uses that weight too: reading the margin as a hard 1{E¹ ≥ E⁰}
-# here made J̄_S jump whenever a single grid cell flipped, leaving the outer
-# θ_S map discontinuous in the parameters while the block feeding it was
-# continuous.
-#
-# SHIPPED FOR CONTINUITY, NOT ACCURACY.  Against the hard rule the soft weight
-# is 1.7–1.8× worse in RMS and carries a one-signed bias about 60× larger,
-# because _soft_oj_weight returns the covered fraction of the INTERVAL
-# [p_j, p_{j+1}] while it multiplies the Gauss–Legendre weight wp_j, which is
-# not that interval's length.  What it buys is that all 8–16 discontinuities
-# per point leave the free-entry map, taking pooled feasibility from 58.0% to
-# 94.3% (n = 192 paired directions per radius, 2304 solves, McNemar
-# p = 3.9e-45).  An exact version would weight by the cell's MASS fraction
-# under dΓ rather than by its length fraction.
-#
-# The RESERVATION margin enters through the index the firm-value tail is read
-# at.  J^0/J^1 already carry the reservation coverage weight ω, so the tail is
-# read from one cell BELOW the cutoff node — j0_soft, the index
-# skilled_inner_loop! and solve_stationary_skilled! both use — or the cell
-# straddling p*_S is dropped from free entry while the block that priced it
-# keeps it.
+# Free entry
 # ---------------------------------------------------------------------------
+
+"""
+    compute_Jbar_skilled(model) → J̄_S
+
+Expected firm value of a meeting for a skilled vacancy. Seekers are the non-draining
+unemployed, û(aS) mcol0(aS), priced over every acceptable destination, and the employed
+searchers, s(aS,p) ê(aS,p) mcol0(aS), priced over destinations above their own quality. The
+OJS margin enters through `_ojs_share` (continuity, not accuracy) and the reservation margin
+through the tail read at one cell below the cutoff node. While m_S has not settled
+(num < 1e-12) the tails are weighted by the non-draining marginal ℓ. Under `corner_limit`
+the seekers are `skilled_stayer_columns`.
+"""
 function compute_Jbar_skilled(model::Model)
     gp = model.grids;  sg = model.skl_grids;  pre = model.skl_pre;  sc = model.skl_cache
     Nx = length(gp.x);  Np = length(sg.p)
@@ -508,12 +433,8 @@ function compute_Jbar_skilled(model::Model)
     mcol0 = model.corner_limit ? skilled_stayer_columns(model, sc.d, sc.m_S) :
                                  nondrain_column_mass(sc.d, sc.m_S)
 
-    # Accumulated PER aS NODE and reduced in index order rather than into thread-local
-    # slots: @threads schedules dynamically, so a threadid()-indexed sum groups the terms
-    # differently from run to run and J̄_S differs in its last bits.  That is invisible at
-    # a well-conditioned point and decisive at a marginal one, because U_S = U_S(θ_S) has
-    # a sensitivity of ~2e4 and the global residual is a sup-norm on U_S — which made the
-    # feasible/infeasible verdict itself depend on the schedule.
+    # Per-node accumulators summed in index order afterwards, so J̄_S does not depend on the
+    # schedule (U_S is very sensitive to θ_S, so last-bit differences decide feasibility).
     num_by_k = zeros(Float64, Nx)
     den_by_k = zeros(Float64, Nx)
 
@@ -534,9 +455,6 @@ function compute_Jbar_skilled(model::Model)
                 tailJ[j] = acc
             end
 
-            # An unemployed seeker is priced over every acceptable destination; an
-            # employed one only over destinations above her own quality, which the
-            # reservation floor still binds from below.
             seeker_e = 0.0
             num_k    = sc.u_frac[k] * tailJ[j0_soft]
             for j in 1:Np
@@ -552,8 +470,6 @@ function compute_Jbar_skilled(model::Model)
 
     num = sum(num_by_k);  den = max(sum(den_by_k), 1e-14)
 
-    # Early-iteration fallback: before m_S has settled, weight the firm-value
-    # tails by the non-draining marginal ℓ so free entry gets a non-trivial signal.
     if num < 1e-12
         num = 0.0;  den = 0.0
         for k in 1:Nx
@@ -579,11 +495,12 @@ function compute_Jbar_skilled(model::Model)
 end
 
 
-# ---------------------------------------------------------------------------
-# Free entry in the skilled market: the tightness a vacancy cost implies, and
-# its inverse.
-#   q_S(θ_S) = k_S π̄_S / J̄_S   (k_S in months of average skilled output)
-# ---------------------------------------------------------------------------
+"""
+    update_theta_skilled(model) → θ_S
+
+Free-entry tightness `q_S(θ_S) = k_S π̄_S / J̄_S`, clamped to [1e-14, 100]; 1e-14 where
+J̄_S is below 1e-12 or not finite.
+"""
 function update_theta_skilled(model::Model)
     sp = model.skl_par
     Jbar = compute_Jbar_skilled(model)
@@ -596,8 +513,8 @@ end
 """
     vacancy_cost_skilled(model) → k_S
 
-The vacancy cost free entry implies at the installed tightness and composition, the
-inverse of `update_theta_skilled`: k_S = q_S(θ_S) J̄_S / π̄_S.  Zero where a meeting is
+Vacancy cost free entry implies at the installed tightness and composition,
+`k_S = q_S(θ_S) J̄_S / π̄_S`, the inverse of `update_theta_skilled`. Zero where a meeting is
 worth nothing.
 """
 function vacancy_cost_skilled(model::Model)
@@ -609,29 +526,22 @@ end
 
 
 # ---------------------------------------------------------------------------
-# Outer loop on (θ_S, p*_S, p^oj_S)
-#
-# Per iteration: inner values (updates d) → cutoffs from raw surpluses, installed
-# under-relaxed by damp_pstar_S → per-aS stationary shapes → free-entry tightness,
-# under-relaxed by the adaptive weight.  A plain damped fixed-point iteration with no
-# acceleration: an Anderson step on the joint [θ_S; p*_S; gap] takes its mixing weight
-# mostly from the cutoff components, which in the base_fc multiplicity band reverses the
-# θ_S step on about half the passes and can carry the iteration onto the repelling root
-# (SETTINGS.md).  Convergence on (Δθ_S, Δp*_S, Δp^oj_S, Δs_part), Δp^oj_S over the types
-# that participate in OJS, with the outlier allowance below.
+# Outer loop on (θ_S, p*_S, p^oj_S, s_part)
 # ---------------------------------------------------------------------------
 
-# How many ability types the convergence test will treat as outliers before falling back
-# to the plain sup-norm.  A CONSTANT, not a setting: at 1 or 2 the boundary has a few
-# types whose increment amplifies while their level is stable, which is the case the
-# allowance is for; letting a run raise it would let a genuinely drifting frontier pass.
+# Most types the convergence test may excuse as boundary outliers before it falls back to the
+# plain sup-norm. A constant: a larger value would let a drifting frontier pass.
 const CONV_S_MAXOUT = 2
-# ---------------------------------------------------------------------------
-# The cutoff map: the cutoffs the stored surpluses imply.  p*_S is the linearly
-# interpolated zero of the raw S^max, p^oj_S a crossing of S^1 − S^0 above it, and Mscore
-# the participation score.  A function of the stored state alone, so the block's
-# iteration and the equilibrium residual (global_residuals) read one map.
-# ---------------------------------------------------------------------------
+
+"""
+    cutoff_proposals!(pst_prop, poj_prop, Mscore, model, κ)
+
+The cutoffs the stored surpluses imply, a function of the stored state alone (shared by the
+block and residual R1): p*_S the interpolated zero of the raw S^max, p^oj_S a crossing of
+S¹ − S⁰ above it (`find_poj_from_diff_grid`), and the participation score `Mscore` =
+max_{p ≥ p*_S} (S¹ − S⁰). Under `OJS_PARTICIPATION = :fraction` a type with M ≤ 0 takes p^oj
+at the peak of S¹ − S⁰, the limit of the crossing. p^oj_S ≥ p*_S.
+"""
 function cutoff_proposals!(pst_prop::AbstractVector{Float64}, poj_prop::AbstractVector{Float64},
                            Mscore::AbstractVector{Float64}, model::Model, κ::Float64)
     cp = model.common;  gp = model.grids;  sg = model.skl_grids
@@ -651,9 +561,7 @@ function cutoff_proposals!(pst_prop::AbstractVector{Float64}, poj_prop::Abstract
             j0_prev = pcut_index(sg.p, clamp01(sc.pstar[k]))
             j0_soft = max(j0_prev - 1, 1)
 
-            # Same search rule as the value block and the firm side.  The cutoffs are
-            # located FROM these tails, so a pointwise max here would search for a new
-            # boundary under a rule the rest of the block does not use.
+            # Tails under the same search rule as the value block and the firm side.
             tailEo = zeros(Float64, Np);  tailEs = zeros(Float64, Np)
             acco = 0.0;  accs = 0.0
             for j in Np:-1:1
@@ -668,7 +576,6 @@ function cutoff_proposals!(pst_prop::AbstractVector{Float64}, poj_prop::Abstract
             base = r + ν + λ + ξ
             for j in 1:Np
                 pj = sg.p[j]
-                # λ_S redraw → shock integral; OJS poaching gain/outflow → offer tail.
                 raw_S0 = (PSeff * pj - (r + ν) * U0k + λ * I_s) / base
                 tail_mass_j = pre.tail_weights[j]
                 tail_Emax_j = tailEo[max(j, j0_soft)]
@@ -681,11 +588,8 @@ function cutoff_proposals!(pst_prop::AbstractVector{Float64}, poj_prop::Abstract
             end
             pst_prop[k] = clamp01(find_cutoff_from_j0(sg.p, Smax_raw, j0_prev))
 
-            # The participation score and the node attaining it.  As M falls to 0 the
-            # searching interval {p : diff > 0} collapses onto that peak, so the peak
-            # is the limit of the crossing — and it is the cutoff the searching branch
-            # of a straddling cell must use, where the scan, finding no crossing at
-            # all, would otherwise shut the margin outright and jump p^oj by cells.
+            # Participation score and the node attaining it. As M → 0 the searching interval
+            # collapses onto that peak, so a straddling cell's searching branch uses it.
             jpk = j0_prev
             for j in (j0_prev + 1):Np
                 diff_raw[j] > diff_raw[jpk] && (jpk = j)
@@ -702,9 +606,16 @@ function cutoff_proposals!(pst_prop::AbstractVector{Float64}, poj_prop::Abstract
 end
 
 
-# `θS_fixed` imposes the skilled tightness instead of solving free entry for it: the block
-# then solves every other skilled object conditional on that θ_S, which is one evaluation
-# of the skilled free-entry map (skilled_equilibria, solver.jl).
+"""
+    solve_skilled_block!(model; θS_fixed = nothing) → (converged, rejected)
+
+Outer loop on (θ_S, p*_S, p^oj_S, s_part), a damped fixed-point iteration with no
+acceleration. Each pass: inner values; cutoff proposals; participation installed undamped;
+cutoffs installed under `damp_pstar_S`; stationary shapes; free-entry θ_S under an adaptive
+weight. Converges when the residual (with the boundary-outlier allowance) is below
+`tol_outer_S` for `conv_streak` passes. Rejection and stall handback as in the unskilled
+block. `θS_fixed` holds θ_S (one evaluation of the skilled free-entry map, skilled_equilibria).
+"""
 function solve_skilled_block!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing)
     gp = model.grids;  sc = model.skl_cache;  sim = model.sim
     Nx = length(gp.x)
@@ -719,10 +630,8 @@ function solve_skilled_block!(model::Model; θS_fixed::Union{Nothing,Float64} = 
     oB = sim.outer_B;  oK = sim.outer_K
     outer_resid = Vector{Float64}(undef, sim.maxit_outer)
 
-    # Adaptive free-entry weight, and the previous pass's interpolated boundary values for
-    # the convergence test.  Both are LOCAL to this call: carrying either between solves
-    # in a module-level Ref would make a result depend on the order in which parameter
-    # draws are evaluated, which is the defect class of the thread-nondeterminism bug.
+    # Adaptive free-entry weight and the previous pass's outlier interpolants. Local to the
+    # call: module-level state would make a result depend on evaluation order.
     w_θ_ad   = DAMP_THETA_S[]
     sgn_prev = 0
     itp_prev = Float64[]
@@ -746,17 +655,11 @@ function solve_skilled_block!(model::Model; θS_fixed::Union{Nothing,Float64} = 
             diverge_streak = 0
         end
 
-        # Cutoffs from raw (unclamped) surpluses.
         cutoff_proposals!(pst_prop, poj_prop, Mscore, model, κ)
 
-        # Type-level OJS participation.  A function of the current iterate, like the cutoff
-        # proposals, and installed undamped, so that :indicator and :fraction differ only in
-        # the participation encoding.
         OJS_PARTICIPATION[] === :fraction && ojs_participation!(part_prop, Mscore, gp.x)
         copyto!(sc.s_part, part_prop)
 
-        # Install the under-relaxed cutoffs for the stationary solve; p^oj_S is kept at or
-        # above p*_S after the blend.
         damp = sim.damp_pstar_S
         @inbounds for k in 1:Nx
             sc.pstar[k] = clamp01(damp * pst_prop[k] + (1.0 - damp) * pstar_old[k])
@@ -765,29 +668,10 @@ function solve_skilled_block!(model::Model; θS_fixed::Union{Nothing,Float64} = 
 
         solve_stationary_skilled!(model)
 
-        # Under-relaxed free entry (DAMP_THETA_S in params.jl).
-        #
-        # The weight ADAPTS, with DAMP_THETA_S as the ceiling it relaxes back toward: on a
-        # sign reversal in the undamped target the step is halved, and absent one it
-        # lengthens back.
-        #
-        # What the shorter step does is NOT stabilise the oscillating root.  This map's
-        # slope in θ_S is (1/η_S)·dlnJ̄_S/dlnθ_S, so it contracts iff dlnJ̄_S/dlnθ_S < η_S
-        # = 0.5; on the ridge that quantity measures 0.52 to 0.90, i.e. slope b = 1.04 to
-        # 1.80, and the DAMPED slope is 1 + w(b−1) > 1 for every w in (0,1].  No
-        # under-relaxation can stabilise a root with b > 1.  What a shorter step does there
-        # is let the iteration be repelled from the unstable root and settle on a different,
-        # stable one — so on the multiplicity band the schedule SELECTS an equilibrium.
-        #
-        # The fixed 0.9 is correct where the estimates live: at θ̂ the skilled free-entry
-        # residual contracts geometrically, 2.1e-04 → 3.6e-07 → 3.2e-08, no reversal occurs
-        # and the weight simply stays at the ceiling.  θ̂ and the controls land on the SAME
-        # root under w = 0.9 and w = 0.5 (Q agreeing to 2.1e-11), so no reported estimate is
-        # branch-dependent.  A FIXED 0.5 instead of the ceiling costs coverage (348 of 361
-        # against 353 at the fixed 0.9); see SETTINGS.md on DAMP_THETA_S for the band.
-        #
-        # With θ_S imposed there is no free-entry step: θ_S is held at θS_fixed on every
-        # pass and only the cutoffs iterate.
+        # Adaptive under-relaxation of free entry: halve the weight on a sign reversal of the
+        # step (floor 0.1), else lengthen it back toward the ceiling DAMP_THETA_S. On the
+        # multiplicity band this selects which attracting root the iteration reaches; at the
+        # estimates the weight stays at the ceiling.
         sc.θ = if θS_fixed === nothing
             T_θ = update_theta_skilled(model)
             sgn = sign(T_θ - θ_old)
@@ -807,13 +691,8 @@ function solve_skilled_block!(model::Model; θS_fixed::Union{Nothing,Float64} = 
             return (converged = false, rejected = false)
         end
 
-        # A type with zero OJS participation before and after the pass is INACTIVE, and its
-        # p^oj_S enters no object: every consumer weights it by _ojs_share = s_part × weight
-        # (grids.jl), which is exactly 0 there.  Its p^oj_S is then the peak of S^1 − S^0,
-        # which for high ability lies on a plateau at the top of the p grid, flat to 1e-12
-        # relative, so rounding moves it between nodes by far more than tol.  Its Δp^oj_S
-        # therefore counts as zero, as in R1 (global_residuals); its Δp*_S and Δs_part still
-        # count, so a type switching participation on or off registers through Δs_part.
+        # A type with zero participation before and after the pass is inactive: its p^oj
+        # enters nothing (and sits on a flat plateau), so its Δp^oj counts as zero, as in R1.
         inactive = [part_old[k] == 0.0 && sc.s_part[k] == 0.0 for k in 1:Nx]
         Δoj = [inactive[k] ? 0.0 : abs(sc.poj[k] - poj_old[k]) for k in 1:Nx]
 
@@ -823,31 +702,12 @@ function solve_skilled_block!(model::Model; θS_fixed::Union{Nothing,Float64} = 
         ds = supnorm(sc.s_part, part_old)        # identically 0 under :indicator
         d  = max(dθ, dp, dj, ds)
 
-        # Outlier allowance on the boundary.  The plain sup-norm lets ONE ability type at
-        # the participation frontier veto the other 159: measured there, that type's p^oj
-        # LEVEL is stable to five decimals while its per-iteration INCREMENT amplifies, so
-        # the sup-norm reports divergence for a boundary that has already settled.  Where
-        # at most CONV_S_MAXOUT types are above tolerance and the rest are below it, each
-        # outlier's cutoff is replaced by a linear interpolation in ability between its
-        # anchors, that interpolated value is required to be stable from one pass to the
-        # next, and convergence is judged on the sup-norm over the remaining types.  Any
-        # other count falls back to the plain sup-norm.
-        #
-        # The interpolation decides CONVERGENCE ONLY and never writes sc.poj: installing it
-        # would mean the moments are computed from a cutoff no equilibrium condition was
-        # ever checked against.  The anchors are the nearest in-tolerance ACTIVE types on
-        # each side: an inactive type's p^oj_S is not an equilibrium object, so the walk
-        # steps over it.  A side with no anchor is the edge of the region where p^oj_S is
-        # defined — the grid edge, or the participation frontier with only inactive types
-        # beyond it, which is where the frontier type above sits — and the interpolant is
-        # then the anchor on the other side.  With no anchor on either side the test falls
-        # back rather than anchoring on the outlier itself.  dθ is a scalar and never the
-        # binding component, so it always stands.
-        #
-        # The stability test matches the previous pass's interpolants by position, so an
-        # outlier SET that changes between passes while keeping its size is compared
-        # type-against-type; the global residual battery is the backstop that catches a
-        # block which exits on that (solver.jl, global_residuals).
+        # Outlier allowance: when 1 to CONV_S_MAXOUT types are above tolerance, replace each
+        # outlier's p^oj by a linear interpolation in ability between the nearest
+        # in-tolerance active anchors (the one anchor if a side has none), require those
+        # interpolants to be stable across passes, and judge convergence on the other types.
+        # For the convergence test only: sc.poj is never overwritten. The global residual
+        # battery is the backstop.
         tol = sim.tol_outer_S
         out = [k for k in 1:Nx if max(Δoj[k], abs(sc.s_part[k] - part_old[k])) > tol]
         if 1 <= length(out) <= CONV_S_MAXOUT
@@ -883,8 +743,7 @@ function solve_skilled_block!(model::Model; θS_fixed::Union{Nothing,Float64} = 
         outer_resid[it] = d
 
         if sim.verbose >= 2 && (it == 1 || it % sim.verbose_stride == 0)
-            # d is the gated residual and nout the number of types the allowance excused,
-            # so d sits BELOW the component maxima whenever nout > 0.
+            # d is the gated residual; nout types were excused, so d can sit below the components.
             @printf("  [outer S it=%d]  d=%.3e  (Δθ=%.3e  Δp*=%.3e  Δpoj=%.3e  Δpart=%.3e)  nout=%d  θ_S=%.4f\n",
                     it, d, dθ, dp, dj, ds, length(out), sc.θ)
         end

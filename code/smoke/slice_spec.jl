@@ -1,6 +1,5 @@
-# Write a truncated copy of smm_main.jl that stops at a named section marker, so
-# the driver's real spec-construction path runs verbatim (same @__DIR__, same
-# includes) without entering the optimiser.
+# smoke/slice_spec.jl — copy smm_main.jl up to (not including) the first line containing
+# a marker, so the driver's spec construction runs verbatim without the optimiser.
 #
 #   julia slice_spec.jl <path/to/smm_main.jl> <marker> <out.jl>
 

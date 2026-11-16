@@ -1,16 +1,15 @@
 ############################################################
 # incidence.jl — who gains and who loses from each crisis, by type and state (RoySearch)
 #
-# LIBRARY FILE — loaded by counterfactuals_main.jl; `run_incidence` is the exercise.
+# Library file, loaded by counterfactuals_main.jl; `run_incidence` is the exercise.
 #
-# For every type (a_U, a_S) and every state it can be in, its value at date 0 of the
-# estimated transition against its value in the same state at the baseline steady state,
-# relative to general productivity: (V_0 / A_crisis) / (V_base / A_base) − 1.  A type's
-# average weighs its states by its date-0 masses (after the date-0 reallocation).  Values
-# and masses are the ones transition_main.jl saved (`types`, transition_types.jl).
+# For every type (a_U, a_S) and state, the value at date 0 of the estimated transition
+# against the value in the same state at the baseline steady state, relative to general
+# productivity: (V_0 / A_crisis) / (V_base / A_base) − 1, averaged with the date-0 masses.
+# Values and masses are those transition_main.jl saved (`types`, transition_types.jl).
 ############################################################
 
-# The state classes: the name, the value field and the mass field of `types`.
+# The state classes: name, value field and mass field of `types`.
 const INCIDENCE_STATES = (
     (:unskilled_unemployed,          :UC,    :uU),
     (:unskilled_employed,            :EUs_p, :eUs_p),
@@ -24,10 +23,10 @@ const INCIDENCE_STATES = (
 """
     incidence_ratios(types) -> NamedTuple
 
-Per type: the ratio (V_0/A_1)/(V_b/A_0) − 1 of each state class, averaged over its states
-(its p nodes) with the date-0 masses; its date-0 mass; and the average over every state.
-A state with date-0 mass and no baseline value (a training slice the baseline cell does
-not have) is left out, and its mass is returned as `unmatched`.
+Per type: the ratio (V_0/A_1)/(V_b/A_0) − 1 of each state class averaged over its p nodes
+with the date-0 masses, the class's date-0 mass, and the average over every state. A state
+with date-0 mass and no baseline value (a training slice the baseline cell lacks) is left
+out and its mass returned as `unmatched`.
 """
 function incidence_ratios(types)
     v0 = types.values_date0;  vb = types.values_base;  ρ0 = types.density_date0
@@ -58,9 +57,9 @@ end
 """
     run_incidence(crises)
 
-For each crisis, `incidence_<crisis>.csv` (one row per type: population, the average ratio,
-and the ratio and date-0 mass of each state class) and `incidence_<crisis>.jls` (the same
-as matrices on the ability grid, for the figures).
+For each crisis, writes `incidence_<crisis>.csv` (one row per type: population, average
+ratio, and the ratio and date-0 mass of each state class) and `incidence_<crisis>.jls` (the
+same as matrices on the ability grid, for the figures).
 """
 function run_incidence(crises)
     dir = cf_log_start(out_counterfactuals(:incidence), "Incidence: date-0 values against the baseline")

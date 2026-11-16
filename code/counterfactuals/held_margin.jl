@@ -1,28 +1,20 @@
 ############################################################
 # held_margin.jl — each crisis with the education margin held at the baseline (RoySearch)
 #
-# LIBRARY FILE — loaded by counterfactuals_main.jl; `run_held_margin` is the exercise.
+# Library file, loaded by counterfactuals_main.jl; `run_held_margin` is the exercise.
 #
-# The transition again, at the estimated parameters, with who trains (τ) and which market
-# trained workers search (d) held at the baseline steady state's choices at every date,
-# known to every agent (`HeldChoices`, `Model.held`): the training option and the market
-# choice are priced on the held branch, and τ never moves, so nobody is swept into or out
-# of training.  Nothing is re-estimated.
-#
-# Tightness, by `HELD_FREE_ENTRY`:
-#   false (default)  held on the estimated transition's path: one backward and one forward
-#                    pass, no free-entry iteration.  The end steady state is the crisis
-#                    model with the held choices at the crisis tightnesses; firms then do
-#                    not break even, and the free-entry gap this leaves is reported.
-#   true             re-solved by free entry at the estimated vacancy costs, warm-started
-#                    from the estimated path; the end steady state follows the crisis
-#                    equilibrium's branch from its tightnesses (`stationary_at_costs!`), and
-#                    `unskilled_branch` reports whether that is the branch the estimate
-#                    selected: a different number of zeros or a different rank is a switch.
-# Reported per crisis and market: unemployment along both paths, the rise over the baseline
-# averaged over the crisis window and at its peak, the share of the estimated rise the
-# margin accounts for, (rise_est − rise_held)/rise_est (negative: the margin absorbed part
-# of the rise), and the welfare difference.
+# The transition at the estimated parameters with who trains (τ) and which market trained
+# workers search (d) held at the baseline steady state's choices at every date, known to
+# every agent (`HeldChoices`, `Model.held`). Tightness, by `HELD_FREE_ENTRY`:
+#   false  the estimated path's: one backward and one forward pass; the end steady state is
+#          the crisis model with the held choices at the crisis tightnesses, and the
+#          free-entry gap this leaves is reported
+#   true   re-solved by free entry at the estimated vacancy costs from the estimated path;
+#          the end steady state follows the crisis equilibrium's branch
+#          (`stationary_at_costs!`) and `unskilled_branch` reports a switch
+# Reported per crisis and market: unemployment along both paths, its rise over the baseline
+# (window mean and peak), the margin's share (rise_est − rise_held)/rise_est (negative: the
+# margin absorbed part of the rise), and the welfare difference.
 ############################################################
 
 const HELD_SERIES = (ur_U = :ur_U, ur_S = :ur_S, ur_total = :ur_total, skilled_share = :skilled_share,
@@ -31,10 +23,10 @@ const HELD_SERIES = (ur_U = :ur_U, ur_S = :ur_S, ur_total = :ur_total, skilled_s
 """
     held_endpoint(m0, m1) -> (model, solve, branch)
 
-The crisis steady state with the baseline's education choices: `m1`'s parameters, `m0`'s
-choices, solved at `m1`'s tightnesses.  Its vacancy costs are set to the estimated ones;
-under `HELD_FREE_ENTRY` the tightnesses are then re-solved to make them hold, and the
-branch is checked against the estimate's.
+The crisis steady state with the baseline's education choices (`m1`'s parameters, `m0`'s
+choices) at `m1`'s tightnesses, its vacancy costs set to the estimated ones; under
+`HELD_FREE_ENTRY` the tightnesses are re-solved at those costs and the unskilled branch
+checked against the estimate's.
 """
 function held_endpoint(m0::Model, m1::Model)
     held = HeldChoices(m0)
@@ -61,7 +53,9 @@ end
 """
     held_path(L, mh) -> (result, path, seconds, fe_gap)
 
-The held-margin transition from the baseline steady state to `mh` on the stored grid.
+The held-margin transition from the baseline steady state to `mh` on the stored dates:
+re-solved by free entry under `HELD_FREE_ENTRY`, otherwise one backward and one forward
+pass at the estimated path's tightness, with the free-entry gap it leaves.
 """
 function held_path(L, mh::Model)
     t0 = time()
@@ -85,9 +79,9 @@ end
 """
     run_held_margin(crises)
 
-Writes `held_margin_path_<crisis>.csv` (both paths, date by date), `held_margin_<crisis>.csv`
-(unemployment per market), `held_margin_welfare_<crisis>.csv` and `held_margin_<crisis>.jls`
-(both TransitionResults and the end steady state's tightnesses and branch).
+For each crisis, writes `held_margin_path_<crisis>.csv` (both paths by date),
+`held_margin_<crisis>.csv` (unemployment per market), `held_margin_welfare_<crisis>.csv` and
+`held_margin_<crisis>.jls` (both TransitionResults, the end steady state and its branch).
 """
 function run_held_margin(crises)
     mode = HELD_FREE_ENTRY ? "tightness re-solved by free entry" : "tightness held on the estimated path"

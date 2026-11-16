@@ -1,13 +1,9 @@
-# Smoke test — crisis_covid spec construction under INIT_MODE = :warmstart.
+# smoke/smoke_warmstart.jl — crisis_covid spec under INIT_MODE = :warmstart (run_smoke.sh).
 #
-# Runs the driver's real spec-construction path (a copy of smm_main.jl truncated
-# just before §9), then checks:
-#   1. every ABILITY_PARAMS entry is pinned in spec.fixed, at the baseline value;
-#   2. ρ_x in particular is the baseline estimate;
-#   3. every parameter is either estimated or pinned;
-#   4. with no seed bank, SA's start set is the single point pack_θ(spec), the
-#      warm start §8a chose, and the Q it reports at [SA init] is the objective
-#      there. With no crisis estimate on disk the warm start is the base point.
+# Checks: 1. every ABILITY_PARAMS entry is pinned in spec.fixed at the baseline value;
+# 2. ρ_x reaching CommonParams is the baseline estimate; 3. every parameter is estimated
+# or pinned; 4. with no seed bank, SA's first evaluated point is pack_θ(spec), the warm
+# start §8a chose, and its Q is the objective there.
 
 include(joinpath(@__DIR__, "main_spec_only.jl"))
 
@@ -59,17 +55,15 @@ starts = _sa_starts_from_bank(seed_bank, prev_optimum)
 Q_at_init = smm_objective(θ_spec, spec)
 @printf("  Q at the spec init = %.10e\n", Q_at_init)
 
-# One SA iteration at step = 0: the single proposal coincides with the start, so
-# the returned incumbent is the point _sa_loop evaluated FIRST, recoverable
-# exactly.  Its [SA init] trace line reports that first solve's Q.
+# One SA iteration at step = 0: the only proposal equals the start, so the returned
+# incumbent is the first point _sa_loop evaluated.
 println("\n  Running _run_sa for one zero-step iteration — [SA init] Q0 IS the first solve:")
 θ_sa, Q_sa, _ = _run_sa(spec; starts = starts, max_iter = 1,
                         T0 = spec.run.sa_T0, step = 0.0,
                         random_init = spec.run.sa_random_init,
                         show_trace = true, trace_stride = 1,
                         rng = Random.Xoshiro(spec.run.sa_seed))
-# θ is the claim and must hold exactly.  Q is compared to a tolerance: the solver
-# reduces over threads, so re-evaluating one θ can differ in the last bits.
+# θ must match exactly; Q to rtol = 1e-10.
 Q_match = isapprox(Q_sa, Q_at_init; rtol = 1e-10)
 @printf("\n  first evaluated θ == pack_θ(spec) exactly?  %s  (max |Δ| = %.3e)\n",
         θ_sa == θ_spec, maximum(abs.(θ_sa .- θ_spec)))

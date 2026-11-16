@@ -35,6 +35,88 @@ measurement was, not just the verdict.
 
 ---
 
+## v61.5.1 — 2026-11-16
+
+**PATCH: codebase cleanup.** Comments cut to replication-package level, a concise docstring
+on every function, unused code and files removed. Every remaining code tree is unchanged by a
+comparison of parsed code with comments, docstrings and line numbers stripped, except the
+removals and the message and include edits below; the stationary solve at the four stored
+chain-mean estimates is bit-identical to v61.5.0 (measured below).
+
+**Comparability.** Full; nothing is superseded.
+
+### Removed, by folder
+- `code/tools/` (all 8 files: `check_tau_margin`, `migrate_bundles`, `ojs_continuity_probe`,
+  `plateau_probe`, `rank_diagnostic`, `test_generator`, `transition_audit`, `width_audit`):
+  no entry point or gate included them.
+- `code/plots_and_tables/`: `transition.jl`, `transition_panel.jl`, `policy.jl` (included by
+  nothing) and `model.jl` (its only caller, `model_main.jl`, no longer plots). New
+  `plots_and_tables_main.jl`, a skeleton that includes nothing yet; figures and tables will
+  live only there.
+- `code/solver/`: `initialise_model` (no caller), `PLOTS_ROOT` and the plotting of `model_main.jl`,
+  the unread local `ℓrow` in `build_model`, five unread fields of the
+  `compute_equilibrium_objects` return (`eU_mat`, `Tv`, `S0_surface`, `S1_surface`,
+  `agg_mS_flow`), an orphaned top-level string in `equilibrium.jl`.
+- `code/smm/`: `bundle_is_final`, `load_training_share_scale` (no caller), `using SHA`.
+- `code/data_and_descriptives/`: `is_civilian_lf` (`setup.jl`), the unread local `n_nonsup`
+  (`cps_asec.jl`), an unreachable second `return phi` in `calibrate_phi` (`nsc.jl`).
+- `code/paths.jl`: the `:policy` output category (nothing writes to it); the gate
+  `check_output_tree.jl` no longer lists it.
+- Removed lines by folder (comments, docstrings and code): mcmc −2012/+672, smm −2538/+1034,
+  solver −1671/+1192, data_and_descriptives −1303/+1160, transition −481/+374,
+  counterfactuals −172/+176, gates −248/+142, smoke −92/+67, ops −56/+38, tools −2029,
+  plots_and_tables −3225/+22.
+
+### Other edits
+- References to the deleted files removed or reworded in comments, docstrings, `README.md`
+  (entry-point table now lists the data pipeline, the counterfactuals and the plotting
+  skeleton), `SETTINGS.md` (incl. `initialise_model`), `.gitignore`. Two error messages that
+  told the user to run `width_audit.jl` (`MCMC_main.jl`, `MCMC_INIT = :widths`; `demc.jl`)
+  now state the file expected (one row per free parameter, columns lb, ub, theta, wQ1_up,
+  wQ1_dn); the `LEGACY_ENV_KEYS` pointer for `ROYSEARCH_WIDTH_BASE` no longer names the tool.
+- `code/solver/model_main.jl` did not load under v61.5.0 (`UndefVarError: Optim not defined`
+  at `smm/smm.jl` include). Fix: `using Optim`. It now solves and prints the accounting and
+  the fit table; it writes nothing.
+- Wrong comments and docstrings corrected to match the code, e.g. the `smm_params.jl` header
+  (r = 0.05/12, 5 % a year, not 4 %), `type_density` (its `d` argument),
+  `_free_entry_tightness` (general η, not only η = 1/2).
+
+### Settings (no bump of their own)
+- `transition_main.jl`: `DAMP` 0.3 → 1.0 and `TOL` 1e-4 → 5e-4 (the author's choice, the run
+  now in progress). `counterfactuals_main.jl` follows: `CF_DAMP` 0.3 → 1.0, `CF_TOL` 1e-4 →
+  5e-4. Reason: the undamped outer iteration oscillates but contracts (successive updates
+  −0.27 and −0.48 times the previous in U and S), the damped 0.3 update was slow (the FC
+  first horizon was still at a gap of 1.9e-4 after 110 iterations), and the floor the grid
+  sets on the max-over-dates gap, 2–4e-4, sits below 5e-4. The run converges in 17
+  iterations. The horizon is untouched.
+
+### Measured
+- Stationary solve at the stored chain means, one thread, v61.5.0 (commit 9622ebf, scratch
+  archive) against this tree, `%.17g`: identical in θ_U, θ_S, k_U, k_S and Q at all four:
+  base_fc θ_U 0.44863949840089007, θ_S 1.1631110356432421, Q 4289.4608385113606;
+  crisis_fc 0.20424436780243382, 0.56572398904107402, 2879.9999778660231; base_covid
+  0.77800249281420231, 1.8050752000367465, 3777.6109474628092; crisis_covid
+  0.83269523662391032, 1.7119968983248111, 2595.2731101024701.
+- Load checks, scratch copy, one thread, stopped by a CPU cap before any long computation:
+  `smm_main`, `MCMC_main`, `transition_main` load and start; `counterfactuals_main` loads
+  and stops at the missing transition file with its message; `model_main` runs to the end
+  (17 s; 31 s with a diagonalW bundle); `plots_and_tables_main` runs; the data pipeline's
+  modules load (its stages were not run: they write `data/derived/`).
+- Gates: `check_forwarding` 1 finding, `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` (the known baseline,
+  same before); `check_dead_settings` PASS (196 kwargs, 4 files); `check_output_tree` PASS;
+  `check_structure` 5 flags (before: 7; the two `tools/` files and `smm/moments.jl` gone,
+  `data_and_descriptives/sipp.jl` new — the counter is heuristic, the file parses and its
+  code tree is unchanged); `check_hire_margin` 0 disagreements at all eight estimates;
+  `check_threading` not run (needs `-t 2`; one-thread limit during the author's run).
+
+### Known gaps
+- Bundle audit not rerun (`bundles = skip`): no estimate-bearing code changed.
+- `code/scripts/` (only `.DS_Store`) could not be deleted from the sandbox.
+- Open issues found by the cleanup are listed, unfixed, in the invariants file kept outside
+  the repository (`roysearch_code_invariants.md`, section "Known issues, not fixed").
+
+---
+
 ## v61.5.0 — 2026-11-16
 
 **MINOR: `code/counterfactuals/`, the counterfactual layer; `code/policy/` removed.** New

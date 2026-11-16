@@ -1,25 +1,28 @@
 ############################################################
-# data_processing/j2j.jl
+# code/data_and_descriptives/j2j.jl
 #
-# Stage 5 — Job-to-Job (J2J) employer-to-employer hiring. Filters the raw
-# Census J2J flows to the national, seasonally-adjusted, Bachelor's+ (E4)
-# cell, converts the quarterly EE hazard to a monthly rate, and averages
-# within each window to produce ee_rate_S.
+# Census Job-to-Job flows: the skilled employer-to-employer rate ee_rate_S from
+# the national, seasonally adjusted, bachelor's-or-more (E4) cell.
 #
-# Reads:  data/raw/j2j/*.csv
-# Writes: j2j_ee_rates.csv
-#         columns: window, ee_rate_S (window-mean monthly hazard),
-#                  ee_rate_S_sd (across-quarter sd of the monthly hazard;
-#                  NaN if fewer than 2 quarters), n_quarters
-#
-# Plain include() file: definitions only, no top-level execution.
-# `using` packages and path consts come from data_processing_main.jl.
+# Entry point: import_j2j_ee_rates()
+#   reads  data/raw/j2j/*.csv (first file)
+#   writes j2j_ee_rates.csv: window, ee_rate_S (window mean of the monthly
+#          rate), ee_rate_S_sd (across-quarter sd; NaN below 2 quarters), n_quarters
+# Definitions only; packages and path constants come from data_processing_main.jl.
 ############################################################
 
+"""
+    import_j2j_ee_rates() -> DataFrame
+
+Filter J2J to the production cell (national, seasonally adjusted, all
+industries/demographics/firm sizes and ages, education E4; no fallback cell),
+form the quarterly rate EEHire/MainB, convert to a monthly rate
+1 − (1 − q)^(1/3), assign each quarter to the window of its middle month, and
+average within window. Saves and returns j2j_ee_rates.csv.
+"""
 function import_j2j_ee_rates()
     @info "Stage 5: import_j2j_ee_rates (E4-only production spec)..."
 
-    # Find J2J CSV file
     j2j_files = filter(f -> endswith(f, ".csv"), readdir(RAW_J2J_DIR))
     isempty(j2j_files) && error("No CSV files found in $RAW_J2J_DIR")
     j2j_path = joinpath(RAW_J2J_DIR, first(j2j_files))
@@ -34,12 +37,6 @@ function import_j2j_ee_rates()
     ))
     @info "  Total rows: $(nrow(j2j))"
 
-    # Filter to production spec from data_and_moments.pdf §5:
-    #   seasonadj = S, geo_level = N, industry = 00,
-    #   sex = 0, agegrp = A00, race = A0, ethnicity = A0,
-    #   firmage = 0, firmsize = 0, education = E4.
-    # No fallback path is computed; ee_rate_S derives exclusively
-    # from the E4 (Bachelor\'s+) cell at the origin firm.
     j2j_nat = filter(row ->
         row.seasonadj == "S" &&
         row.geo_level == "N" &&
@@ -58,7 +55,7 @@ function import_j2j_ee_rates()
     dropmissing!(j2j_nat, [:EEHire, :MainB])
     j2j_nat.ee_quarterly = j2j_nat.EEHire ./ j2j_nat.MainB
 
-    # Quarterly → window via mid-quarter month (Q1→Feb, Q2→May, Q3→Aug, Q4→Nov)
+    # Quarter → window by its middle month (Feb, May, Aug, Nov).
     quarter_to_months = Dict(1 => [1,2,3], 2 => [4,5,6], 3 => [7,8,9], 4 => [10,11,12])
     j2j_nat.window = Vector{Symbol}(undef, nrow(j2j_nat))
     for (i, row) in enumerate(eachrow(j2j_nat))
@@ -66,11 +63,8 @@ function import_j2j_ee_rates()
         j2j_nat.window[i] = assign_window(row.year, mid_month)
     end
 
-    # Constant-hazard monthly rate: ee_m = 1 - (1 - ee_q)^(1/3)
     j2j_nat.ee_monthly = 1.0 .- (1.0 .- j2j_nat.ee_quarterly) .^ (1/3)
 
-    # Window-mean of the monthly hazard. Drop quarters with missing/non-
-    # finite values; these omissions are logged as diagnostics.
     results = NamedTuple[]
     for wname in keys(WINDOWS)
         win_data = filter(r -> r.window == wname, j2j_nat)

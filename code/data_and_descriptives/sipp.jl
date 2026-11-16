@@ -1,109 +1,49 @@
 ############################################################
-# data_processing/sipp.jl
+# code/data_and_descriptives/sipp.jl
 #
-# Stage 6b — SIPP job-mobility and wage moments among the skilled/unskilled.
-# One recursive walk over data/raw/sipp/ produces, per estimation window:
-#   • wchg_rate_U / wchg_rate_S  within-job wage-change hazard (both markets):
-#     the monthly rate at which a continuing match re-prices its wage. The
-#     wage-change variable is constructed differently by panel era (see below):
-#     a BBG break filter on the hourly-rate series for the classic (FC) windows,
-#     and the raw earnings-based change for the redesign (COVID) windows.
-#   • ee_rate_S  skilled employer-to-employer hazard (an OJS poach). The
-#     unskilled market has no on-the-job search, so no EE events exist there —
-#     these two moments are skilled-only.
-#   • ee_step_S  mean LOG real-weekly-wage step of a skilled EE move, i.e.
-#     E[log w_post − log w_pre]. Log scale matches every other wage moment,
-#     which lives on log weekly wages.
+# SIPP job-mobility moments per estimation window:
+#   wchg_rate_U, wchg_rate_S  within-job wage-change hazard (rate at which a
+#                             continuing match re-prices its wage)
+#   ee_rate_S                 skilled employer-to-employer hazard (comparison only;
+#                             the shipped target comes from J2J)
+#   ee_step_S                 mean log real weekly wage step on a skilled EE move
+# EE moments are skilled only: the unskilled market has no on-the-job search.
 #
-# WAGE-CHANGE CONSTRUCTION BY PANEL ERA:
-#   • Classic FC windows (2001/2004/2008 panels → base_fc, crisis_fc): the
-#     reported earnings series carries hours/overtime/rounding noise that
-#     crosses any sensible threshold nearly every month. We instead run the
-#     Barattieri–Basu–Gottschalk (2014) three-step break filter on the far
-#     cleaner HOURLY-RATE series (EPAYHR==1, TPYRATE/100), detect genuine wage
-#     steps with a sequential sup-F test, and correct the per-period detection
-#     rate for test size and power. The result is a lower bound on the true
-#     re-pricing rate (BBG over-filters transitory re-pricings); the raw
-#     earnings-based classic number is the upper bound. Both are reported.
-#   • Redesign COVID windows (2014-present → base_covid, crisis_covid): the raw
-#     earnings-based within-job wage change (|Δ real weekly wage| > ε).
-# SIPP_BBG_WINDOWS is the single point of control for which windows take the BBG
-# construction; the shipped wchg_rate_j column carries the BBG hazard there and
-# the raw earnings hazard elsewhere.
+# The wage-change construction depends on the panel era (SIPP_BBG_WINDOWS):
+# on the classic 2001/2004/2008 panels (FC windows) the reported earnings are
+# too noisy, so the Barattieri–Basu–Gottschalk (2014) break filter is run on the
+# hourly-rate series and corrected for test size and power (a lower bound; the
+# raw earnings value is reported as the upper bound). On the 2014+ redesign
+# (COVID windows) it is the raw earnings change |Δ real weekly wage| > ε.
 #
-# Two file formats feed one per-window measurement:
-#   • Redesign (2014-present): comma-delimited pu<Y>.csv annual releases and
-#     pu2014w<N>.csv per-wave files, EEDUC / EJB<n>_JOBID / TJB<n>_MSUM (7 job
-#     slots), MONTHCODE the reference month within the reference year.
-#   • Classic (2001/2004/2008): fixed-width l<YY>puw<N>.dat cores. Census ships
-#     the core file for EVERY wave but the core DICTIONARY for wave 1 only
-#     (l<YY>puw1d.txt); the other waves' folders carry only Topical-Module
-#     dictionaries, which document a different file and lack the core job
-#     variables. The core layout is constant across a panel's waves, so the
-#     wave-1 core dictionary is resolved ONCE per panel and applied to every
-#     wave. Variable NAMES are stable across panels but byte OFFSETS differ per
-#     panel, so fields are located by name. EEDUCATE / EENO1-2 / TPMSUM1-2 (2
-#     job slots), RHCALYR+RHCALMN the reference month.
+# Inputs, found by a recursive walk of data/raw/sipp/:
+#   pu<Y>.csv, pu2014w<N>.csv       redesign cores (comma-delimited)
+#   l<YY>puw<N>.dat                 classic cores (fixed width), laid out by the
+#   l<YY>puw1d.txt[.old2|.old.2]    panel's wave-1 core dictionary (Census ships
+#                                   the core dictionary for wave 1 only)
+# Compressed cores without an extracted sibling are skipped with a hint.
 #
-# WINDOW ASSIGNMENT IS THE SINGLE POINT OF CONTROL. Each person-month pair is
-# routed to a window by its OWN calendar month via assign_window (setup.jl),
-# read straight from WINDOWS. No file-level reference year and no window years
-# are hardcoded here: adding, moving or removing a window in setup.jl WINDOWS
-# re-routes every record automatically. A pair is used iff its calendar month
-# lands in some window AND its calendar year has a known CPI-U index; a year in
-# a window but absent from SIPP_CPIU is a loud error (never a silent skip).
+# Entry point: make_sipp_wchg()  → sipp_wchg_rates.csv, sipp_ee_rates.csv
 #
-# Reads (walked recursively under data/raw/sipp/, so files sitting in per-year
-# subfolders are found as well as those directly under sipp/):
-#         pu*.csv                        redesign cores (flat annual pu<Y>.csv and
-#                                        the 2014 panel's per-wave pu2014w<N>.csv)
-#         l<YY>puw<N>.dat                classic cores (in the per-panel subfolders)
-#         l<YY>puw1d.txt[.old2/.old.2]   classic wave-1 core dictionary, resolved
-#                                        from the same directory as its panel's cores
-# Compressed cores (.zip, .dat.gz) with no extracted sibling are skipped with a
-# gunzip/unzip hint — the SIPP files ship extracted, so the reader needs no
-# zip/gzip dependency.
-# Writes: sipp_wchg_rates.csv  (window; shipped wchg_rate_U/S + neff_U/S; raw
-#                               earnings wchg_rate_U/S_raw; hourly_share_U/S;
-#                               bbg_underflow_U/S; and the BBG variance inputs
-#                               bbg_pihat_U/S + bbg_corrfac_U/S consumed by
-#                               sampling_variances.jl — see the CSV contract at make_sipp_wchg)
-#         sipp_ee_rates.csv    (window, ee_rate_S, ee_step_S, ee_step_sd,
-#                               neff_ee, neff_step)
-#
-# PARALLELISM (bit-deterministic). The walk discovers many independent files;
-# they are processed concurrently with Threads.@threads (JULIA_NUM_THREADS),
-# but the arithmetic is made independent of thread scheduling so the output is
-# identical to a serial run of the same logic:
-#   • each file accumulates into its OWN private SippAcc (no shared mutable
-#     state during the parallel phase — threads never touch the same object);
-#   • after all files finish, the per-file accumulators are summed into one
-#     master in a FIXED SORTED file order. Floating-point summation is
-#     order-sensitive, so fixing the order makes the merged totals a
-#     deterministic function of the inputs alone. Per-file info lines are
-#     collected and printed in that same order.
-# The BBG rate series are collected per file and concatenated by job id in the
-# same fixed order (a classic job spans several wave files), so break detection
-# runs on the full within-window series regardless of thread scheduling.
-# The per-file readers STREAM row-by-row (CSV.Rows for redesign, eachline for
-# classic) and flush per person, so peak memory is one person's records — safe
-# to run many threads over multi-GB annual releases on a memory-tight machine.
-#
-# Plain include() file: definitions only, no top-level execution.
-# `using` packages (incl. Dates, CSV, Random, Base.Threads) and path consts come
-# from data_processing_main.jl.
+# Files are read in parallel (Threads.@threads), each into its own accumulator,
+# and merged serially in a fixed sorted order, so the result is bit-identical to
+# a serial run.
+# Definitions only; packages and path constants come from data_processing_main.jl.
 ############################################################
 
-# ── BBG (Barattieri–Basu–Gottschalk 2014) wage-change break filter ──────────
-# A reported monthly wage-rate series is modelled as a step function (the true
-# wage, constant within a spell) plus classical measurement error. A "wage
-# change" is a genuine step, not every reported movement. We detect steps with a
-# sequential sup-F (Bai–Perron) test, giving π̂ = detected changes / (T−1). BBG
-# eq. (6) then corrects for test size/power:  π̃ = (π̂ − α)/(γ − α), α the size
-# (0.05) and γ the power, both read from the same Monte-Carlo calibration used
-# for the critical values.  All logic is base Julia (no external packages).
+# ── BBG break filter ────────────────────────────────────────────────────────
+# A reported wage-rate series is a step function (the true wage) plus
+# measurement error. Steps are detected by a sequential sup-F (Bai–Perron)
+# test; the detection rate π̂ is then corrected for size α and power γ,
+# π̃ = (π̂ − α)/(γ − α) (BBG eq. 6), both from a Monte-Carlo calibration.
 
-# Mean-shift sup-F at every interior split of y[lo:hi]; returns (maxF, argsplit).
+"""
+    _supF(y, lo, hi, htrim) -> (maxF, k)
+
+Largest one-break mean-shift F statistic over the interior splits of
+`y[lo:hi]` (at least `htrim` points per side) and its split index; `(0.0, 0)`
+for a segment too short or constant.
+"""
 function _supF(y::AbstractVector{Float64}, lo::Int, hi::Int, htrim::Int)
     n = hi - lo + 1
     n < 2*htrim + 2 && return (0.0, 0)
@@ -116,14 +56,19 @@ function _supF(y::AbstractVector{Float64}, lo::Int, hi::Int, htrim::Int)
         ssr1 = 0.0
         for i in lo:k;    ssr1 += abs2(y[i]-m1); end
         for i in (k+1):hi; ssr1 += abs2(y[i]-m2); end
-        # F for one break (2 vs 1 params): ((ssr0-ssr1)/1)/(ssr1/(n-2))
+        # One break (2 vs 1 parameters): (ssr0 − ssr1) / (ssr1/(n − 2))
         F = ssr1 > 0 ? ((ssr0 - ssr1)) / (ssr1 / (n - 2)) : 0.0
         F > bestF && (bestF = F; bestk = k)
     end
     return (bestF, bestk)
 end
 
-# Sequential Bai–Perron: count mean-shift breaks in y at critical value `crit`.
+"""
+    count_breaks(y; crit, htrim = 1) -> Int
+
+Number of mean-shift breaks in `y` found by sequential binary splitting: a
+segment is split at its sup-F point whenever the statistic exceeds `crit`.
+"""
 function count_breaks(y::AbstractVector{Float64}; crit::Float64, htrim::Int=1)
     T = length(y); T < 2*htrim + 2 && return 0
     segs = [(1, T)]; nbreaks = 0
@@ -138,15 +83,19 @@ function count_breaks(y::AbstractVector{Float64}; crit::Float64, htrim::Int=1)
     return nbreaks
 end
 
-# Monte-Carlo calibration under H0 (no true break): constant series + AR(1)
-# measurement error (BBG: autocorr ρ, signal/noise s2n). Returns the crit value
-# (1−α quantile of the null max-F) AND the power γ against a single mid-series
-# break of the given standardized size. One calibration per series length T.
+"""
+    calibrate(T; alpha = 0.05, rho = 0.482, s2n = 2.64, break_size_sd = 1.0,
+              nsim = 4000, htrim = 1, seed = 1234) -> (crit, gamma)
+
+Monte-Carlo calibration for series of length `T` under AR(1) measurement error
+(autocorrelation `rho`, signal-to-noise `s2n`): `crit` is the 1 − `alpha`
+quantile of the null sup-F, `gamma` the power against one mid-series break of
+`break_size_sd` signal sds. Seeded with `seed + T`, so deterministic.
+"""
 function calibrate(T::Int; alpha::Float64=0.05, rho::Float64=0.482, s2n::Float64=2.64,
                    break_size_sd::Float64=1.0, nsim::Int=4000, htrim::Int=1, seed::Int=1234)
     rng = MersenneTwister(seed + T)
-    sig_e = 1.0                          # error sd (scale-free; F is scale-invariant)
-    # null distribution of max-F
+    sig_e = 1.0                          # error sd (F is scale-invariant)
     nullF = Vector{Float64}(undef, nsim)
     e = Vector{Float64}(undef, T)
     function fill_ar!(v)
@@ -158,7 +107,6 @@ function calibrate(T::Int; alpha::Float64=0.05, rho::Float64=0.482, s2n::Float64
         fill_ar!(e); F,_ = _supF(e, 1, T, htrim); nullF[s] = F
     end
     crit = quantile(nullF, 1 - alpha)
-    # power: plant one break of size break_size_sd·(signal sd) at T÷2
     sig_signal = sqrt(s2n) * sig_e
     hits = 0
     y = Vector{Float64}(undef, T)
@@ -173,21 +121,23 @@ function calibrate(T::Int; alpha::Float64=0.05, rho::Float64=0.482, s2n::Float64
     return (crit=crit, gamma=gamma)
 end
 
-# Self-consistent per-period calibration: at a per-candidate-split critical value
-# `crit`, measure the per-period FALSE-break rate α_eff (null: constant + AR error)
-# and the per-period detection rate γ_eff (H1: per-period true-step prob π_plant,
-# steps ~ signal sd). Both aggregated over worker-periods, so π̂, α_eff, γ_eff all
-# share the per-period unit that BBG eq.(6) requires. Returns (α_eff, γ_eff).
+"""
+    calibrate_perperiod(T; crit, rho = 0.482, s2n = 2.64, π_plant = 0.05,
+                        nsim = 4000, htrim = 1, seed = 4321) -> (alpha_eff, gamma_eff)
+
+Per-period size and power of `count_breaks` at critical value `crit` for series
+of length `T`: `alpha_eff` is false breaks per period under the null, `gamma_eff`
+detected breaks per true step when each period carries a step with probability
+`π_plant`. Both are per period, the unit BBG eq. (6) needs. Seeded with `seed + T`.
+"""
 function calibrate_perperiod(T::Int; crit::Float64, rho::Float64=0.482, s2n::Float64=2.64,
                              π_plant::Float64=0.05, nsim::Int=4000, htrim::Int=1, seed::Int=4321)
     rng = MersenneTwister(seed + T)
     sig_signal = sqrt(s2n)
     ar!(v) = (v[1]=randn(rng); for t in 2:T; v[t]=rho*v[t-1]+sqrt(1-rho^2)*randn(rng); end)
-    # null: false breaks per period
     e = Vector{Float64}(undef,T); false_b = 0
     for s in 1:nsim; ar!(e); false_b += count_breaks(e; crit=crit, htrim=htrim); end
     alpha_eff = false_b / (nsim*(T-1))
-    # H1: plant per-period steps, measure detection per truly-changed period
     y = Vector{Float64}(undef,T); det_true = 0; true_periods = 0
     for s in 1:nsim
         ar!(e); lvl=0.0; truebk=Int[]
@@ -196,7 +146,7 @@ function calibrate_perperiod(T::Int; crit::Float64, rho::Float64=0.482, s2n::Flo
             y[t]=lvl+e[t]
         end
         isempty(truebk) && continue
-        # crude allocation: a detected break within ±1 of a true break counts as a hit
+        # Hits are capped at the number of true steps; break locations are not matched.
         nb = count_breaks(y; crit=crit, htrim=htrim)
         det_true += min(nb, length(truebk)); true_periods += length(truebk)
     end
@@ -204,30 +154,31 @@ function calibrate_perperiod(T::Int; crit::Float64, rho::Float64=0.482, s2n::Flo
     return (alpha_eff=alpha_eff, gamma_eff=gamma_eff)
 end
 
-# BBG calibration constants. s2n = 2.64 is the Gottschalk–Huynh signal/noise;
-# AK (Altonji–Kang) s2n = 1.80 is the robustness alternative. ρ = 0.482 is the
-# BBG measurement-error autocorrelation. nsim is the Monte-Carlo replication
-# count; the calibration is seeded (MersenneTwister, deterministic per length T)
-# so the correction is reproducible run-to-run.
-const SIPP_BBG_S2N  = 2.64   # signal/noise (Gottschalk–Huynh); AK s2n = 1.80 is the robustness alternative
-const SIPP_BBG_RHO  = 0.482  # measurement-error AR(1) autocorrelation
-const SIPP_BBG_NSIM = 3000   # Monte-Carlo replications per distinct series length
+"""BBG signal-to-noise ratio (Gottschalk–Huynh); Altonji–Kang's 1.80 is the robustness alternative."""
+const SIPP_BBG_S2N  = 2.64
+"""BBG measurement-error AR(1) autocorrelation."""
+const SIPP_BBG_RHO  = 0.482
+"""Monte-Carlo replications per distinct series length."""
+const SIPP_BBG_NSIM = 3000
 
-# Windows measured on the pre-2014 classic panels, where the earnings-based
-# within-job wage change is measurement-noise-inflated and the BBG break filter
-# is applied to the hourly-rate series. Every other window keeps the raw
-# earnings construction (post-2014 redesign event-history design). Single point
-# of control for the era split: window membership here selects the construction.
+"""
+    SIPP_BBG_WINDOWS
+
+Windows measured on the classic panels, where the shipped wage-change hazard is
+the BBG one; every other window ships the raw earnings hazard. The single
+control for the era split.
+"""
 const SIPP_BBG_WINDOWS = (:base_fc, :crisis_fc)
 
 # ── CPI-U deflator ─────────────────────────────────────────────────────────
-# BLS CPI-U, US city average, all items, annual average (series CUUR0000SA0,
-# 1982–84 = 100). The Census public-use SIPP ships no CPI99 (that is IPUMS-
-# only), so weekly earnings are deflated with this external CPI-U series
-# rebased to 2013, consistent with the ASEC wage construction (setup.jl
-# deflate_wage, 2013 base). Covers 1996–2025 so any window the project is
-# likely to use is priced; a window that references a year outside this range
-# raises a loud error in sipp_cpi (never deflates with a missing index).
+
+"""
+    SIPP_CPIU
+
+BLS CPI-U, US city average, annual average (CUUR0000SA0, 1982–84 = 100). Public
+SIPP has no CPI99, so earnings are deflated with this series to 2013 dollars,
+the ASEC base.
+"""
 const SIPP_CPIU = Dict{Int,Float64}(
     1996 => 156.900, 1997 => 160.500, 1998 => 163.000, 1999 => 166.600,
     2000 => 172.200, 2001 => 177.100, 2002 => 179.900, 2003 => 184.000,
@@ -238,13 +189,18 @@ const SIPP_CPIU = Dict{Int,Float64}(
     2020 => 258.811, 2021 => 270.970, 2022 => 292.655, 2023 => 304.702,
     2024 => 313.689, 2025 => 321.943,
 )
+"""Base year of the SIPP real wages."""
 const SIPP_CPIU_BASE_YEAR = 2013
-const SIPP_CPIU_BASE       = 232.957   # CPI-U annual average, 2013
+"""CPI-U annual average in the base year."""
+const SIPP_CPIU_BASE       = 232.957
 
-# CPI-U index for a calendar year, or a loud error naming the year. Called only
-# after a pair has been assigned to a window, so it fires exactly when a window
-# covers a calendar year with no CPI-U row — a real misconfiguration to fix at
-# the SIPP_CPIU dict, never a record to deflate with a missing/zero index.
+"""
+    sipp_cpi(year) -> Float64
+
+CPI-U index for a calendar year. Errors for a year absent from `SIPP_CPIU`: it
+is called only for pairs inside a window, so a missing year is a
+misconfiguration, never a record to deflate with a missing index.
+"""
 function sipp_cpi(year::Int)::Float64
     haskey(SIPP_CPIU, year) && return SIPP_CPIU[year]
     lo, hi = extrema(keys(SIPP_CPIU))
@@ -253,18 +209,21 @@ function sipp_cpi(year::Int)::Float64
           "CUUR0000SA0 annual average for $year to SIPP_CPIU in sipp.jl.")
 end
 
-# ── Threshold-robustness grid ──────────────────────────────────────────────
-# A within-job wage change is counted when |Δ real weekly wage| exceeds a
-# threshold ε ($/week). The production moment uses ε = $1 (SIPP_WCHG_EPS); the
-# other thresholds are re-measured in parallel for the diagnostic table printed
-# at the end of the stage. SIPP_WCHG_EPS_GRID is the diagnostic grid; the
-# production definition is fixed at $1.
+# ── Earnings-based wage-change threshold ───────────────────────────────────
+
+"""Thresholds ε (dollars per week) at which the earnings-based wage change is measured; all but the production one are a diagnostic."""
 const SIPP_WCHG_EPS_GRID = [1.0, 5.0, 10.0, 20.0]
-const SIPP_WCHG_EPS       = 1.0   # locked production threshold ($/week)
+"""Production threshold ε (dollars per week); must be on `SIPP_WCHG_EPS_GRID`."""
+const SIPP_WCHG_EPS       = 1.0
 
 # ── Cell coercion ──────────────────────────────────────────────────────────
-# Coerce a CSV / fixed-width cell (Int / Float / String / missing) to Float64;
-# NaN on failure.
+
+"""
+    _sipp_to_float(v) -> Float64
+
+A CSV or fixed-width cell (number, string or missing) as Float64; NaN if blank
+or unparseable.
+"""
 function _sipp_to_float(v)::Float64
     ismissing(v) && return NaN
     v isa Real && return Float64(v)
@@ -274,72 +233,60 @@ function _sipp_to_float(v)::Float64
     return isnothing(p) ? NaN : p
 end
 
-# Coerce a cell to Int; `nothing` when missing/blank/unparseable. SIPP core
-# files carry `missing` in the categorical columns (MONTHCODE, RMESR, TAGE,
-# EEDUC/EEDUCATE), so a bare Int(...) is a latent crash — call sites treat
-# `nothing` as "cannot qualify this record" and skip it.
+"""
+    _sipp_to_int(v) -> Union{Int,Nothing}
+
+A cell rounded to Int, or `nothing` if missing, blank or unparseable (callers
+then skip the record).
+"""
 function _sipp_to_int(v)::Union{Int,Nothing}
     f = _sipp_to_float(v)
     (isnan(f) || !isfinite(f)) && return nothing
     return round(Int, f)
 end
 
-# ── Real weekly wage ───────────────────────────────────────────────────────
-# Day-count-neutral real weekly wage from a job's monthly earnings. Both SIPP
-# formats report earnings as a monthly sum that varies with the number of days
-# in the month (redesign TJB{n}_MSUM, classic TPMSUM{n}), so a flat ×12/52 (or
-# raw monthly differencing) would flag a spurious change every month purely
-# from day-count. Normalise to a 7-day week using the calendar month's length
-# BEFORE differencing, then deflate to 2013 $.
+"""
+    sipp_real_weekly_wage(msum, cal_year, cal_month, cpi_ref) -> Float64
+
+Real 2013-dollar weekly wage from a month's earnings: monthly sum × 7 / days in
+the month, deflated by `cpi_ref`. The day-count normalisation precedes
+differencing, so month length alone never registers as a wage change.
+"""
 function sipp_real_weekly_wage(msum::Float64, cal_year::Int, cal_month::Int,
                                cpi_ref::Float64)::Float64
     nominal_week = msum * 7.0 / Dates.daysinmonth(cal_year, cal_month)
     return deflate_wage(nominal_week, cpi_ref, SIPP_CPIU_BASE)
 end
 
-# ── Nominal hourly pay rate (BBG step 1) ────────────────────────────────────
-# The BBG classic construction detects wage steps on the REPORTED HOURLY PAY
-# RATE, not monthly earnings: earnings carry hours/overtime/rounding noise that
-# crosses any threshold nearly every month, while the rate is far cleaner
-# (Barattieri–Basu–Gottschalk 2014). Break structure is invariant to a monotone
-# deflation, so the break filter runs on the NOMINAL rate and no CPI-U is
-# applied to the rate series (the earnings-based wage above is still deflated —
-# it is differenced, not break-detected).
-#
-# Classic TPYRATE{n} is stored in dollars-and-cents with two implied decimals
-# (core dict value label "Dollars and cents (two implied decimals)"), so the raw
-# integer field is divided by 100 to recover dollars. The redesign
-# TJB{n}_HOURLY1 already arrives as a decimal dollar amount in the public-use
-# CSV and needs no rescale.
-#
-# BBG step 1 keeps the hourly definition clean: a classic slot flagged hourly is
-# admitted to the rate series only if it also carries a usable usual-hours
-# reading EJBHRS{n} (a genuine hourly job, not a mislabelled record). EJBHRS = -8
-# is the "Hours vary" sentinel and counts as unusable; such a slot is excluded
-# (no imputation). The hours value gates inclusion only — the series the filter
-# differences is the reported rate itself.
+# ── Hourly pay rate (BBG series) ─────────────────────────────────────────────
+# The BBG filter runs on the NOMINAL reported hourly rate: break structure is
+# invariant to monotone deflation (earnings, which are differenced, are deflated).
+
+"""Classic `TPYRATE{n}` carries two implied decimals."""
 const SIPP_CLASSIC_RATE_SCALE = 100.0
-const SIPP_CLASSIC_HOURS_VARY = -8   # EJBHRS{n} = -8 → "Hours vary" (unusable)
+"""Classic `EJBHRS{n}` code for "hours vary"; such a slot is excluded from the rate series."""
+const SIPP_CLASSIC_HOURS_VARY = -8
 
 # ── Skilled classification ─────────────────────────────────────────────────
-# Redesign EEDUC (highest level/degree, scale 31–46) — skilled is Bachelor's or
-# higher (43 BA, 44 MA, 45 professional, 46 doctorate), matching the project's
-# CPS EDUC>=111 definition. Distinct variable from CPS EDUC, so the shared
-# is_skilled (educ>=111) never fires on this scale and is not reused here.
+
+"""Skilled on the redesign `EEDUC` scale: ≥ 43 (bachelor's or higher)."""
 is_skilled_sipp(eeduc::Integer)::Bool = eeduc >= 43
 
-# Classic EEDUCATE (highest degree/grade) uses a DIFFERENT scale from the
-# redesign EEDUC: 44 Bachelor's, 45 Master's, 46 professional, 47 doctorate,
-# with 43 an Associate degree (2001/2004/2008 core dictionaries, value labels
-# for EEDUCATE). Bachelor's-or-higher is therefore ≥ 44, one code above the
-# redesign threshold — the two must never share a classifier.
+"""
+Skilled on the classic `EEDUCATE` scale: ≥ 44 (bachelor's or higher; 43 is an
+associate degree). Never share a classifier with the redesign scale.
+"""
 is_skilled_sipp_classic(eeducate::Integer)::Bool = eeducate >= 44
 
 # ── Accumulators ────────────────────────────────────────────────────────────
-# Within-job wage-change counts at every ε on the grid, per market (earnings-
-# based construction). den/chg are the weighted at-risk and weighted changed
-# stayer-pair masses; den2 is the ε-invariant Σw² carrying the Kish effective N
-# (den²/den2). Held per window.
+
+"""
+    WchgCounts(eps)
+
+Earnings-based within-job wage-change tallies for one window at every threshold
+in `eps`, per market: `den_j` the weighted stayer pairs at risk, `chg_j` those
+with |Δw| > ε, `den2_j` the ε-invariant Σw² (Kish N = den²/den2).
+"""
 mutable struct WchgCounts
     eps    :: Vector{Float64}
     den_U  :: Vector{Float64}
@@ -353,8 +300,12 @@ WchgCounts(eps::Vector{Float64}) = WchgCounts(copy(eps),
     zeros(length(eps)), zeros(length(eps)), zeros(length(eps)), zeros(length(eps)),
     Ref(0.0), Ref(0.0))
 
-# Bin one within-job stayer pair (same job, consecutive employed months) into
-# every ε cell: it is always at risk (den), and changed (chg) where |Δw| > ε.
+"""
+    _wchg_record_pair!(c, skilled, wgt, w1, w2)
+
+Add one stayer pair (same job, consecutive months) with weekly wages `w1`, `w2`
+and weight `wgt` to every ε cell of its market.
+"""
 function _wchg_record_pair!(c::WchgCounts, skilled::Bool, wgt::Float64,
                             w1::Float64, w2::Float64)
     (isnan(w1) || isnan(w2) || !isfinite(wgt) || wgt <= 0.0) && return
@@ -375,19 +326,23 @@ function _wchg_record_pair!(c::WchgCounts, skilled::Bool, wgt::Float64,
     end
 end
 
-# Merge b into a element-wise (used only in the fixed-order serial merge, never
-# during the parallel phase).
+"""
+    _wchg_merge!(a, b)
+
+Add `b`'s tallies into `a` (serial merge only).
+"""
 function _wchg_merge!(a::WchgCounts, b::WchgCounts)
     a.den_U .+= b.den_U;  a.chg_U .+= b.chg_U
     a.den_S .+= b.den_S;  a.chg_S .+= b.chg_S
     a.den2_U[] += b.den2_U[];  a.den2_S[] += b.den2_S[]
 end
 
-# Hourly-worker share among employed person-months, per market. den is the
-# weighted at-risk mass (every employed in-age person-month assigned to a
-# window); hr is the subset whose main job is paid by the hour (the population
-# the BBG step-1 rate series is built on). share = hr/den tells how much the
-# hourly restriction thins the classic cell, so the BBG effective N can be read.
+"""
+    HourlyShare()
+
+Weighted employed person-months per market (`den_j`) and those whose main job is
+paid by the hour (`hr_j`): how much the hourly restriction thins the BBG cell.
+"""
 mutable struct HourlyShare
     den_U :: Base.RefValue{Float64}
     hr_U  :: Base.RefValue{Float64}
@@ -396,13 +351,21 @@ mutable struct HourlyShare
 end
 HourlyShare() = HourlyShare(Ref(0.0), Ref(0.0), Ref(0.0), Ref(0.0))
 
+"""
+    _hshare_merge!(a, b)
+
+Add `b`'s tallies into `a` (serial merge only).
+"""
 function _hshare_merge!(a::HourlyShare, b::HourlyShare)
     a.den_U[] += b.den_U[];  a.hr_U[] += b.hr_U[]
     a.den_S[] += b.den_S[];  a.hr_S[] += b.hr_S[]
 end
 
-# Add one employed person-month to its market's share tally: always at-risk
-# (den), and hourly (hr) when its main job is paid by the hour.
+"""
+    _hshare_record!(h, skilled, wgt, is_hourly)
+
+Add one employed person-month of weight `wgt` to its market's tally.
+"""
 function _hshare_record!(h::HourlyShare, skilled::Bool, wgt::Float64, is_hourly::Bool)
     (isfinite(wgt) && wgt > 0.0) || return
     if skilled
@@ -413,21 +376,29 @@ function _hshare_record!(h::HourlyShare, skilled::Bool, wgt::Float64, is_hourly:
     return nothing
 end
 
-# Skilled EE-mobility counts. ee is the poach hazard (weighted moves over
-# weighted at-risk employed pairs); step is the mean LOG real-weekly-wage jump
-# on a move (Δlog w = log w_new − log w_old), with its weighted sd and Kish N.
-# Skilled only (no unskilled OJS).
+"""
+    EeCounts()
+
+Skilled EE tallies for one window: the at-risk and moving weights with Σw² (the
+EE hazard and its Kish N), and over movers Σw, Σw·Δlog w, Σw·(Δlog w)² and Σw²
+(the mean log wage step, its weighted sd and Kish N).
+"""
 mutable struct EeCounts
     den_ee    :: Base.RefValue{Float64}   # Σw at-risk employed-skilled pairs
     chg_ee    :: Base.RefValue{Float64}   # Σw pairs whose main employer changed
-    den2_ee   :: Base.RefValue{Float64}   # Σw² at-risk (Kish N for ee_rate)
+    den2_ee   :: Base.RefValue{Float64}   # Σw² at risk
     den_step  :: Base.RefValue{Float64}   # Σw over movers
     sum_step  :: Base.RefValue{Float64}   # Σ w·Δlog w
-    sum_step2 :: Base.RefValue{Float64}   # Σ w·Δlog w² (weighted sd of the log step)
-    den2_step :: Base.RefValue{Float64}   # Σw² over movers (Kish N for ee_step)
+    sum_step2 :: Base.RefValue{Float64}   # Σ w·(Δlog w)²
+    den2_step :: Base.RefValue{Float64}   # Σw² over movers
 end
 EeCounts() = EeCounts(Ref(0.0), Ref(0.0), Ref(0.0), Ref(0.0), Ref(0.0), Ref(0.0), Ref(0.0))
 
+"""
+    _ee_merge!(a, b)
+
+Add `b`'s tallies into `a` (serial merge only).
+"""
 function _ee_merge!(a::EeCounts, b::EeCounts)
     a.den_ee[]    += b.den_ee[];    a.chg_ee[]    += b.chg_ee[]
     a.den2_ee[]   += b.den2_ee[];   a.den_step[]  += b.den_step[]
@@ -435,12 +406,14 @@ function _ee_merge!(a::EeCounts, b::EeCounts)
     a.den2_step[] += b.den2_step[]
 end
 
-# BBG nominal-hourly-rate observations for one window, split by market. Each job
-# id maps to its (calendar-month, nominal-rate) readings; the fragments are
-# merged across wave files (a classic job spans several waves) and only split
-# into contiguous monthly series at output time, so a job's full within-window
-# rate series is reconstructed regardless of thread scheduling. Collected for the
-# BBG windows only (SIPP_BBG_WINDOWS); the break filter runs on these series.
+"""
+    BbgCell()
+
+Nominal hourly-rate readings for one BBG window, per market: job id →
+(calendar month, rate). Fragments from different wave files are concatenated
+and only split into contiguous runs in `_bbg_cell_hazard`, so a job's full
+within-window series is used.
+"""
 mutable struct BbgCell
     U :: Dict{String,Vector{Tuple{Int,Float64}}}
     S :: Dict{String,Vector{Tuple{Int,Float64}}}
@@ -448,12 +421,21 @@ end
 BbgCell() = BbgCell(Dict{String,Vector{Tuple{Int,Float64}}}(),
                     Dict{String,Vector{Tuple{Int,Float64}}}())
 
+"""
+    _bbg_merge!(a, b)
+
+Append `b`'s readings to `a`, job by job (serial merge only).
+"""
 function _bbg_merge!(a::BbgCell, b::BbgCell)
     for (jid, obs) in b.U; append!(get!(() -> Tuple{Int,Float64}[], a.U, jid), obs); end
     for (jid, obs) in b.S; append!(get!(() -> Tuple{Int,Float64}[], a.S, jid), obs); end
 end
 
-# Record one hourly person-month reading onto its job's rate series.
+"""
+    _bbg_record!(cell, skilled, jid, cal_m, rate)
+
+Append one positive finite hourly-rate reading to job `jid`'s series.
+"""
 function _bbg_record!(cell::BbgCell, skilled::Bool, jid::String, cal_m::Int, rate::Float64)
     (isfinite(rate) && rate > 0.0) || return
     d = skilled ? cell.S : cell.U
@@ -461,28 +443,38 @@ function _bbg_record!(cell::BbgCell, skilled::Bool, jid::String, cal_m::Int, rat
     return nothing
 end
 
-# One file's private accumulator: window-keyed earnings-based wage-change counts,
-# hourly-worker share, and skilled EE counts, plus the BBG nominal-hourly-rate
-# series store for the classic (FC) windows. No two files share one of these
-# during the parallel phase; the fixed-order merge below makes the merged totals
-# a deterministic function of the inputs alone.
+"""
+    SippAcc()
+
+One file's private, window-keyed accumulator: wage-change counts, hourly share
+and EE counts (all windows), BBG rate series (BBG windows only), and the
+calendar years deflated. Never shared between threads.
+"""
 struct SippAcc
-    wchg       :: Dict{Symbol,WchgCounts}    # earnings-based wage-change counts (all windows)
-    hshare     :: Dict{Symbol,HourlyShare}   # hourly-worker share (all windows)
-    ee         :: Dict{Symbol,EeCounts}      # skilled EE hazard + wage step (all windows)
-    bbg        :: Dict{Symbol,BbgCell}       # nominal hourly-rate series (BBG windows only)
-    years_used :: Set{Int}                   # calendar years actually deflated (for the CPI-U report)
+    wchg       :: Dict{Symbol,WchgCounts}
+    hshare     :: Dict{Symbol,HourlyShare}
+    ee         :: Dict{Symbol,EeCounts}
+    bbg        :: Dict{Symbol,BbgCell}
+    years_used :: Set{Int}
 end
 SippAcc() = SippAcc(Dict{Symbol,WchgCounts}(), Dict{Symbol,HourlyShare}(),
                     Dict{Symbol,EeCounts}(), Dict{Symbol,BbgCell}(), Set{Int}())
 
+"""Window `w`'s wage-change counts in `acc`, created if absent."""
 _wchg_get!(acc::SippAcc, w::Symbol)   = get!(() -> WchgCounts(SIPP_WCHG_EPS_GRID), acc.wchg, w)
+"""Window `w`'s hourly-share tally in `acc`, created if absent."""
 _hshare_get!(acc::SippAcc, w::Symbol) = get!(() -> HourlyShare(), acc.hshare, w)
+"""Window `w`'s EE counts in `acc`, created if absent."""
 _ee_get!(acc::SippAcc, w::Symbol)     = get!(() -> EeCounts(), acc.ee, w)
+"""Window `w`'s BBG rate series in `acc`, created if absent."""
 _bbg_get!(acc::SippAcc, w::Symbol)    = get!(() -> BbgCell(), acc.bbg, w)
 
-# Sum a file accumulator into the master. Called in fixed sorted file order so
-# the merged totals do not depend on thread scheduling.
+"""
+    _sipp_merge!(master, f)
+
+Add file accumulator `f` into `master`. Called in the fixed file order, so the
+merged totals do not depend on thread scheduling.
+"""
 function _sipp_merge!(master::SippAcc, f::SippAcc)
     for (w, c) in f.wchg
         _wchg_merge!(get!(() -> WchgCounts(SIPP_WCHG_EPS_GRID), master.wchg, w), c)
@@ -499,14 +491,15 @@ function _sipp_merge!(master::SippAcc, f::SippAcc)
     union!(master.years_used, f.years_used)
 end
 
-# ── Per-person-month record and the shared qualification routine ────────────
-# One non-empty job slot of a person-month. `msum` is the month's earnings, used
-# for the earnings-based wage change and the stayer-pair matching on `id`.
-# `hourly` flags a job paid by the hour this month (classic EPAYHR=1, redesign
-# EJB{n}_PAYHR1=2); `rate` is its NOMINAL reported hourly pay rate (classic
-# TPYRATE/100, redesign TJB{n}_HOURLY1), or NaN when the slot is not hourly or
-# its rate reading is unusable. The BBG break filter builds its per-job monthly
-# series from `rate` on the hourly slots.
+# ── Person-month records ────────────────────────────────────────────────────
+
+"""
+    JobSlot
+
+One non-empty job slot of a person-month: person-namespaced job `id`, monthly
+earnings `msum`, whether the job is paid by the hour (`hourly`), and its nominal
+hourly `rate` (NaN when not hourly or unusable).
+"""
 struct JobSlot
     id     :: String
     msum   :: Float64
@@ -514,21 +507,28 @@ struct JobSlot
     rate   :: Float64
 end
 
-# A parsed person-month, produced by either format's streaming parser and fed
-# to the format-agnostic processor below. `skilled` is already resolved with the
-# format's own classifier so the processor stays format-blind.
+"""
+    PMRecord
+
+A parsed person-month from either format; `skilled` is resolved with the
+format's own classifier so the processing below is format-blind.
+"""
 struct PMRecord
-    cal_m   :: Int                      # yr*12 + mn (consecutive-month test + window)
+    cal_m   :: Int                      # yr*12 + mn
     yr      :: Int
     mn      :: Int
-    employed:: Bool                     # RMESR indicates employed this month
+    employed:: Bool                     # RMESR == 1
     inage   :: Bool                     # 16 ≤ TAGE ≤ 64
     skilled :: Bool
     wgt     :: Float64                  # WPFINWGT
     jobs    :: Vector{JobSlot}
 end
 
-# Highest-earning ("main") job of a month, or nothing when no job is held.
+"""
+    _main_job(rec) -> Union{JobSlot,Nothing}
+
+The month's highest-earning job, or `nothing` when no job is held.
+"""
 function _main_job(rec::PMRecord)
     isempty(rec.jobs) && return nothing
     best = rec.jobs[1]
@@ -538,23 +538,18 @@ function _main_job(rec::PMRecord)
     return best
 end
 
-# Process one person's month records into `acc`. Sorts by calendar month and
-# walks consecutive employed pairs (Δcal_m == 1, employed and in-age both
-# months), each routed to the pair's window by r2's calendar month:
-#   • within-job wage change, EARNINGS-based (both markets): every job id held in
-#     BOTH months is a stayer pair — its real weekly wages (monthly earnings,
-#     day-count-neutral) are differenced and binned;
-#   • EE hazard (skilled): the pair is at risk; a move is when the main-job id
-#     differs across the two months;
-#   • EE wage step (skilled movers): the LOG new main-job weekly wage minus the
-#     LOG old main-job weekly wage, on the same day-count-neutral 2013-$ wages as
-#     the wage change (a proportional step, matching the log-wage moment scale).
-# Weights and skilled status are taken from the later month (r2), matching the
-# stock-moment convention.
-# A separate person-month pass (below) (i) tallies the hourly-worker share and
-# (ii) for the BBG windows collects the nominal hourly-rate reading of each
-# hourly main job onto its job-id series, from which the break filter measures
-# genuine wage steps at output time.
+"""
+    _process_person!(acc, recs) -> Int
+
+Add one person's month records to `acc`. Over consecutive months in which the
+person is employed and of working age (routed to the window of the later month,
+whose weight and skill are used): every job id held in both months is a stayer
+pair for the earnings-based wage change; for the skilled, the pair is at risk of
+an EE move, which occurs when the main-job id changes, and a move contributes
+its log weekly wage step. Separately, each employed in-age person-month in a
+window adds to the hourly share and, in a BBG window, its hourly main job's rate
+to that job's series. Returns the number of in-window pairs.
+"""
 function _process_person!(acc::SippAcc, recs::Vector{PMRecord})::Int
     length(recs) < 2 && return 0
     sort!(recs; by = r -> r.cal_m)
@@ -575,8 +570,7 @@ function _process_person!(acc::SippAcc, recs::Vector{PMRecord})::Int
         cpi1 = sipp_cpi(r1.yr);  cpi2 = sipp_cpi(r2.yr)
         push!(acc.years_used, r1.yr);  push!(acc.years_used, r2.yr)
 
-        # (a) within-job wage change, earnings-based — one stayer pair per job id
-        #     held in both months, its real weekly wages differenced and binned.
+        # (a) within-job wage change, one stayer pair per job id held in both months
         wc = _wchg_get!(acc, w)
         for s1 in r1.jobs
             isempty(s1.id) && continue
@@ -588,19 +582,19 @@ function _process_person!(acc::SippAcc, recs::Vector{PMRecord})::Int
             _wchg_record_pair!(wc, skilled, wgt, w1, w2)
         end
 
-        # (b),(c) EE hazard + wage step — skilled only, main-job change
+        # (b), (c) EE hazard and log wage step, skilled only
         skilled || continue
         mj1 = _main_job(r1);  mj2 = _main_job(r2)
         (isnothing(mj1) || isnothing(mj2)) && continue
         ee = _ee_get!(acc, w)
         ee.den_ee[]  += wgt
         ee.den2_ee[] += wgt * wgt
-        if mj1.id != mj2.id                       # employer changed → EE move
+        if mj1.id != mj2.id
             ee.chg_ee[] += wgt
             w_old = sipp_real_weekly_wage(mj1.msum, r1.yr, r1.mn, cpi1)
             w_new = sipp_real_weekly_wage(mj2.msum, r2.yr, r2.mn, cpi2)
             if isfinite(w_old) && isfinite(w_new) && w_old > 0.0 && w_new > 0.0
-                step = log(w_new) - log(w_old)    # LOG step: same scale as every other wage moment
+                step = log(w_new) - log(w_old)
                 ee.den_step[]  += wgt
                 ee.sum_step[]  += wgt * step
                 ee.sum_step2[] += wgt * step * step
@@ -609,14 +603,7 @@ function _process_person!(acc::SippAcc, recs::Vector{PMRecord})::Int
         end
     end
 
-    # Person-month pass over employed, in-age records assigned to a window:
-    #   • hourly-worker share — fraction whose main job is paid by the hour, per
-    #     market (each record counted once with its own weight and skill), the
-    #     context for the BBG cell's effective N;
-    #   • BBG rate series — for the BBG windows, the main job's nominal hourly
-    #     rate is appended to that job's within-window series (keyed by job id and
-    #     market). The series are split into contiguous monthly runs and break-
-    #     filtered at output time.
+    # Person-month pass: hourly share, and the BBG rate series.
     @inbounds for r in recs
         (r.employed && r.inage && isfinite(r.wgt) && r.wgt > 0.0) || continue
         w = assign_window(r.yr, r.mn)
@@ -631,53 +618,52 @@ function _process_person!(acc::SippAcc, recs::Vector{PMRecord})::Int
     return n_win_pairs
 end
 
-# ── Hazard / effective-N helpers ────────────────────────────────────────────
-# Monthly transition probability → continuous-time hazard −log(1−p), matching
-# the model's Poisson rates (moments.jl frequency-consistency block leaves these
-# untouched because they arrive already converted). NaN denominator ⇒ NaN.
+# ── Hazards ─────────────────────────────────────────────────────────────────
+
+"""
+    _sipp_hazard(chg, den) -> Float64
+
+Monthly hazard −log(1 − p) of the proportion p = chg/den (capped at 1 − 1e-12),
+matching the model's Poisson rates; NaN for a non-positive denominator.
+"""
 function _sipp_hazard(chg::Float64, den::Float64)::Float64
     den > 0.0 || return NaN
     p = min(chg / den, 1.0 - 1e-12)
     return p > 0.0 ? -log(1.0 - p) : 0.0
 end
 
-# Kish effective sample size (Σw)² / Σw² for a weighted proportion / mean.
+"""Kish effective sample size den²/den2 (0 if den2 ≤ 0)."""
 _sipp_neff(den::Float64, den2::Float64)::Float64 = den2 > 0.0 ? den^2 / den2 : 0.0
 
-# Index of the production ε on the grid.
+"""Index of `SIPP_WCHG_EPS` on `SIPP_WCHG_EPS_GRID`."""
 _sipp_prod_eps_idx()::Int = findfirst(==(SIPP_WCHG_EPS), SIPP_WCHG_EPS_GRID)
 
-# ── BBG cell → corrected wage-change hazard ─────────────────────────────────
-# One market's collected nominal-hourly-rate series in a BBG window is turned
-# into a size/power-corrected within-job wage-change hazard, BBG (2014):
-#   1. split each job's readings into contiguous monthly runs (a gap in the
-#      calendar-month index ends a run); each run of length T ≥ 3 is one series;
-#   2. count Bai–Perron breaks per series at the length's own critical value;
-#      π̂ = Σ breaks / Σ (T−1) over the cell;
-#   3. correct π̃ = (π̂ − ᾱ)/(γ̄ − ᾱ), where ᾱ, γ̄ are the (T−1)-weighted means of
-#      the per-length α_eff(T), γ_eff(T). Calibration is memoized per distinct T.
-# Returns (pihat, pitil, corrfac, wchg, neff, underflow, nseries):
-#   pihat    raw per-period break rate;
-#   pitil    corrected per-period wage-change probability (0 when π̂ ≤ ᾱ);
-#   corrfac  the correction factor γ̄ − ᾱ (sampling_variances.jl scales the π̂ variance by
-#            1/corrfac² — the correction inflates the variance);
-#   wchg     monthly hazard −log(1 − clamp(π̃, 0, 1−1e-12));
-#   neff     Σ(T−1), the number of at-risk worker-periods behind π̂;
-#   underflow true when π̃ was forced to 0 — either π̃ ≤ 0 (over-correction on a
-#            thin cell) or a non-positive correction factor γ̄ ≤ ᾱ (degenerate
-#            calibration, off by BBG design but guarded against);
-#   nseries  number of length-≥3 series entering the cell (0 ⇒ no measurement).
+"""
+    _bbg_cell_hazard(series_by_job, calib) -> NamedTuple
+
+BBG wage-change hazard of one market in one BBG window. Each job's readings are
+split at calendar-month gaps into contiguous runs; every run of length T ≥ 3 is
+break-counted at its length's critical value. π̂ = Σ breaks / Σ(T − 1), and
+π̃ = (π̂ − ᾱ)/(γ̄ − ᾱ) with ᾱ, γ̄ the (T − 1)-weighted per-period size and power.
+Calibrations are memoised per T in `calib`. Returns
+- `pihat`: raw per-period break rate;
+- `pitil`: corrected probability (0 on underflow);
+- `corrfac`: γ̄ − ᾱ (sampling_variances.jl divides the π̂ variance by its square);
+- `wchg`: −log(1 − π̃) with π̃ clamped to [0, 1 − 1e-12];
+- `neff`: Σ(T − 1);
+- `underflow`: π̃ ≤ 0 or γ̄ ≤ ᾱ, forced to 0;
+- `nseries`: runs used (0 ⇒ all NaN).
+"""
 function _bbg_cell_hazard(series_by_job::Dict{String,Vector{Tuple{Int,Float64}}},
                           calib::Dict{Int,NamedTuple})::NamedTuple
     tot_breaks = 0
-    tot_periods = 0            # Σ(T−1), the effective N for π̂
-    sum_alpha_w = 0.0          # Σ (T−1)·α_eff(T)  → ᾱ = /tot_periods
-    sum_gamma_w = 0.0          # Σ (T−1)·γ_eff(T)  → γ̄
+    tot_periods = 0            # Σ(T−1)
+    sum_alpha_w = 0.0          # Σ (T−1)·α_eff(T)
+    sum_gamma_w = 0.0          # Σ (T−1)·γ_eff(T)
     nseries = 0
     for obs in values(series_by_job)
         length(obs) < 3 && continue
         sort!(obs; by = first)
-        # split at any calendar-month gap into contiguous monthly runs
         run = Float64[obs[1][2]]
         prev = obs[1][1]
         flush_run!() = begin
@@ -725,13 +711,14 @@ function _bbg_cell_hazard(series_by_job::Dict{String,Vector{Tuple{Int,Float64}}}
             wchg=wchg, neff=Float64(tot_periods), underflow=underflow, nseries=nseries)
 end
 
-# ── Redesign format (2014-present, comma-delimited pu<Y>.csv) ───────────────
-# Reference calendar year of a redesign file. The 2014 panel ships one file per
-# wave, pu2014w<N>.csv, whose reference year is the wave's data year 2012+N
-# (wave 1 → 2013, wave 2 → 2014, …). The annual releases pu<YYYY>.csv reference
-# the prior calendar year (pu2018.csv → 2017, …). MONTHCODE gives the month
-# within that reference year, so window assignment is per record via
-# assign_window(ref_year, MONTHCODE) with no window years hardcoded.
+# ── Redesign format (2014+, comma-delimited) ────────────────────────────────
+
+"""
+    sipp_redesign_ref_year(fname) -> Int
+
+Reference calendar year of a redesign file: `pu2014w<N>` → 2012 + N; annual
+`pu<YYYY>` → YYYY − 1. MONTHCODE then gives the month within that year.
+"""
 function sipp_redesign_ref_year(fname::String)::Int
     m = match(r"^pu(\d{4})w(\d+)"i, fname)
     isnothing(m) || return 2012 + parse(Int, m.captures[2])
@@ -740,26 +727,27 @@ function sipp_redesign_ref_year(fname::String)::Int
     error("sipp_redesign_ref_year: cannot parse reference year from '$fname'")
 end
 
-# Non-empty job slots of a redesign row: EJB{n}_JOBID holds the within-file job
-# identifier, TJB{n}_MSUM the month's earnings for that job. Slots with a blank
-# / "0" id or a non-positive earnings sum are unfilled and dropped. Job ids are
-# namespaced with SSUID+PNUM so identical slot numbers across people never
-# collide.
-#
-# For the BBG break filter each slot also reads EJB{n}_PAYHR1 (pay type; value
-# 2 = paid by the hour) and TJB{n}_HOURLY1 (primary hourly-rate dollar amount).
-# An hourly slot with a non-positive / missing rate carries rate = NaN and is
-# simply absent from that job's rate series.
-const REDESIGN_HOURLY_CODE = 2   # EJB{n}_PAYHR1 = 2 → "Pay per hour"
-const REDESIGN_JOB_SLOTS   = 7   # EJB1..7 job slots in the redesign core
+"""Redesign `EJB{n}_PAYHR1` code for "pay per hour"."""
+const REDESIGN_HOURLY_CODE = 2
+"""Number of job slots (EJB1–EJB7) in the redesign core."""
+const REDESIGN_JOB_SLOTS   = 7
 
-# Per-slot column names the redesign reader touches for one job slot: id,
-# earnings, and the two BBG rate fields (pay type, hourly rate). Single source of
-# truth for both the parser and the CSV select= list, so adding a field here
-# keeps the streamed columns in sync.
+"""
+    _sipp_redesign_slot_fields(n) -> NTuple{4,Symbol}
+
+Redesign column names read for job slot `n`: job id, monthly earnings, pay type
+and hourly rate. Feeds `REDESIGN_SELECT`.
+"""
 _sipp_redesign_slot_fields(n::Int) = (Symbol("EJB$(n)_JOBID"), Symbol("TJB$(n)_MSUM"),
     Symbol("EJB$(n)_PAYHR1"), Symbol("TJB$(n)_HOURLY1"))
 
+"""
+    _sipp_redesign_job_records(row, pidkey, n_slots) -> Vector{JobSlot}
+
+Filled job slots of a redesign row (non-blank, non-"0" `EJB{n}_JOBID` with
+positive `TJB{n}_MSUM`), ids namespaced by `pidkey`. A slot paid by the hour
+carries its `TJB{n}_HOURLY1` rate when positive, else NaN.
+"""
 function _sipp_redesign_job_records(row, pidkey::String, n_slots::Int)
     jobs = JobSlot[]
     for n in 1:n_slots
@@ -786,25 +774,27 @@ function _sipp_redesign_job_records(row, pidkey::String, n_slots::Int)
     return jobs
 end
 
+"""Person-month columns a redesign core must contain."""
 const REDESIGN_REQUIRED = [:SSUID, :PNUM, :MONTHCODE, :RMESR, :EEDUC, :TAGE, :WPFINWGT]
 
-# Columns the redesign reader actually reads: the required person-month fields
-# plus every per-slot job field over all slots. Passed to CSV.Rows as select= so
-# CSV.jl tokenises/coerces only these instead of all 5000+ columns of an annual
-# pu file (the dominant cost on the multi-GB releases). Derived from the same
-# REDESIGN_REQUIRED + slot-field builder the parser uses, so it never drifts out
-# of sync. Columns listed but absent from a file are simply not selected —
-# CSV.Rows reports only present columns via propertynames, so the missing-column
-# guard on REDESIGN_REQUIRED still fires when a required field is genuinely gone.
+"""
+    REDESIGN_SELECT
+
+Every column the redesign reader touches, passed to `CSV.Rows(select=)` so only
+these are tokenised out of the 5000+ in an annual file. Absent columns are
+simply not selected; the `REDESIGN_REQUIRED` check still catches a missing one.
+"""
 const REDESIGN_SELECT = vcat(REDESIGN_REQUIRED,
     collect(Iterators.flatten(_sipp_redesign_slot_fields(n) for n in 1:REDESIGN_JOB_SLOTS)))
 
-# Stream one redesign core into `acc`. CSV.Rows reads row-by-row without
-# materialising the file (multi-GB annual releases stay within one row of
-# memory), and records are flushed per person: rows arrive grouped by
-# (SSUID,PNUM) in the Census files, so a person is complete once the id changes.
-# Returns (n_pairs, ref_year, in_window) for the caller's ordered info line;
-# n_pairs is the skilled-EE at-risk pair count actually accumulated.
+"""
+    _sipp_accumulate_redesign!(acc, path) -> (n_pairs, ref_year, in_window, err)
+
+Stream one redesign core row by row into `acc`, flushing each person when
+(SSUID, PNUM) changes (rows are grouped by person). `in_window` is whether any
+month of the reference year lies in a window; `err` is non-empty if a required
+column is missing.
+"""
 function _sipp_accumulate_redesign!(acc::SippAcc, path::String)
     fname    = basename(path)
     ref_year = sipp_redesign_ref_year(fname)
@@ -816,11 +806,8 @@ function _sipp_accumulate_redesign!(acc::SippAcc, path::String)
     checked = false
     flush!() = (n_pairs[] += _process_person!(acc, recs); empty!(recs))
 
-    # SSUID/PNUM forced to String so long numeric ids never overflow or gain a
-    # decimal point; every other column is coerced per-cell below. reusebuffer
-    # keeps one row of memory live at a time. select= restricts tokenisation to
-    # the ~40 columns the reader touches (REDESIGN_SELECT) rather than the annual
-    # file's 5000+, the dominant read cost on the multi-GB releases.
+    # String ids never overflow or gain a decimal point; reusebuffer keeps one
+    # row in memory on multi-GB files.
     for row in CSV.Rows(path; reusebuffer = true, select = REDESIGN_SELECT,
                         types = Dict(:SSUID => String, :PNUM => String))
         if !checked
@@ -853,10 +840,14 @@ function _sipp_accumulate_redesign!(acc::SippAcc, path::String)
     return (n_pairs[], ref_year, in_window, "")
 end
 
-# ── Classic format (2001/2004/2008, fixed-width l<YY>puw<N>.dat) ────────────
-# Parse a classic core DICTIONARY into name → (startpos, width), 1-indexed. The
-# `D VARNAME width startpos` lines describe the fixed-width record; the first D
-# line for a name is its core definition (later D lines are value labels).
+# ── Classic format (2001/2004/2008, fixed width) ────────────────────────────
+
+"""
+    parse_classic_dict(path) -> Dict{String,Tuple{Int,Int}}
+
+Field layout name → (start, width), 1-indexed, from a classic core dictionary's
+`D NAME width start` lines; the first line per name is the core definition.
+"""
 function parse_classic_dict(path::String)::Dict{String,Tuple{Int,Int}}
     pos = Dict{String,Tuple{Int,Int}}()
     for line in eachline(path)
@@ -869,8 +860,12 @@ function parse_classic_dict(path::String)::Dict{String,Tuple{Int,Int}}
     return pos
 end
 
-# Extract a fixed-width field by name from a record line; `nothing` when the
-# field is out of range or blank. posmap[name] = (startpos, width), 1-indexed.
+"""
+    _classic_field(line, posmap, name) -> Union{SubString,Nothing}
+
+Stripped fixed-width field `name` of a record; `nothing` if unknown, out of
+range or blank.
+"""
 function _classic_field(line::AbstractString, posmap, name::String)
     haskey(posmap, name) || return nothing
     sp, w = posmap[name]
@@ -880,12 +875,13 @@ function _classic_field(line::AbstractString, posmap, name::String)
     return isempty(s) ? nothing : s
 end
 
-# Report a compressed core the walk cannot read and skip it. The SIPP release
-# ships extracted files and the project depot carries no zip/gzip codec, so a
-# .dat.gz or .zip is never decompressed here. A redundant compressed copy (its
-# extracted sibling already present) is ignored silently; otherwise the exact
-# gunzip/unzip command is printed so the user can extract and re-run. Never adds
-# a dependency, never fails.
+"""
+    _sipp_warn_compressed(path)
+
+Warn, with the gunzip/unzip command, about a compressed core that has no
+extracted sibling; silent if the sibling exists. Never decompresses (no codec
+dependency).
+"""
 function _sipp_warn_compressed(path::String)
     dir, fname = dirname(path), basename(path)
     low = lowercase(fname)
@@ -899,20 +895,18 @@ function _sipp_warn_compressed(path::String)
     return nothing
 end
 
-# Non-empty job slots of a classic record: employer entry number EENO<n> paired
-# with monthly earnings TPMSUM<n>, two slots (the classic analogue of the
-# redesign EJB<n>_JOBID / TJB<n>_MSUM). The id is namespaced with the person key
-# so slot ids never collide across people.
-#
-# For the BBG break filter each slot also reads EPAYHR{n} (paid by the hour,
-# value 1 = Yes), TPYRATE{n} (regular hourly pay rate, two implied decimals →
-# ÷100), and EJBHRS{n} (usual weekly hours; -8 "Hours vary" is unusable). An
-# hourly slot is admitted to the rate series only when BOTH the rate and the
-# usual-hours reading are usable; otherwise rate = NaN and the slot is absent
-# from that job's series (BBG step 1, no imputation). The hours reading is the
-# inclusion gate only — the series value is the rate itself.
-const CLASSIC_HOURLY_CODE = 1   # EPAYHR{n} = 1 → "Yes (paid by the hour)"
+"""Classic `EPAYHR{n}` code for "paid by the hour"."""
+const CLASSIC_HOURLY_CODE = 1
 
+"""
+    _sipp_classic_job_records(line, posmap, pidkey) -> Vector{JobSlot}
+
+Filled job slots (two per record) of a classic record: employer number
+`EENO{n}` ≠ 0 with positive earnings `TPMSUM{n}`, ids namespaced by `pidkey`.
+An hourly slot (`EPAYHR{n}` = 1) carries its rate `TPYRATE{n}`/100 only when the
+rate is positive and the usual hours `EJBHRS{n}` are usable (not −8, "hours
+vary"); the hours gate inclusion only. No imputation.
+"""
 function _sipp_classic_job_records(line::AbstractString, posmap, pidkey::String)
     jobs = JobSlot[]
     for n in 1:2
@@ -936,34 +930,36 @@ function _sipp_classic_job_records(line::AbstractString, posmap, pidkey::String)
     return jobs
 end
 
+"""Fields a classic core dictionary must define for the panel to be read."""
 const CLASSIC_REQUIRED = ["SSUID", "EPPPNUM", "RHCALYR", "RHCALMN",
                           "WPFINWGT", "EEDUCATE", "RMESR",
                           "EENO1", "EENO2", "TPMSUM1", "TPMSUM2"]
 
-# Classic panel year from a core filename l<YY>puw<N>.dat (YY → 2000+YY).
+"""
+    sipp_classic_panel_year(fname) -> Union{Int,Nothing}
+
+Panel year 2000 + YY of a classic core `l<YY>puw<N>.dat`.
+"""
 function sipp_classic_panel_year(fname::AbstractString)
     m = match(r"l(\d{2})puw\d+\.dat"i, fname)
     isnothing(m) && return nothing
     return 2000 + parse(Int, m.captures[1])
 end
 
-# Stream one classic core wave into `acc`, locating fields by name from the
-# panel's wave-1 core dictionary (resolved once by the caller and passed as
-# `posmap`). Records are read line-by-line and grouped into per-person buffers,
-# then handed to the shared _process_person! — identical pair qualification to
-# the redesign path (consecutive employed in-age months, same-job wage change,
-# skilled EE hazard + wage step, 2013 diagnostic). A classic wave is four months
-# and modest in size, so buffering one wave's persons is bounded memory.
-# Returns (n_pairs, ref_year, in_window, err) for the caller's ordered info
-# line; ref_year is the panel year for reporting.
+"""
+    _sipp_accumulate_classic!(acc, dat_path, posmap) -> (n_pairs, data_year, in_window, err)
+
+Read one classic wave line by line with the panel's wave-1 layout `posmap`,
+group records by person, and process persons in sorted id order (deterministic
+regardless of Dict order). The wave is skipped (`err` set) if its records are
+shorter than the rightmost required field, i.e. the layout does not match.
+`data_year` is the first calendar year present in the records and `in_window`
+is whether any record month lies in a window.
+"""
 function _sipp_accumulate_classic!(acc::SippAcc, dat_path::String, posmap)
     fname = basename(dat_path)
     panel = sipp_classic_panel_year(fname)
 
-    # The wave-1 dictionary is applied to every wave on the premise that the core
-    # layout is constant within a panel. Enforce it: a record shorter than the
-    # rightmost byte any CLASSIC_REQUIRED field occupies means a layout mismatch,
-    # so the wave is skipped rather than read with misaligned fields.
     reclen_needed = maximum(sp + w - 1 for (sp, w) in (posmap[v] for v in CLASSIC_REQUIRED))
 
     ref_year = isnothing(panel) ? 0 : panel
@@ -1003,17 +999,11 @@ function _sipp_accumulate_classic!(acc::SippAcc, dat_path::String, posmap)
     isempty(by_pid) &&
         return (0, ref_year, false, "no parseable records")
 
-    # Persons processed in sorted id order so the file's contribution is a
-    # deterministic function of its contents, independent of Dict iteration.
     n_pairs = 0
     for pid in sort(collect(keys(by_pid)))
         n_pairs += _process_person!(acc, by_pid[pid])
     end
 
-    # Window membership and the reported year come from the RECORDS (RHCALYR),
-    # not the panel label: a classic panel spans several calendar years, so the
-    # out-of-window report must name the data years actually present (a 2008
-    # panel that only reaches 2013 should read "no window covers 2013").
     yrs = sort(unique(r.yr for r in Iterators.flatten(values(by_pid))))
     data_year = isempty(yrs) ? ref_year : first(yrs)
     in_window = any(assign_window(r.yr, r.mn) != :none
@@ -1021,15 +1011,14 @@ function _sipp_accumulate_classic!(acc::SippAcc, dat_path::String, posmap)
     return (n_pairs, data_year, in_window, "")
 end
 
-# Resolve a classic panel's core dictionary from its wave-1 core dictionary and
-# return (filename, posmap). `dict_dir` is the directory the panel's own cores
-# live in, so the dictionary is read from beside the data it describes. Census
-# ships the core dictionary for wave 1 only, so one dictionary documents every
-# wave. The plain name l<YY>puw1d.txt is preferred; the 2008 panel's plain file
-# survives only as a suffixed revision, so `.old2` then `.old.2` are tried as
-# fallbacks. A candidate is accepted only if its posmap carries every
-# CLASSIC_REQUIRED variable, which rejects the truncated stubs. Returns nothing
-# (with a loud @warn naming the panel) when none is usable.
+"""
+    _resolve_classic_dict(dict_dir, panel_yy) -> Union{(name, posmap), Nothing}
+
+The panel's wave-1 core dictionary from the directory of its cores: tries
+`l<YY>puw1d.txt`, then `.old2`, then `.old.2` (the 2008 panel's surviving
+revision), accepting the first that defines every `CLASSIC_REQUIRED` field.
+Returns `nothing` with a warning if none does.
+"""
 function _resolve_classic_dict(dict_dir::String, panel_yy::AbstractString)
     candidates = ["l$(panel_yy)puw1d.txt",
                   "l$(panel_yy)puw1d.txt.old2",
@@ -1048,24 +1037,29 @@ function _resolve_classic_dict(dict_dir::String, panel_yy::AbstractString)
     return nothing
 end
 
-# ── Parallel directory scan and deterministic merge ─────────────────────────
-# One unit of work: a discovered file plus everything its reader needs. Classic
-# waves carry the resolved wave-1 posmap (classic files with no usable
-# dictionary are dropped before the work list is built, so every unit here is
-# readable).
+# ── Parallel scan and deterministic merge ───────────────────────────────────
+
+"""
+    SippWork
+
+One file to read: `kind` (`:redesign` or `:classic`), `path`, the merge-order
+key `sortkey` (basename), and the classic layout `posmap` (`nothing` for redesign).
+"""
 struct SippWork
-    kind   :: Symbol            # :redesign | :classic
+    kind   :: Symbol
     path   :: String
-    sortkey:: String            # fixed merge order: basename, unique across the walk
+    sortkey:: String
     posmap :: Union{Nothing,Dict{String,Tuple{Int,Int}}}
 end
 
-# Build the ordered work list from a recursive walk. Redesign cores are pu*.csv;
-# classic cores are l<YY>puw<N>.dat, grouped by panel YY with the wave-1 core
-# dictionary resolved once per panel and shared by every wave (Census ships that
-# dictionary for wave 1 only). Compressed cores with no extracted sibling are
-# reported and skipped. The returned vector is sorted by basename so the merge
-# order below is fixed and independent of walk/thread order.
+"""
+    _sipp_build_worklist(sipp_dir) -> Vector{SippWork}
+
+Walk `sipp_dir` recursively for redesign (`pu*.csv`) and classic
+(`l<YY>puw<N>.dat`) cores, reporting compressed ones. Classic waves are grouped
+by panel, which must sit in one directory, and share the panel's resolved
+wave-1 dictionary; panels without one are skipped. Sorted by basename.
+"""
 function _sipp_build_worklist(sipp_dir::String)::Vector{SippWork}
     redesign = String[]
     classic  = String[]
@@ -1112,14 +1106,14 @@ function _sipp_build_worklist(sipp_dir::String)::Vector{SippWork}
     return work
 end
 
-# Read every file into its OWN private accumulator concurrently, then merge the
-# per-file accumulators into one master in the fixed work-list order. No two
-# threads touch the same accumulator during the parallel phase, and the ordered
-# merge makes the summed totals a deterministic function of the inputs alone
-# (floating-point addition is order-sensitive, so a fixed order is what makes
-# the parallel result identical to a serial fold over the same order). Per-file
-# report tuples are collected positionally and printed in the same order, so the
-# stage log is deterministic too.
+"""
+    _sipp_accumulate_parallel(sipp_dir) -> SippAcc
+
+Read every file of the work list concurrently, each into its own `SippAcc`,
+then merge them and print their report lines serially in work-list order.
+Floating-point sums depend on order, so the fixed order is what makes the
+result identical to a serial run.
+"""
 function _sipp_accumulate_parallel(sipp_dir::String)
     work = _sipp_build_worklist(sipp_dir)
     n    = length(work)
@@ -1146,13 +1140,12 @@ function _sipp_accumulate_parallel(sipp_dir::String)
     return master
 end
 
-# Per-file stage line (Part-2 print). Three clean cases, no scary warning for a
-# file that is merely out of range:
-#   • out of window → INFO naming the reference year and that no window covers it;
-#   • within window, parsed → INFO with the contributed stayer-pair count;
-#   • within window but a real parse/column failure → the only @warn.
-# A parse failure that is ALSO out of window is reported as the out-of-window
-# INFO line: an unreadable file no window would have used is not a problem.
+"""
+    _sipp_report_file(kind, fname, n_pairs, ref_year, in_window, err)
+
+One log line per file: info if outside every window (even if unreadable) or
+read successfully; a warning only for an in-window file that failed to read.
+"""
 function _sipp_report_file(kind::Symbol, fname::String, n_pairs::Int,
                            ref_year::Int, in_window::Bool, err::String)
     tag = kind === :redesign ? "redesign" : "classic"
@@ -1167,35 +1160,23 @@ function _sipp_report_file(kind::Symbol, fname::String, n_pairs::Int,
     return nothing
 end
 
-# ── Stage 6b production outputs ─────────────────────────────────────────────
-# Within-job wage-change, both markets, one row per window with SIPP data.
-# The SHIPPED wchg_rate_j column (what moments.jl and sampling_variances.jl read) is the BBG
-# break-filtered hazard on the classic FC windows (SIPP_BBG_WINDOWS) and the raw
-# earnings-based hazard elsewhere. Two tables are printed for the reader:
-#   TABLE 1 "ALL RAW"  — earnings-based hazard at the production ε
-#                        (SIPP_WCHG_EPS), all four windows; this is the shipped
-#                        raw value. The wider-ε robustness grid is printed
-#                        separately by print_sipp_wchg_robustness.
-#   TABLE 2 "SHIPPED"  — the shipped column: BBG hazard for FC windows (with the
-#                        raw earnings value printed alongside, so the documented
-#                        [BBG lower, raw upper] bracket is visible in one place)
-#                        and the raw earnings hazard for the COVID windows.
-# Windows with no SIPP contribution are omitted (they stay NaN downstream and
-# auto-hold out of the objective).
-#
-# CSV CONTRACT (sipp_wchg_rates.csv):
-#   window
-#   wchg_rate_U/S        SHIPPED hazard (BBG on FC, raw earnings on COVID) — the
-#                        column the SMM moment side reads unchanged
-#   neff_U/S             effective N of the shipped construction (BBG Σ(T−1) on
-#                        FC, earnings Kish N on COVID)
-#   wchg_rate_U/S_raw    raw earnings hazard at production ε, all windows (Table 1)
-#   hourly_share_U/S     BBG step-1 hourly-worker share (all windows where present)
-#   bbg_underflow_U/S    1 when the FC correction forced π̃ ≤ 0 to 0 (else 0)
-#   bbg_pihat_U/S        raw per-period break rate π̂ on FC (NaN off the BBG
-#                        windows) — sampling_variances.jl's delta-method variance input
-#   bbg_corrfac_U/S      BBG correction factor γ̄ − ᾱ on FC (NaN elsewhere) —
-#                        sampling_variances.jl scales the π̂ variance by 1/corrfac²
+# ── Outputs ─────────────────────────────────────────────────────────────────
+
+"""
+    make_sipp_wchg() -> DataFrame
+
+Read all SIPP cores and write sipp_wchg_rates.csv (one row per window with SIPP
+data; returned) and, through `make_sipp_ee`, sipp_ee_rates.csv. Columns:
+- `wchg_rate_U/S`: shipped hazard (BBG on `SIPP_BBG_WINDOWS`, raw earnings elsewhere);
+- `neff_U/S`: its effective N (BBG Σ(T − 1), or earnings Kish N);
+- `wchg_rate_U/S_raw`: raw earnings hazard at the production ε, all windows;
+- `hourly_share_U/S`: share of employed person-months paid by the hour;
+- `bbg_underflow_U/S`: 1 if π̃ was forced to 0;
+- `bbg_pihat_U/S`, `bbg_corrfac_U/S`: π̂ and γ̄ − ᾱ on BBG windows (NaN
+  elsewhere), the inputs of the variance in sampling_variances.jl.
+If data/raw/sipp is absent or empty, both CSVs are written empty and every SIPP
+moment is held out. Prints the raw and shipped tables and the ε robustness grid.
+"""
 function make_sipp_wchg()
     @info "Stage 6b: SIPP within-job wage-change + EE mobility (wchg_rate_U/S, ee_rate_S, ee_step_S)..."
 
@@ -1224,13 +1205,12 @@ function make_sipp_wchg()
     print_sipp_deflation_basis(master.years_used)
 
     ip = _sipp_prod_eps_idx()
-    calib = Dict{Int,NamedTuple}()   # BBG calibration memoized per distinct series length T
+    calib = Dict{Int,NamedTuple}()   # BBG calibration memoised per series length T
     wchg_rows = NamedTuple[]
     for wname in WINDOWS_ORDER
         haskey(master.wchg, wname) || continue
         c = master.wchg[wname]
         h = get(master.hshare, wname, nothing)
-        # raw earnings hazard at the production ε (Table 1 / _raw columns)
         raw_U = _sipp_hazard(c.chg_U[ip], c.den_U[ip])
         raw_S = _sipp_hazard(c.chg_S[ip], c.den_S[ip])
         n_earn_U = _sipp_neff(c.den_U[ip], c.den2_U[])
@@ -1238,8 +1218,6 @@ function make_sipp_wchg()
         hs_U = isnothing(h) || h.den_U[] <= 0.0 ? NaN : h.hr_U[] / h.den_U[]
         hs_S = isnothing(h) || h.den_S[] <= 0.0 ? NaN : h.hr_S[] / h.den_S[]
 
-        # BBG windows: replace the shipped hazard with the corrected one and
-        # carry its π̂ / correction factor for the sigma diagonal.
         if wname in SIPP_BBG_WINDOWS
             cell = get(master.bbg, wname, BbgCell())
             bU = _bbg_cell_hazard(cell.U, calib)
@@ -1287,13 +1265,13 @@ function make_sipp_wchg()
     return wchg_out
 end
 
-# Skilled EE mobility: the poach hazard ee_rate_S and the mean EE-move wage step
-# ee_step_S (with its weighted sd), one row per window with skilled EE at-risk
-# mass. ee_rate_S is a monthly hazard −log(1−p) consistent with the other rate
-# moments; ee_step_S is the mean LOG real-weekly-wage jump E[Δlog w] on a move
-# (proportional step, same scale as every other wage moment). Both carry a
-# Kish neff for the delta-method variance in sampling_variances.jl. Written to its own CSV so
-# the wchg output is byte-unchanged.
+"""
+    make_sipp_ee(master) -> DataFrame
+
+Write and return sipp_ee_rates.csv, one row per window with skilled EE mass:
+`ee_rate_S` (monthly hazard −log(1 − p)), `ee_step_S` (mean log weekly wage step
+on a move), `ee_step_sd` (its weighted sd), and the Kish N `neff_ee`, `neff_step`.
+"""
 function make_sipp_ee(master::SippAcc)
     rows = NamedTuple[]
     for wname in WINDOWS_ORDER
@@ -1320,11 +1298,11 @@ function make_sipp_ee(master::SippAcc)
     return out
 end
 
-# ── Deflation basis report ──────────────────────────────────────────────────
-# Print the 2013 CPI-U base ONCE, then the CPI-U index for each calendar year
-# actually deflated in this run (the years of the loaded records), ascending.
-# Replaces the former per-record "CPI-U x → 2013 base y" line: the base is a
-# constant, and the per-year indices are the same for every record of a year.
+"""
+    print_sipp_deflation_basis(years_used)
+
+Print the CPI-U base once and the CPI-U index of each calendar year deflated.
+"""
 function print_sipp_deflation_basis(years_used::Set{Int})
     @printf("  SIPP deflation base: CPI-U(%d) = %.3f\n", SIPP_CPIU_BASE_YEAR, SIPP_CPIU_BASE)
     isempty(years_used) && return nothing
@@ -1333,31 +1311,24 @@ function print_sipp_deflation_basis(years_used::Set{Int})
     return nothing
 end
 
-# ── Shipped-vs-raw tables (wchg) ────────────────────────────────────────────
-# TABLE 1 "ALL RAW": earnings-based hazard, all four windows × {U, S}, at the
-# production ε. TABLE 2 "SHIPPED": the shipped column (BBG on FC, raw on COVID),
-# with the raw earnings value printed alongside on the FC windows so the
-# documented [BBG lower, raw upper] bracket is visible, and the BBG effective N /
-# hourly share / underflow flag. `rows` are the per-window NamedTuples built in
-# make_sipp_wchg (already in WINDOWS_ORDER, windows without SIPP omitted).
+"""
+    print_sipp_wchg_tables(rows)
+
+Print Table 1 (raw earnings hazard at the production ε, every window), Table 2
+(the shipped hazard with method, N and hourly share) and, for the BBG windows,
+the raw upper bound, π̂ and the correction factor.
+"""
 function print_sipp_wchg_tables(rows::Vector{NamedTuple})
     isempty(rows) && return nothing
     println("\n  ══ TABLE 1 — ALL RAW (earnings-based within-job wage-change hazard, ε = \$$(SIPP_WCHG_EPS)/week) ══")
     @printf("  %-14s %12s %12s %10s %10s\n", "window", "wchg_U", "wchg_S", "neff_U", "neff_S")
     for r in rows
-        # neff shown here is the shipped construction's N; for COVID it is the
-        # earnings Kish N, for FC it is the BBG Σ(T−1) (the raw earnings N is the
-        # same order and not separately shipped).
+        # neff is the shipped construction's N (BBG Σ(T−1) on the FC windows).
         @printf("  %-14s %12.5f %12.5f %10.1f %10.1f\n",
                 string(r.window), r.wchg_rate_U_raw, r.wchg_rate_S_raw, r.neff_U, r.neff_S)
     end
 
     println("\n  ══ TABLE 2 — SHIPPED (BBG-classic + raw-redesign; wchg_rate_U/S in sipp_wchg_rates.csv) ══")
-    # One clean row per window, same numeric field widths as TABLE 1
-    # (window %-14s, wchg %12.5f, neff %10.1f); a left-aligned `method` column
-    # (BBG / raw) sits between the window name and the numbers, and hshr_U/hshr_S
-    # are right-justified columns at the end. Per-window BBG correction
-    # diagnostics moved below into their own aligned block.
     @printf("  %-14s %-7s %12s %12s %10s %10s %8s %8s\n",
             "window", "method", "wchg_U", "wchg_S", "neff_U", "neff_S", "hshr_U", "hshr_S")
     for r in rows
@@ -1369,15 +1340,9 @@ function print_sipp_wchg_tables(rows::Vector{NamedTuple})
     println("  Table 2 is the shipped target: BBG break-filtered hazard (lower bound) on the")
     println("  classic FC windows, raw earnings hazard on the redesign COVID windows.")
 
-    # BBG correction diagnostics for the classic (BBG) windows — one aligned row
-    # per window: the raw earnings hazard (upper end of the [BBG, raw] bracket),
-    # the uncorrected break rate π̂, and the correction factor corr = γ̄ − ᾱ.
     bbg_rows = filter(r -> r.window in SIPP_BBG_WINDOWS, rows)
     if !isempty(bbg_rows)
         println("\n  ── BBG correction diagnostics (classic FC windows; corr = γ̄ − ᾱ) ──")
-        # @printf pads %Ns by textwidth, which already treats the zero-width
-        # combining circumflex in π̂ as zero-width, so %8s headers line up with the
-        # %8.4f data columns below with no special-casing.
         @printf("  %-14s %10s %10s %8s %8s %8s %8s\n",
                 "window", "raw_U", "raw_S", "π̂_U", "π̂_S", "corr_U", "corr_S")
         any_uf = false
@@ -1393,10 +1358,12 @@ function print_sipp_wchg_tables(rows::Vector{NamedTuple})
     return nothing
 end
 
-# ── Threshold-robustness diagnostic (wchg) ──────────────────────────────────
-# Earnings-based wage-change hazard for all four windows × {U, S} at every ε in
-# the grid. Diagnostic only; the shipped raw value is the ε = SIPP_WCHG_EPS
-# column. A window with no SIPP contribution shows NaN throughout.
+"""
+    print_sipp_wchg_robustness(acc)
+
+Print the earnings-based wage-change hazard for every window and market at each
+ε on `SIPP_WCHG_EPS_GRID` (diagnostic; NaN for windows without SIPP data).
+"""
 function print_sipp_wchg_robustness(acc::Dict{Symbol,WchgCounts})
     println("\n  ── wchg threshold robustness — earnings-based (monthly hazard −log(1−p); shipped raw ε = \$$(SIPP_WCHG_EPS)/week) ──")
     @printf("  %-14s", "window")

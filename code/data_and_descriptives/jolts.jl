@@ -1,24 +1,24 @@
 ############################################################
-# data_processing/jolts.jl
+# code/data_and_descriptives/jolts.jl
 #
-# Stage 3 — JOLTS job openings. download_jolts() pulls the supersector
-# series from the BLS API (cached to data/raw/jolts/); clean_jolts()
-# allocates openings to skilled/unskilled using the CPS industry skill
-# shares and aggregates V_S / V_U per (year, month, window).
+# JOLTS job openings by supersector, split between the skilled and unskilled
+# markets with the CPS industry skill shares and summed to monthly V_S and V_U.
 #
-# Reads:  data/raw/jolts/jolts_openings.csv (or BLS API), industry_skill_shares.arrow, economy_skill_shares.arrow
-# Writes: jolts_openings.csv, jolts_clean.arrow
-#
-# Set ENV["BLS_API_KEY"] for higher BLS rate limits (optional).
-#
-# Plain include() file: definitions only, no top-level execution.
-# `using` packages and path consts come from data_processing_main.jl.
+# Entry points:
+#   download_jolts()  BLS API → data/raw/jolts/jolts_openings.csv (skipped if present;
+#                     ENV["BLS_API_KEY"] optional, for higher rate limits)
+#   clean_jolts()     reads jolts_openings.csv, industry_skill_shares.arrow,
+#                     economy_skill_shares.arrow; writes jolts_clean.arrow
+# Definitions only; packages and path constants come from data_processing_main.jl.
 ############################################################
 
-# JOLTS series IDs — supersector-level job openings
-# NOTE: Mining and logging is BLS code 110099, NOT 100000.
-# 100000 = "Total private" (display_level 1) and would double-count the
-# entire private economy into the allocation (≈1.9x total nonfarm).
+"""
+    JOLTS_SERIES
+
+BLS job-openings series used in the allocation, one per supersector. Mining and
+logging is 110099, not 100000: BLS 100000 is "Total private" and would
+double-count the private economy (≈1.9× total nonfarm).
+"""
 const JOLTS_SERIES = [
     "JTS110099000000000JOL", "JTS230000000000000JOL",
     "JTS320000000000000JOL", "JTS340000000000000JOL",
@@ -31,7 +31,12 @@ const JOLTS_SERIES = [
     "JTS920000000000000JOL",
 ]
 
-# Cross-check aggregate series (not used for allocation — would double-count)
+"""
+    JOLTS_CROSSCHECK_SERIES
+
+Aggregate series downloaded for the cross-check only; including them in the
+allocation would double-count.
+"""
 const JOLTS_CROSSCHECK_SERIES = [
     "JTS000000000000000JOL",  # Total nonfarm
     "JTS300000000000000JOL",  # Manufacturing total
@@ -41,6 +46,7 @@ const JOLTS_CROSSCHECK_SERIES = [
     "JTS900000000000000JOL",  # Government total
 ]
 
+"""Display names keyed by the internal supersector code (Mining and logging = "100000")."""
 const JOLTS_INDUSTRY_MAP = Dict(
     "100000" => "Mining and logging",
     "230000" => "Construction",
@@ -61,6 +67,11 @@ const JOLTS_INDUSTRY_MAP = Dict(
     "920000" => "Government (federal + state & local)",
 )
 
+"""
+    _bls_fetch(series_ids, start_year, end_year) -> JSON3.Object
+
+One POST to the BLS public API v2 for the given series and year range.
+"""
 function _bls_fetch(series_ids, start_year, end_year)
     body = JSON3.write(Dict(
         "seriesid"        => series_ids,
@@ -76,21 +87,32 @@ function _bls_fetch(series_ids, start_year, end_year)
     return JSON3.read(String(resp.body))
 end
 
+"""
+    _parse_jolts_industry(sid) -> String
+
+Six-digit industry code of a JOLTS series id, with BLS Mining and logging
+(110099) mapped to the internal key "100000" used by the CPS crosswalk;
+"unknown" if the id does not parse.
+"""
 function _parse_jolts_industry(sid::AbstractString)::String
     m = match(r"^JTS(\d{6})\d*JOL$", sid)
     isnothing(m) && return "unknown"
     code = m.captures[1]
-    # BLS codes Mining and logging as 110099; the rest of the pipeline
-    # (JOLTS_INDUSTRY_MAP and the CPS IND_JOLTS crosswalk) uses the internal
-    # key "100000" for this supersector. Normalise so the join matches.
     code == "110099" && return "100000"
     return code
 end
 
+"""
+    download_jolts() -> DataFrame
+
+Fetch every series in `JOLTS_SERIES` and `JOLTS_CROSSCHECK_SERIES` for 2000–2025
+from the BLS API and save data/raw/jolts/jolts_openings.csv (series_id, year,
+period, value). If the file exists it is read instead. Errors if any allocation
+series returns no data.
+"""
 function download_jolts()
     outpath = joinpath(RAW_JOLTS_DIR, "jolts_openings.csv")
 
-    # Download guard: skip if file already exists
     if isfile(outpath)
         @info "  JOLTS file already exists: $outpath — skipping download"
         return CSV.read(outpath, DataFrame)
@@ -108,7 +130,7 @@ function download_jolts()
         for series in result["Results"]["series"]
             sid = String(series["seriesID"])
             for obs in series["data"]
-                String(obs["period"]) == "M13" && continue
+                String(obs["period"]) == "M13" && continue   # annual average
                 push!(records, (
                     series_id = sid,
                     year      = parse(Int, String(obs["year"])),
@@ -122,7 +144,6 @@ function download_jolts()
 
     df = DataFrame(records)
 
-    # Missing series check — ERROR not warning
     missing_series = setdiff(JOLTS_SERIES, unique(df.series_id))
     if !isempty(missing_series)
         error("No data returned for JOLTS series: $missing_series — verify IDs at bls.gov/jlt")
@@ -134,6 +155,15 @@ function download_jolts()
     return df
 end
 
+"""
+    clean_jolts() -> DataFrame
+
+Monthly skilled and unskilled vacancies. Each in-window supersector's openings
+(persons) are split by its CPS skill share for the window (falling back to the
+economy-wide share), then summed per (YEAR, MONTH, window). Saves and returns
+jolts_clean.arrow with columns YEAR, MONTH, window, V_S, V_U, and prints the
+allocation total against total nonfarm.
+"""
 function clean_jolts()
     @info "Stage 3: clean_jolts..."
 
@@ -156,31 +186,24 @@ function clean_jolts()
     df.industry_name = [get(JOLTS_INDUSTRY_MAP, ic, "Cross-check ($ic)")
                         for ic in df.industry_code]
 
-    # Verify: all JOL series should resolve
     @assert all(df.industry_code .!= "unknown") "Unresolved series IDs found"
 
-    # ── 4. JOLTS units: multiply by 1000 (thousands → persons) ───
+    # ── 4. Thousands → persons ────────────────────────────────────
     df.VALUE_PERSONS = df.VALUE .* 1000.0
     @info "  JOLTS values converted: thousands → persons (×1000)"
 
     # ── 5. Window assignment ──────────────────────────────────────
     df.window = assign_window.(df.YEAR, df.MONTH)
 
-    # Merge Federal (910000) into State-and-local (920000) → one Government
-    # cell. The CPS Census industry codes (setup.jl) route all public
-    # administration to "920000" and cannot separate federal from state/local,
-    # so JOLTS Federal openings have no distinct CPS skill share. Collapsing
-    # both JOLTS government series onto "920000" lets them share the single
-    # CPS government skill share; step 8's groupby then sums their V_S/V_U.
+    # Federal (910000) joins state and local (920000): the CPS crosswalk cannot
+    # separate them, so both share the one CPS government skill share and are
+    # summed in step 8.
     df.industry_code = [c == "910000" ? "920000" : c for c in df.industry_code]
     df.industry_name = [get(JOLTS_INDUSTRY_MAP, ic, "Cross-check ($ic)")
                         for ic in df.industry_code]
 
     # ── 6. Merge with CPS industry skill shares ──────────────────
-    # Restrict to in-window months. CPS industry skill shares are only
-    # produced for window != :none (Stage 1), so out-of-window JOLTS months
-    # (2001-02, 2011-14, the Dec-2000 lead-in, etc.) have no share to join
-    # to and would otherwise default spuriously. They enter no moment.
+    # In-window months only: CPS shares exist only for in-window rows.
     CROSS_CHECK_CODES = Set(["000000","300000","400000","600000","700000","900000"])
     allocation = filter(row -> row.window != :none &&
                                row.industry_code ∉ CROSS_CHECK_CODES &&
@@ -197,7 +220,6 @@ function clean_jolts()
                               on = [:window => :window, :industry_code => :IND_JOLTS],
                               makeunique = true)
 
-        # Default: economy-wide skill share (not 0.5)
         if isfile(econ_shares_path)
             econ = DataFrame(Arrow.Table(econ_shares_path))
             econ_map = Dict(row.window => row.econ_skill_share for row in eachrow(econ))
@@ -218,9 +240,8 @@ function clean_jolts()
         end
         if n_defaulted > 0
             @warn "  $n_defaulted industry-window cells used economy-wide default skill share"
-            # Breakdown by supersector: a code defaulting in (near) all 192
-            # in-window months means CPS never emits that IND_JOLTS string
-            # (structural gap in the crosswalk), not sampling sparsity.
+            # A code defaulting in (nearly) every in-window month is a crosswalk
+            # gap, not sampling sparsity.
             for (code, n) in sort(collect(defaulted_codes); by = last, rev = true)
                 name = get(JOLTS_INDUSTRY_MAP, code, code)
                 @warn "    defaulted: $code ($name) — $n cells"
@@ -246,7 +267,7 @@ function clean_jolts()
     Arrow.write(outpath, agg)
     @info "  Saved: $outpath  ($(nrow(agg)) rows)"
 
-    # ── 9. Cross-check: compare allocation total vs total nonfarm ─
+    # ── 9. Cross-check: allocation total vs total nonfarm ─────────
     total_nf = filter(row -> row.industry_code == "000000", df)
     if nrow(total_nf) > 0
         alloc_total = combine(groupby(allocation, [:YEAR, :MONTH]),

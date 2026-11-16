@@ -1,15 +1,13 @@
 #!/bin/bash
-# Crisis-window spec smoke tests (see README.md).
+# smoke/run_smoke.sh — crisis-window spec smoke tests (see README.md).
 #
-#   ./run_smoke.sh warmstart|clusters|guard
+#   bash code/smoke/run_smoke.sh warmstart|clusters|guard
 #
-# Run from anywhere; paths resolve relative to this script.  Requires
-# data/derived/ and the paired baseline bundle in output/estimates/.
+# Runs from anywhere. Requires data/derived/ and the baseline estimate in output/estimates/.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Test name, and the INIT_MODE the sliced driver runs under.  The guard test
-# exercises spec.fixed only, so it reuses the :warmstart configuration.
+# INIT_MODE per test; the guard test exercises spec.fixed only and reuses :warmstart.
 TEST="${1:-}"
 case "$TEST" in
     warmstart|guard) MODE=warmstart ;;
@@ -24,13 +22,11 @@ SLICED="$SMM_DIR/main_spec_only.jl"
 # Truncate the driver just before §9 so the spec-construction path runs verbatim.
 "$JULIA" slice_spec.jl "$SMM_DIR/smm_main.jl" "# 9. Run estimation" "$SLICED"
 
-# The window and INIT_MODE are run settings, read by the driver from the environment.
 export ROYSEARCH_WINDOW=crisis_covid
 export ROYSEARCH_INIT_MODE="$MODE"
 
-# Only the RUN CONFIGURATION differs from the shipped driver: the coarse grid
-# (these tests build a spec, they do not estimate) and, for :clusters, a small
-# Sobol sample.  n_sample must stay a power of two — Owen scrambling requires it.
+# Run configuration only: a coarse grid and, for :clusters, a small Sobol sample (a power
+# of two, for Owen scrambling). The patterns match smm_main.jl's alignment exactly.
 python3 - "$MODE" "$SLICED" <<'PY'
 import re, sys
 mode, path = sys.argv[1], sys.argv[2]

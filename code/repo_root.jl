@@ -1,19 +1,16 @@
 ############################################################
 # code/repo_root.jl — locate the repository root from any script
 #
-# Scripts are not pinned to one depth: `scripts/` may sit at the repo root or
-# under `code/`, and a fixed `joinpath(@__DIR__, "..")` silently resolves to the
-# wrong directory in the second case — which both writes generated files to the
-# wrong place and builds include paths like `code/code/solver`.  Walking up for a
-# marker makes the answer independent of where the script is placed.
+# Walks up from the caller to the first directory holding the repository's markers, so a
+# script finds the root whatever its depth in the tree.
 ############################################################
 
 """
     find_repo_root(start = @__DIR__) -> String
 
-Nearest ancestor of `start` that holds both `code/smm/smm_main.jl` and
-`data/derived/windows.json`.  Both are required: `code/` alone also matches a
-stale snapshot of the tree, and `data/derived/` alone matches nothing useful.
+Nearest ancestor of `start` holding both `code/smm/smm_main.jl` and
+`data/derived/windows.json` (`code/` alone also matches a stale snapshot of the tree).
+Errors if there is none.
 """
 function find_repo_root(start :: AbstractString = @__DIR__) :: String
     dir = abspath(start)

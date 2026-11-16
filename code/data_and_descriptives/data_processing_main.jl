@@ -1,62 +1,35 @@
 ############################################################
 # code/data_and_descriptives/data_processing_main.jl
-#   Data-processing pipeline — entry point
+#
+# Data pipeline entry point. Cleans every raw dataset and writes the products
+# the estimation reads from data/derived/: windows.json, moments_{w}.csv,
+# sampling_var_{w}.csv, nu_estimation.csv, phi_calibration.csv,
+# training_share_target.csv, plus intermediate *_clean.arrow and source CSVs.
 #
 # Usage (from the project root):
 #   julia --threads auto code/data_and_descriptives/data_processing_main.jl
 #
-# Loads every raw dataset, cleans it, and writes all artefacts the SMM
-# step later reads from data/derived/. Run this once before any SMM
-# estimation.
-#
-# Project layout:
-#   code/
-#     data_processing/
-#       data_processing_main.jl   — this driver (paths, using, includes, run)
-#       setup.jl                  — windows, MOMENT_NAMES, helpers, _load_arrow
-#       cps_basic.jl   cps_asec.jl — CPS Basic / ASEC cleaning
-#       jolts.jl       j2j.jl      — JOLTS openings / J2J EE rates
-#       nsc.jl                     — training_share target + φ calibration
-#       transitions.jl             — worker-flow hazards + ν life-table turnover
-#       sipp.jl                    — SIPP within-job wage-change + EE mobility
-#       moments.jl                 — 35 moment targets per window
-#       sampling_variances.jl      — per-moment sampling variances σ̂²_samp
-#       validation.jl              — end-of-run diagnostics
-#     smm/                         — separate step; consumes data/derived/
-#   data/
-#     raw/      cps_basic/  cps_asec/  jolts/  j2j/  nsc/
-#     derived/  windows.json, moments_{w}.csv, sampling_var_{w}.csv,
-#               nu_estimation.csv,
-#               phi_calibration.csv,
-#               j2j_ee_rates.csv, sipp_wchg_rates.csv, sipp_ee_rates.csv, *_clean.arrow, ...
-#
-# Pipeline order (each stage's output feeds the later ones):
-#   0  windows.json        write_windows_json()
-#   1  CPS Basic           clean_cps_basic()          → cps_basic_clean.arrow (+ skill shares)
-#   2  CPS ASEC            clean_cps_asec()           → cps_asec_clean.arrow
-#   3  enrolment diagnostic enrollment_rate_by_age()
-#   4  JOLTS               clean_jolts()              → jolts_clean.arrow
-#   5  Transitions         make_transitions()         → transitions_monthly.arrow
-#   6  J2J EE rates        import_j2j_ee_rates()      → j2j_ee_rates.csv
-#   6b SIPP wchg + EE       make_sipp_wchg()           → sipp_wchg_rates.csv, sipp_ee_rates.csv
-#   7  ν turnover          compute_nu()               → nu_estimation.csv
-#   8  φ completion        calibrate_phi()            → phi_calibration.csv
-#   9  Moments             make_moments()             → moments_{w}.csv
-#  10  Sampling variances  compute_sampling_variances() → sampling_var_{w}.csv
-#  11  Validation          run_validation(...)        → diagnostics (prints only)
-#
-# training_share convention. Its level and its across-Fall-year variance both
-# come from training_share_target.csv (Stage 3) rather than from this file's CPS
-# closed forms; Stage 9 writes the level into moments_{w}.csv and Stage 10 writes
-# the variance into sampling_var_{w}.csv. code/smm/moments.jl reads both
-# directly.
+# Stages, in order (each consumes files written by earlier ones):
+#   0  windows.json          write_windows_json()               setup.jl
+#   1  CPS Basic             clean_cps_basic()                  cps_basic.jl
+#   2  CPS ASEC              clean_cps_asec()                   cps_asec.jl
+#   3  enrolment             enrollment_rate_by_age(),
+#                            compute_training_share_target()    nsc.jl
+#   4  JOLTS                 clean_jolts()                      jolts.jl
+#   5  CPS flows             make_transitions()                 transitions.jl
+#   6  J2J EE rate           import_j2j_ee_rates()              j2j.jl
+#   6b SIPP wchg + EE        make_sipp_wchg()                   sipp.jl
+#   7  ν                     compute_nu()                       transitions.jl
+#   8  φ                     calibrate_phi()                    nsc.jl
+#   9  moments               make_moments()                     moments.jl
+#  10  sampling variances    compute_sampling_variances()       sampling_variances.jl
+#  11  validation            run_validation()                   validation.jl
+#  12  decision audit        run_consistency_test()             this file
+# The stage numbers printed inside the stage functions predate this ordering;
+# this table is the reference.
 ############################################################
 
-# The version is defined once, in code/smm/version.jl, and read here rather than
-# restated. Two files holding one fact drift, and this pair did: the data pipeline
-# once read 15.12 while the estimation code read 16.7.1, and a release bump had to
-# remember to touch both. @__DIR__ rather than PIPELINE_DIR because this banner
-# prints before the Paths block below runs.
+# The version lives once, in code/smm/version.jl.
 include(joinpath(@__DIR__, "..", "smm", "version.jl"))
 
 println("="^60)
@@ -88,31 +61,35 @@ using DataFrames
 using CSV
 using Arrow
 using Statistics
-using Random               # SIPP BBG break-filter Monte-Carlo calibration (deterministic)
+using Random               # seeded BBG Monte-Carlo calibration (sipp.jl)
 using Printf
-using Dates                # SIPP day-count-neutral weekly wage (daysinmonth)
-using HTTP, JSON3          # download_jolts hits the BLS API
+using Dates                # daysinmonth (sipp.jl)
+using HTTP, JSON3          # BLS API (jolts.jl), windows.json
 
 println("done."); flush(stdout)
 
 # ── Pipeline modules ───────────────────────────────────────────
 print("Loading pipeline modules... "); flush(stdout)
 
-include(joinpath(PIPELINE_DIR, "setup.jl"))        # constants, helpers, _load_arrow, write_windows_json
-include(joinpath(PIPELINE_DIR, "cps_basic.jl"))    # clean_cps_basic
-include(joinpath(PIPELINE_DIR, "cps_asec.jl"))     # clean_cps_asec
-include(joinpath(PIPELINE_DIR, "jolts.jl"))        # download_jolts, clean_jolts
-include(joinpath(PIPELINE_DIR, "j2j.jl"))          # import_j2j_ee_rates
-include(joinpath(PIPELINE_DIR, "sipp.jl"))         # make_sipp_wchg (SIPP wchg_rate_U/S, ee_rate_S, ee_step_S)
-include(joinpath(PIPELINE_DIR, "nsc.jl"))          # enrollment_rate_by_age, compute_training_share_target, _load_training_share_target, calibrate_phi
-include(joinpath(PIPELINE_DIR, "transitions.jl"))  # make_transitions, compute_nu
-include(joinpath(PIPELINE_DIR, "moments.jl"))      # make_moments (+ stock/wage/tightness helpers)
-include(joinpath(PIPELINE_DIR, "sampling_variances.jl"))  # compute_sampling_variances
-include(joinpath(PIPELINE_DIR, "validation.jl"))   # run_validation
+include(joinpath(PIPELINE_DIR, "setup.jl"))
+include(joinpath(PIPELINE_DIR, "cps_basic.jl"))
+include(joinpath(PIPELINE_DIR, "cps_asec.jl"))
+include(joinpath(PIPELINE_DIR, "jolts.jl"))
+include(joinpath(PIPELINE_DIR, "j2j.jl"))
+include(joinpath(PIPELINE_DIR, "sipp.jl"))
+include(joinpath(PIPELINE_DIR, "nsc.jl"))
+include(joinpath(PIPELINE_DIR, "transitions.jl"))
+include(joinpath(PIPELINE_DIR, "moments.jl"))
+include(joinpath(PIPELINE_DIR, "sampling_variances.jl"))
+include(joinpath(PIPELINE_DIR, "validation.jl"))
 
 println("done."); flush(stdout)
 
-# ── Stage banner helper ────────────────────────────────────────
+"""
+    _stage_banner(title)
+
+Print a stage header line.
+"""
 function _stage_banner(title::AbstractString)
     println("\n" * "─"^70)
     println("▶ " * title)
@@ -120,30 +97,24 @@ function _stage_banner(title::AbstractString)
     flush(stdout)
 end
 
-# ── Stage 12: audit of the data DECISIONS ─────────────────────────────────────
-# Every check below corresponds to a choice argued in the data-and-moments notes,
-# and every one of them CAN fail. Bounds checks (is a share in [0,1], is a hazard
-# positive) are deliberately absent: they passed 72/72 with no information, and a
-# test that cannot fail is a test that cannot be read.
-#
-# What each line defends:
-#   (1) wage_premium is not an independent moment — it is mean_S − mean_U on the
-#       same ASEC log universe. If it ever drifts, the wage block is inconsistent.
-#   (2) ur_total is dropped from the weighting because it is implied by ur_U, ur_S
-#       and skilled_share. This verifies the redundancy that justifies dropping it.
-#   (3) ASEC 2023 is in the sample. The year filter is derived from WINDOWS rather
-#       than hardcoded, and this is what catches a regression to a literal.
-#   (4) DURUNEMP == 999 (IPUMS NIU) never enters ltu_share_S. The NIU code exceeds
-#       every duration threshold, so an unguarded comparison silently calls those
-#       records long-term unemployed.
-#   (5) training_share has complete Fall-year coverage in every window, and the
-#       two pairs move as the source series does: the FC pair rises, the COVID
-#       pair is flat.
-#   (6) The CPS stock variances are person-clustered. CPS is a 4-8-4 rotating
-#       panel; the unclustered form understates them 2-5×. The singleton-cluster
-#       control shows the inflation comes from the PANEL and not from switching
-#       variance formulas: with one record per cluster the estimator is within a
-#       few percent of Kish, while clustering on person is multiples of it.
+"""
+    run_consistency_test(windows_order)
+
+Audit of the data decisions on the written products; prints PASS/FAIL per check
+and warns if any fail. Each check guards one deliberate choice:
+(1) wage_premium = mean_S − mean_U on the same ASEC sample;
+(2) ur_total is implied by ur_U, ur_S and skilled_share (why it is redundant);
+(3) the ASEC sample reaches the last declared survey year (filter from WINDOWS),
+    and keeps CPSIDP;
+(4) the DURUNEMP NIU code 999 maps to duration 0 (`_durw`);
+(5) training_share has complete Fall-year coverage, rises across the FC pair
+    (> 5 %) and is flat across the COVID pair (within ±2 %, a magnitude
+    statement: the stationary identity would need about +8.6 %);
+(6) CPS stock variances are person-clustered: clustered > 1.5× Kish, while the
+    singleton-cluster control stays within 15 % of Kish, so the inflation comes
+    from the panel and not from the formula.
+Bounds checks are deliberately absent.
+"""
 function run_consistency_test(windows_order)
     _stage_banner("Stage 12 — audit of the data decisions")
     npass = Ref(0); nfail = Ref(0)
@@ -162,7 +133,7 @@ function run_consistency_test(windows_order)
 
     M = Dict(w => read_moments(w) for w in windows_order)
 
-    # (1)+(2)+(4): per-window identities
+    # (1), (2): per-window identities
     for w in windows_order
         m = M[w]
         isempty(m) && (@printf("  (no moments_%s.csv — skipped)\n", w); continue)
@@ -182,7 +153,7 @@ function run_consistency_test(windows_order)
         end
     end
 
-    # (3) ASEC 2023 present — the year filter reads WINDOWS, not a literal
+    # (3) ASEC final survey year present, CPSIDP kept
     asec_path = joinpath(DERIVED_DIR, "cps_asec_clean.arrow")
     if isfile(asec_path)
         yrs = unique(DataFrame(Arrow.Table(asec_path)).YEAR)
@@ -193,7 +164,7 @@ function run_consistency_test(windows_order)
               "(3b) ASEC keeps CPSIDP for person clustering", "")
     end
 
-    # (4) NIU guard: no DURUNEMP == 999 record counted as long-term unemployed
+    # (4) NIU guard
     cps_path = joinpath(DERIVED_DIR, "cps_basic_clean.arrow")
     if isfile(cps_path)
         cps = DataFrame(Arrow.Table(cps_path); copycols=false)
@@ -205,11 +176,7 @@ function run_consistency_test(windows_order)
               "$n999 unemployed records carry 999")
     end
 
-    # (5) training_share: complete Fall-year coverage, and the two pairs move as
-    #     the source series does — the FC pair rises, the COVID pair is flat.
-    #     "Flat" is a magnitude statement, not a sign one: the stationary identity
-    #     needs roughly +8.6% across the COVID pair, so anything inside ±2% is
-    #     flat relative to what the model asks for, and its sign is not meaningful.
+    # (5) training_share coverage and direction across each pair
     tgt_path = joinpath(DERIVED_DIR, "training_share_target.csv")
     if isfile(tgt_path)
         t = CSV.read(tgt_path, DataFrame)
@@ -230,7 +197,7 @@ function run_consistency_test(windows_order)
         end
     end
 
-    # (6) CPS stock variances are person-clustered
+    # (6) CPS stock variances person-clustered, with the singleton control
     if isfile(cps_path)
         cps  = DataFrame(Arrow.Table(cps_path); copycols=false)
         cps.ym = 100 .* cps.YEAR .+ cps.MONTH
@@ -242,10 +209,6 @@ function run_consistency_test(windows_order)
             inlf = coalesce.(s.in_lf, false); unemp = coalesce.(s.unemployed, false)
             vk = _kish_prop_var(cw, inlf, inlf .& unemp)
             vc = _kish_prop_var_clustered(cw, inlf, inlf .& unemp, cid)
-            # Singleton control: one record per cluster. Agrees with Kish in
-            # expectation (not exactly — see setup.jl), so the gap must be small
-            # while the person-clustered inflation must be large. That contrast is
-            # what shows the inflation comes from the panel, not the formula.
             vs = _kish_prop_var_clustered(cw, inlf, inlf .& unemp, collect(eachindex(cw)))
             check(isfinite(vc) && vc > 1.5 * vk && abs(vs - vk) / vk < 0.15,
                   "(6) $w ur_total variance clustered on person",
@@ -260,8 +223,7 @@ function run_consistency_test(windows_order)
 end
 
 # ============================================================
-# Run the pipeline. Order matters: every stage below consumes
-# artefacts written by an earlier one (see the header table).
+# Run the pipeline (order as in the header table).
 # ============================================================
 
 _stage_banner("Stage 0 — windows.json (single source of truth for WINDOWS)")
@@ -289,8 +251,6 @@ import_j2j_ee_rates()
 _stage_banner("Stage 6b — SIPP within-job wage-change + EE mobility (wchg_rate_U/S, ee_rate_S, ee_step_S)")
 make_sipp_wchg()
 
-# SIPP-vs-J2J EE-rate comparison (shipped target = J2J), printed here so it
-# follows the J2J (Stage 6) and SIPP (Stage 6b) EE tables.
 print_ee_source_comparison()
 
 _stage_banner("Stage 7 — demographic turnover ν (life-table)")
@@ -308,8 +268,8 @@ compute_sampling_variances()
 _stage_banner("Stage 11 — validation and diagnostics")
 run_validation(all_moments)
 
-# Stage 12 runs last so it reads the FINAL written products. Guarded: a bug in
-# the test itself must not lose the derived files the user just built.
+# Last, on the final products; a failure in the audit itself must not cost the
+# derived files just built.
 try
     run_consistency_test(WINDOWS_ORDER)
 catch e
@@ -317,7 +277,7 @@ catch e
 end
 
 # ============================================================
-# Summary of the derived artefacts the SMM step will load.
+# Summary of the derived files
 # ============================================================
 println("\n" * "="^60)
 println("Derived files in: $DERIVED_DIR")

@@ -1,37 +1,27 @@
 ############################################################
-# code/solver/model_main.jl — Standalone single solve + plots
+# model_main.jl — Standalone single solve and fit table
 #
-# Usage (from project root):
-#   julia --threads auto code/solver/model_main.jl
+# Usage (from the project root):
+#   julia --project=. --threads auto code/solver/model_main.jl
 #
-# Solves the model at the hard-coded parameters below, prints the
-# SMM moment-fit table (targets from the MOMENT_WINDOW bundle), and
-# writes the full set of equilibrium figures from single_run_plots.jl
-# to OUTPUT_DIR.  To plot at SMM-estimated parameters, use
-# code/solver/plots_main.jl instead.
+# Solves the model at the parameters in §1 with the grid and SimParams of the
+# MOMENT_WINDOW estimate bundle, and prints the accounting and the moment-fit table
+# against that bundle's targets. Nothing is written to disk.
 ############################################################
 
 println("="^60)
-println("  Segmented Search Model — Standalone Single-Run Plots")
+println("  Segmented Search Model — Standalone Single Solve")
 println("="^60)
 flush(stdout)
 
-# Paths
+# Paths (paths.jl is the only place output paths are built)
 const SOLVER_DIR   = @__DIR__
 const CODE_ROOT    = normpath(joinpath(SOLVER_DIR, ".."))
 const SMM_DIR      = joinpath(CODE_ROOT, "smm")
-const PT_DIR       = joinpath(CODE_ROOT, "plots_and_tables")
-# paths.jl is the sole definition of PROJECT_ROOT, OUTPUT_DIR and the out_*()
-# accessors. Declared in seven files before v19.6.0, two of them behind
-# !@isdefined guards, so the effective value depended on include order.
 include(joinpath(CODE_ROOT, "paths.jl"))
-const PLOTS_ROOT   = joinpath(OUTPUT_DIR, "plots")
 
-# ── Moment-table / run-settings switch ──────────────────────────────────────
-# Which data window supplies the targets, weights, SimParams, and grid; a baseline period
-# is read from the baseline's estimate (`period_bundle`).
-# NOTE: the hard-coded parameter block in §1 should be the estimate for this
-# window, otherwise the table compares apples to oranges.
+# Data window supplying targets, weights, SimParams and grid; a baseline period is read
+# from the baseline's estimate (`period_bundle`). §1 should hold that window's estimate.
 const MOMENT_WINDOW = :base_covid     # :base_fc | :crisis_fc | :base_covid | :crisis_covid
 const W_SUFFIX      = "_equalW"
 const POINT_ESTIMATE = :smm   # :smm reads estimate_<w>_smm.jls, :mcmc the chain's estimate_<w>_mcmc.jls
@@ -52,9 +42,7 @@ using Printf
 using Serialization
 using DataFrames
 using Base.Threads
-
-using Plots
-using LaTeXStrings
+using Optim
 
 println("done."); flush(stdout)
 
@@ -72,10 +60,8 @@ include(joinpath(SOLVER_DIR, "equilibrium.jl"))
 
 println("done."); flush(stdout)
 
-# SMM modules — model_moments for the fit table, plus the SMMSpec/SMMResult
-# type definitions WITHOUT which deserialize() cannot read the .jls bundle
-# (same include set and order as the sensitivity notebook; candidates.jl is
-# deliberately not included).
+# SMM modules: model_moments for the fit table, and the type definitions deserialize()
+# needs to read the bundle (candidates.jl is not needed).
 print("Loading SMM modules... "); flush(stdout)
 include(joinpath(SMM_DIR, "settings.jl"))
 include(joinpath(SMM_DIR, "moments.jl"))
@@ -83,19 +69,13 @@ include(joinpath(SMM_DIR, "smm_params.jl"))   # ParamSpec, SMMSpec, run params
 include(joinpath(SMM_DIR, "smm.jl"))          # SMMResult, _load_smm_bundle
 println("done."); flush(stdout)
 
-# Plotting library
-print("Loading plotting modules... "); flush(stdout)
-
-include(joinpath(PT_DIR, "model.jl"))
-
-println("done."); flush(stdout)
 @printf("Threads available: %d\n\n", Threads.nthreads())
 flush(stdout)
 
 # ============================================================
-# 1. Parameters
+# 1. Parameters (stored units: A = ln A, flows per unit of A, c = ln c,
+#    k in months of mean new-match output)
 # ============================================================
-# SMM run: Q = 0.885395387, converged = false, 5000 iterations
 
 common = CommonParams(
     r   = 0.00417,       # fixed (= 0.05/12, monthly)
@@ -137,7 +117,7 @@ skl_par = SkilledParams(
     σ_w = 0.21904,       # fixed (skl_σ_w)
 )
 
-# Fallback SimParams — used only if the SMM bundle cannot be read.
+# SimParams used when the bundle cannot be read; its verbose settings are always used.
 sim_fallback = SimParams(
     tol_inner          = 1e-7,
     tol_outer_U        = 1e-6,
@@ -171,11 +151,6 @@ sim_fallback = SimParams(
     verbose_stride     = 10,
 )
 
-# :manual, not a window. standalone_default/ and single_run/ were one thing under two
-# names; out_plots(:manual) is the single home, and out_tables(:manual) is an error
-# because a solve at arbitrary parameters produces figures, never a paper table.
-const PLOTS_DIR = out_plots(:manual)
-
 println("Parameters:")
 @printf("  CommonParams:    r=%.5f   ν=%.5f   φ=%.5f\n",
         common.r, common.ν, common.φ)
@@ -193,32 +168,37 @@ flush(stdout)
 
 # ============================================================
 # 1b. SMM bundle — estimation SimParams, grid, targets, weights
+#
+# Reproducing an SMM fit needs the estimation's grid and SimParams: the fit sits near a
+# training knife edge, and other (grid, sim) combinations can land on the τ ≡ 0 twin.
 # ============================================================
-# Reproducing an SMM fit requires the SAME grid and SimParams as the
-# estimation run: this fit sits near a training/no-training knife edge,
-# and other (grid, sim) combinations can land on the degenerate τ≡0 twin.
-# Everything is wrapped in functions ⇒ no top-level soft-scope issues.
 
+"""
+    load_smm_bundle(path) → NamedTuple or nothing
+
+The estimate bundle at `path` (`_load_smm_bundle`) at the period of `MOMENT_WINDOW`
+(`period_bundle`), or `nothing` with a warning when it is missing or unreadable.
+"""
 function load_smm_bundle(path::AbstractString)
     isfile(path) || (@warn "SMM bundle not found: $path"; return nothing)
-    # Use the SMM module's own loader (handles stale formats gracefully).
     b = _load_smm_bundle(path; delete_on_fail = false,
                          label = "bundle($MOMENT_WINDOW)")
     b === nothing && @warn "Could not read SMM bundle: $path"
     return b === nothing ? b : period_bundle(b, MOMENT_WINDOW)
 end
 
+"""
+    run_settings(bundle, sim_fb) → (sim, Nx, Np_U, Np_S)
+
+The bundle's SimParams and grid sizes, with `verbose` and `verbose_stride` from `sim_fb`
+(the bundle was estimated silent); fields missing from the bundle's SimParams are taken
+from `sim_fb`. Without a bundle, `sim_fb` on a 120-node grid.
+"""
 function run_settings(bundle, sim_fb)
     bundle === nothing && return (sim_fb, 120, 120, 120)   # estimation-grid fallback
     spec = bundle.spec
     @printf("Loaded run settings from bundle: Nx=%d  Np_U=%d  Np_S=%d\n",
             spec.run.Nx, spec.run.Np_U, spec.run.Np_S)
-    # VERBOSE FIX: keep the bundle's grid + solver settings, but let the LOCAL
-    # verbose win.  The bundle was estimated with verbose=0 (silent inside SMM),
-    # so returning spec.sim as-is muted the inner/outer loop prints on every
-    # standalone run.  Rebuild sim with the fallback's verbose/verbose_stride.
-    # Bundles serialized before a SimParams field existed (e.g. global_B/global_K)
-    # lack it on spec.sim; fall back to the local default so old bundles still load.
     getf(f) = hasproperty(spec.sim, f) ? getfield(spec.sim, f) : getfield(sim_fb, f)
     kept = filter(f -> f ∉ (:verbose, :verbose_stride), collect(fieldnames(SimParams)))
     sim  = SimParams(; (f => getf(f) for f in kept)...,
@@ -231,17 +211,18 @@ const BUNDLE = load_smm_bundle(SMM_BUNDLE)
 sim_run, Nx_run, NpU_run, NpS_run = run_settings(BUNDLE, sim_fallback)
 
 # ============================================================
-# 1c. Moment-fit diagnostic table
-#
-#    abs_dev      = model − target
-#    rel_dev_pct  = 100 · abs_dev / target
-#    contribution = w · abs_dev²
-#    pct_of_Q     = 100 · contribution / Q,      Q = Σ contribution
-#
-#  With weights taken from the bundle (diag(spec.W)/q_scale) the printed
-#  Q reproduces the SMM objective exactly (diagonal weight schemes).
+# 1c. Moment-fit table
 # ============================================================
 
+"""
+    moment_fit_table(names, targets, model; weights = nothing, sorted = true, io = stdout)
+        → NamedTuple
+
+Print and return, per moment, target, model value, `abs_dev = model − target`,
+`rel_dev% = 100 abs_dev / target`, `contribution = w abs_dev²` and its percentage of
+`Q = Σ contribution`; rows sorted by contribution when `sorted`. Default weights 1/target².
+With the bundle's weights (`diag(W) / q_scale`) Q is the SMM objective (diagonal W).
+"""
 function moment_fit_table(names::AbstractVector, targets::AbstractVector,
                           model::AbstractVector;
                           weights=nothing, sorted::Bool=true, io::IO=stdout)
@@ -286,9 +267,13 @@ function moment_fit_table(names::AbstractVector, targets::AbstractVector,
               rel_dev_pct, contribution=contrib, pct_of_Q)
 end
 
-# Same accounting as the sensitivity notebook's decompose_Q: iterate the
-# bundle's moment dict in order, keep weight>0 entries, index the (already
-# subset) W diagonal sequentially, divide by q_scale.
+"""
+    print_smm_moment_table(obj, bundle; io = stdout) → NamedTuple or nothing
+
+Fit table of the equilibrium objects `obj` against the bundle's active moments (weight > 0,
+in the bundle's order), with the bundle's diagonal weights `W[i,i] / q_scale`, followed by
+the bundle's stored Q. `nothing` without a bundle.
+"""
 function print_smm_moment_table(obj, bundle; io::IO=stdout)
     if bundle === nothing
         @warn "No SMM bundle — skipping the moment-fit table."
@@ -328,15 +313,15 @@ if result.ok
 else
     @printf("WARNING: solver did not fully converge  (U=%s  S=%s  global=%s)\n",
             result.converged_U, result.converged_S, result.converged_global)
-    @printf("Plots will still be produced from the (non-converged) model state.\n")
+    @printf("The accounting and the fit table below come from the non-converged model state.\n")
 end
 flush(stdout)
 
 # ============================================================
 # 3. Equilibrium objects and accounting
 # ============================================================
-# Where the skilled market has more than one equilibrium, the plots show the one the
-# estimation would select against the bundle's targets (select_equilibrium).
+# With several skilled equilibria, report the one the estimation selects against the
+# bundle's targets.
 if BUNDLE !== nothing && result.ok
     sel = select_equilibrium(model, BUNDLE.spec)
     sel.model === nothing || (model = sel.model)
@@ -345,20 +330,8 @@ end
 obj = compute_equilibrium_objects(model)
 print_accounting(obj)
 
-# ============================================================
-# 3b. Moment-fit table (printed before the graphs)
-# ============================================================
 fit_res = print_smm_moment_table(obj, BUNDLE)
 flush(stdout)
-
-# ============================================================
-# 4. Generate all single-run plots
-# ============================================================
-println("\nGenerating figures...")
-flush(stdout)
-
-@time make_all_plots(obj; output_dir = PLOTS_DIR,
-                          PS    = skl_par.PS)
 
 println("\nDone.")
 flush(stdout)

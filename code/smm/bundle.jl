@@ -1,106 +1,46 @@
 ############################################################
-# bundle.jl — ONE shape for the estimate bundle, one writer, one reader.
+# smm/bundle.jl — the estimate bundle: one shape, one writer, one reader
 #
-# THE PROBLEM THIS SOLVES. Before v19.6.0 four different sites serialised an estimate
-# bundle and each wrote a different field set:
+# A bundle is a NamedTuple serialised to estimate_<window><suffix>_<point>.jls
+# (`estimate_path`, paths.jl). Every field is always present; information a writer
+# does not produce is `nothing`. Fields:
 #
-#   smm_main.jl   (SMM final)        result, spec, sim, provenance
-#   smm.jl        (SA/DE checkpoint) result, spec, checkpoint, tag
-#   MCMC_main.jl  (MCMC checkpoint)  result, spec
-#   MCMC_main.jl  (posterior mean)   result, spec, provenance
+#   schema         BUNDLE_SCHEMA (smm_params.jl)
+#   stage          what the file is (BUNDLE_STAGES):
+#                    :smm             finished smm_main run; SEs only once MCMC_main's
+#                                     chain-free pass has added them
+#                    :smm_checkpoint  incumbent written at an SA or DE reheat; resumable,
+#                                     not an estimate
+#                    :mcmc_checkpoint best point a chain visited (MCMC_CHECKPOINT); a record
+#                    :mcmc            the chain's estimate, the posterior mean of the draws
+#                    :mcmc_aborted    chain hit the acceptance floor or drift abort; never an
+#                                     estimate, but its Jacobian SEs are kept
+#                    :superseded      the point no longer solves under the current spec
+#   result, spec   SMMResult and SMMSpec (positional structs: see smm_params.jl)
+#   provenance     RunProvenance
+#   sim            SimParams of the run (final :smm bundles only)
+#   se, se_source  standard-error columns and how they were produced: (sandwich, bound,
+#                  chain) with the chain covariance as bread (:chain_bread_fd/_design), or
+#                  (curvature, bound, chain) with (Ĝ′WĜ)⁻¹ (:jacobian_fd/_design)
+#   mcmc           chain record, including the file it was seeded from
+#   vacancy_costs  (k = (U, S), se, post): the costs at the estimate, their delta-method
+#                  SEs and the chain's posterior summary
+#   attracting     (D, market, joint) of `attracting_check` (smm.jl)
+#   tag            free-text label (checkpoints)
 #
-# While MCMC overwrote the SMM bundle in place, whichever writer touched a window last
-# decided what the file contained. The audit that prompted this found
-# smm_result_base_fc_diagonalW.jls carrying TWO fields, written by the MCMC checkpoint: no
-# provenance, so a table could not record which version produced the number, and no
-# marker, so a table could not tell an optimiser point from a sampled one. Since v57.0.0
-# each estimate has a file of its own (`estimate_path`, paths.jl), and no run writes into
-# another's: smm_main writes the SMM estimates, a chain run the chain's estimate, and the
-# chain-free pass only adds its standard errors to the SMM bundle it read.
-#
-# WHY A CONSTANT FIELD SET RATHER THAN OPTIONAL FIELDS. Every field below is always
-# present; absent information is `nothing`. A reader then asks `b.se === nothing` instead
-# of `hasproperty(b, :se)`, and the difference matters: `hasproperty` returning false is
-# ambiguous between "this writer does not produce standard errors" and "this bundle predates
-# the field", and those call for different handling. A constant shape removes the ambiguity.
-#
-# WHY THIS IS SAFE FOR EXISTING FILES. The bundle is a NamedTuple, read by name, so adding
-# fields cannot break an old file — an old bundle simply lacks the new names, and
-# `read_bundle` below normalises it to this shape in memory. Adding a field to SMMResult
-# would NOT be safe: that is a struct, read positionally by the deserialiser, and a field
-# added anywhere in it makes every stored bundle unreadable. Nothing here touches SMMResult.
-#
-# THE `stage` FIELD is the one that makes a plotting layer possible. It answers, without
-# probing, the only two questions a consumer has: is this a finished estimate or a mid-run
-# resume artifact, and are there standard errors in it.
-#
-#   :smm             smm_main finished. sim present. Standard errors only once the
-#                    chain-free pass of MCMC_main has added its own (se_source
-#                    :jacobian_fd or :jacobian_design, after MCMC_JAC_METHOD).
-#   :smm_checkpoint  written at an SA or DE reheat. Resumable, not final.
-#   :mcmc_checkpoint the best point a chain visited, in estimate_<w>_mcmcbest.jls, written
-#                    only with MCMC_CHECKPOINT = true. A record, never an estimate.
-#   :mcmc            the chain's estimate: the posterior mean of the retained draws, with
-#                    the chain's standard errors and diagnostics.
-#   :mcmc_aborted    the same file when the chain hit the acceptance floor or the drift
-#                    abort. The draws are not a stationary sample, so no consumer takes
-#                    this file as an estimate.
-#   :superseded      the point no longer solves under the current specification. Present so
-#                    a stale file can say so instead of being silently read as an estimate.
-#
-# A chain run records the file it was seeded from as `mcmc.seed`. RunProvenance is a
-# struct, read positionally, so a field added to it would make every stored bundle
-# unreadable; the mcmc NamedTuple is read by name.
-#
-# `vacancy_costs` holds the vacancy costs at the estimate. They are estimated parameters,
-# but the optimiser's coordinates are the tightnesses and the solve computes the costs from
-# free entry, so they are not in θ and are stored here: `(k = (U, S), se, post)`, with `se`
-# their delta-method standard errors (keyed as the parameters' `se`, each `(U, S)`) and `post`
-# the chain's posterior summary, each `nothing` when the writer did not produce it. `attracting` is
-# the free-entry slope check at the estimate, `(D, market, joint)` (smm.jl,
-# `attracting_check`), or `nothing`.
-#
-# `se` is a NamedTuple of columns or `nothing`, and `se_source` names how they were produced.
-# The first column is the sandwich, keyed by its bread: `(sandwich, bound, chain)` with the
-# chain's covariance as bread (se_source :chain_bread_fd or :chain_bread_design), and
-# `(curvature, bound, chain)` with J⁻¹ = (Ĝ′WĜ)⁻¹ (se_source :jacobian_fd or
-# :jacobian_design), which is what the chain-free pass and an aborted chain carry; the
-# suffix is MCMC_JAC_METHOD, how Ĝ was measured. An ABORTED chain still yields Jacobian-based
-# standard errors, so the refusal to report belongs at the table, not here: a bundle that
-# discards a computed number destroys information, while a table that prints one without its
-# caveat misleads. Both failures are avoidable; only one is avoidable here.
+# Entry points: write_bundle, read_bundle, require_current_estimate, bundle_summary.
 ############################################################
-
-# BUNDLE_SCHEMA lives in smm_params.jl, where it already existed with exactly this meaning
-# ("Current bundle-format version. Bump only on a shape change") and feeds
-# RunProvenance.schema. Defining a second one here shadowed it: Julia warned on every run,
-# and provenance.schema would have reported 1 or 2 depending on include order — a value
-# declared in one place and effective in another, which is the defect class check_forwarding
-# exists for. It is bumped to 2 at its own definition instead.
 
 const BUNDLE_STAGES = (:smm, :smm_checkpoint, :mcmc_checkpoint, :mcmc, :mcmc_aborted,
                        :superseded)
 
 """
-    provenance_from_path(path) -> RunProvenance
+    provenance_from_path(path) → RunProvenance
 
-Build provenance for a writer that does not know which window it is writing.
-
-`write_checkpoint` is called from inside `_run_sa` and `_run_de`, neither of which receives
-the window: `SMMSpec` carries no window field, and threading one down two call layers to
-label a resume artifact is not worth the signature churn. The filename is constructed at
-exactly one place — `estimate_path` in paths.jl — so parsing it back is reliable.
-
-Every filename generation is matched: `smm_result_<window><suffix>.jls` (before v19.6.0),
-`estimate_<window><suffix>.jls` (before v57.0.0) and the tagged
-`estimate_<window><suffix>_<point>.jls`, so an old bundle still yields its window rather
-than losing it.
-
-When neither pattern matches, `window` and `w_suffix` are listed in `unrecorded` rather than
-guessed. `run_provenance` supplies the git SHA, host and timestamp itself, so those are never
-fabricated here either. Before v19.6.0 the checkpoint carried no provenance at all while its
-own docstring claimed it did — which is how a resume artifact became indistinguishable from
-a finished estimate on disk.
+Provenance for a writer that does not know its window (`write_checkpoint`), parsed from the
+bundle filename. Every filename generation is recognised (`smm_result_<w><suffix>.jls`,
+`estimate_<w><suffix>.jls`, `estimate_<w><suffix>_<point>.jls`); an unrecognised name
+records `window` and `w_suffix` as `unrecorded` rather than guessing them.
 """
 function provenance_from_path(path::AbstractString)
     m = match(r"^(?:estimate|smm_result)_(.+?)(_[a-zA-Z]+W)(?:_[a-z_]+)?\.jls$", basename(path))
@@ -113,16 +53,11 @@ end
 
 """
     write_bundle(path; result, spec, stage, provenance, sim, se, se_source, mcmc,
-                 vacancy_costs, attracting, tag)
+                 vacancy_costs, attracting, tag) → path
 
-Serialise an estimate bundle in the one documented shape, atomically.
-
-`stage` must be one of `BUNDLE_STAGES`; an unknown value is an error rather than a warning,
-because a bundle whose stage a consumer cannot interpret is worse than no bundle.
-
-The write is temp-then-`mv`. That is not cosmetic: MCMC overwrites the SMM bundle in place,
-so the file being written is the only copy of the incumbent, and a kill mid-write must leave
-the previous bundle intact rather than a truncated file where the warm start looks.
+Serialise an estimate bundle to `path` in the documented shape and return `path`; an empty
+`path` writes nothing. `stage` must be one of `BUNDLE_STAGES`. The write goes to a temporary
+file and is then moved into place, so a kill mid-write leaves the previous bundle intact.
 """
 function write_bundle(path::AbstractString;
                       result,
@@ -163,21 +98,12 @@ function write_bundle(path::AbstractString;
 end
 
 """
-    read_bundle(path) -> NamedTuple | nothing
+    read_bundle(path) → NamedTuple | nothing
 
-Load a bundle and normalise a schema-1 file to the current shape. Returns
-`nothing` when the file is absent or cannot be deserialised — a caller that needs the
-distinction should check `isfile` first.
-
-`stage` is INFERRED for a pre-v2 file, from the fields that writer left behind:
-
-  has `checkpoint`  -> :smm_checkpoint   (only write_checkpoint set that flag)
-  has `sim`         -> :smm             (only smm_main's final write carried sim)
-  otherwise         -> :smm_checkpoint
-
-The fallback is deliberately the conservative one. A two-field bundle could have come from
-either the MCMC checkpoint or an early writer, and calling it a checkpoint understates it at
-worst; calling it a finished estimate would let a table report it as one.
+Load the bundle at `path`, or `nothing` when the file is absent or cannot be deserialised.
+A schema-1 file is normalised to the current shape, with `stage` inferred conservatively:
+`:smm_checkpoint` if it carries the checkpoint flag, `:smm` if it carries `sim`,
+`:smm_checkpoint` otherwise.
 """
 function read_bundle(path::AbstractString)
     isfile(path) || return nothing
@@ -206,41 +132,34 @@ function read_bundle(path::AbstractString)
 end
 
 """
-    bundle_has_se(b) -> Bool
+    bundle_has_se(b) → Bool
 
-Whether `b` carries standard errors a table may print: an `:smm` bundle the chain-free
-pass has added its standard errors to, or a chain's `:mcmc` / `:mcmc_aborted` bundle. A
-table printing them under `:mcmc_aborted` must also print the abort reason, the realised
-R-hat and the accepted-move count; see the footer in MCMC_main.jl for the wording that has
-to travel with the number.
+Whether bundle `b` carries standard errors a table may print: an `:smm` bundle with the
+chain-free pass's standard errors, or a chain's `:mcmc` / `:mcmc_aborted` bundle. Under
+`:mcmc_aborted` a table must also print the abort reason, R̂ and the accepted-move count
+(see the footer in MCMC_main.jl).
 """
 bundle_has_se(b) = b.se !== nothing && b.stage in (:smm, :mcmc, :mcmc_aborted)
 
 """
-    bundle_is_final(b) -> Bool
+    _major(v) → Int | nothing
 
-Whether `b` is a finished estimate rather than a mid-run resume artifact. A plotting or
-table script should refuse a non-final bundle: a checkpoint is a point the run had reached,
-not a point it stopped at, and a figure captioned as an estimate should not be built from one.
+The MAJOR component of a version string `"M.m.p"`.
 """
-bundle_is_final(b) = b.stage in (:smm, :mcmc, :mcmc_aborted)
-
 _major(v::AbstractString) = tryparse(Int, first(split(v, '.')))
 
-# How closely a bundle written by another MAJOR version must reproduce its stored Q under
-# this code to be read as an estimate: rounding, not a change in the model's equilibrium.
+# Relative agreement with its stored Q at which a bundle of another MAJOR version is read as
+# an estimate under this code: rounding, not a change of equilibrium.
 const REPRODUCE_RTOL = 1.0e-10
 
 """
-    require_current_estimate(b, path) -> evaluation or nothing
+    require_current_estimate(b, path) → evaluation | nothing
 
-Stop unless the bundle at `path` is an estimate under this code. One written by this MAJOR
-version is. One written by another is if its stored parameter vector still scores its
-stored Q: the point is re-evaluated with the bundle's own spec (`equilibrium_at`) and
-accepted when that Q is finite and within `REPRODUCE_RTOL` of the stored one, since a MAJOR
-change that leaves the estimate's equilibrium where it was does not move the estimate.
-Nothing is written; the bundle's provenance stays as written. Returns the evaluation when
-one was made, `nothing` otherwise.
+Raise unless bundle `b` (read from `path`) is an estimate under this code. A bundle written
+by this MAJOR version is; one written by another is if its stored parameter vector,
+re-evaluated with its own spec (`equilibrium_at`), reproduces its stored Q to within
+`REPRODUCE_RTOL`. Nothing is written. Returns the evaluation when one was made, `nothing`
+otherwise.
 """
 function require_current_estimate(b, path::AbstractString)
     p = hasproperty(b, :provenance) ? b.provenance : nothing
@@ -263,15 +182,11 @@ function require_current_estimate(b, path::AbstractString)
 end
 
 """
-    bundle_summary(b) -> String
+    bundle_summary(b) → String
 
-One line for a log or a banner: stage, Q, free-parameter count, version, and whether
-standard errors are present. Printed wherever a bundle is loaded, so a run's log records
-which kind of file it actually opened.
-
-`v=` is the version that WROTE the file. A migrated bundle was written by a version that
-did not produce its estimate, so the chain it came through is printed beside it — without
-that, the one line a reader sees would name the wrong code.
+One log line for bundle `b`: stage, stored Q, free-parameter count, the version that wrote
+the file (and, for a migrated bundle, the versions it came through), the standard-error
+source and the tag.
 """
 function bundle_summary(b)
     q = b.result === nothing ? NaN : b.result.loss_opt

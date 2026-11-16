@@ -1,75 +1,57 @@
 ############################################################
-# transition_values.jl — Step 2 of the transition: the backward pass
+# transition_values.jl — the backward pass of the transition (step 2)
 #
-# Solves the time-dependent values along a given tightness path, from the terminal
-# date inward.  Each value V carries the discount ϱ_V of its stationary HJB, and the
-# implicit one-step recursion is
+# The time-dependent values along a given tightness path, from the terminal date inward,
+# by the implicit step  V(t) = [flow_V(t) + V̂(t+dt)/dt] / (ϱ_V + 1/dt),  V̂ the ENVELOPE of
+# the state at t+dt after that date's choices, never the agent's own branch (spec P0); with
+# 1/dt = 0 it is the stationary equation, the terminal condition. Entry point:
+# `_backward_pass!`.
 #
-#     V(t) = [ flow_V(t) + V̂(t+dt)/dt ] / (ϱ_V + 1/dt),
+# Choices re-made at every date and the envelope each continuation is valued on:
+#   unskilled unemployed   search or train          U_U = max{C, −c(aS) + T}
+#   in training            none (never abandoned)   T, which continues on U_S
+#   skilled unemployed     which market             U_S = max{U_S^(0), U_S^(1)}
+#   unskilled match        continue or end          [S_U]⁺
+#   skilled match          search on the job, end   max{0, S⁰, S¹}
+# A model with held choices (`Model.held`) takes τ, d and those envelopes as held.
 #
-# where V̂(t+dt) is the value of the state the agent is in at t+dt AFTER that date's
-# choices: the envelope, never the agent's own branch (transition_spec.md, P0).  With
-# 1/dt = 0 the step is the stationary equation, which is the terminal condition.
-#
-# The choices re-made at every date, and the envelope each continuation is valued on:
-#   unskilled unemployed   search or train            U_U = max{C, −c(aS) + T}
-#   in training            none: cannot be abandoned  T continues on T
-#   skilled unemployed     which market to search     U_S = max{U_S^(0), U_S^(1)}
-#   unskilled match        continue or end            [S_U]⁺
-#   skilled match          search on the job, end     max{0, S⁰, S¹}
-# T continues on U_S, and both crossing branches continue on U_S.
-#
-# HELD CHOICES.  A z₁ model that holds its education choices (`Model.held`, a cf1 window)
-# re-makes neither of the first and third choices: τ and d are the held arrays at every
-# date, and every envelope over training or over the market is the held branch of its node
-# (`trains_at`, `drains_at`, `skilled_value_at`, unskilled.jl), as in its stationary solve.
-# τ then never moves between dates, so no slice is swept or released.
-#
-# FLOW VALUES OF UNEMPLOYMENT.  A match's outside option enters its surplus as the flow
-# z = (r+ν)U − U̇ (spec V4), which the recursion gives without the stationary
-# substitution: b_U + κ_U β_U S_U(·,1) for an unskilled searcher, b_S + κ_S β_S ∫S dΓ for
-# a skilled searcher, (r+ν)U_tr − (Û − U_tr)/dt for a type in training, and
-# (r+ν+1/dt)U_S − Û_S/dt for a skilled type whose envelope is the crossing branch.
-#
-# TWO DIMENSIONS WHERE A LATER CHOICE DIFFERS.  A value depends on the whole type
-# (aU, aS) only through a choice made at some later date.  A type that searches the
-# unskilled market at every later date has the one-dimensional U^search(aU) of the
-# stationary solver, and a type that stays skilled at every later date the
-# one-dimensional U_S^(0)(aS); for them the recursion is exactly the one-dimensional
-# one.  The full per-type surfaces are solved on the other types only (`pureU`,
-# `pureS`), which is the reduction R1 of the spec, exact by construction.
-#
-# A CELL HAS TWO SLICES.  τ is the covered fraction of a cell that trains, the
-# stationary solver's convention.  The searching slice holds the cell's unskilled
-# unemployed and the matches whose outside option is search; the training slice holds
-# the matches of workers the frontier has enclosed, whose outside option is training.
-# When τ rises between dates the share (τ'−τ)/(1−τ) of the searching slice joins the
-# training slice, and when it falls the share (τ−τ')/τ of the training slice's matches
-# returns: each slice's continuation mixes the two in those proportions, which is the
-# reallocation the forward pass applies.
-#
-# STRADDLING CELLS.  Cutoffs are represented, as in the stationary solver, by the
-# coverage weight ω of the cell containing them, and the node just below a cutoff (the
-# boundary node) carries the surplus's linear extension, which locates the zero.  A
-# match's continuation is the positive part of the next date's surplus, zero at and below
-# the boundary node, since a match whose surplus is negative ends.  The boundary node's raw
-# value is added back only where the same node is the boundary at both dates: there it
-# keeps a steady state exact, and where the cutoff has moved past the node the match ends
-# and its continuation is 0.
+# Outside options enter as the flow z = (r+ν)U − U̇ (spec V4), without the stationary
+# substitution. Types that make no different choice at any later date (`pureU`, `pureS`)
+# have the stationary solver's one-dimensional values exactly; per-type surfaces are solved
+# only on the others. A cell has a searching slice (share 1−τ) and a training slice (τ),
+# mixed in each continuation as the forward pass reallocates them. A cutoff is the coverage
+# weight ω of its cell, and the boundary node below it keeps its raw value to locate the
+# zero only while it stays the boundary (`_continuation!`, `_drop_moved_edges!`).
 ############################################################
 
-# A covered fraction that moves by less than this between dates has not moved.  The
-# fractions agree at a steady state to a few ulps, and 1e-12 of a cell carries no mass.
+# A covered fraction moving by less than this has not moved (a steady state holds its
+# fractions to a few ulps).
 const FRONTIER_MOVE_TOL = 1e-12
 
-# Share of a cell's searching slice that the training frontier encloses between two dates,
-# and share of its training slice that the frontier releases.
+"""
+    sweep_share(τ_now, τ_next) -> Float64
+
+Share (τ_next − τ_now)/(1 − τ_now) of a cell's searching slice the training frontier
+encloses between two dates; 0 unless the frontier advances.
+"""
 @inline sweep_share(τ_now::Float64, τ_next::Float64) =
     (τ_next - τ_now > FRONTIER_MOVE_TOL && τ_now < 1.0) ? (τ_next - τ_now) / (1.0 - τ_now) : 0.0
+
+"""
+    return_share(τ_now, τ_next) -> Float64
+
+Share (τ_now − τ_next)/τ_now of a cell's training slice the frontier releases between two
+dates; 0 unless the frontier retreats.
+"""
 @inline return_share(τ_now::Float64, τ_next::Float64) =
     (τ_now - τ_next > FRONTIER_MOVE_TOL && τ_now > 0.0) ? (τ_now - τ_next) / τ_now : 0.0
 
-# Two-slot ring for the per-type surfaces: date n writes its slot, date n+1's is the other.
+"""
+    _slot(n) -> Int
+
+Slot of date n in the two-slot ring of per-type surfaces (date n writes its slot and reads
+date n+1's, the other).
+"""
 @inline _slot(n::Int) = isodd(n) ? 1 : 2
 
 
@@ -77,9 +59,12 @@ const FRONTIER_MOVE_TOL = 1e-12
 #  Shared pieces
 # ════════════════════════════════════════════════════════════
 
-# The boundary nodes of a cutoff, which carry the surplus's linear extension: the last node
-# below it, or the top two nodes when it lies above the grid, where the zero is extrapolated
-# through both (`_unskilled_cutoff`).
+"""
+    _boundary(p, pstar) -> (lo, hi)
+
+The boundary nodes of a cutoff, which carry the surplus's linear extension: the last node
+below it, or the top two nodes when it lies above the grid.
+"""
 @inline function _boundary(p::Vector{Float64}, pstar::Float64)
     Np = length(p);  ps = clamp01(pstar)
     p[Np] < ps && return (Np - 1, Np)
@@ -87,20 +72,23 @@ const FRONTIER_MOVE_TOL = 1e-12
     return (j0, j0)
 end
 
-# A continuation with no boundary values, and an edge weighted by a slice share.
+# A continuation with no boundary values.
 const NO_EDGE = ((0, 0), 0.0, 0.0)
+
+"""
+    _scaled(edge, w) -> edge
+
+The boundary values of `edge` weighted by the slice share `w`.
+"""
 @inline _scaled(edge, w::Float64) = (edge[1], w * edge[2], w * edge[3])
 
 """
     _continuation!(E, S, p, pstar) -> edge
 
-The value a match of each quality carries into the date whose raw surface is `S` and
-cutoff `pstar`: the positive part of `S` above the boundary nodes (`_boundary`), zero below
-them, since a match whose surplus is negative ends and an ended match is worth nothing.  The
-boundary nodes keep their raw values, which only locate the zero and keep a steady state
-exact; they are returned as `edge = (nodes, S[lo], S[hi])`, and the date's solve takes them
-out again where its solution's boundary nodes differ (`_drop_moved_edges!`): there the
-cutoff has moved past the node, the match ends, and its continuation is 0.
+Write to `E` the value a match of each quality carries into the date whose raw surface is
+`S` and cutoff `pstar`: the positive part of `S` above the boundary nodes, zero below them
+(the match ends), and the raw value at the boundary nodes, which locates the zero and keeps
+a steady state exact. Returns `edge = (nodes, S[lo], S[hi])` for `_drop_moved_edges!`.
 """
 function _continuation!(E::AbstractVector{Float64}, S::AbstractVector{Float64},
                         p::Vector{Float64}, pstar::Float64)
@@ -111,12 +99,14 @@ function _continuation!(E::AbstractVector{Float64}, S::AbstractVector{Float64},
     return (b, S[b[1]], S[b[2]])
 end
 
-# Take out of the continuation `E` the boundary values of every edge whose nodes are not
-# the boundary nodes of the date's cutoff `pst`, which has moved past them; true if any was.
-# A date is solved with the boundary values in place, which leaves a steady state and every
-# date whose boundary did not move exactly as they were, and solved again from there when
-# this returns true.  `converged = false` drops every edge: the solve found no cutoff that
-# keeps its boundary nodes (it cycles between cells), so the cutoff has moved.
+"""
+    _drop_moved_edges!(E, edges, p, pst, converged) -> Bool
+
+Remove from the continuation `E` the boundary values of every edge whose nodes are no longer
+the boundary nodes of the date's cutoff `pst` (the cutoff moved past them: the match ends);
+every edge when `converged` is false. Returns whether any was removed, in which case the
+caller solves the date once more.
+"""
 function _drop_moved_edges!(E::AbstractVector{Float64}, edges, p::Vector{Float64}, pst::Float64,
                             converged::Bool)
     bn = _boundary(p, pst);  moved = false
@@ -132,10 +122,9 @@ end
 """
     _unskilled_cutoff(p, raw) -> p*
 
-Zero of a raw unskilled surface over the support [0, 1], on the line through the two
-nodes that bracket it, or through the two end nodes when it lies outside the grid.  At a
-steady state the surface is affine and this is `update_pstar_from_surplus!`'s formula,
-including a zero above the top node.
+Zero of a raw unskilled surface over [0, 1], on the line through the two nodes that bracket
+it, or through the two end nodes when it lies outside the grid (`update_pstar_from_surplus!`'s
+formula at a steady state).
 """
 function _unskilled_cutoff(p::Vector{Float64}, raw::AbstractVector{Float64})
     Np = length(p)
@@ -155,13 +144,12 @@ end
     _unskilled_surface!(raw, E, E1, PUeff, p, wG, λ, D, inv_dt, tol, maxit, pst;
                         zfix, b, κβ, edges) -> (S1, S1_raw, pst, iters, resid)
 
-One date of an unskilled match surface: `raw(p) = [A P_U aU p − z + λ I + E(p)/dt] / D`,
-`I = ∫ ω raw dG`, the entry surplus `S(1)` from `entry_surplus_unskilled` with the
-continuation `E1` at p = 1 (and its value before the positive part, `S1_raw`), and the cutoff.  `edges` are the boundary values `E` carries
-(`_continuation!`); where the solution's cutoff has moved past them they are taken out of
-`E`, which is overwritten, and the date is solved again from there.  The flow value of unemployment is `zfix`
-when given, otherwise the searcher's `b + κβ S(1)`, which depends on the surface being solved,
-so the pass iterates until the three agree.
+One date of an unskilled match surface, written to `raw`:
+`raw(p) = [A P_U aU p − z + λ I + E(p)/dt] / D`, `I = ∫ ω raw dG`, with the entry surplus
+`S(1)` (`entry_surplus_unskilled`, continuation `E1` at p = 1; `S1_raw` before the positive
+part) and the cutoff, iterated jointly from `pst` to `tol`. The flow `z` is `zfix` when
+given, otherwise the searcher's `b + κβ S(1)`. Where the cutoff moves past the boundary
+values `edges` carried by `E`, they are removed from `E` and the date solved once more.
 """
 function _unskilled_surface!(raw::AbstractVector{Float64}, E::AbstractVector{Float64},
                              E1::Float64, PUeff::Float64, p::Vector{Float64},
@@ -194,8 +182,9 @@ end
 """
     _training_slice_hire_share!(path, model, n, D)
 
-The hired share of every training slice's meetings at date n (`crosser_hire_share`), from
-the date's row entry surplus and the slice's own; zero where the cell does not train.
+Write the hired share χ_t of every training slice's meetings at date n
+(`crosser_hire_share`, from the date's row entry surplus and the slice's own); zero where
+the cell does not train.
 """
 function _training_slice_hire_share!(path::TransitionPath, model::Model, n::Int, D::Float64)
     hp = hire_profile(view(path.SU1, :, n), model, D)
@@ -229,22 +218,15 @@ end
                        PSeff, z, σS, ϱ, λ, β, κ, inv_dt) -> Float64
 
 One pass of the two skilled branch values at a single type, both continuing on the
-envelope `E` of the next date (spec V6, Part 4 step 3):
+envelope `E` of the next date (`_continuation!`; spec V6):
 
     S^s = [F^s + E/dt] / (ρ^s + 1/dt),   F⁰ = A P_S aS p − z + λ I_s,
     F¹ = F⁰ − σ + κβ ∫_p S dΓ,           ρ⁰ = ϱ,  ρ¹ = ϱ + κ(1 − Γ(p)).
 
-Writes the branches, the destination value of each cell and the OJS score; returns the
-sup-norm change of the branches.  `E` is the continuation (`_continuation!`).
-
-The destination value is the envelope `ω·max(S⁰,S¹)⁺` plus the stationary solver's
-smoothing of the cell the OJS cutoff straddles, `s R¹ + (1−s) R⁰ − max(R⁰,R¹)` on the
-flow-equivalent values `R^s = F^s/ρ^s`; it is zero wherever the OJS share is 0 or 1 on
-the branch that is larger.  The score is the OJS gain against the envelope,
-`[F¹ − F⁰ − κ(1−Γ) S] / ρ`, divided by the discount of the branch NOT chosen; at a steady
-state both equal the solver's objects exactly (`R^s` is its raw branch value, and the
-score is R¹ − R⁰), so the cutoffs nest, while off a steady state the score has the sign
-of the spec's OJS choice.
+Writes the branches, the destination value `Sdest` (the envelope `ω·max(S⁰,S¹)⁺` plus the
+stationary solver's smoothing of the OJS-straddling cell on `R^s = F^s/ρ^s`) and the OJS
+score (the gain against the envelope over the discount of the branch not chosen; R¹ − R⁰
+at a steady state). Returns the sup-norm change of the branches.
 """
 function _skilled_branches!(b0::AbstractVector{Float64}, b1::AbstractVector{Float64},
                             Sdest::AbstractVector{Float64}, score::AbstractVector{Float64},
@@ -281,8 +263,8 @@ end
     _skilled_cutoffs(env, b0, b1, score, sg, pst) -> (pst, poj, M)
 
 The cutoffs the branch values imply, by the rules of `cutoff_proposals!`: p*_S where the
-envelope crosses zero, the participation score M and p^oj_S where the OJS score does.
-`env` is scratch for the envelope.
+envelope crosses zero, the participation score M, and p^oj_S ≥ p*_S where the OJS score
+crosses zero. `env` is scratch.
 """
 function _skilled_cutoffs(env::Vector{Float64}, b0::AbstractVector{Float64},
                           b1::AbstractVector{Float64}, score::AbstractVector{Float64},
@@ -311,14 +293,10 @@ end
 """
     _seed_terminal_values!(path, model_z1)
 
-Write date `Nt` from the converged `z₁` caches: the boundary condition of the backward
-recursion.  The one-dimensional values and cutoffs are copied; the raw surfaces are
-rebuilt from them, because the caches store only the ω-weighted, positive-part
-transforms (`J`), which cannot be inverted where `ω = 0`.  Rebuilding is one pass of the
-stationary equations at `z₁`'s own converged tails, so it lands on `z₁`'s fixed point.
-
-The per-type values are the solver's own (`career_choices!`): the crossing branch
-U_S^(1), the training value on `max{U_S^(0), U_S^(1)}` (or the held branch), and τ.
+Write date `Nt`, the terminal condition, from the converged `z₁` caches: the values,
+cutoffs and per-type choices are copied (`career_choices!`'s U_S^(1), T, τ); the raw
+surfaces are rebuilt by one pass of the stationary equations at `z₁`'s converged tails,
+because the caches hold only ω-weighted positive parts, not invertible where ω = 0.
 """
 function _seed_terminal_values!(path::TransitionPath, model_z1::Model)
     cp = model_z1.common;  up = model_z1.unsk_par;  sp = model_z1.skl_par
@@ -410,9 +388,8 @@ end
 """
     _training_step!(path, model, n; inv_dt)
 
-Training value at date n, `(r+φ+ν) T = b_T + φ U_S + Ṫ`, with the cross-block term
-`U_S = max{U_S^(0), U_S^(1)}` of the next date (spec Part 4, step 1), its held branch where
-the model holds its choices, and the training option `−c(aS) + T`.
+Training value at date n, `(r+φ+ν) T = b_T + φ U_S + Ṫ` with U_S the next date's
+envelope (or held branch), and the training option `−c(aS) + T`.
 """
 function _training_step!(path::TransitionPath, model::Model, n::Int; inv_dt::Float64)
     cp = model.common;  gp = model.grids;  held = model.held
@@ -430,8 +407,8 @@ end
     _unskilled_search_step!(path, model, n, wG, iters, resid; inv_dt)
 
 Date-n values of a type that searches the unskilled market at every later date: the
-one-dimensional U^search(aU), its surface and cutoff, the objects of the stationary
-unskilled block.
+one-dimensional U^search(aU), its surface, entry surplus and cutoff. Threaded over a_U;
+writes each row's iteration count and residual to `iters`, `resid`.
 """
 function _unskilled_search_step!(path::TransitionPath, model::Model, n::Int,
                                  wG::Vector{Float64}, iters::Vector{Int},
@@ -465,9 +442,9 @@ end
 """
     _slice_continuations!(Es, Et, path, buf, i, j, n, p) -> (edge_s, edge_t)
 
-The two continuation surfaces of cell (i,j) into date n+1, with their boundary values: the
-searching slice's (per-type when it was solved per type at n+1, the one-dimensional surface
-otherwise) and the training slice's (zero where the cell had no training slice).
+Write to `Es`, `Et` the continuations of cell (i,j) into date n+1 and return their edges:
+the searching slice's (per-type where it was solved per type at n+1, else the
+one-dimensional surface) and the training slice's (zero where the cell had none).
 """
 function _slice_continuations!(Es::Vector{Float64}, Et::Vector{Float64},
                                path::TransitionPath, buf, i::Int, j::Int, n::Int,
@@ -487,20 +464,14 @@ end
 """
     _unskilled_slices_step!(path, model, n, wG, buf; inv_dt)
 
-Date-n per-type unskilled values: the training fraction τ, the searching slice's value C
-and surface, and the training slice's surface.
+Date-n per-type unskilled values: the training fraction τ, the searching slice's value C,
+surface and cutoff, the training slice's surface and cutoff, and χ_t.
 
-The frontier is located on the value of searching at n and at n+1, C⁰: the
-one-dimensional U^search where the searching slice searches at every later date, the
-per-type value at no sweep otherwise.  That value is smooth in aS, so the covered
-fraction it gives is `training_policy!`'s own and a steady state returns its τ.  Where the
-next date's frontier encloses more of the cell, the types between the two frontiers train
-at n+1 in any case, and they train already at n when that beats searching for one step
-first, U_tr ≥ C¹ with C¹ the per-type value at a full sweep.  Locating the frontier on
-the swept value instead makes τ a fixed point of C(τ) whose slope is 1/(1−τ) near a full
-cell, and the iteration leaves the steady state.  With τ chosen, C is the searching slice's
-value at the share (τ'−τ)/(1−τ) that the frontier sweeps.  A model that holds its choices
-takes τ as held.
+τ is located (`training_policy!`) on C⁰, the searching value with no sweep, so a steady
+state returns its τ; locating it on the swept value would make τ a fixed point of C(τ) with
+slope 1/(1−τ) near a full cell, which leaves the steady state. Types between this and the
+next date's frontier then train at n if U_tr ≥ C¹, the value at a full sweep. C is the
+searching slice's value at the share the frontier sweeps. A held model takes τ as held.
 """
 function _unskilled_slices_step!(path::TransitionPath, model::Model, n::Int,
                                  wG::Vector{Float64}, buf; inv_dt::Float64)
@@ -608,14 +579,10 @@ end
     _skilled_value_step!(path, model, n, iters, resid; inv_dt)
 
 Date-n values of a type that stays skilled at every later date: U_S^(0)(aS), the two
-branch values, their cutoffs and the destination values, the objects of the stationary
-skilled block.  Both branches continue on the envelope max{S⁰, S¹} of the next date.
-
-The participation weight `part` of a cell is a covered fraction across NEIGHBOURING
-types (`ojs_participation!`), so it cannot be formed inside the per-type loop that needs
-it: the date is swept with `part` held fixed, the weight is rebuilt from the scores the
-sweep produced, and the sweep repeats until the weight settles to `tol_outer_S`, the
-tolerance the stationary block applies to it.
+branch values (both on the next date's envelope max{S⁰, S¹}), their cutoffs and the
+destination values. The OJS participation weight is a covered fraction across
+neighbouring types (`ojs_participation!`), so the date is swept with it fixed, the weight
+rebuilt from the scores, and the sweep repeated until it settles to `tol_outer_S`.
 """
 function _skilled_value_step!(path::TransitionPath, model::Model, n::Int,
                               iters::Vector{Int}, resid::Vector{Float64};
@@ -695,20 +662,16 @@ end
 """
     _skilled_types_step!(path, model, n, buf; inv_dt)
 
-Date-n skilled branch values per type (spec V3, reading (A), the author's choice): the
-skilled unemployed choose the market at every date, and both branches continue on
-`U_S = max{U_S^(0), U_S^(1)}` of the next date,
+Date-n skilled values per type (spec V3, reading (A)): the skilled unemployed choose the
+market at every date, both branches continuing on the next date's U_S = max{U_S^(0), U_S^(1)},
 
     U_S^(1) = [b_S + κ_X E_U(a,1) + Û_S/dt] / (r+ν+κ_X+1/dt),   κ_X = κ_U χ_X,
     U_S^(0) = [b_S + κ_S β_S ∫S dΓ + Û_S/dt] / (r+ν+1/dt).
 
-A type that stays skilled at every later date and does not cross at n has the
-one-dimensional U_S^(0)(aS).  Every other type has a skilled outside option that prices
-the crossing, so its own skilled surface is solved, at the flow `z = (r+ν+1/dt)U_S −
-Û_S/dt`, with the column's OJS participation and cutoff.  The match a crosser enters and
-its hired share χ_X are `crossing_value`'s: the training slice's where training beats
-searching at the node, the searching slice's otherwise.  A model that holds its choices
-takes the market choice, the training choice at the node and every U_S as held.
+A crosser's match and hired share χ_X are the training slice's where training beats
+searching, the searching slice's otherwise. Types that stay skilled and do not cross take
+the one-dimensional U_S^(0)(aS); every other type solves its own skilled surface at
+`z = (r+ν+1/dt)U_S − Û_S/dt`. A held model takes every choice as held.
 """
 function _skilled_types_step!(path::TransitionPath, model::Model, n::Int, buf;
                               inv_dt::Float64)
@@ -793,9 +756,9 @@ end
 """
     _terminal_slices!(path, model, buf)
 
-The terminal date's per-type surfaces the recursion carries: the training slice of every
-cell with τ > 0, a stationary surface at the outside option (r+ν)U_tr, and the skilled
-surface of every type that crosses at the terminal date.
+The terminal date's per-type surfaces: the training slice of every cell with τ > 0 (a
+stationary surface at the outside option (r+ν)U_tr) and the skilled surface of every type
+that crosses at the terminal date (at (r+ν)U_S^(1)).
 """
 function _terminal_slices!(path::TransitionPath, model::Model, buf)
     Nt = length(path.tgrid)
@@ -864,21 +827,18 @@ end
 """
     _backward_pass!(path, model_z1, tp) -> (iters, resid, buf)
 
-Sweep dates `n = Nt-1 … 1` under the `z₁` parameters, solving the time-dependent values
-at the path's own tightness: the training value off the next date, the unskilled block,
-then the skilled block, which uses the same date's unskilled values (spec Part 4).
-Date `Nt` is the boundary condition.  Returns the largest within-date iteration count and
-residual of the one-dimensional blocks, and the per-type surfaces: slot 1 of `buf` holds
-date 1's (searching slice `Ss`, training slice `St`, skilled branches `K0/K1`) wherever
-its flags `hasS/hasT/hasK` are set; elsewhere date 1 is the one-dimensional surface.
+Solve the values at the path's tightness for dates `Nt−1 … 1` under the `z₁` parameters,
+from the terminal surfaces: at each date the training value, the unskilled blocks, then
+the skilled blocks, which read the same date's unskilled values. Returns the largest
+within-date iteration count and residual of the one-dimensional blocks, and `buf`, whose
+slot 1 holds date 1's per-type surfaces (`Ss`, `St`, `K0/K1`) where `hasS/hasT/hasK` are set.
 """
 function _backward_pass!(path::TransitionPath, model::Model, tp::TransitionParams)
     Nt = length(path.tgrid);  Nx = length(model.grids.x)
     NpU = length(model.unsk_grids.p);  NpS = length(model.skl_grids.p)
     wG = build_unskilled_G_weights(model.unsk_grids.p, model.unsk_grids.wp,
                                    model.unsk_par.α_U)
-    # The flags are Array{Bool}, not BitArray: threads write neighbouring cells, and a
-    # BitArray packs 64 of them into one word.
+    # Array{Bool}, not BitArray: threads write neighbouring cells.
     buf = (Ss = zeros(Nx, Nx, NpU, 2), St = zeros(Nx, Nx, NpU, 2),
            hasS = fill(false, Nx, Nx, 2), hasT = fill(false, Nx, Nx, 2),
            K0 = zeros(Nx, Nx, NpS, 2), K1 = zeros(Nx, Nx, NpS, 2),

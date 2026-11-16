@@ -1,8 +1,8 @@
-# Smoke test — the accounting guard fires on the v14.8 defect.
+# smoke/smoke_guard.jl — the parameter-accounting guard (run_smoke.sh).
 #
-# Rebuilds the crisis spec with ρ_x deleted from the pinned block, reproducing
-# exactly what v14.8 constructed, and checks that `assert_all_params_accounted`
-# raises at spec construction, before any solve, naming common:ρ_x.
+# Rebuilds the crisis spec with ρ_x deleted from the pinned block (neither free nor
+# pinned) and checks that `assert_all_params_accounted` raises before any solve, naming
+# common:ρ_x, and passes on the shipped spec.
 
 include(joinpath(@__DIR__, "main_spec_only.jl"))
 
@@ -33,7 +33,7 @@ end
 isnothing(caught) && error("SMOKE 7 FAILED: the guard did not fire on the v14.8 spec.")
 @printf("  guard raised: %s\n", sprint(showerror, caught))
 
-# And it passes on the v14.9 spec.
+# The shipped spec passes.
 assert_all_params_accounted(spec; context = "v14.9 crisis spec")
 println("  guard passes on the v14.9 spec.")
 

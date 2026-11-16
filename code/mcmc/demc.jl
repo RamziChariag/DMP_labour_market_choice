@@ -1,42 +1,30 @@
 ############################################################
-# smm/demc.jl — Differential-Evolution MCMC (DE-MC) sampler
+# mcmc/demc.jl — Differential-Evolution MCMC (DE-MC) sampler
 #
-# Julia port of the algorithm in the Lise–Meghir–Robin (2016)
-# replication package:
-#   FMPIOpt/src/mpi/mpi_mcmc_mod.f90
-#     · StartOptimizerMaster   (population loop, Metropolis accept)
-#     · ComputeParamCandidate  (the differential-evolution proposal)
+# Julia port of the sampler in the Lise–Meghir–Robin (2016) replication package,
+# FMPIOpt/src/mpi/mpi_mcmc_mod.f90 (StartOptimizerMaster: population loop and Metropolis
+# accept; ComputeParamCandidate: the DE proposal). ter Braak (2006): N chains run
+# together and each chain's proposal is built from differences between other chains, so
+# its scale and orientation adapt to the target. DREAM-style extras as in LMR: a
+# per-coordinate crossover CR, a periodic γ = 1 mode jump, additive and multiplicative
+# shocks, and replacement of stuck chains.
 #
-# Idea (ter Braak 2006, "A Markov Chain Monte Carlo version of the
-# genetic algorithm Differential Evolution"): run N chains in parallel
-# (a "population"). The proposal for chain c is built from DIFFERENCES
-# between other randomly chosen chains, so the proposal scale and
-# orientation self-adapt to the target covariance — no hand-tuned
-# proposal matrix. DREAM-style extras carried over from LMR:
-#   · per-dimension crossover CR (only a random subset of dims moves),
-#   · a periodic γ = 1 "mode jump" (every `jump_every` generations),
-#   · small additive (b_add) and multiplicative (b_mult) shocks.
+# Everything runs in the optimiser's unconstrained (logit) space. The caller supplies the
+# log quasi-posterior logπ(t), which returns −Inf at an infeasible point.
 #
-# Everything runs in the optimiser's UNCONSTRAINED (logit) space, so any
-# draw maps back inside the (lb,ub) box via `_to_constrained`. The caller
-# supplies the log quasi-posterior `logπ(θ)` (see MCMC_main.jl). Infeasible
-# θ must return logπ = -Inf (handled there) → the proposal is rejected,
-# which is exactly LMR's "reject if outside prior".
-#
-# NOTE on threading: the equilibrium solve is already internally threaded
-# over the worker-type grid, and the DE optimiser threads over its
-# population (smm.jl). Mirroring that, the population evaluation here can
-# thread over chains (`parallel = true`); under the outer @threads the
-# solver's inner @threads run serially, so there is no oversubscription.
-# Set `parallel = false` to evaluate chains serially (each solve then uses
-# the solver's own threads).
+# Entry point: run_demc. Needs min_ess, converged_sequential and stop_rule
+# (mcmc_diagnostics.jl).
 ############################################################
 
 using Random, Statistics, Printf
 using Base.Threads: @threads, nthreads
 
-# Pick δ distinct difference pairs of chain indices, all ≠ the current
-# chain `c` and ≠ each other (mirrors pickFirstDifferences in the Fortran).
+"""
+    _de_pairs(N, c, δ, rng) -> (i1, i2)
+
+δ difference pairs of chain indices, all distinct and different from chain `c`
+(pickFirstDifferences in the Fortran). Returns two length-δ views.
+"""
 function _de_pairs(N::Int, c::Int, δ::Int, rng::AbstractRNG)
     need = 2δ
     chosen = Int[]
@@ -48,10 +36,14 @@ function _de_pairs(N::Int, c::Int, δ::Int, rng::AbstractRNG)
     return @view(chosen[1:δ]), @view(chosen[δ+1:2δ])
 end
 
-# The random part of chain c's proposal, in the order the sampler draws it: the difference
-# pairs, the crossover mask (before the step, since γ depends on how many coordinates it
-# updates), then the multiplicative and additive shocks. It reads nothing but the RNG, so how
-# many numbers a generation consumes does not depend on the target.
+"""
+    _proposal_draws(rng, N, c, δ, d, CR) -> (i1, i2, mask, z_mult, z_add)
+
+The random part of chain `c`'s proposal, in the order the sampler draws it: difference
+pairs, crossover mask (at least one coordinate set), multiplicative and additive normal
+shocks. Reads nothing but the RNG, so a generation's consumption does not depend on the
+target.
+"""
 function _proposal_draws(rng::AbstractRNG, N::Int, c::Int, δ::Int, d::Int, CR::Float64)
     i1, i2 = _de_pairs(N, c, δ, rng)
     mask = rand(rng, d) .< CR
@@ -64,11 +56,10 @@ end
 """
     _replay_rng!(rng, gens, N, δ, d, CR) -> rng
 
-Advance `rng` through every draw `gens` generations of `run_demc` make: each chain's proposal
-(`_proposal_draws`), then one Metropolis uniform per chain. None depends on the target, so
-from the run's base seed this rebuilds, without a solve, the stream of a stored run that drew
-nothing before generation 1 (`init = :at_seed`). A resume uses it when the stored file
-carries no RNG state, which no file written before v61.3.0 does.
+Advance `rng` through every draw `gens` generations of `run_demc` make (each chain's
+`_proposal_draws`, then one Metropolis uniform per chain). From the run's base seed this
+rebuilds, without a solve, the stream of a stored `init = :at_seed` run whose file
+carries no RNG state (files written before v61.3.0).
 """
 function _replay_rng!(rng::AbstractRNG, gens::Int, N::Int, δ::Int, d::Int, CR::Float64)
     for _ in 1:gens
@@ -85,12 +76,10 @@ end
 """
     _outcome_from_history(accepted, chain_lp, lp0) -> Matrix{Int8}
 
-LMR's outcome code per chain and generation (see the accept loop) for a stored run that did
-not record it, as no file written before v61.3.0 does. An accepted draw is a strong, equal or
-weak accept by the sign of its log-target step from the previous generation, `lp0` standing
-for generation 0. A rejection is coded 0: the candidate is not stored, so one the prior box
-rejected (−1) cannot be told apart. Exact wherever the stuck-chain rule left the history
-alone; inside a span it overwrote, the step is read off the copied chain.
+LMR outcome codes (N × G) rebuilt for a stored run that did not record them. An accepted
+draw is 3, 2 or 1 by the sign of its log-target step from the previous generation (`lp0`
+for generation 0); a rejection is 0, since an out-of-box rejection (−1) cannot be told
+apart from the history.
 """
 function _outcome_from_history(accepted::AbstractMatrix{Bool}, chain_lp::AbstractMatrix,
                                lp0::AbstractVector)
@@ -104,24 +93,33 @@ function _outcome_from_history(accepted::AbstractMatrix{Bool}, chain_lp::Abstrac
     return out
 end
 
-# Everything run_demc carries from one generation to the next besides the population and the
-# history arrays. Read off the sampler's locals by name, so one list serves the snapshots, the
-# return and a resume; copied, so a state handed out is never mutated by the run it came from.
+# Sampler state carried between generations besides the population and history arrays.
+# Read off run_demc's locals BY NAME (Base.@locals), so this one list serves snapshots,
+# the return value and a resume: renaming any of these locals breaks all three.
 const _DEMC_STATE = (:rng, :n_replaced, :last_replace, :lp_best, :θ_best,
                      :gamma_scale, :n_adapt, :wacc_ad, :wfin_ad, :acc_ad_last,
                      :wacc, :wfin, :wprop, :weval, :wdlp, :wesjd, :wrep, :wbox,
                      :wacc_chk, :wprop_chk, :lp_best_prev, :rhat_prev, :stop_armed, :diag_armed)
+
+"""
+    _demc_state(locals) -> NamedTuple
+
+Deep copy of the `_DEMC_STATE` entries of `locals` (from `Base.@locals()`), so a state
+handed out is never mutated by the run it came from.
+"""
 _demc_state(locals::AbstractDict) =
     deepcopy(NamedTuple{_DEMC_STATE}(map(k -> locals[k], _DEMC_STATE)))
 
-# Evaluate logπ over a population matrix M (d × N), filling `out`.
+"""
+    _eval_population!(out, logπ, M, N, parallel; skip = nothing) -> out
+
+Fill `out[c] = logπ(M[:, c])` for the N columns of `M`, threaded over chains when
+`parallel`. Members flagged in `skip` (known to carry zero prior mass) get −Inf without a
+solve, which gives the same accept/reject outcome.
+"""
 function _eval_population!(out::Vector{Float64}, logπ, M::AbstractMatrix,
                           N::Int, parallel::Bool;
                           skip::Union{Nothing,AbstractVector{Bool}} = nothing)
-    # `skip` marks members already known to carry zero prior mass, so the solve is not
-    # worth spending: logπ would return -Inf and the Metropolis test would reject. Writing
-    # -Inf directly gives the identical accept/reject outcome for free. Defaults to nothing,
-    # which evaluates every member as before.
     if parallel
         @threads for c in 1:N
             out[c] = (skip !== nothing && skip[c]) ? -Inf : logπ(view(M, :, c))
@@ -135,183 +133,117 @@ function _eval_population!(out::Vector{Float64}, logπ, M::AbstractMatrix,
 end
 
 """
-    run_demc(logπ, θ0; kwargs...) → NamedTuple
+    run_demc(logπ, θ0; kwargs...) -> NamedTuple
 
-Differential-Evolution MCMC. `logπ` is the log quasi-posterior (a function
-of an unconstrained-space parameter vector); `θ0` is the seed (e.g. the SMM
-point estimate, unconstrained).
+Differential-Evolution MCMC on the log quasi-posterior `logπ` (a function of an
+unconstrained parameter vector, thread-safe when `parallel`), seeded at `θ0`
+(unconstrained).
 
-Keyword arguments (defaults follow LMR where sensible):
-  N           number of chains (0 ⇒ max(2·d, 16))
-  gens        number of generations
-  burn_frac   fraction of generations discarded as burn-in
-  CR          per-dimension crossover probability (LMR: 0.75; default 0.90)
-  δ           number of difference pairs in the proposal (LMR: 2; default 1)
-  b_add       additive shock sd          (LMR shock_add_std = 1e-4)
-  b_mult      multiplicative shock sd    (LMR shock_mult_std = 1e-2)
-  jump_every  γ is set to 1.0 every `jump_every` generations (mode jumps)
-  outlier_iqr IQR multiple below Q1 at which a chain is declared stuck and replaced by
-              a copy of the best chain (Lise-Meghir-Robin, mpi_mcmc_mod.f90:419).
-              Timing is set by `outlier_burn_only`; the LMR default is throughout.
-              A DE-MC proposal is γ·(Xᵣ₁ − Xᵣ₂), so a stuck chain does not merely waste
-              its own draws — its position enters every other chain's difference vector
-              and degrades all N. Replacement breaks detailed balance, so it runs ONLY
-              during burn-in and the last generation it fired is reported: a replacement
-              inside the retained sample would mean those draws are not from the target.
-              0 disables. On 32 iid scores this flags 0.08 chains per generation, so on
-              a healthy population it is close to silent.
-  init        `:at_seed` starts every chain at θ0 exactly; `:screen` draws candidates
-              around θ0, keeps only the ones the objective accepts and seeds from the
-              middle of their log-target ranking; `:resume` continues the stored run in
-              `resume` (below)
-  resume      the stored run for `init = :resume`: its history `chain` (d × N × g0),
-              `chain_lp`, `accepted`, `outcome` (`nothing` rebuilds it with
-              `_outcome_from_history`), `replaced`, and `state`, the sampler state
-              `_demc_state` records. The run continues at generation g0 + 1 with `gens` the
-              total, so everything it returns and prints is what one run of `gens`
-              generations returns and prints. A state entry the file lacks keeps its fresh
-              value, except the RNG, which `_replay_rng!` rebuilds from `rng`. The caller
-              vouches that `chain_lp` is the target's value at the stored population.
-  init_screen candidate count for `init = :screen` (0 → 20N)
-  parallel    thread the population evaluation over chains (see header note)
-  rng, verbose, print_every, check_every, rhat_max, ess_min
+Population and proposal:
+  N             number of chains (0 ⇒ max(2d, 16))
+  gens          generations (the budget cap when a stop rule is on; the TOTAL on resume)
+  burn_frac     fraction of generations discarded as burn-in
+  CR            per-coordinate crossover probability
+  δ             difference pairs per proposal (clamped to (N−1)÷2)
+  b_add, b_mult additive and multiplicative shock SDs
+  jump_every    γ = 1 every `jump_every` generations (mode jump)
+  gamma_scale0  multiplier on ter Braak's γ = 2.38/√(2δ·n_updated)
+  t_box         half-width of the flat prior box on t (LMR ±20); Inf is an improper target
+  parallel      thread the population evaluation over chains
 
-Set `check_every > 0` to terminate sequentially instead of always running the
-full `gens`: every `check_every` generations, R̂ and per-parameter ESS are computed
-on the draws so far and sampling stops once R̂ ≤ `rhat_max` for every coordinate
-and ESS ≥ `ess_min` for every coordinate (`ess_min ≤ 0` uses the dimension's
-Vats–Flegal–Jones minESS floor). `gens` then acts as a budget cap.
+Initial population (`init`):
+  :at_seed  every chain at θ0 (LMR);
+  :widths   chain 1 at θ0, others drawn with per-coordinate half-widths `init_widths`
+            (up) and `init_widths_dn` (down, defaults to up), times `init_disperse`;
+  :screen   `init_screen` candidates (0 ⇒ 20N) around θ0 on per-coordinate scale
+            `init_scale`, keeping feasible ones and seeding from the middle of their
+            ranking; `init_width` (the unclamped widths) is used only to report
+            over-dispersion;
+  :resume   continue `resume` = (chain, chain_lp, accepted, outcome or nothing, replaced,
+            state) after its last generation; missing state keeps fresh values, the RNG
+            is replayed from `rng` with `_replay_rng!`.
 
-Returns `(; draws, chain, accept, lp, N, gens, gens_requested, burn, state, ...)` where
-  draws          : d × (N·kept) matrix of post-burn-in samples (UNCONSTRAINED),
-  chain          : d × N × gens history, truncated to the generations actually run,
-  gens           : generations actually run (< gens_requested if it stopped early),
-  gens_requested : the budget cap that was passed in,
-  state          : the sampler state at the last generation, from which a resume continues.
+Stuck chains: `outlier_iqr` IQRs below Q1 of the trailing mean log-target ⇒ replaced by
+the best chain over the retained window (0 disables); `outlier_burn_only` confines this
+to burn-in.
+
+Adaptive scale (`gamma_adapt`, every `gamma_every`): one-sided Robbins–Monro brake on
+`gamma_scale` toward feasible-candidate acceptance `gamma_target`, step `gamma_eta/√k`.
+
+Sequential stop (`check_every > 0`): every `check_every` generations `stop_rule` is
+evaluated with `moves_min`, `drift_flat`, `acc_floor`, `mcse_target` and box bounds `lb`,
+`ub`; the run stops when it passes at two consecutive checks and aborts on the
+acceptance floor at two consecutive checks. `drift_max > 0` aborts when the running
+maximum climbs that far above the seed. `rhat_max` and `ess_min` (≤ 0 ⇒ `min_ess(d)`)
+are reported only.
+
+Output: `verbose`, `print_every` (≤ 0 ⇒ final line only), `lmr_print` (LMR-format block
+every `lmr_print` generations, 0 disables), `labels` (names for the progress line).
+Callbacks: `on_best(θ_best, lp_best, g)` when the incumbent improves;
+`on_dump(chain, chain_lp, accepted, outcome, replaced, g, state)` at the `lmr_print`
+cadence.
+
+Returns `(; draws, chain, chain_lp, accepted, outcome, replaced, accept, lp, N, gens,
+gens_requested, burn, lp_seed, lp_best, theta_best, drift, aborted, abort_why,
+gamma_scale, n_adapt, n_replaced, last_replace, state)`: `draws` is the d × (N·kept)
+pooled post-burn-in sample, the history arrays are truncated to the `gens` generations
+actually run, and `state` is the sampler state a resume continues from.
 """
 function run_demc(logπ, θ0::AbstractVector{<:Real};
                   N::Int = 0, gens::Int = 4000, burn_frac::Float64 = 0.5,
                   CR::Float64 = 0.90, δ::Int = 1,
                   b_add::Float64 = 1e-4, b_mult::Float64 = 1e-2,
-                  # Half-width of the prior box on the UNCONSTRAINED parameter (LMR's
-                  # prior_lower/upper_bound = ∓20, main_mpi.f90:146-147). Inf recovers the
-                  # unbounded — and improper — target that every version before 20.0.0 used.
                   t_box::Float64 = Inf,
                   jump_every::Int = 10, init::Symbol = :at_seed, init_screen::Int = 0,
                   resume::Union{Nothing,NamedTuple} = nothing,
-                  # Per-coordinate scale for init = :widths, in the SAMPLED space. Supplying
-                  # the criterion's own ΔQ=1 half-widths starts the population at roughly the
-                  # scale it would otherwise spend the run growing into: measured on base_fc,
-                  # every coordinate began at across-chain sd ~1e-4 against criterion widths
-                  # of 1e-4 to 1e-2, so the cloud started one to two orders of magnitude too
-                  # small and no coordinate equilibrated within 400 generations.
                   init_widths::Union{Nothing,AbstractVector{Float64}} = nothing,
-                  # Down-side half-widths, kept separate because up and down are not
-                  # interchangeable: a coordinate resting on a floor has a bracketable
-                  # width upward and none downward. Defaults to init_widths (symmetric).
                   init_widths_dn::Union{Nothing,AbstractVector{Float64}} = nothing,
-                  # Multiplier on those widths. >1 is REQUIRED for the sequential stop to
-                  # have power: at 1.0 the population starts AT the target scale, so
-                  # between- and within-chain variance start equal and R-hat starts at 1 —
-                  # the same blindness as :at_seed, less severe. Gelman-Rubin needs an
-                  # over-dispersed start, and mcse_ratio needs it for the same reason.
                   init_disperse::Float64 = 2.0,
                   init_scale::Union{Nothing,AbstractVector} = nothing,
                   init_width::Union{Nothing,AbstractVector} = nothing,
                   parallel::Bool = true,
                   rng::AbstractRNG = MersenneTwister(20260624),
                   verbose::Bool = true, print_every::Int = 250,
-                  # Generations between LMR-format blocks (their stat_display_rate = 500).
-                  # 0 disables it, which is the default so existing runs print as before.
                   lmr_print::Int = 0,
-                  # Fixed multiplier on the DE scale 2.38/√(2δn). 1.0 is ter Braak's and
-                  # LMR's. gamma_adapt, if on, adapts away from this starting value.
                   gamma_scale0::Float64 = 1.0,
-                  # Display labels, used only to name the widest coordinate on the progress
-                  # line. Falls back to the coordinate index when absent.
                   labels::Union{Nothing,Vector{String}} = nothing,
-                  # Called with (chain, chain_lp, accepted, outcome, replaced, g, state) at the
-                  # lmr_print cadence — LMR's own structure, where `if (op%dump_chain)` sits
-                  # inside the stat_display_rate block (mpi_mcmc_mod.f90:459-468). One cadence
-                  # for both, so a printed block and the draws behind it always correspond.
                   on_dump::Union{Nothing,Function} = nothing,
                   outlier_iqr::Float64 = 2.0,
-                  # false = LMR: mpi_mcmc_mod.f90:421-427 runs every generation, ungated.
-                  # true  = confine to burn-in, keeping the retained sample reversible.
                   outlier_burn_only::Bool = false,
                   check_every::Int = 0, rhat_max::Float64 = 1.03,
                   ess_min::Float64 = 0.0, drift_max::Float64 = 0.0,
-                  # Sequential stop (stop_rule, mcmc_diagnostics.jl). rhat_max and ess_min
-                  # above are now REPORTED rather than gated on: the stop gates on accepted
-                  # moves, drift-flatness and non-worsening R̂. Defaults reproduce the
-                  # documented rule; a caller passing moves_min = typemax(Int) disables the
-                  # stop without disabling the acceptance-floor diagnosis.
                   moves_min::Int      = 2000,
                   drift_flat::Float64 = 0.5,
                   acc_floor::Float64  = 0.02,
-                  # ADAPTIVE DE SCALE. gamma is fixed at 2.38/sqrt(2*delta*n) in ter Braak's DE-MC, which
-                  # assumes the population already sits at the target's scale. Measured on the v20.0.0
-                  # base_fc run it does not: the population drifted to a median 6.1x the criterion's own
-                  # per-coordinate widths, and the error is a SHAPE error rather than a scale one —
-                  # it spans ~500x, from 25x too wide on λ_S to 0.05x on b_S. Acceptance fell
-                  # 0.193 -> 0.009 between g=250 and g=1000, and the run aborted. No scalar can
-                  # correct a shape error, and it does not have to: the population's SHAPE can only
-                  # change through accepted moves,
-                  # a chain at 0.9% acceptance cannot reshape itself out of the problem — the adaptation
-                  # below is what restores the accepted moves that let DE-MC's own covariance adaptation
-                  # work. Diminishing step eta_k = gamma_eta/sqrt(k) (Roberts & Rosenthal 2007): the
-                  # adaptation vanishes asymptotically, so ergodicity holds with NO freeze point — which
-                  # matters here because burn = burn_frac*gens never arrives when the sequential stop
-                  # fires two orders of magnitude earlier.
                   gamma_adapt::Bool     = true,
                   gamma_target::Float64 = 0.234,   # Roberts-Gelman-Gilks high-dimensional optimum
                   gamma_eta::Float64    = 2.0,
-                  gamma_every::Int      = 25,      # brake more often than the stop checks, so the
-                                                   # diminishing step has enough events to converge
-                  # The ACCURACY gate: MCSE(mean)/sd(pooled) over non-exempt coordinates.
-                  # 0.05 is Flegal-Haran-Jones (2008). This is what "good enough" means for
-                  # a run whose deliverable is a mean and a standard deviation, and it
-                  # replaces the no-worsening-R-hat gate, which a non-converging chain
-                  # satisfies. See mcse_ratio in mcmc_diagnostics.jl.
+                  gamma_every::Int      = 25,
                   mcse_target::Float64 = 0.05,
-                  # Box bounds, for the AT-A-BOUND half of the convergence gate's exemption
-                  # test. Pile-up must be measured in CONSTRAINED units because the logit
-                  # transform puts each bound at infinity in t, where no threshold detects
-                  # it. Optional: with lb/ub omitted the gate still applies its FROZEN test
-                  # (distinct visited values), so a caller that cannot supply them degrades
-                  # to a weaker exemption rather than to a wrong one.
                   lb::Union{Nothing,AbstractVector} = nothing,
                   ub::Union{Nothing,AbstractVector} = nothing,
                   on_best = nothing)
 
-    # print_every ≤ 0 means "final line only" rather than a modulo by zero.
     print_every = print_every > 0 ? print_every : typemax(Int)
 
     d = length(θ0)
     N = N > 0 ? N : max(2d, 16)
     δ = clamp(δ, 1, max(1, (N - 1) ÷ 2))
-    # ter Braak's scaling is 2.38/sqrt(2·δ·n) where n is the number of coordinates
-    # ACTUALLY updated, not the dimension: the CR mask freezes the rest, so the same
-    # step is spread over fewer coordinates and each must move further. LMR compute it
-    # per proposal from the realised mask (mpi_mcmc_mod.f90:576). γ_full below is the
-    # d-coordinate value, reported in the header as the reference scale.
+    # Reference scale for all d coordinates; each proposal uses its realised mask count.
     γ_full = 2.38 / sqrt(2δ * d)
     burn = clamp(floor(Int, burn_frac * gens), 0, gens - 1)
     θ0f = collect(float.(θ0))
-    # Generations already run: the stored run's on a resume, none otherwise.
     init === :resume && resume === nothing &&
         error("run_demc: init = :resume needs `resume`, the stored run.")
-    g0 = init === :resume ? size(resume.chain, 3) : 0
+    g0 = init === :resume ? size(resume.chain, 3) : 0     # generations already run
 
-    # The box defines the target, so it belongs in the header beside δ and CR: a log that
-    # does not record it cannot tell a reader which density the chain sampled.
+    # The box defines the target, so the header records it.
     verbose && @printf("[demc] d=%d  N=%d chains  gens=%d  δ=%d  CR=%.2f  γ(all d)=%.3f  box=%s  init=%s  threads=%d\n",
                        d, N, gens, δ, CR, γ_full,
                        isfinite(t_box) ? @sprintf("±%.4g", t_box) : "none (improper)",
                        init === :resume ? "resume from gen $g0" : init, nthreads())
 
-    # The seed must carry prior mass, or the chain starts at log-target −Inf and nothing can
-    # ever be accepted. Caught here rather than as a silent all-reject run.
+    # A seed outside the box has log-target −Inf and nothing could ever be accepted.
     if isfinite(t_box)
         viol = findall(k -> abs(θ0f[k]) > t_box, 1:d)
         isempty(viol) || error("seed lies outside the prior box |t| ≤ $(t_box) in " *
@@ -320,33 +252,13 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
     end
 
     # ── initial population ──────────────────────────────────────────────────
-    # DE-MC's step size IS the population spread: the proposal is γ·(Xᵣ₁ − Xᵣ₂), so
-    # the difference vector inherits whatever dispersion the population has, PER
-    # COORDINATE. That makes the start decisive and asymmetric — a population wider
-    # than the target cannot contract, because contraction requires accepted moves and
-    # an over-wide proposal is rejected; a population narrower than the target grows
-    # into it within a few hundred generations. Measured on a 25-d target of sd 1e-3:
-    # starting from an isotropic 1e-2 cloud leaves the spread at 9.0e-3 with acceptance
-    # 0.000 after 600 generations, while starting at the seed reaches 9.5e-4 with
-    # acceptance 0.30.
-    #
-    # So neither mode disperses blindly. Both start from points the objective already
-    # accepts and let the difference vectors discover each coordinate's own scale.
-    # How fast they do so depends on how far each coordinate has to travel: on a 25-d
-    # target whose widths span 300x, the four narrower groups reach 0.92-0.99 of their
-    # true scale within 600 generations, but the WIDEST group is still at 0.60 there,
-    # reaching 0.94 by 1500 generations and 0.99 by 6000. Growth is the direction DE-MC
-    # self-corrects in, so this is burn-in rather than a bias — but it means burn_frac
-    # must cover the widest coordinate's growth, not the median's.
+    # The DE step is the population's own spread, so the start sets the scale: a
+    # population wider than the target cannot contract (contraction needs accepted
+    # moves), one narrower grows into it. Every mode starts from feasible points.
     X  = Matrix{Float64}(undef, d, N)
     lp = Vector{Float64}(undef, N)
     if init === :at_seed
-        # Every chain starts at exactly the seed, as Lise-Meghir-Robin do
-        # (mpi_mcmc_mod.f90:268): generation 1 then has zero difference vectors and the
-        # additive shock
-        # b_add is the only mover. The population then grows outward to the target's
-        # own scale. Their uniform-over-prior alternative sits commented out at lines
-        # 265-266 of the same file.
+        # LMR (mpi_mcmc_mod.f90:268). Generation 1 has zero differences; b_add moves it.
         for c in 1:N
             @views X[:, c] .= θ0f
         end
@@ -355,15 +267,10 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
             error("run_demc: the seed itself is infeasible — rerun the estimation, or " *
                   "check that the bundle's spec matches the current one.")
     elseif init === :widths
-        # Disperse the population at a SUPPLIED per-coordinate scale rather than discovering
-        # it by diffusion. This is the only init mode that does not have to grow: the widths
-        # are the criterion's, so the step γ·(X_r1 − X_r2) is in the right units from
-        # generation 1 and acceptance should start near the DE-MC optimum of 0.234 instead of
-        # far above it (0.758 was measured on base_fc, which is the signature of a step far
-        # too short). Chain 1 is held AT the seed so the best known point is never lost.
+        # Disperse at the criterion's own per-coordinate widths; chain 1 stays at the seed.
         init_widths === nothing &&
             error("run_demc: init = :widths requires init_widths (per-coordinate scale in " *
-                  "the sampled space). Run code/tools/width_audit.jl to produce them.")
+                  "the sampled space), read from MCMC_WIDTHS_CSV.")
         length(init_widths) == d ||
             error("run_demc: init_widths has $(length(init_widths)) entries, expected $(d).")
         w = collect(float.(init_widths))
@@ -377,19 +284,14 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
         dev = Vector{Float64}(undef, d)
         @views X[:, 1] .= θ0f
         for c in 2:N
-            # Asymmetric draw: the up-width upward, the down-width downward, scaled by
-            # init_disperse. A symmetric draw on a coordinate resting against a floor sends
-            # half its proposals into infeasibility, and the old fallback then replaced the
-            # whole vector with the seed — so the coordinates the criterion resolves least
-            # were the ones that ended up with no dispersion at all.
+            # Asymmetric draw: up-width upward, down-width downward (a coordinate on a
+            # floor has no downward width).
             @inbounds for k in 1:d
                 z = randn(rng)
                 dev[k] = init_disperse * (z >= 0.0 ? w[k] * z : wdn[k] * z)
             end
-            # On infeasibility SHRINK toward the seed along the ray rather than discarding the
-            # draw: the direction is kept and most of the dispersion survives. Halving
-            # terminates in at most 20 steps, and only a chain whose whole ray is infeasible
-            # falls back to the seed.
+            # On infeasibility shrink toward the seed along the ray (≤ 20 halvings), so the
+            # direction survives; only a wholly infeasible ray falls back to the seed.
             ok = false; s = 1.0
             for _ in 1:20
                 @inbounds for k in 1:d
@@ -409,35 +311,19 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
             @printf("[demc] init=:widths — %d of %d chains fell back to the seed\n",
                     nfb, N - 1)
     elseif init === :screen
-        # Screened start: draw candidates around the seed, KEEP ONLY the ones the
-        # solver converges on, rank the survivors by log-target and seed the chains
-        # from the middle of that ranking. Drawing around an optimum mostly returns
-        # non-convergence, so the screen is what makes this usable: it selects a
-        # feasible cloud rather than assuming one exists at a chosen radius. Taking
-        # the middle rather than the best avoids putting every chain at the mode,
-        # which would leave no spread to build a difference vector from.
-        # The radius cannot be a fixed constant: drawing at a chosen radius around an
-        # optimum mostly returns non-convergence, and how wide is admissible is a
-        # property of the basin, not of the sampler. So shrink from a generous radius
-        # until enough candidates survive, and report which radius that was — a very
-        # small one is itself the finding that the basin is narrow.
+        # Draw candidates around the seed, keep the feasible ones, seed the chains from the
+        # middle of their log-target ranking (the best alone would leave no spread). The
+        # radius multiplier shrinks until enough candidates survive.
         ncand = init_screen > 0 ? init_screen : 20N
         cand  = Matrix{Float64}(undef, d, ncand)
         lpc   = Vector{Float64}(undef, ncand)
         keep  = Int[]
         radius = 0.0
-        # PER-COORDINATE scale. One scalar radius cannot serve coordinates whose
-        # posterior widths span orders of magnitude: DE-MC's step size is the
-        # population's own spread, so it contracts a population that starts too narrow
-        # but not one that starts too wide (contraction needs accepted moves, and an
-        # over-dispersed proposal is rejected). init_scale = nothing reproduces the
-        # v17.1 isotropic draw exactly, so old call sites are unaffected.
+        # Per-coordinate scale; nothing ⇒ isotropic.
         s = init_scale === nothing ? ones(d) : collect(float.(init_scale))
         length(s) == d || error("run_demc: init_scale has length $(length(s)), expected $d")
         all(x -> isfinite(x) && x > 0, s) ||
             error("run_demc: init_scale must be finite and strictly positive")
-        # The ladder is now a MULTIPLIER on s: the vector carries the units, so r = 1.0
-        # is the intended scale and shrinking happens only if feasibility forces it.
         for r in (1.0, 0.3, 0.1, 0.03, 0.01)
             for j in 1:ncand, k in 1:d
                 cand[k, j] = θ0f[k] + r * s[k] * randn(rng)
@@ -453,20 +339,10 @@ function run_demc(logπ, θ0::AbstractVector{<:Real};
                   "candidates. The seed sits in a basin too narrow to sample from; " *
                   "use init = :at_seed, or re-estimate.")
         order = keep[sortperm(lpc[keep], rev = true)]          # best log-target first
-        # Report the realised scale, and the one number that says whether the
-        # precondition holds: how many coordinates start WIDER than the target scale
-        # they were given. That count must be 0 — a non-zero value means the population
-        # cannot contract in those directions and their reported SD is biased upward.
         if verbose
+            # Over-dispersion is judged against each coordinate's own posterior width
+            # (init_width, unclamped), not against s, which is already clamped.
             eff = radius .* s          # the scale actually drawn from, per coordinate
-            # A coordinate is over-dispersed iff the scale actually drawn from exceeds
-            # that coordinate's own POSTERIOR WIDTH. The comparison must be against the
-            # width itself (init_width), NOT against s: s is already the clamped scale,
-            # so eff .<= s holds by construction and comparing the two would be a
-            # tautology that always reports 0. The clamp is exactly where genuine
-            # over-dispersion enters — MCMC_SCREEN_CAP raises the scale of any
-            # coordinate whose width is below the cap — so the cap is what this must
-            # catch. init_width is the unclamped se_t vector in the same t units.
             nover = init_width === nothing ? -1 : count(k -> eff[k] > init_width[k], 1:d)
             @printf("[demc] screen: mult=%.2f  scale in t: min=%.2e med=%.2e max=%.2e  %s\n",
                     radius, minimum(eff), median(eff), maximum(eff),
@@ -488,8 +364,7 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             lp[c] = lpc[src]
         end
     elseif init === :resume
-        # The stored run's final population and its log-target. Its history and state are
-        # restored below, once the arrays they fill exist.
+        # The stored final population and its log-target; history and state follow below.
         (size(resume.chain, 1), size(resume.chain, 2)) == (d, N) ||
             error("run_demc: the stored run has $(size(resume.chain, 1)) coordinates and " *
                   "$(size(resume.chain, 2)) chains; this run has $d and $N.")
@@ -501,24 +376,13 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
         error("run_demc: init must be :at_seed, :widths, :screen or :resume, got :$init")
     end
 
-    # Sequential termination (Vats–Flegal–Jones 2019; Vats–Knudson 2021): from
-    # check_every onwards, stop as soon as R̂ and ESS both clear their thresholds
-    # on the draws so far. check_every = 0 runs the full `gens` unconditionally.
-    # ess_min ≤ 0 resolves to the dimension's minESS floor.
     ess_target = ess_min > 0 ? ess_min : min_ess(d)
     g_final    = gens
-    # A chain whose running maximum keeps climbing above the seed is optimising, not
-    # sampling, and no amount of extra budget fixes it: abort so the diagnosis is
-    # cheap. drift_max ≤ 0 disables the check.
-    # Evaluated at θ0 itself: chain 1 starts there only under :at_seed and :widths.
-    lp_seed    = logπ(θ0f)
+    lp_seed    = logπ(θ0f)                    # at θ0 itself, whatever the init mode
     θ_best     = copy(θ0f)                    # argmax of logπ seen so far
     lp_best    = lp_seed
     aborted    = false
-    # Which abort fired. Two paths set `aborted`, and they mean opposite things: :drift
-    # says the chain found a better point than the seed, :acceptance says the proposal is
-    # mis-scaled. Reporting one as the other sends the reader after the wrong fix.
-    abort_why  = :none
+    abort_why  = :none                        # :drift (better point found) or :acceptance
 
     chain  = Array{Float64}(undef, d, N, gens)
     cand   = Matrix{Float64}(undef, d, N)
@@ -526,106 +390,51 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     pop_sd = Vector{Float64}(undef, d)      # per-generation ESJD yardstick
     outbox = falses(N)                      # candidates outside the prior box, solve skipped
     nacc  = 0
-    # Windowed counters, reset at each print. A cumulative acceptance rate hides
-    # the current one once the early generations are averaged in, and `nfin`
-    # separates a proposal rejected for being uphill from one rejected because
-    # the solve failed — the two call for opposite fixes.
+    # Counters over the current print window. fin (feasible share of evaluated
+    # candidates) separates an uphill rejection from a failed solve.
     wacc  = 0
     wfin  = 0
     wprop = 0
-    weval = 0     # proposals actually sent to the solver, i.e. wprop minus box rejections
-    # Proposal economics, windowed alongside the counters above. Acceptance says how
-    # often a proposal lands; these say WHY it does or does not, which is what a tuning
-    # decision needs.
-    #
-    #   wdlp   the Δlogπ of every feasible proposal. Its MEDIAN is the step-scale
-    #          diagnostic: a well-scaled d-dimensional proposal sits at −1 to −3, which
-    #          is what yields acceptance ≈ 0.234. A median near −20 means the median
-    #          proposal is rejected with probability 1 − 2e−9 and the whole acceptance
-    #          rate is riding a thin tail — invisible in the acceptance number itself.
-    #   wesjd  expected squared jump distance, in the POPULATION's own metric (each
-    #          coordinate standardised by its current population sd, so the measure is
-    #          scale-free and computable at runtime without knowing the target). ESJD,
-    #          not acceptance, is the mixing criterion: a shorter step that raises
-    #          acceptance while lowering ESJD is moving less, not mixing better.
+    weval = 0     # proposals sent to the solver: wprop minus box rejections
+    # wdlp: Δlogπ of each feasible proposal (median −1 to −3 is a well-scaled step);
+    # wesjd: squared jump distance in population-sd units (the mixing measure).
     wdlp  = Float64[]
     wesjd = 0.0
-    # Check-window counters, reset at each CHECK rather than at each print. The two
-    # strides are independent (print_every 250, check_every 250 today but not by
-    # construction), so the stop rule cannot read the print counters: a print between
-    # checks would zero them and the acceptance the rule sees would cover the wrong
-    # window. Separate counters make the rule's window exactly check-to-check.
-    # The adaptive DE scale and its own acceptance window, kept separate from the stop's so
-    # the two cadences cannot interfere.
-    # Multiplies ter Braak's 2.38/√(2δn). 1.0 is his value and LMR's; it is a TUNING
-    # constant, not a derived one, and on this model it is measurably too large — a
-    # perturbation scan at the v37 base_fc point puts mean acceptance at 0.455 for a
-    # per-coordinate step of 1e-3 across all 20 coordinates and 4e-06 at 1e-2, while the
-    # population's own spread equilibrates near 1e-2. Lowering this is the one-constant way
-    # to land the step in the usable band; gamma_adapt does the same thing with feedback.
+    # Adaptive DE scale and its own acceptance window. The brake's denominator is FEASIBLE
+    # candidates (wfin_ad): an infeasible candidate's rejection does not respond to γ.
     gamma_scale = gamma_scale0
     n_adapt     = 0
     wacc_ad     = 0
-    # Feasible candidates in the adaptation window — the brake's denominator. See the update
-    # below for why an infeasible candidate must not enter it.
     wfin_ad     = 0
-    # The last conditional acceptance the brake acted on. Reported on the check line because
-    # it is the quantity the brake steers by, and without it a log cannot be used to tell a
-    # brake that has settled from one still chasing an unreachable target.
-    acc_ad_last = NaN
-    
+    acc_ad_last = NaN                       # last conditional acceptance the brake acted on
+
+    # Check-window counters, reset at each check; independent of the print window.
     wacc_chk  = 0
     wprop_chk = 0
-    # Two-consecutive-check state. NaN/false means "nothing to compare against yet", so
-    # neither the stop nor the diagnosis can fire on the first check — one check is a
-    # reading, two is evidence.
+    # Two-consecutive-check state; NaN/false means nothing to compare against yet.
     lp_best_prev = NaN
     rhat_prev    = Inf
     stop_armed   = false
     diag_armed   = false
-    # Per-chain log-posterior history, for the stuck-chain score. LMR average over the
-    # last half of a 500-draw ring buffer; 250 is that window, capped so a short run
-    # still scores over something.
-    chain_lp     = Matrix{Float64}(undef, N, gens)
-    # Two per-draw masks, RETURNED so an estimator chosen later can be computed from this
-    # run instead of a new one. They cost N*gens bits each (~119 KB at 95x10 000).
-    #   accepted  the draw is a NEW state, not a repeat of the previous generation. Lets an
-    #             average be taken over unique states rather than over the padded chain.
-    #   replaced  the draw was overwritten by the stuck-chain rule and is therefore NOT a
-    #             draw from the target. LMR keep exactly this (all_outliner_results_nl,
-    #             mpi_mcmc_mod.f90:423) and it is the only way to excise contaminated draws
-    #             after the fact — n_replaced and last_replace are a count and a scalar,
-    #             which say THAT it happened but not WHERE.
+    chain_lp     = Matrix{Float64}(undef, N, gens)   # per-chain log-target history
+    # Per-draw records returned with the run:
+    #   accepted  the draw is a new state, not a repeat;
+    #   outcome   LMR's five-way code (3/2/1/0/−1, see the accept loop);
+    #   replaced  overwritten by the stuck-chain rule, hence not a draw from the target.
     accepted     = falses(N, gens)
-    # LMR's five-way outcome code per chain per generation (3/2/1/0/-1; see the accept loop).
-    # `accepted` says whether a move happened, this says which of their five kinds it was,
-    # which is what their periodic breakdown reports.
     outcome      = zeros(Int8, N, gens)
     replaced     = falses(N, gens)
-    out_window   = min(250, max(1, burn ÷ 2))
-    # The retained window — the span a replacement overwrites for the outlier chain.
-    # LMR's chain array is a cyclical buffer and the replacement overwrites all of it
-    # (mpi_mcmc_mod.f90:423-424), so the faithful analogue here is the span that will
-    # actually be pooled: gens - burn, which is 1000 at the paper's 10,000 with the last
-    # 1000 retained (Appendix C p.86). Derived from burn, so it tracks any burn_frac.
+    out_window   = min(250, max(1, burn ÷ 2))   # trailing window of the stuck-chain score
+    # Span a replacement overwrites: the retained window (LMR overwrite their whole buffer).
     retain_len   = max(1, gens - burn)
     out_score    = Vector{Float64}(undef, N)
     n_replaced   = 0
     last_replace = 0
-    # Replacement events since the last print, so the RATE is visible rather than only the
-    # run-total. n_replaced and last_replace were returned but never printed, so an
-    # 11-hour run gave no live signal on the one mechanism that concentrates the ensemble.
-    wrep         = 0
-    # Proposals rejected by the prior box since the last print. Reported separately from
-    # `fin` because the two say different things: fin counts points where the equilibrium
-    # does not exist, wbox counts points the prior excludes. A tuning decision reads them
-    # differently — a high wbox means the box is binding, not that the model is fragile.
-    wbox         = 0
+    wrep         = 0     # replacements since the last print
+    wbox         = 0     # box rejections since the last print
 
-    # A resumed run continues the stored one: its history fills generations 1..g0 and the
-    # loop picks up at g0 + 1 in the stored run's state. Entries a file does not carry keep
-    # the fresh values above, except the RNG, replayed from the base seed, and the outcome
-    # codes, rebuilt from the history (a file written before v61.3.0 has neither).
+    # A resumed run continues the stored one: its history fills 1..g0 and the loop picks up
+    # at g0 + 1 in the stored state (RNG replayed and outcome rebuilt when the file lacks them).
     if init === :resume
         @views chain[:, :, 1:g0] .= resume.chain
         @views chain_lp[:, 1:g0] .= resume.chain_lp
@@ -648,33 +457,9 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     end
 
     for g in (g0 + 1):gens
-        # Brake the DE scale toward the acceptance optimum. Robbins-Monro in log gamma, so the
-        # multiplier stays positive.
-        #
-        # ONE-SIDED, and that is the design rather than a simplification. A symmetric controller
-        # was tried and made things worse: from the shipped collapsed start acceptance is 0.739 at
-        # g=25 — not because the step is well scaled but because the population has not spread yet
-        # — so a symmetric rule reads "step too short", lengthens it 65%, and accelerates the very
-        # expansion it exists to brake (acceptance then fell to 0.196 by g=50, against the
-        # fixed-gamma control's 0.555 at the same generation). The asymmetry follows from the
-        # measured dynamics: a symmetric accepted proposal adds its squared step to the population
-        # variance, and that step is proportional to the variance already present, with no inward
-        # pull to offset it. Widening is intrinsic and needs no help; only the overshoot needs
-        # correcting. n_adapt counts braking events only, so the diminishing step is not spent
-        # during the transient.
-        # The denominator is FEASIBLE candidates, not all proposals, and that is not a detail.
-        # The 0.234 optimum describes the Metropolis accept/reject on the target; an infeasible
-        # candidate is a prior-zero rejection, a different mechanism whose rate does not respond
-        # to the step. On the v21.0.1 base_fc run `fin` sat at 0.77 while acceptance among
-        # feasible candidates saturated near 0.26, so UNCONDITIONAL acceptance was capped at
-        # 0.77·0.26 ≈ 0.20 — below the 0.234 target. The brake could therefore never succeed: it
-        # shortened the step at every window for 2000 generations (γ× 0.545 → 0.142, still
-        # falling) and esjd collapsed 63×, while the population had stopped contracting after
-        # g = 750. Under the feasible denominator that run would have braked at g = 500 and 750
-        # and then stopped at g = 1000, where conditional acceptance reached 0.243.
-        #
-        # No dead band is needed: the shortfall (acc − target) shrinks as the gap closes, so the
-        # update self-limits rather than oscillating.
+        # Brake the DE scale toward the acceptance optimum: Robbins–Monro in log γ, step
+        # η/√n_adapt. One-sided: it only shortens the step, because the population widens
+        # on its own and a symmetric rule amplified the early expansion.
         if gamma_adapt && gamma_every > 0 && g > 1 && (g - 1) % gamma_every == 0 && wfin_ad > 0
             acc_ad = wacc_ad / wfin_ad
             acc_ad_last = acc_ad
@@ -686,7 +471,7 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             end
             wacc_ad = 0; wfin_ad = 0
         end
-        
+
         Xc   = copy(X)                        # freeze current population
         jump = (g % jump_every == 0)          # periodic mode jump
 
@@ -696,8 +481,7 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             @inbounds for j in 1:δ
                 @views diff .+= Xc[:, i1[j]] .- Xc[:, i2[j]]
             end
-            # gamma_scale multiplies the DE step only. The mode jump keeps γ = 1: it is a
-            # deliberate full-population hop and rescaling it would defeat its purpose.
+            # gamma_scale multiplies the DE step only; the mode jump keeps γ = 1.
             γ = jump ? 1.0 : gamma_scale * 2.38 / sqrt(2δ * count(mask))
             e = b_mult .* z_mult
             ε = b_add  .* z_add
@@ -705,31 +489,18 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             @inbounds for k in 1:d
                 cand[k, c] = mask[k] ? prop[k] : Xc[k, c]
             end
-            # A candidate outside the prior box has zero prior mass, so it is rejected with
-            # certainty and its solve is wasted. Flagging it here skips the solve; the
-            # accept/reject outcome is identical.
-            #
-            # NOTE this is a rejection, not LMR's reject-and-redraw (mpi_mcmc_mod.f90:294-304).
-            # Redrawing until the candidate lands in the box makes the effective proposal
-            # q(x→y)·1{y∈B}/Z(x) with Z(x) varying over x, so it is no longer symmetric and
-            # detailed balance fails — biasing the retained sample, which is the sample the
-            # standard errors are computed from. Rejecting is exact and, because the check
-            # precedes evaluation, costs nothing.
+            # Outside the prior box: rejected without a solve. Rejected, not redrawn as in
+            # LMR (mpi_mcmc_mod.f90:294-304): redrawing makes the proposal asymmetric and
+            # breaks detailed balance.
             outbox[c] = isfinite(t_box) && any(abs(cand[k, c]) > t_box for k in 1:d)
         end
 
         _eval_population!(lpc, logπ, cand, N, parallel; skip = outbox)
         wbox += count(outbox)
 
-        # Population sd per coordinate, this generation, as the metric for ESJD. Taken
-        # BEFORE the accept loop so every jump in this generation is measured against one
-        # fixed yardstick rather than one that shifts as chains update.
-        #
-        # Floored at b_add because that is the smallest displacement the proposal can
-        # produce: a coordinate whose population sd is below it has not separated from the
-        # seed, and standardising by that sd divides a real step by floating-point noise.
-        # Unfloored, an :at_seed start reports esjd ≈ 5e23 in its first generations —
-        # cancellation in std() over N nearly identical members, not a large jump.
+        # Population sd per coordinate, fixed for this generation's ESJD, floored at b_add
+        # (the smallest displacement a proposal makes) so a collapsed start does not divide
+        # a real step by rounding noise.
         sd_floor = max(b_add, eps())
         @inbounds for k in 1:d
             pop_sd[k] = max(std(@view Xc[k, :]), sd_floor)
@@ -737,11 +508,8 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
 
         for c in 1:N
             wprop += 1; wprop_chk += 1
-            # fin and dlp describe candidates the SOLVER saw. An out-of-box candidate was
-            # never evaluated, so folding it in would report the prior as model fragility:
-            # on a target that is finite everywhere, a binding box would still print
-            # fin = 0.35. Acceptance keeps the full denominator — an out-of-box proposal is
-            # a real rejection.
+            # fin and dlp describe candidates the solver saw; acceptance keeps the full
+            # denominator, since an out-of-box proposal is a real rejection.
             if !outbox[c]
                 weval += 1
                 if isfinite(lpc[c])
@@ -749,16 +517,9 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                     push!(wdlp, lpc[c] - lp[c])
                 end
             end
-            # LMR's five-way outcome code (mpi_mcmc_mod.f90:360-378), recorded so the run can
-            # report the same breakdown they do. α = exp(Δ log-posterior), so the sign of Δ
-            # is the classification: uphill moves are accepted with certainty and are the
-            # ones worth counting separately, because a chain whose accepted moves are nearly
-            # all uphill is still descending rather than sampling.
-            #   3 strong accept  α > 1   accepted an uphill move
-            #   2 equal  accept  α = 1   Δ exactly zero
-            #   1 weak   accept  α < 1   accepted a downhill move on the coin flip
-            #   0 weak   reject  α > 0   the coin went the other way
-            #  -1 reject, no prior mass  out of the box, never evaluated
+            # LMR outcome code (mpi_mcmc_mod.f90:360-378), by the sign of Δ log-target:
+            #   3 strong accept (Δ > 0)   2 equal accept (Δ = 0)   1 weak accept (Δ < 0)
+            #   0 reject                 −1 out of the box, never evaluated
             dlp = lpc[c] - lp[c]
             if log(rand(rng)) < dlp                      # α = exp(Δ log-posterior)
                 jd = 0.0
@@ -781,22 +542,14 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
         if lp[c_best] > lp_best
             lp_best = lp[c_best]
             @views θ_best .= X[:, c_best]
-            # Hand the incumbent out as it improves, so a run that never reaches its
-            # own end — interrupted, or killed after the abort raises the budget — still
-            # leaves the best point on disk rather than only in this frame.
             on_best === nothing || on_best(θ_best, lp_best, g)
         end
 
-        # Stuck-chain replacement (Lise-Meghir-Robin, mpi_mcmc_mod.f90:419). Score each
-        # chain by its MEAN log-posterior over the trailing window rather than its
-        # current value, so a chain is judged on where it has been living and not on one
-        # lucky proposal; replace any chain more than outlier_iqr IQRs below Q1 with the
-        # best chain's current position.
-        #
-        # Confined to burn-in: the replacement is not a reversible transition, so a
-        # generation in which it fires cannot contribute to the retained sample. LMR run
-        # it throughout, which their 10 000 generations make harmless because it is
-        # extinct long before the end; at this budget the gate has to be explicit.
+        # Stuck-chain replacement (LMR mpi_mcmc_mod.f90:419-427). A chain whose mean
+        # log-target over the trailing window is more than outlier_iqr IQRs below Q1 takes
+        # the best chain's position, and its history over the retained window is
+        # overwritten with the best chain's (LMR's scope), marked in `replaced`. Not a
+        # reversible transition: outlier_burn_only confines it to burn-in.
         if outlier_iqr > 0 && g > out_window && (!outlier_burn_only || g <= burn)
             for c in 1:N
                 @views out_score[c] = mean(chain_lp[c, (g - out_window + 1):g])
@@ -807,16 +560,6 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                 if out_score[c] < cut
                     @views X[:, c] .= X[:, c_best]
                     lp[c] = lp[c_best]
-                    # LMR SCOPE (mpi_mcmc_mod.f90:423-424):
-                    #   all_population_knl(:,C,:) = all_population_knl(:,best_chain,:)
-                    # Their chain array is a cyclical buffer and the `:` overwrites ALL of it,
-                    # so an outlier chain's entire retained history becomes a copy of the best
-                    # chain's, not just its current position. Since solution_theta averages
-                    # that buffer (:485), the estimator can average duplicated chains. Ours
-                    # keeps the full gens-length history rather than a ring buffer, so the
-                    # faithful analogue is the span that will be pooled: retain_len.
-                    # `replaced` marks every generation touched, so the duplication is
-                    # auditable after the fact rather than invisible.
                     lo = max(1, g - retain_len + 1)
                     @views chain[:, c, lo:g]  .= chain[:, c_best, lo:g]
                     @views chain_lp[c, lo:g]  .= chain_lp[c_best, lo:g]
@@ -829,43 +572,13 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
         end
 
         if verbose && (g % print_every == 0 || g == gens)
-            # Acceptance alone cannot say whether the run is producing a posterior, nor
-            # what to change if it is not. Six numbers answer six distinct questions:
-            #
-            #   acc   is the chain moving at all
-            #   moved HOW MANY of the N chains moved at least once in this window. acc is a
-            #         rate over proposals and cannot separate "every chain crawling" from
-            #         "a handful alive and the rest frozen", which call for opposite
-            #         responses — the second is what the outlier rule exists to repair. On
-            #         the 2026-08-31 run 47 of 95 chains made no move at all in the retained
-            #         window while acc read 0.008, and only this number shows that.
-            #   sprd  mean per-coordinate population sd, the quantity the DE step is built
-            #         from. RISING means the population is still finding its scale; flat
-            #         means it has settled, and whether it settled somewhere usable is the
-            #         whole question. Measured at the pre-revert base_fc point: a step of
-            #         1e-3 is accepted 45% of the time and 1e-2 is accepted 4e-06 of the
-            #         time, so a spread that parks near 1e-2 is parked in the dead zone.
-            #   dlp   the MEDIAN feasible proposal's Δlogπ — is the step the right SIZE?
-            #         −1 to −3 is well scaled; −20 means the median proposal is hopeless
-            #         and acceptance is riding a tail. This is the tuning number.
-            #   esjd  expected squared jump per proposal in population-sd units — is the
-            #         chain COVERING ground? Read together with dlp: acceptance rising
-            #         while esjd falls is a shorter step moving less, not better mixing.
-            #   R̂/ESS the deliverable itself, over non-exempt coordinates.
-            #
-            # `rep` appears only when the stuck-chain rule fired since the last print. On a
-            # healthy population it is silent, so its presence is the signal. Past the burn
-            # boundary it reads `rep=N RETAINED`, because a replacement there puts duplicated
-            # draws in the pooled sample and those draws are not from the target — the
-            # requirement CH Theorem 2 integrates against. That is the one reading which
-            # changes what the reported SD means, so it is spelled out rather than flagged.
-            #
-            # `fin` appears only when it drops below 0.95. At the measured 0.98 it is
-            # noise on every line; below that it is the difference between a proposal
-            # rejected for being uphill and one rejected because the solve failed, which
-            # call for opposite fixes. Cumulative acceptance is dropped outright — it
-            # averages in the collapsed :at_seed start forever, so it falls monotonically
-            # whatever the chain is doing.
+            # Progress line, all over the print window:
+            #   acc    acceptance rate;  moved  chains that moved at least once;
+            #   sprd   mean per-coordinate population sd (and the widest coordinate);
+            #   dlp    median feasible Δlogπ (step size);  esjd  jump per proposal;
+            #   R̂/ESS  over non-exempt coordinates (reported, not gated);
+            #   fin    feasible share, shown below 0.95;  rep  replacements, "RETAINED"
+            #          past burn-in;  box  box-rejection share, shown when nonzero.
             _, wr, me = converged_sequential(chain, g, burn_frac, d;
                                              rhat_max = rhat_max, ess_min = ess_target,
                                              lb = lb, ub = ub)
@@ -893,34 +606,21 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             empty!(wdlp); wesjd = 0.0
         end
 
-        # LMR's own periodic block (mpi_mcmc_mod.f90:429-455), reproduced so a run can be
-        # read against theirs line for line. It is ADDITIVE: the line above stays, because it
-        # carries the two quantities theirs does not — the median proposal's Δlogπ, which is
-        # the step-size number, and ESJD. Their rates are cumulative over the retained window
-        # rather than windowed, which is why the shares here move slowly.
-        #
-        # Their block also prints the running mean and best parameter VECTORS. Those are
-        # dropped here: at d = 23 they are two unlabelled 23-number rows per block that no
-        # decision is taken on, and the estimator writes the same quantities to
-        # mcmc_results_<window><suffix>_mcmc.csv with labels, quantiles and standard errors. What
-        # is kept is the part that cannot be recovered afterwards — the breakdown of WHY
-        # proposals were accepted or rejected, which is the reason to watch a live run.
+        # LMR's periodic block (mpi_mcmc_mod.f90:429-455), shares over their L-generation
+        # buffer. Their running-mean and best vectors are omitted (they are in the CSV).
         if lmr_print > 0 && (g % lmr_print == 0 || g == gens)
             lo = max(1, g - retain_len + 1)          # their cyclical buffer, L generations
             n_buf = N * (g - lo + 1)
             share(v) = count(==(Int8(v)), @view outcome[:, lo:g]) / n_buf
             @printf("\n ---------- gen %d, last %d generations ----------\n",
                     g, g - lo + 1)
-            # Two of the five outcomes are not printed. "equal" (Δ = 0 exactly) cannot occur
-            # with a continuous criterion, and a candidate outside the prior box is already
-            # reported on the progress line as box=, which appears only when it is nonzero.
+            # "equal" cannot occur with a continuous criterion; box rejections are on the
+            # progress line.
             @printf(" accept  strong %.4f   weak %.4f\n", share(3), share(1))
             @printf(" reject  weak   %.4f\n", share(0))
             @printf(" logπ over the population: min %.6e  median %.6e  max %.6e\n",
                     minimum(lp), median(lp), maximum(lp))
-            # A replacement marks the replaced chain's whole trailing window, so counting
-            # marked cells would overstate it; count distinct chains instead, which is the
-            # unit n_replaced also uses.
+            # Distinct replaced chains, the unit n_replaced uses.
             @printf(" outlier chains replaced: %d in this window, %d in the run\n",
                     count(any(view(replaced, c, lo:g)) for c in 1:N), n_replaced)
             flush(stdout)
@@ -941,13 +641,7 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
                 g_final = g; aborted = true; abort_why = :drift
                 break
             end
-            # The stop gates on accepted moves, drift-flatness and non-worsening R̂ —
-            # not on an R̂ threshold. Measured on the 18.4.1 base_fc chain, the old
-            # threshold gate fired at 0 of 16 checkpoints (true-stop rate zero as well
-            # as false-stop rate zero), because worst R̂ trends UPWARD with budget while
-            # accepted moves stay flat. R̂ and ESS are still computed and printed.
-            # Both conditions require TWO CONSECUTIVE checks: one check is a reading,
-            # two is evidence.
+            # Stop and diagnosis each need two consecutive checks.
             drift_since_last = isnan(lp_best_prev) ? NaN : lp_best - lp_best_prev
             acc_window = wprop_chk > 0 ? wacc_chk / wprop_chk : NaN
             done1, diag1, moves, _, wr, me, mcse_now =
@@ -964,26 +658,9 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             wacc_chk = 0; wprop_chk = 0
 
             if verbose
-                # Only the quantities the stop actually GATES on, each beside its
-                # threshold so a reader can see which one is binding. R̂ and ESS are on
-                # every generation line already and are reported, not gated, so they are
-                # not repeated here.
-                # The FIRST check has no previous reading to difference against, so the
-                # gated quantity is genuinely undefined there and printed "n/a" — one
-                # check is a reading, two is evidence. But "n/a" alone left the first
-                # check line carrying no information at all, which reads like a defect.
-                # Print the cumulative drift from the seed beside it: that IS defined at
-                # the first check, it is the quantity the run is descending on, and its
-                # size tells the reader immediately whether the chain is sampling near
-                # the seed or still travelling away from it.
-                # mcse leads: it is the ACCURACY gate, the one quantity that says whether the
-                # reported mean and sd are usable yet. moves and drift are necessary
-                # conditions on the sample, not statements about its accuracy.
-                # R-hat travels beside mcse because mcse is bounded above by 1/sqrt(N)
-                # (= 0.103 at N = 95): a chain at R-hat = 9.7 reads mcse = 0.102, which
-                # against a 0.05 target looks like a factor of two rather than the
-                # factor of nine it is. gamma is printed so a run that adapts its way
-                # out of a mis-scaled population leaves a record of having done so.
+                # The gated quantities beside their thresholds; mcse's ceiling 1/√N and R̂
+                # are shown because mcse saturates there. The cumulative drift is defined
+                # even on the first check.
                 @printf("[demc] check g=%d  mcse=%s/%.3f (ceil %.3f)  R̂=%s  γ×%.3f accf=%s  moves=%d/%d  Δmax logπ=%s/%.2f  (cum %+.3f)  → %s\n",
                         g,
                         isfinite(mcse_now) ? @sprintf("%.4f", mcse_now) : "n/a",
@@ -1018,12 +695,8 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
             end
         end
 
-        # Their DUMPING CHAINS TO FILE block, at the cadence of the block above but at the END
-        # of the generation, so a snapshot holds everything the next generation reads and a
-        # run resumes from it exactly. Without it a run ended by hand — which is how a run
-        # with no abort ends — leaves the best POINT on disk and no draws, and the draws are
-        # what the estimator needs. Skipped at g == gens: the caller writes its own snapshot
-        # when the sampler returns, so dumping here would write the same file twice in a row.
+        # Snapshot at the end of the generation, at the lmr_print cadence, so a run resumes
+        # from it exactly. Skipped at g == gens: the caller snapshots when this returns.
         if on_dump !== nothing && lmr_print > 0 && g % lmr_print == 0 && g < gens
             on_dump(view(chain, :, :, 1:g), view(chain_lp, :, 1:g), view(accepted, :, 1:g),
                     view(outcome, :, 1:g), view(replaced, :, 1:g), g,
@@ -1031,8 +704,8 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
         end
     end
 
-    # Truncate to what was actually filled, and re-derive burn-in at g_final so a
-    # sequential stop discards the same FRACTION as a full-length run.
+    # Truncate to the generations run; burn is re-derived at g_final so an early stop
+    # discards the same fraction as a full run.
     chain    = chain[:, :, 1:g_final]
     chain_lp = chain_lp[:, 1:g_final]
     accepted = accepted[:, 1:g_final]
@@ -1041,9 +714,6 @@ worst is coord %d at %.2fx. DE-MC cannot contract these, so their reported SD is
     burn  = clamp(floor(Int, burn_frac * g_final), 0, g_final - 1)
 
     draws = reshape(chain[:, :, burn+1:end], d, :)        # pool post-burn-in chains
-    # chain_lp, accepted and replaced are returned so the bundle can persist them. Without
-    # chain_lp the log-target of a draw is recoverable only by re-solving — 950 000 solves at
-    # the shipped budget — which would make any later change of estimator a full re-run.
     return (; draws, chain, chain_lp, accepted, outcome, replaced,
               accept = nacc / (g_final * N), lp, N,
               gens = g_final, gens_requested = gens, burn,

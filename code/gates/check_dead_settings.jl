@@ -1,43 +1,26 @@
 #!/usr/bin/env julia
-# check_dead_settings.jl — find keyword arguments that ARRIVE and are never READ.
+# gates/check_dead_settings.jl — keyword arguments that arrive and are never read.
 #
-# THE GAP THIS CLOSES. check_forwarding.jl answers "does the caller's value reach the
-# callee?" and passes as soon as the keyword is present at the call site. It cannot see
-# whether the callee then does anything with it. sa_target_fin was forwarded from
-# run_params through _run_sa into _sa_loop, printed in the settings banner as though it
-# governed the walk, and never read in the loop body — so the banner asserted a target
-# feasibility fraction that nothing acted on. That is the same failure mode as the
-# unforwarded SA settings, one layer deeper.
+# check_forwarding.jl confirms a keyword is passed; this confirms the callee reads it.
+# For every function in FILES, each keyword in its signature must appear in its own body
+# (nested closures included). Works on the AST, so comments, docstrings and multi-line
+# annotations cannot produce false matches. A finding is printed for a human: a keyword
+# kept for signature compatibility is legitimately unread and says so beside it.
 #
-# WHY THE PARSER RATHER THAN grep. A keyword name also appears in comments, in docstrings,
-# in unrelated locals, and in nested closures; and a signature's type annotation may span
-# commas and braces. Julia's own parser resolves all of that exactly: the function AST
-# gives the kwarg list and the body as separate objects, so "declared" and "read" are
-# structural facts rather than pattern matches.
-#
-# USAGE
-#   julia --project=. code/gates/check_dead_settings.jl
-#
-# EXIT CODE
-#   0 clean, 1 findings. A finding is not automatically a bug — a keyword kept for
-#   signature compatibility with an older bundle loader is legitimately unread — so each
-#   is printed for a human, and the ones that are genuinely obsolete get purged with a
-#   note in CHANGELOG.md's rejected section rather than deleted silently.
+#   julia --project=. code/gates/check_dead_settings.jl      # exit 0 clean, 1 findings
 
 using Printf
 
-# Updated for the v19.6.0 layout: demc.jl and mcmc_diagnostics.jl moved to code/mcmc/.
-# A stale entry here makes this gate PASS by scanning nothing, which is the same class of
-# silent failure it was written to catch — hence the non-zero-scan assertion below.
+# Files scanned, relative to the repository root. A missing file is skipped, so this
+# list must follow the code layout.
 const FILES = ["code/smm/smm.jl", "code/smm/bundle.jl",
                "code/mcmc/demc.jl", "code/mcmc/mcmc_diagnostics.jl"]
 
 """
     kwargs_of(sig) -> Vector{Symbol}
 
-The keyword names of a function-definition signature expression. Keywords live in the
-`Expr(:parameters, ...)` block that follows the semicolon; each entry is either a bare
-symbol, a `::` annotation, or a `kw` default assignment.
+Keyword names of the function-signature expression `sig`, read from its
+`Expr(:parameters, ...)` block (bare, annotated or with a default).
 """
 function kwargs_of(sig::Expr)
     out = Symbol[]
@@ -56,8 +39,7 @@ end
 """
     symbols_in(x, acc) -> Set{Symbol}
 
-Every symbol appearing anywhere in an expression tree. Comments and docstrings are
-already gone by parse time, which is the point of doing this on the AST.
+Every symbol appearing anywhere in the expression tree `x`, accumulated into `acc`.
 """
 function symbols_in(x, acc = Set{Symbol}())
     x isa Symbol && (push!(acc, x); return acc)
@@ -68,8 +50,8 @@ end
 """
     walk(x, found)
 
-Collect `(name, kwargs, body_symbols)` for every function definition in the tree,
-including nested ones — a keyword read only inside a closure is read.
+Push `(name, kwargs, body)` onto `found` for every function definition in `x` that has
+keywords, nested definitions included; `body` is the set of symbols in its body.
 """
 function walk(x, found)
     if x isa Expr && x.head in (:function, :(=)) && !isempty(x.args) &&
@@ -89,8 +71,8 @@ end
 """
     audit(root) -> (findings, n_checked)
 
-Scan every file in `FILES`, returning one entry per keyword argument that is declared in
-a signature and absent from its own body.
+Scan every file of `FILES` under `root`. Returns `(file, function, keyword)` for each
+keyword absent from its own body, and the number of keywords checked.
 """
 function audit(root::String)
     findings = Tuple{String,Symbol,Symbol}[]

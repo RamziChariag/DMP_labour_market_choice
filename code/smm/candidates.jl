@@ -1,36 +1,22 @@
 ############################################################
-# candidates.jl — SMM candidate-generation / initialisation layer
+# smm/candidates.jl — candidate start points for INIT_MODE = :clusters
 #
-# Runs BEFORE SA/DE.  Draws a scrambled-Sobol sample over the free
-# parameter box, evaluates each point on a coarse grid, keeps the
-# feasible (finite-Q) subset, clusters them with complete-linkage
-# hierarchical clustering (`hclust`) in normalised constrained space,
-# ranks members within each cluster by Q, and returns a `SeedBank`
-# (defined in smm_params.jl).  The bank is cached to disk and reused
-# unless stale.
+# Draws a scrambled Sobol sample over the free-parameter box, evaluates it on the
+# coarse candidate grid, keeps the feasible (finite-Q) points, clusters them by
+# complete-linkage hierarchical clustering in normalised constrained space and returns
+# a `SeedBank` (smm_params.jl). The bank is cached on disk.
 #
-# Public entry points
-#   generate_candidates(spec; window, ...)          build a fresh bank
-#   load_or_generate_candidates(spec, path; ...)     load cache or build
+# The layer is a deterministic function of (cand_seed, grid, n_sample, bounds, fixed).
 #
-# Dependencies (imported in smm_main.jl):
-#   QuasiMonteCarlo  — scrambled Sobol sampling
-#   Clustering       — hclust / cutree
-#   Serialization    — cache I/O
-#
-# Replicability: the Sobol scramble is seeded from spec.run.cand_seed via
-# Random.seed!; the whole layer is therefore a deterministic function of
-# (cand_seed, grid, n_sample, bounds, fixed).
+# Entry points: generate_candidates, load_or_generate_candidates.
 ############################################################
 
 
 """
     _candidate_meta(spec, window, n_sample, seed, min_cluster) → NamedTuple
 
-Staleness / validity key for a candidate cache.  Two caches are
-interchangeable iff their structural fields match (see `_meta_matches`).
-Free-parameter identity is stored as `(block, name)` pairs so the key
-is unambiguous across blocks, and the pinned values period by period.
+Cache key of a candidate bank: window, free parameters as `(block, name)`, bounds, pinned
+values per period, coarse grid, and the sampling settings.
 """
 function _candidate_meta(spec::SMMSpec, window::Symbol,
                          n_sample::Int, seed::Int, min_cluster::Int)
@@ -53,11 +39,9 @@ end
 """
     _meta_matches(a, b) → Bool
 
-Compare two candidate-cache metas for interchangeability.  A cache is
-rejected (and regenerated) if the window, free-parameter set, bounds,
-fixed-parameter values, or coarse grid differ.  (n_sample / seed /
-min_cluster do not invalidate: a cache built with at least the current
-content is still usable; change them with CLUSTERS_FORCE_REGEN.)
+Whether two cache keys describe interchangeable banks: same window, free set, bounds,
+pinned values and coarse grid. `n_sample`, `seed` and `min_cluster` are not compared;
+rebuild with CLUSTERS_FORCE_REGEN after changing them.
 """
 function _meta_matches(a, b)
     return a.window     == b.window     &&
@@ -72,14 +56,9 @@ end
 """
     _hclust_labels(X, min_cluster) → Vector{Int}
 
-Cluster labels for the d×m matrix `X` (features in ROWS, observations in
-COLUMNS).  Returns one integer label per observation; clusters are 1..K and
-noise is 0.
-
-Complete-linkage hierarchical clustering (`hclust`/`cutree`, from Clustering.jl)
-on pairwise Euclidean distances over the columns of `X`, cut at the largest gap
-in the merge heights.  Clusters with fewer than `min_cluster` members are
-relabelled as noise (0); the rest get sequential ids 1..K.
+Cluster labels for the columns of the d×m matrix `X`: complete-linkage hierarchical
+clustering on Euclidean distances, cut at the largest gap in the merge heights. Clusters
+are numbered 1..K; clusters with fewer than `min_cluster` members are labelled 0 (noise).
 """
 function _hclust_labels(X::AbstractMatrix{Float64}, min_cluster::Int)
     m = size(X, 2)
@@ -133,14 +112,13 @@ end
 
 
 """
-    generate_candidates(spec; window, n_sample, seed, min_cluster, show_trace)
-        → SeedBank
+    generate_candidates(spec; window, n_sample, seed, min_cluster, show_trace) → SeedBank
 
-Sample (scrambled Sobol), evaluate on the coarse grid, filter to finite-Q,
-cluster with complete-linkage hierarchical clustering (`hclust`), rank within
-clusters by Q, and return a `SeedBank`.  If clustering finds no clusters (all
-noise), fall back to the best feasible points (one synthetic cluster) so SA/DE
-always receive a non-empty bank.
+Build a candidate bank for `spec`: `n_sample` scrambled Sobol points in the box (scramble
+seeded by `seed`), scored by `smm_objective` on the coarse candidate grid, the feasible
+ones clustered (`_hclust_labels`) with noise dropped. When nothing clusters, the bank is
+the best max(2·min_cluster, 10) feasible points as one cluster; when nothing is feasible,
+it is empty.
 """
 function generate_candidates(spec::SMMSpec;
                              window      :: Symbol = :unknown,
@@ -153,13 +131,12 @@ function generate_candidates(spec::SMMSpec;
     ub = [ps.ub for ps in spec.free]
     meta = _candidate_meta(spec, window, n_sample, seed, min_cluster)
 
-    # 1. Scrambled-Sobol sample in the constrained box [lb, ub]  (d × n_sample).
-    #    Seed the global RNG so the scramble (and hence the layer) is replicable.
+    # Sobol sample in the constrained box (d × n_sample); the scramble draws from the
+    # global RNG, seeded here.
     Random.seed!(seed)
     X = QuasiMonteCarlo.sample(n_sample, lb, ub,
                                SobolSample(R = OwenScramble(base = 2, pad = 32)))
 
-    # Map each column (constrained) → unconstrained θ.
     thetas = Vector{Vector{Float64}}(undef, n_sample)
     for j in 1:n_sample
         θ = Vector{Float64}(undef, d)
@@ -172,7 +149,6 @@ function generate_candidates(spec::SMMSpec;
         thetas[j] = θ
     end
 
-    # 2. Evaluate on the coarse grid (parallel).
     if show_trace
         @printf("  [candidates]  evaluating %d Sobol points on coarse grid (Nx=%d, Np_U=%d, Np_S=%d)...\n",
                 n_sample, spec.run.cand_Nx, spec.run.cand_Np_U, spec.run.cand_Np_S)
@@ -186,7 +162,6 @@ function generate_candidates(spec::SMMSpec;
                               Np_S = spec.run.cand_Np_S)
     end
 
-    # 3. Filter to finite Q.
     feas = findall(isfinite, Qs)
     if show_trace
         @printf("  [candidates]  feasible (finite Q): %d / %d\n", length(feas), n_sample)
@@ -201,7 +176,7 @@ function generate_candidates(spec::SMMSpec;
     feas_Q      = Qs[feas]
     m           = length(feas)
 
-    # 4. Normalise to [0,1]^d in constrained space.  Features in COLUMNS (d × m).
+    # Constrained coordinates normalised to [0,1]^d, one column per point.
     Xn = Matrix{Float64}(undef, d, m)
     for (col, θ) in enumerate(feas_thetas)
         for (k, ps) in enumerate(spec.free)
@@ -210,13 +185,10 @@ function generate_candidates(spec::SMMSpec;
         end
     end
 
-    # 5. Cluster with complete-linkage hierarchical clustering; label 0 = noise.
     labels = _hclust_labels(Xn, min_cluster)
     keep   = findall(>(0), labels)
 
     if isempty(keep)
-        # Fallback: no clusters — seed from the best feasible points (one
-        # synthetic cluster) so SA/DE always receive a non-empty bank.
         order = sortperm(feas_Q)
         ntop  = min(length(order), max(2 * min_cluster, 10))
         sel   = order[1:ntop]
@@ -242,12 +214,10 @@ end
 
 
 """
-    load_or_generate_candidates(spec, path; window, force_regen, show_trace)
-        → SeedBank
+    load_or_generate_candidates(spec, path; window, force_regen, show_trace) → SeedBank
 
-Load a cached `SeedBank` from `path` if present and not stale; otherwise
-generate a fresh one and save it.  With `force_regen=true`, always
-regenerate and overwrite.
+The candidate bank cached at `path` when it exists and its key matches `spec`
+(`_meta_matches`); otherwise, or with `force_regen`, a fresh bank, saved to `path`.
 """
 function load_or_generate_candidates(spec::SMMSpec, path::String;
                                      window      :: Symbol = :unknown,

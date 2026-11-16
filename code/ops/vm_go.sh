@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# ON THE LAPTOP, from the repo:  bash code/ops/vm_go.sh base_covid
-# Accesses the VM, starts the run (auto push + auto shutdown), tails the log.
+# ops/vm_go.sh — run on the laptop:  bash code/ops/vm_go.sh <window>
+# Resets the VM checkout to origin/main, starts vm_run.sh in tmux there (which pushes and
+# shuts the VM down when done), and tails the run log.
 set -u
 W="${1:-base_covid}"
 S="gcloud compute ssh chariag1_ramzi@instance-20260808-143737 --zone=us-central1-c --project=roysearch"

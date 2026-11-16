@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
-# scripts/check_repo.sh — what would a clone actually contain?
+# gates/check_repo.sh — can a clone run the estimation, and what does it contain?
 #
-# Answers the question a .gitignore cannot: of the files git currently TRACKS, how
-# large is the clone, what are the biggest offenders, and is every input the
-# estimation needs actually present?
+# Checks the required inputs and warm-start bundles, runs the settings, threading and
+# hiring-margin gates, then (unless --verify-only) audits the size of the tracked set.
+# Run before pushing, and on the VM after cloning with --verify-only.
 #
-# Run before pushing, and on the VM after cloning (--verify-only) to confirm the
-# clone can run the batch.
-#
-#   bash scripts/check_repo.sh
-#   bash scripts/check_repo.sh --verify-only
+#   bash code/gates/check_repo.sh
+#   bash code/gates/check_repo.sh --verify-only
 set -euo pipefail
 
-# Scripts may sit at the repo root or under code/, so the root is found by walking
-# up for its markers rather than assuming a fixed depth.
+# The root is the nearest ancestor holding both markers (as code/repo_root.jl).
 find_repo_root() {
     dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     while [ "$dir" != "/" ]; do
@@ -52,8 +48,8 @@ for w in "${DATA_WINDOWS[@]}"; do
 done
 [ "$missing" -eq 0 ] && echo "  all per-window moment and sampling-variance files present"
 
-# A warmstart scores every stored point that can start a window (smm_main.jl §8a); with
-# none it starts from the DEFAULT values, which is a different (and slower) starting point.
+# A :warmstart run scores every stored point that can start a window (smm_main.jl §8a);
+# with none it starts from the DEFAULT values.
 echo ""
 echo "=== warm-start candidates (optional, but a :warmstart run wants one) ==="
 for w in "${WINDOWS[@]}"; do
@@ -65,10 +61,8 @@ for w in "${WINDOWS[@]}"; do
     printf "  %-13s %s\n" "$w" "${found:- none — will start from the DEFAULT values}"
 done
 
-# Settings lifecycle. Runs before the size audit and in --verify-only, because a clone
-# that cannot deliver its own settings is broken in a way no file listing reveals: the
-# defect this catches produces numbers, writes output, and reports the configuration the
-# caller intended rather than the one the optimiser used. Non-zero here fails the gate.
+# Settings lifecycle, also under --verify-only: an undelivered setting still produces
+# numbers and reports the intended configuration, so no file listing reveals it.
 echo ""
 echo "=== settings lifecycle (code/gates/check_forwarding.jl) ==="
 JULIA_BIN="${JULIA:-julia}"
@@ -83,9 +77,7 @@ else
     echo "  SKIPPED: julia not on PATH (set JULIA=/path/to/julia to include this gate)"
 fi
 
-# Threaded evaluation. Runs with -t 2 deliberately: the defect this catches is invisible
-# on one thread, which is how v40.0.0 shipped a solver that returned Inf for every
-# parameter point the DE, the width measurement or the Jacobian evaluated.
+# Threaded evaluation, at -t 2: the defect it catches is invisible on one thread.
 echo ""
 echo "=== threaded evaluation (code/gates/check_threading.jl) ==="
 if command -v "$JULIA_BIN" >/dev/null 2>&1; then
@@ -99,8 +91,7 @@ else
     echo "  SKIPPED: julia not on PATH (set JULIA=/path/to/julia to include this gate)"
 fi
 
-# Hiring margin. The solver weights cells by the closed-form hireable set a_U > b̃_U/P_U;
-# this confirms the solved p*_U still selects the same set at every stored estimate.
+# Hiring margin: the solved p*_U must select the closed-form hireable set a_U > b̃_U/P_U.
 echo ""
 echo "=== unskilled hiring margin (code/gates/check_hire_margin.jl) ==="
 if command -v "$JULIA_BIN" >/dev/null 2>&1; then
@@ -127,13 +118,11 @@ git ls-files -z | while IFS= read -r -d '' f; do
     [ -f "$f" ] && printf "%s\t%s\n" "$(stat -f%z "$f")" "$f"
 done | sort -rn | head -15 | awk -F'\t' '{printf "  %8.2f MB  %s\n", $1/1048576, $2}'
 
-# The pre-commit hook blocks single files over its limit. It cannot see files that
-# are ALREADY tracked, and it never fires on a directory of many small files — which
-# is how most repository bloat actually arrives.
+# The pre-commit hook only sees newly staged files over its size limit; this reports
+# tracked files that .gitignore now excludes.
 echo ""
 echo "=== tracked files that .gitignore now excludes (staged bloat the hook missed) ==="
-# --no-index is load-bearing: without it check-ignore skips paths already in the
-# index, which is exactly the set being audited, and the count comes back zero.
+# --no-index is required: without it check-ignore skips tracked paths and reports none.
 stale=$(git ls-files | git check-ignore --stdin --no-index 2>/dev/null | head -20 || true)
 if [ -z "$stale" ]; then
     echo "  none — tracked set agrees with .gitignore"

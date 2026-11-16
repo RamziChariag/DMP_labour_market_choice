@@ -1,33 +1,27 @@
 ############################################################
-# data_and_descriptives/nsc.jl
+# code/data_and_descriptives/nsc.jl
 #
-# Education-side data: the training state's level, its completion rate, and one
-# enrolment diagnostic.
-#   • enrollment_rate_by_age — CPS enrolment-rate diagnostic by age band;
-#   • compute_training_share_target — per-window training_share target from
-#     four-year undergraduate enrolment (consumed by Stage 9 / Stage 10);
-#   • _load_training_share_target — reads that level and its variance back;
-#   • calibrate_phi — the training-completion rate φ.
+# Education side of the data: the training_share target (level and variance),
+# the completion rate φ, and one CPS enrolment diagnostic.
 #
-# Reads:  data/raw/nces/nces_4yr_undergrad_enrollment.csv, cps_basic_clean.arrow
-# Writes: enrollment_rate_by_age.csv, training_share_target.csv, phi_calibration.csv
-#
-# Plain include() file: definitions only, no top-level execution.
-# `using` packages and path consts come from data_processing_main.jl.
+# Entry points:
+#   enrollment_rate_by_age()          → enrollment_rate_by_age.csv (diagnostic)
+#   compute_training_share_target()   → training_share_target.csv
+#   _load_training_share_target(w)    reads that target back (moments, variances)
+#   calibrate_phi()                   → phi_calibration.csv
+# Reads data/raw/nces/nces_4yr_undergrad_enrollment.csv and cps_basic_clean.arrow.
+# Definitions only; packages and path constants come from data_processing_main.jl.
 ############################################################
 
-# ──────────────────────────────────────────────────────────────────────────
-# Diagnostic: CPS enrolment rate by age band × window
-#
-# Shows the share of the population that is enrolled (in_training) for
-# each age band within each window. The SCHLCOLL universe expanded from
-# 16–24 to 16–54 in Jan 2013, so we expect the FC windows (base_fc,
-# crisis_fc) to show ~zero enrolment for ages 25+ — that is the
-# structural-zero signature, not a behavioural fact about older workers.
-# The COVID windows (base_covid, crisis_covid) should show non-trivial
-# enrolment up through age 54 and ~zero only at 55–64.
-# ──────────────────────────────────────────────────────────────────────────
+"""
+    enrollment_rate_by_age() -> DataFrame
 
+Weighted CPS enrolment rate (`in_training` share of population) by age band and
+window, plus the overall 16–64 rate; printed and saved to
+enrollment_rate_by_age.csv. The SCHLCOLL universe widened from 16–24 to 16–54 in
+January 2013, so the FC windows show a structural zero above age 24. This is why
+the training_share level is not taken from CPS.
+"""
 function enrollment_rate_by_age()
     cps_path = joinpath(DERIVED_DIR, "cps_basic_clean.arrow")
     isfile(cps_path) ||
@@ -35,11 +29,12 @@ function enrollment_rate_by_age()
     cps = DataFrame(Arrow.Table(cps_path))
     cps.enrolled = coalesce.(cps.in_training, false)
 
-    # Age bands, both edges inclusive.
     bands = [(16, 19), (20, 24), (25, 29), (30, 34),
              (35, 44), (45, 54), (55, 64)]
     band_label(lo, hi) = lo == hi ? "$(lo)" : "$(lo)–$(hi)"
 
+    # (rate, mean monthly population) for ages lo..hi: monthly weighted
+    # enrolment and population, each averaged over months, then divided.
     function _band_rate(sub::DataFrame, lo::Int, hi::Int)
         b = filter(r -> lo <= r.AGE <= hi, sub)
         nrow(b) == 0 && return (NaN, NaN)
@@ -56,8 +51,6 @@ function enrollment_rate_by_age()
     for w in WINDOWS_ORDER
         sub = filter(r -> r.window == w, cps)
         nt = (window = w,)
-        # Build a row with one column per band (enrolment rate)
-        # plus the overall 16–64 rate at the end.
         for (lo, hi) in bands
             rate, _ = _band_rate(sub, lo, hi)
             nt = merge(nt, NamedTuple{(Symbol(band_label(lo, hi)),)}((
@@ -78,53 +71,23 @@ function enrollment_rate_by_age()
     return df
 end
 
+"""
+    compute_training_share_target() -> DataFrame
 
+The training_share target per window: the mean over the window's Fall years of
+NCES four-year undergraduate enrolment (all attendance) divided by the mean
+monthly CPS 16–64 population, with its across-Fall-year variance (n − 1, not
+divided by the number of years). Errors if any Fall year in the window is
+missing. Saves and returns training_share_target.csv.
 
-# ──────────────────────────────────────────────────────────────────────────
-# Attrition wedge constants (see compute_training_share_target below)
-# ──────────────────────────────────────────────────────────────────────────
-# training_share target — four-year undergraduate enrolment over population
-#
-# The model's trainee state t is fed by newborns from the unskilled pool and has
-# exactly two exits: completion at φ and demographic exit at ν. Nobody drops
-# out, so t is simply everyone currently enrolled in the programme that confers
-# market access:
-#
-#     training_share_w  =  mean over Fall years w of ( enr_4yr / CPS_pop_w )
-#
-# Three choices, each load-bearing:
-#
-#   (a) FOUR-YEAR UNDERGRADUATE, not total postsecondary. The skilled state is
-#       EDUC ≥ 111, a bachelor's or above, so two-year enrolment does not lead
-#       to it and graduate enrolment starts from it. Either one in the numerator
-#       counts a student the training state cannot represent.
-#
-#   (b) ALL ATTENDANCE, full- and part-time together. φ is a single hazard on
-#       the whole training stock, so a part-time student is one who completes
-#       more slowly — which is what a constant hazard already represents — not
-#       one to be excluded.
-#
-#   (c) NO ATTRITION WEDGE. A completion-probability wedge on the stock and a
-#       completion hazard φ discount the same attrition twice. The stationary
-#       identity also leaves no admissible room for one: inverting
-#       skilled_share = (φ/ν)·t/(1−t) at the observed skilled share wants a
-#       wedge of 1.008, 0.946, 1.090 and 1.183 across the four windows — three
-#       of the four above the ceiling of 1. The single wedge minimising mean
-#       |error| in φ/ν is 1.008, and the objective falls monotonically in f
-#       below that, so 1 is the boundary optimum on (0, 1] and no admissible
-#       wedge does better. It is not the per-window optimum: crisis_fc alone
-#       wants 0.946.
-#
-# The variance is the across-Fall-year dispersion, undivided by the number of
-# years: the source is an administrative census, so there is no sampling error
-# to divide down and the year-to-year spread IS the uncertainty in the target.
-# Same convention as ee_rate_S (sampling_variances.jl).
-#
-# A CPS-derived enrolment count is deliberately not used for the level: the
-# SCHLCOLL universe is age-capped at 24 before 2013 and widens to 54 after, so
-# it is not comparable across the two crisis pairs.
-# ──────────────────────────────────────────────────────────────────────────
-
+The model's trainee state exits only by completion (φ) or demographic exit (ν),
+so it is everyone enrolled in the programme that leads to the skilled state.
+Hence four-year undergraduate only (the skilled state is BA+), part-time
+included (a constant φ already represents slower completion), and no attrition
+wedge (a wedge and φ would discount attrition twice; the stationary identity
+admits no wedge below 1). The variance is the year-to-year spread because the
+source is an administrative census with no sampling error to divide down.
+"""
 function compute_training_share_target()
     cps_path = joinpath(DERIVED_DIR, "cps_basic_clean.arrow")
     isfile(cps_path) ||
@@ -182,12 +145,11 @@ function compute_training_share_target()
 end
 
 """
-    _load_training_share_target(wname) → (target, sampling_var)
+    _load_training_share_target(wname) -> (target, sampling_var)
 
-The training_share level and its across-Fall-year variance for `wname`,
-read from derived/training_share_target.csv. Errors rather than defaulting: a
-missing target would silently ship the raw CPS moment, which measures a different
-universe (SCHLCOLL, age-capped before 2013) and is not the model's `t`.
+The training_share level and its across-Fall-year variance for `wname`, read
+from derived/training_share_target.csv. Errors rather than defaulting: the only
+alternative would be the CPS count, which measures a different universe.
 """
 function _load_training_share_target(wname::Symbol)
     path = joinpath(DERIVED_DIR, "training_share_target.csv")
@@ -201,22 +163,22 @@ function _load_training_share_target(wname::Symbol)
             sampling_var = Float64(rows.sampling_var[1]))
 end
 
+"""
+    BACHELOR_PROGRAM_MONTHS
 
-
-# ──────────────────────────────────────────────────────────────────────────
-# φ — the training-completion hazard
-#
-# 1/φ is the NOMINAL length of a bachelor's programme, not an observed mean
-# time-to-degree. The training state has completion as its only exit, so a
-# measured mean would fold in part-time pacing, stop-out and re-enrolment —
-# all of which the model already represents as time spent in the state at this
-# same constant hazard. Taking the nominal length keeps φ a property of the
-# programme rather than of the current composition of enrolment, which is what
-# makes it admissible to hold fixed across a crisis pair.
-# ──────────────────────────────────────────────────────────────────────────
-
+Nominal length of a bachelor's programme. 1/φ is this nominal length, not an
+observed time to degree: pacing, stop-out and re-enrolment are already time
+spent in the training state at the same constant hazard, and a programme
+property can be held fixed across a crisis pair.
+"""
 const BACHELOR_PROGRAM_MONTHS = 48.0
 
+"""
+    calibrate_phi() -> Float64
+
+The training-completion hazard φ = 1/`BACHELOR_PROGRAM_MONTHS` per month;
+printed, saved to phi_calibration.csv, and returned.
+"""
 function calibrate_phi()
     phi = 1 / BACHELOR_PROGRAM_MONTHS
     @printf("  φ = %.6f per month  (1/%.0f, nominal four-year programme)\n",
@@ -224,6 +186,5 @@ function calibrate_phi()
 
     CSV.write(joinpath(DERIVED_DIR, "phi_calibration.csv"),
               DataFrame(phi = phi, program_months = BACHELOR_PROGRAM_MONTHS))
-    return phi
     return phi
 end

@@ -1,13 +1,9 @@
 #!/usr/bin/env julia
 ############################################################
-# check_output_tree.jl — enforce the v19.6.0 layout rules rather than remember them.
+# gates/check_output_tree.jl — the output-tree and code-layout rules of paths.jl.
 #
-# Nine rules, each a filesystem check or a grep. They exist because the alternative is a
-# convention, and a convention that nothing checks drifts: before v19.6.0 output paths were
-# declared in seven files, two behind !@isdefined guards, and output/tables/ held nine CSVs
-# alongside five .tex files so the directory could not be deleted and regenerated.
-#
-# A finding is a defect, not a warning. Exit 1 on any.
+# Nine rules, each a filesystem check or a grep over code/ and output/. Any finding is a
+# defect: exit 1.
 #
 #   julia --project=. code/gates/check_output_tree.jl
 ############################################################
@@ -18,9 +14,13 @@ include(joinpath(@__DIR__, "..", "repo_root.jl"))
 const ROOT = find_repo_root()
 
 findings = String[]
+
+"""Records finding `s`."""
 note(s) = push!(findings, s)
 
+"""Regular files directly inside `dir` (full paths); empty if `dir` is absent."""
 _files(dir) = isdir(dir) ? [f for f in readdir(dir; join = true) if isfile(f)] : String[]
+"""Every file under `dir`, recursively (full paths); empty if `dir` is absent."""
 function _walk(dir)
     out = String[]
     isdir(dir) || return out
@@ -29,6 +29,7 @@ function _walk(dir)
     end
     return out
 end
+"""Path `p` relative to the repository root, for printing."""
 _rel(p) = replace(p, ROOT => "")
 
 const IMAGE_EXT = (".png", ".pdf", ".svg", ".jpg", ".jpeg", ".eps")
@@ -50,7 +51,7 @@ for f in _walk(joinpath(OUT, "plots"))
 end
 
 # ── 3. no artifacts under code/ ────────────────────────────────────────────
-# The gitignored trees are excluded: they are not part of the shipped codebase.
+# Gitignored trees under code/ are not part of the shipped code and are skipped.
 const CODE_SKIP = ("notebooks", "single_run_plots_all", ".vscode", ".ipynb_checkpoints",
                    "roysearch_v")
 for f in _walk(CODE)
@@ -60,27 +61,24 @@ for f in _walk(CODE)
 end
 
 # ── 4. only plots_and_tables/ writes exhibits ──────────────────────────────
-# The one rule that makes "one writer" true rather than aspirational.
 for f in _walk(CODE)
     endswith(f, ".jl") || continue
     any(occursin(s, f) for s in CODE_SKIP) && continue
     occursin(joinpath("code", "plots_and_tables"), f) && continue
     src = read(f, String)
-    # The WRITE is savefig. out_plots/out_tables are path LOOKUPS, and an entry point
-    # resolving a directory to hand to a plotting script is correct — flagging those made
-    # the rule fire on model_main.jl doing exactly the right thing.
+    # The write is savefig; out_plots/out_tables are lookups and allowed anywhere.
     occursin(joinpath("code", "gates"), f) && continue    # a gate names the pattern it greps for
     occursin("savefig(", src) &&
         note("rule 4: savefig( outside plots_and_tables/ — $(_rel(f))")
 end
 
 # ── 5. exact window / pair subdirectories per category ─────────────────────
+# The admitted units mirror paths.jl's _CATEGORY_UNITS.
 const WINDOWS_E = ("base_fc", "crisis_fc", "base_covid", "crisis_covid")
 const PAIRS_E   = ("fc", "covid")
 for (kind, root) in (("plots", joinpath(OUT, "plots")), ("tables", joinpath(OUT, "tables")))
     isdir(root) || continue
-    for (cat, admitted) in (("fit", WINDOWS_E), ("model", WINDOWS_E),
-                            ("policy", WINDOWS_E), ("transition", PAIRS_E))
+    for (cat, admitted) in (("fit", WINDOWS_E), ("model", WINDOWS_E), ("transition", PAIRS_E))
         d = joinpath(root, cat)
         isdir(d) || continue
         for sub in readdir(d)
@@ -100,8 +98,8 @@ for (kind, root) in (("plots", joinpath(OUT, "plots")), ("tables", joinpath(OUT,
 end
 
 # ── 6. estimates/ matches only the permitted patterns ──────────────────────
-# _postmean is the chain estimate's name before v57.0.0, which no code reads.
-const EST_OK = r"^(estimate|smm_estimates|mcmc_results|candidates|plateau_probe|tau_margin)_.*\.(jls|csv)$"
+# _postmean is a retired name for the chain estimate, which no code reads.
+const EST_OK = r"^(estimate|smm_estimates|mcmc_results|candidates)_.*\.(jls|csv)$"
 for f in _files(joinpath(OUT, "estimates"))
     b = basename(f)
     b == ".DS_Store" && continue
@@ -126,7 +124,7 @@ for f in _walk(CODE)
 end
 
 # ── 8. smm/ never includes from mcmc/ ──────────────────────────────────────
-# The MCMC samples the SMM criterion, so it is downstream and the layout should say so.
+# The MCMC samples the SMM criterion, so it is downstream.
 for f in _files(joinpath(CODE, "smm"))
     endswith(f, ".jl") || continue
     occursin("mcmc", read(f, String)) && occursin("include(", read(f, String)) || continue
@@ -142,21 +140,13 @@ for f in _walk(CODE)
     any(occursin(s, f) for s in CODE_SKIP) && continue
     endswith(f, "bundle.jl") && continue                     # the writer itself
     endswith(f, "candidates.jl") && continue                 # seed bank, not a bundle
-    # Only smm/ and mcmc/ write estimate bundles. transition_simulation serialises a
-    # transition result — no spec field, different object, different home — and a gate that
-    # flagged it would be asserting a rule that does not apply to it.
-    (occursin(joinpath("code", "smm"), f) || occursin(joinpath("code", "mcmc"), f) ||
-     occursin(joinpath("code", "tools"), f)) || continue
+    # Only smm/ and mcmc/ write estimate bundles; a transition result is another object.
+    (occursin(joinpath("code", "smm"), f) || occursin(joinpath("code", "mcmc"), f)) || continue
     for (i, l) in enumerate(eachline(f))
         occursin("serialize(", l) && !occursin("deserialize", l) || continue
-        # The chain-draw bundle is a different object with its own shape and its own home.
+        # The chain-draw bundle is a different object with its own home.
         occursin("chain", lowercase(l)) && continue
         occursin("res.chain", l) && continue
-        # The neutral migration intermediate is raw ON PURPOSE: a struct migration cannot
-        # route through write_bundle, because the struct being migrated is the one
-        # write_bundle would fail to construct. It stages under /.migration/ and is
-        # removed on success.
-        occursin("neutral", lowercase(l)) && continue
         note("rule 9: bare serialize of a bundle — $(_rel(f)):$(i)")
     end
 end

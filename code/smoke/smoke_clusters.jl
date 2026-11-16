@@ -1,12 +1,7 @@
-# Smoke test — crisis_covid spec construction under INIT_MODE = :clusters.
+# smoke/smoke_clusters.jl — crisis_covid spec under INIT_MODE = :clusters (run_smoke.sh).
 #
-# Checks that the baseline optimum reaches the optimiser as a start:
-#   1. it is present in the seed bank, in a cluster of its own;
-#   2. `_sa_starts_from_bank` therefore emits it (one start per cluster);
-#   3. the emitted start is the baseline vector to the last bit.
-#
-# The sliced driver runs with a small cand_n_sample so the Sobol layer is cheap;
-# the injection path under test does not depend on the bank's size.
+# The baseline optimum must be in the seed bank, in a cluster of its own, and
+# `_sa_starts_from_bank` must emit it as a start, bit-identical.
 
 include(joinpath(@__DIR__, "main_spec_only.jl"))
 

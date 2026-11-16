@@ -1,38 +1,25 @@
 ############################################################
-# solver.jl — Global equilibrium solver (RoySearch)
+# solver.jl — Global equilibrium solver and multiple skilled equilibria
 #
-# Public entry points
-#   solve_model(common, unsk_par, skl_par, sim; Nx, Np_U, Np_S, tightness)
-#       → build grids and caches and solve, return (Model, SolveResult): at the vacancy
-#         costs in the parameter blocks (the global loop), or at `tightness = (U, S)`.
-#   solve_model!(model)
-#       → run the global loop in place on an existing Model (vacancy costs given).
-#   solve_at_tightness!(model, θU, θS)
-#       → the equilibrium at given tightnesses, in one pass, with the vacancy costs
-#         free entry implies installed in the parameter blocks.  The estimation's solve.
-#   skilled_equilibria(model)
-#       → every attracting skilled equilibrium at the parameters of a converged Model.
+# Entry points
+#   solve_model(common, unsk_par, skl_par, sim; Nx, Np_U, Np_S, tightness, held)
+#       build the model and solve it at the vacancy costs, or at given tightnesses.
+#   solve_model!(model; θS_fixed)      global fixed point in place (vacancy costs given).
+#   solve_at_tightness!(model, θU, θS) equilibrium at given tightnesses, with the implied
+#                                      vacancy costs installed (the estimation's solve).
+#   global_residuals(model)            the equilibrium residual battery.
+#   skilled_equilibria(model)          every attracting skilled equilibrium.
 #
-# Global fixed point on the link variables (U_S^(0), m_S), both Anderson(m=1)
-# accelerated.  U_S^(0)(aS) is one-dimensional in the skilled aptitude; the
-# trained mass m_S(aU,aS) is two-dimensional on the copula grid.  The
-# remaining link objects are derived deterministically each pass:
-#   κ_U         = θ_U q_U(θ_U)                     from the unskilled solve
-#   E_U(aU,1)   = U^search(aU) + β_U S_U(aU,1)     from the frontier surplus
-#   U_S^(1), T, τ, d and the training-slice match   from the career choices
-#   m_S(aU,aS)  = φ t(aU,aS) / (ν + k(aU,aS))       k the crossing hire rate
-#   d(aU,aS) u_S(aU,aS) = d m_S                     the cross-market seekers
-#
-# Per global iteration:
-#   A. Solve the unskilled block with the carried d·u_S.
-#   B. Form κ_U and E_U(·,1).
-#   C. Career choices at the installed U_S^(0); masses; install m_S.
-#   D. Solve the skilled block.
-#   E. Career choices at the new U_S^(0); masses.
-#   F. Anderson on the joint [U_S^(0); vec(m_S)] with per-block scaling.
-#   G. Write back: sc.U ← new U_S^(0); sc.m_S ← new m_S; uc.duS_carry ← d·m_S.
-#   H. Evaluate the equilibrium residual battery; the pass converges when it is
-#      inside tolerance on every component (global_residuals below).
+# The global loop iterates on the link variables U_S^(0)(aS) and m_S(aU,aS) with joint
+# Anderson(1). Per pass:
+#   A. unskilled block with the carried d·u_S;
+#   B. κ_U and E_U(·,1);
+#   C. career choices at the installed U_S^(0); m_S installed;
+#   D. skilled block;
+#   E. career choices and masses at the new U_S^(0);
+#   F. Anderson on [U_S^(0); vec(m_S)], each block scaled;
+#   G. write back U_S^(0), m_S and duS_carry = d·m_S;
+#   H. residual battery; converged when Rmax < 1 for conv_streak passes.
 ############################################################
 
 
@@ -43,8 +30,8 @@
 """
     SolveResult
 
-Records whether each layer of the solver converged on the final global
-iteration.  All three flags true ⇒ `result.ok`.
+Convergence flags of the unskilled block, the skilled block and the global loop on the final
+pass; `ok` when all three hold.
 """
 struct SolveResult
     converged_U      :: Bool
@@ -53,21 +40,23 @@ struct SolveResult
     ok               :: Bool
 end
 
+"""
+    SolveResult(cU, cS, cG) → SolveResult
+
+Flags with `ok = cU && cS && cG`.
+"""
 SolveResult(cU::Bool, cS::Bool, cG::Bool) = SolveResult(cU, cS, cG, cU && cS && cG)
 
 
-# ---------------------------------------------------------------------------
-# solve_model — allocate grids and caches from parameter blocks, then solve
-# ---------------------------------------------------------------------------
 """
-    solve_model(common, unsk_par, skl_par, sim; Nx, Np_U, Np_S, tightness = nothing,
-                held = nothing) → (Model, SolveResult)
+    solve_model(common, unsk_par, skl_par, sim; Nx = 200, Np_U = 200, Np_S = 200,
+                tightness = nothing, held = nothing) → (Model, SolveResult)
 
-With `tightness = nothing` the vacancy costs `unsk_par.k`, `skl_par.k` are given and the
-global loop solves for the tightnesses (`solve_model!`).  With
+Build grids and caches and solve. With `tightness = nothing` the vacancy costs `k` are given
+and the global loop solves for the tightnesses (`solve_model!`). With
 `tightness = (U = θ_U, S = θ_S)` the tightnesses are given and the vacancy costs are
-computed from free entry (`solve_at_tightness!`); the blocks' `k` are then not read.
-`held` holds the education choices at those of another equilibrium (`HeldChoices`).
+computed from free entry (`solve_at_tightness!`); the blocks' `k` are then not read. `held`
+holds the education choices of another equilibrium (`HeldChoices`).
 """
 function solve_model(common::CommonParams, unsk_par::UnskilledParams,
                      skl_par::SkilledParams, sim::SimParams;
@@ -85,10 +74,12 @@ function solve_model(common::CommonParams, unsk_par::UnskilledParams,
 end
 
 
-# ---------------------------------------------------------------------------
-# m_S(aU,aS) = φ t(aU,aS) / (ν + k(aU,aS)), k the rate at which the cell's trained
-# are hired into the unskilled market (crossing_rates)
-# ---------------------------------------------------------------------------
+"""
+    _mS_from_t(t, k, φ, ν) → mS
+
+Trained mass `m_S = φ t / (ν + k)`, `k` the crossing hire rate (`crossing_rates`); zero
+where the denominator vanishes.
+"""
 function _mS_from_t(t::Matrix{Float64}, k::Matrix{Float64}, φ::Float64, ν::Float64)
     mS = similar(t)
     @inbounds for c in eachindex(t)
@@ -99,64 +90,36 @@ function _mS_from_t(t::Matrix{Float64}, k::Matrix{Float64}, φ::Float64, ν::Flo
 end
 
 
-# ---------------------------------------------------------------------------
+# ============================================================
 # Equilibrium residuals
 #
-# One tolerance per component, because the components do not live on a common
-# scale: R1 is a displacement in match quality, R2 and R5 are relative gaps, R3 a
-# fraction.  These are properties of the conditions rather than choices a run should
-# vary, so they are constants here and not SimParams fields.
-# ---------------------------------------------------------------------------
-const TOL_CUTOFF   = 1.0e-6      # a cutoff, in units of p ∈ [0,1]; the skilled block's own step tolerance
+# One tolerance per component, since they are on different scales. Constants, not settings.
+# ============================================================
+
+const TOL_CUTOFF   = 1.0e-6      # a cutoff displacement, in p ∈ [0,1]
 const TOL_RELATIVE = 1.0e-6      # free entry and the education margin, relative
 const TOL_POLICY   = 1.0e-6      # the training choice, a fraction in [0,1]
 
 """
-    global_residuals(model) → (R1, R2, R3, R5, Rmax)
+    global_residuals(model; θS_fixed = nothing) → (R1, R2, R3, R5, Rmax)
 
-The equilibrium conditions THEMSELVES, evaluated at the state the solver currently holds.
-Each component is returned as a RATIO TO ITS OWN TOLERANCE, so all of them read on one
-scale and `Rmax < 1` is the convergence gate.
-
-  R1  the skilled cutoffs.  The skilled values are re-solved at the installed cutoffs and
-      tightness, and the cutoffs those values imply (`cutoff_proposals!`, the map the
-      block iterates) are compared with the installed ones, in p.  `p*_S` is read at every
-      type — at the grid floor it is implied at the floor exactly when `S ≥ 0` holds there
-      — and `p^oj` wherever some of the type searches; at `s_part = 0` it enters nothing.
-      A displacement, so it is zero at a fixed point whatever the grid: the surplus read at
-      a node, which it replaces, reported the slope times the distance from the cutoff to
-      that node and halved with every doubling of the p-grid.
-  R2  free entry, both markets, relative in θ.
-  R3  the training choice τ, already a fraction in [0,1].
-  R5  the education margin.  R1–R3 are all satisfied by the degenerate state where nobody
-      trains and the skilled market is empty — free entry closes on the ℓ-weighted
-      fallback, there is no mass to misclassify, and the identities hold trivially.  R5 is
-      the training value the current U_S = max{U_S^(0), U_S^(1)} implies against the one
-      the state holds, U_S^(1) re-evaluated at the installed T (implied_training_value),
-      and it is the only component coupling the two markets.
-
-There is no R4.  The population adding-up residual would go there, and it is deliberately
-absent: (E5) DEFINES `m_U := ℓ − m_S` and `e_U := m_U − u_U − t`, so every distributional
-identity holds by construction, reads exactly zero everywhere, and can detect no
-non-convergence at all.  A vacuous component is not free — it is somewhere for an
-arithmetic slip to hide.
-
-R3 and R5 call `training_choice!` and the career choices' own `crossing_value`, the
-implementations the iteration uses: a residual built from a second copy of a formula tests
-the copy.  Where the model holds its choices (`Model.held`) the training choice is not a
-condition of the state, and R3 reads zero.
-
-With `θS_fixed` the skilled tightness is imposed rather than solved for (solve_model!), so
-skilled free entry is not a condition of that state and R2 reads the unskilled market only.
+The equilibrium conditions at the installed state, each as a ratio to its own tolerance, so
+`Rmax < 1` is the convergence gate.
+  R1  skilled cutoffs: displacement between the installed cutoffs and those the re-solved
+      values imply (`cutoff_residual`); p^oj only where `s_part > 0`.
+  R2  free entry in both markets, relative in θ (skilled dropped under `θS_fixed`).
+  R3  the training choice τ (zero when the choices are held).
+  R5  the education margin: the training value implied by U_S = max{U_S^(0), U_S^(1)}
+      against the installed T. The only component coupling the markets, and the one the
+      degenerate nobody-trains state fails.
+There is no R4: population adding-up holds by construction (m_U := ℓ − m_S) and would be
+vacuous. R3 and R5 use the iteration's own implementations.
 """
 function global_residuals(model::Model; θS_fixed::Union{Nothing,Float64} = nothing)
     uc = model.unsk_cache;  sc = model.skl_cache;  up = model.unsk_par
 
     R1 = cutoff_residual(model)
 
-    # `update_theta_*` RETURN the tightness free entry implies at this state, so the gap
-    # against the installed tightness is the free-entry residual expressed in θ — the
-    # equation, not a step between iterates.
     R2 = abs(update_theta_unskilled(model) - uc.θ) / max(uc.θ, 1e-14)
     θS_fixed === nothing &&
         (R2 = max(R2, abs(update_theta_skilled(model) - sc.θ) / max(sc.θ, 1e-14)))
@@ -177,9 +140,9 @@ end
 """
     implied_cutoffs(model) → (pst, poj, M)
 
-The skilled cutoffs the model implies at the installed state, and the on-the-job search
-participation score M(aS) behind p^oj (`cutoff_proposals!`).  The values are re-solved on
-a copy of the skilled cache, so the state is read, never moved.
+Skilled cutoffs and OJS participation score the model implies at the installed state
+(`cutoff_proposals!`), with the skilled values re-solved on a copy of the skilled cache so
+the state is never moved.
 """
 function implied_cutoffs(model::Model)
     uc = model.unsk_cache;  up = model.unsk_par;  sc = model.skl_cache
@@ -199,8 +162,7 @@ end
 """
     cutoff_residual(model) → Float64
 
-Largest displacement between the installed skilled cutoffs and the ones the model implies
-at the installed state (R1 in `global_residuals`).
+Largest displacement between the installed skilled cutoffs and `implied_cutoffs` (R1).
 """
 function cutoff_residual(model::Model)
     sc = model.skl_cache
@@ -215,26 +177,19 @@ function cutoff_residual(model::Model)
 end
 
 
-# ---------------------------------------------------------------------------
-# solve_model! — in-place global fixed point
-# ---------------------------------------------------------------------------
+# ============================================================
+# Global solve
+# ============================================================
+
 """
-    solve_model!(model) → SolveResult
+    solve_model!(model; θS_fixed = nothing) → SolveResult
 
-Run the global fixed-point loop in place on `model`.
-
-Free entry at a market that holds no one is priced two ways.  While iterating it is priced
-over the population: the first passes of an interior solve often sit at the nobody-trains
-corner, and that is the rule the iteration is robust under.  An equilibrium AT a corner is
-priced at the limit of the market's composition as it empties, the model's own rule and the
-one that keeps every moment continuous where the market closes.  So a solve that converges
-at a corner continues from that state under the model's rule; an interior solve never
-reaches that step and is unaffected by it.
-
-`θS_fixed` holds the skilled tightness at that value and solves every other object of the
-model given it — θ_U, the training frontier, values, cutoffs, participation and masses —
-with skilled free entry dropped from the convergence battery.  That is one evaluation of the
-skilled free-entry map; `skilled_equilibria` is its only caller.
+Global fixed point in place. The iteration prices free entry in an empty market over the
+population; a solve that converges with a market holding no one is then continued with
+`corner_limit = true`, pricing it at its limit composition. Interior solves never take the
+second step. `θS_fixed` holds θ_S and solves every other object given it, with skilled free
+entry dropped from the battery (one evaluation of the skilled free-entry map, used by
+`skilled_equilibria`).
 """
 function solve_model!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing)::SolveResult
     model.corner_limit = false
@@ -249,22 +204,14 @@ end
 """
     solve_at_tightness!(model, θU, θS) → SolveResult
 
-The equilibrium at the tightnesses (θU, θS), and the vacancy costs free entry implies
-there.  Given both tightnesses the stationary state is unique and needs no iteration
-between the markets, because the dependence between the blocks runs one way:
-  1. the unskilled block at θ_U: values, the hiring margin and the reservation qualities.
-     U^search(a_U) does not read U_S (training enters only the choice τ), so these are final;
-  2. the skilled block at θ_S: the stay-skilled values, cutoffs and OJS participation;
-  3. the career choices at the solved U_S^(0), with κ_U and E_U(a_U,1) from step 1:
-     U_S^(1), T, τ, the drain d and the training-slice match (career_choices!), then the
-     masses, which are linear given every policy (stationary_masses);
-  4. k_U = q_U(θ_U) J̄_U / (π̄_U ũ_U) and k_S = q_S(θ_S) J̄_S / π̄_S from the same
-     free-entry objects `update_theta_*` read (`vacancy_cost_unskilled/skilled`), installed
-     in `model.unsk_par` / `model.skl_par`.  A market that holds no one is priced at the
-     limit of its composition (`solve_model!`).
-With the costs installed the state is an equilibrium of the model at those costs in every
-condition, so the residual battery applies unchanged and is the convergence gate: free
-entry holds to rounding by construction, and R1, R3, R5 check the rest.
+Equilibrium at the tightnesses (θU, θS) and the vacancy costs free entry implies there, in
+one pass, since given both tightnesses the dependence between the blocks runs one way:
+  1. unskilled block at θ_U (U^search does not read U_S);
+  2. skilled block at θ_S;
+  3. career choices at the solved U_S^(0), then the stationary masses;
+  4. k_U, k_S from free entry (`vacancy_cost_unskilled/skilled`), installed in
+     `model.unsk_par`, `model.skl_par`; an empty market priced at its limit composition.
+The residual battery is the convergence gate.
 """
 function solve_at_tightness!(model::Model, θU::Float64, θS::Float64)::SolveResult
     up = model.unsk_par;  uc = model.unsk_cache;  sc = model.skl_cache
@@ -293,16 +240,18 @@ function solve_at_tightness!(model::Model, θU::Float64, θS::Float64)::SolveRes
     return SolveResult(res_U.converged, res_S.converged, R.Rmax < 1.0)
 end
 
-# A parameter block with its vacancy cost replaced.
+"""
+    _with_k(p, k) → typeof(p)
+
+Parameter block `p` with its vacancy cost replaced by `k`, rebuilt by field name.
+"""
 _with_k(p::T, k::Float64) where {T <: Union{UnskilledParams,SkilledParams}} =
     T(; (f => (f === :k ? k : getfield(p, f)) for f in fieldnames(T))...)
 
 """
     market_empty(model) → Bool
 
-Whether either market holds no one at the current state: no non-draining skilled mass, or
-no one seeking in the unskilled market.  The same two tests select the limit composition
-in compute_Jbar_skilled and update_theta_unskilled.
+Whether either market holds no one: no non-draining skilled mass, or no unskilled seekers.
 """
 function market_empty(model::Model)
     sc = model.skl_cache;  uc = model.unsk_cache
@@ -310,6 +259,13 @@ function market_empty(model::Model)
            sum(uc.u) + sum(uc.duS_carry) <= EMPTY_MASS
 end
 
+"""
+    _global_loop!(model; θS_fixed = nothing) → SolveResult
+
+The global fixed point on [U_S^(0); m_S] (steps A–H in the file header). Convergence is
+judged on the residual battery, not on the step between iterates. The stall-out (`global_B`,
+`global_K`) stops a residual that is above tolerance and has not beaten its best-so-far.
+"""
 function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing)::SolveResult
     cp = model.common;  sc = model.skl_cache;  uc = model.unsk_cache
     up = model.unsk_par;  sim = model.sim
@@ -318,7 +274,7 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
 
     aa = Anderson1(Nx + Nx * Nx)
 
-    # First-pass m_S: nobody crosses, so (φ/ν) t.
+    # First-pass m_S: nobody crosses.
     sc.m_S .= (φ / ν) .* uc.t
     mS_cur = copy(sc.m_S)
 
@@ -384,26 +340,13 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
         sc.m_S = mS_new
         mS_cur = mS_new
 
-        # G. Refresh the cross-market contribution for the next pass.  Only the
-        #    draining fraction seeks in the U-market, and all of its mass is
-        #    unemployed there, so the carry is d·m_S.  Thresholding d at 0.5 to
-        #    pick a branch would discard the fractional boundary node and put the
-        #    step function back, whatever the producer does upstream.
+        # G. Cross-market seekers for the next pass: the draining fraction, all unemployed.
         @inbounds for j in 1:Nx, i in 1:Nx
             dij = clamp(sc.d[i, j], 0.0, 1.0)
             uc.duS_carry[i, j] = max(dij * mS_new[i, j], 0.0)
         end
 
-        # Convergence on the equilibrium RESIDUALS rather than on the step between
-        # iterates.  A step test is equivalent to a residual test only for a contraction,
-        # and this map is not one; it also has no natural scale.  The superseded test
-        # compared an ABSOLUTE sup-norm on a U_S of order 1e+05 against the same number as
-        # a sup-norm on m_S, so the m_S half never bound and the U_S half demanded nine
-        # significant digits of pass-to-pass agreement.  Measured at the base_fc estimate:
-        # θ_U, θ_S and m_S are pinned from pass 4 (Δm_S ≈ 1e-13) while ΔU_S oscillates
-        # between 1e-05 and 2e-04 against tol_global = 1e-4, so the streak never completes
-        # and the stall rule stopped the solve as non-converged — while the battery reads
-        # 0.18 of tolerance at that same state.
+        # H. Residual battery (each component a ratio to its tolerance, so the gate is 1).
         R = global_residuals(model; θS_fixed = θS_fixed)
         d = R.Rmax
         global_resid[it] = d
@@ -413,7 +356,6 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
                     it, d, R.R1, R.R2, R.R3, R.R5, uc.θ, sc.θ)
         end
 
-        # Each component is already a ratio to its own tolerance, so the gate is 1.
         if d < 1.0
             streak += 1
             if streak >= sim.conv_streak
@@ -424,15 +366,8 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
         else
             streak = 0
         end
-        # Stall-out: after the burn-in, if the residual has not beaten its best-so-far
-        # over the last gK iterations, the coupling is limit-cycling — UNLESS the residual
-        # is already inside tolerance, in which case "no longer improving" is exactly what
-        # a converged sequence looks like and the rule was reading convergence as failure.
-        # conv_streak demands four CONSECUTIVE sub-tolerance passes while this rule can
-        # fire from pass gB+gK+1, so a point whose residual dips in and out of tolerance
-        # was killed before it could complete the streak: measured under the superseded
-        # step test at a_ℓ-0.20 c+0.02, streak 3 of 4 with d = 2.7e-05 against a tolerance
-        # of 1e-04, stopped at pass 13.
+        # Stall-out only while above tolerance: a sub-tolerance residual that stops improving
+        # is a converging sequence.
         if gB > 0 && it > gB + gK && d >= 1.0 &&
            minimum(@view global_resid[it-gK:it]) >= minimum(@view global_resid[1:it-gK])
             sim.verbose >= 1 && @printf("[global]  stalled it=%d  d=%.3e — no improvement over %d iters, stopping\n", it, d, gK)
@@ -450,58 +385,45 @@ end
 # ============================================================
 # Multiple skilled equilibria
 #
-# Given θ_S every other object of the model is unique — θ_U = Θ_U(θ_S), the training
-# frontier, values, cutoffs, OJS participation and masses — so an equilibrium is a root of
-# one scalar function of θ_S.  solve_model!(m; θS_fixed = θ) solves the model given θ, and
-#     D(θ) = ln(θ̃/θ),   θ̃ = update_theta_skilled at that state,
-# carries the sign of the value of a skilled vacancy V_S(θ) = [q_S J̄_S − k_S π̄_S]/(r + q_S):
-# positive at small θ, negative at large θ.  An evaluation is always a global solve: the
-# skilled block alone iterates a map conditional on the lagged θ_U and m_S, whose shape
-# differs.
+# Given θ_S every other object is unique, so an equilibrium is a root of
+#     D(θ) = ln(θ̃/θ),   θ̃ = update_theta_skilled at the state solve_model!(m; θS_fixed = θ),
+# which has the sign of the value of a skilled vacancy. Measured properties of D (203 curves):
+#   A  D falls strictly left of the OJS onset θ_on (the lowest θ at which anyone searches);
+#   B  right of θ_on D has at most one hump (dip, top, then falling), every dip at
+#      1.016–1.058 θ_on.
+# So there are one or three equilibria, three iff D(dip) < 0 < D(top). L (left of the dip)
+# and H (right of the top) attract; the middle root M repels, is never located, and a solve
+# that ends there is discarded.
 #
-# The detector rests on two properties of D, held on every curve measured (203):
-#   A  D falls strictly left of the OJS onset θ_on, the lowest θ at which any type searches;
-#   B  right of θ_on D has at most one hump — it may fall to a dip, rise to a top, then
-#      falls — and every measured dip lies at 1.016–1.058 θ_on.
-# So there are one or three equilibria, three iff D(dip) < 0 < D(top).  The attracting ones
-# cross from above: L, left of the dip, and H, right of the top.  The middle root M crosses
-# from below and is repelling, so it is never located.  The skilled block's damped free-entry
-# step is repelled from it (restarted at M or 0.3% from it, crisis_fc at 0.995 k̂_S, the solve
-# leaves for L or H), but a solve that does end there is recognised and discarded.
-#
-# Whether a point is left of the onset is exact and free: every s_part is 0.  The onset
-# itself is bracketed (_onset) and only aims the detector: a jump to ONSET_JUMP × the
-# bracket's upper end lands past every dip, and a root beyond that point cannot be L.
-#
-# A change in D counts only when it exceeds TOL_RELATIVE, the free-entry tolerance D is
-# resolved to, so a turning point finer than the solve can see is not a turning point.
-# Walks step EQ_STEP in ln θ, and a hump narrower than a step is ignored by design.
-#
-# Types enter on-the-job search one ability node at a time, and each entry puts a sawtooth
-# of about 3e-4 on D (crisis_fc, one tooth per ≈0.003 in ln θ).  Where D is flat — near the
-# top or the dip — a tooth can cross zero, making a pair of crossings about 3e-4 apart that
-# no step of the walk resolves, and the normal solve can converge to either.  The attracting
-# equilibrium is the OUTERMOST crossing on its side, so every root is probed EQ_PROBE
-# outward and the search continues past a pair.  At the crisis_fc estimate the normal solve
-# lands on such a pair at 0.655916; the outermost crossing is 0.65769.
+# Each type entering OJS adds a tooth of about 3e-4 to D, so where D is flat a pair of
+# crossings can form that no step resolves. The attracting root is the outermost crossing:
+# every root is probed EQ_PROBE outward. A change in D counts only beyond TOL_RELATIVE.
 # ============================================================
 
-const EQ_STEP     = 0.005    # ln θ_S; the grid on which A, B and the curvature rule were measured
+const EQ_STEP     = 0.005    # ln θ_S; walk step, the grid on which A, B and the curvature rule were measured
 const EQ_PROBE    = 0.001    # ln θ_S; clears the pair of crossings one type switching makes
 const EQ_MAXEVAL  = 200      # a search this long means the map does not have the shape above
 const ONSET_SLOPE = 4515.0   # dM/d ln θ_S at the onset (crisis_fc); aims the first onset step only
 const ONSET_TOL   = 0.02     # ln θ_S; onset bracket width, below ln(1.08/1.058)
 const ONSET_JUMP  = 1.08     # jumps land at this multiple of the onset's upper bound, past every dip
-# ln(θ/θ*) searched for the onset.  With no onset above, nobody searches and D falls throughout
-# (A); with none below, the hump would sit where D is of order +10, far from any root.
+# ln(θ/θ*) searched for the onset: with no onset above, D falls throughout (A); with none
+# below, the hump would sit far from any root.
 const ONSET_RANGE = (-12.0, 5.0)
 
+"""
+    FreeEntryMapFailure
+
+Raised when an evaluation of the free-entry map fails twice or `EQ_MAXEVAL` is exceeded.
+"""
 struct FreeEntryMapFailure <: Exception end
 
-# The free-entry map and its warm-start state.  `base` is the normal solve, silenced, and
-# `work` is moved by every evaluation; the caller's model is never touched, so a lone root
-# keeps its model, and its Q, bit for bit.  A located root is handed back under the caller's
-# SimParams.
+"""
+    FreeEntryMap
+
+The skilled free-entry map D(θ) with its warm start: `base` is a silenced copy of the normal
+solve, `work` is moved by every evaluation, `sim` the caller's `SimParams` (restored on a
+located root), `n_eval` the evaluations spent. The caller's model is never touched.
+"""
 mutable struct FreeEntryMap
     base   :: Model
     work   :: Model
@@ -509,23 +431,35 @@ mutable struct FreeEntryMap
     n_eval :: Int
 end
 
+"""
+    FreeEntryMap(model) → FreeEntryMap
+
+A free-entry map warm-started at the solved `model`, with `verbose = 0` on the copies.
+"""
 function FreeEntryMap(model::Model)
     base = deepcopy(model)
     base.sim = SimParams((f === :verbose ? 0 : getfield(model.sim, f) for f in fieldnames(SimParams))...)
     return FreeEntryMap(base, deepcopy(base), model.sim, 0)
 end
 
-# D at a solved state, whether anyone searches there, and the participation score M = max
-# over types (implied_cutoffs), which crosses 0 at the onset.
+"""
+    _map_point(m) → (θ, D, searching, M)
+
+D at the solved state `m`, whether anyone searches on the job there, and the maximum
+participation score M (crosses 0 at the onset).
+"""
 function _map_point(m::Model)
     sc = m.skl_cache
     return (θ = sc.θ, D = log(update_theta_skilled(m) / sc.θ),
             searching = any(>(0.0), sc.s_part), M = maximum(implied_cutoffs(m).M))
 end
 
-# One evaluation, warm-started from the last.  A warm start can fail where the normal solve's
-# own state converges (measured at crisis_covid, next to a root), so a failure is retried
-# once from that state before it is final.
+"""
+    (fm::FreeEntryMap)(θ) → map point
+
+One evaluation at θ_S = θ, warm-started from the last; a failure is retried once from the
+normal solve's state before `FreeEntryMapFailure` is thrown.
+"""
 function (fm::FreeEntryMap)(θ::Float64)
     for attempt in 1:2
         fm.n_eval += 1
@@ -536,16 +470,29 @@ function (fm::FreeEntryMap)(θ::Float64)
     throw(FreeEntryMapFailure())
 end
 
+"""
+    _rises(a, b), _falls(a, b) → Bool
+
+Whether D rises (falls) from map point `a` to `b` by more than `TOL_RELATIVE`.
+"""
 _rises(a, b) = b.D - a.D >  TOL_RELATIVE
 _falls(a, b) = b.D - a.D < -TOL_RELATIVE
+
+"""
+    _nudge(fm, p, dir) → map point
+
+The map one `EQ_STEP` from `p` in ln θ, in direction `dir = ±1`.
+"""
 _nudge(fm::FreeEntryMap, p, dir::Int) = fm(p.θ * exp(dir * EQ_STEP))
 
-# The onset, bracketed: `lo`, where nobody searches, and `hi`, where someone does, at most
-# ONSET_TOL apart in ln θ.  Starts from points already evaluated and steps outward until the
-# participation flips.  Each step is aimed at M = 0 by the secant on M, and capped at a length
-# that doubles from 0.25: M is near-linear in ln θ only close to the onset, and far from it
-# is flat enough that an uncapped secant leaves the map.  The bracket is then narrowed by
-# Illinois regula falsi on M.  `nothing` when the onset lies outside ONSET_RANGE.
+"""
+    _onset(fm, c, pts) → (lo, hi) or nothing
+
+The OJS onset bracketed by `lo` (nobody searches) and `hi` (someone does), at most
+`ONSET_TOL` apart in ln θ. Starts from the evaluated points `pts`, steps outward by a secant
+on M with a cap doubling from 0.25 until participation flips, then narrows the bracket by
+Illinois regula falsi on M. `nothing` when the onset lies outside `ONSET_RANGE` around `c`.
+"""
 function _onset(fm::FreeEntryMap, c, pts)
     above = filter(p -> p.searching, pts)
     hi = isempty(above) ? nothing : above[argmin([p.θ for p in above])]
@@ -578,10 +525,14 @@ function _onset(fm::FreeEntryMap, c, pts)
     return (lo = lo, hi = hi)
 end
 
-# Which attracting root the normal solve returned, c neither M nor left of the onset.  Beyond
-# ONSET_JUMP × the onset it is H: L lies left of the dip.  Nearer the onset, D is convex at L
-# and concave at H (770 of 770 measured roots); where the curvature is flat, walking left to
-# the onset settles it, since only from H does the walk cross the top.
+"""
+    _classify(fm, c, lo, hi, on) → (label, seek)
+
+Which attracting root (`:L` or `:H`) the normal solve's root `c` is, with `lo`, `hi` a step
+either side and `on` the onset bracket. Beyond `ONSET_JUMP` × the onset it is H. Nearer, D is
+convex at L and concave at H (770 of 770 measured roots); where the curvature is flat, a walk
+left to the onset decides (only from H does it cross the top), and that walk is returned.
+"""
 function _classify(fm::FreeEntryMap, c, lo, hi, on)
     c.θ >= ONSET_JUMP * on.hi.θ && return (:H, nothing)
     curv = lo.D + hi.D - 2.0 * c.D
@@ -591,9 +542,13 @@ function _classify(fm::FreeEntryMap, c, lo, hi, on)
     return (s.hit !== nothing || s.hump ? :H : :L, s)
 end
 
-# From L, the top: land past the dip; D > 0 there or on the climb to the top proves three
-# equilibria.  A top bracketed with D ≤ 0 is a hump below zero; falling back to L, or to the
-# onset, without a turn means no hump right of L.
+"""
+    _seek_top(fm, L, on) → (hit, ext, hump)
+
+From L, look for the top: land past the dip, then walk. D > 0 at a point (`hit`) proves
+three equilibria; a top bracketed with D ≤ 0 is a hump below zero (`hump`, D there in `ext`);
+falling back to L or to the onset without a turn means no hump.
+"""
 function _seek_top(fm::FreeEntryMap, L, on)
     b = fm(max(ONSET_JUMP * on.hi.θ, L.θ * exp(EQ_STEP)))
     b.D > TOL_RELATIVE && return (hit = b, ext = b.D, hump = true)
@@ -615,10 +570,13 @@ function _seek_top(fm::FreeEntryMap, L, on)
     end
 end
 
-# From H, the dip: land past it and walk left, over the top if the landing is beyond it.
-# D < 0 anywhere proves three equilibria.  A dip bracketed with D ≥ 0 is a hump above zero;
-# reaching the onset without D having fallen means no hump.  `land = false` walks from H
-# itself.
+"""
+    _seek_dip(fm, H, on; land = true) → (hit, ext, hump)
+
+From H, look for the dip: land past it (`land = true`; else start at H) and walk left, over
+the top if needed. D < 0 at a point (`hit`) proves three equilibria; a dip bracketed with
+D ≥ 0 is a hump above zero; reaching the onset without D having fallen means no hump.
+"""
 function _seek_dip(fm::FreeEntryMap, H, on; land::Bool = true)
     b = land ? fm(min(ONSET_JUMP * on.hi.θ, H.θ * exp(-EQ_STEP))) : H
     b.D < -TOL_RELATIVE && return (hit = b, ext = b.D, hump = true)
@@ -634,10 +592,14 @@ function _seek_dip(fm::FreeEntryMap, H, on; land::Bool = true)
     end
 end
 
-# The attracting root beyond p in direction dir, where D has the sign of dir between the
-# middle root and it: step outward, doubling, until D changes sign, then Illinois regula
-# falsi in ln θ to half the free-entry tolerance, and past any tooth pair (_beyond).  The
-# state there is certified by the full battery, skilled free entry included.
+"""
+    _locate(fm, p, dir) → (θ, model, certified)
+
+The attracting root beyond map point `p` in direction `dir`, where D has the sign of `dir`
+between the middle root and it: step outward, doubling, until D changes sign, then Illinois
+regula falsi in ln θ to half the free-entry tolerance, then past any tooth pair (`_beyond`).
+The root's model carries the caller's `SimParams` and is certified by the full battery.
+"""
 function _locate(fm::FreeEntryMap, p, dir::Int)
     a = p
     while dir * a.D <= 0.5 * TOL_RELATIVE
@@ -667,36 +629,36 @@ function _locate(fm::FreeEntryMap, p, dir::Int)
     return (θ = q.θ, model = m, certified = global_residuals(m).Rmax < 1.0)
 end
 
-# Whether the root at r is the outermost crossing in direction dir: D must already have the
-# outer sign EQ_PROBE beyond it.  If not, r is one of a tooth pair, and the root is located
-# from the probe.
+"""
+    _beyond(fm, r, dir) → root or nothing
+
+`nothing` if the root at `r` is the outermost crossing in direction `dir` (D already has the
+outer sign `EQ_PROBE` beyond it); otherwise the root located from that probe.
+"""
 function _beyond(fm::FreeEntryMap, r, dir::Int)
     o = fm(r.θ * exp(dir * EQ_PROBE))
     return dir * o.D > 0.5 * TOL_RELATIVE ? _locate(fm, o, dir) : nothing
 end
 
 """
-    skilled_equilibria(model) → NamedTuple
+    skilled_equilibria(model) → (roots, start, moved, D_ext, n_eval, complete)
 
 Every attracting skilled equilibrium at the parameters of `model`, a converged solve.
 
   roots     the attracting equilibria in increasing θ_S, each `(label, θ, model, certified)`:
-            one, or the pair `:L` and `:H`.  A lone root is labelled by its side of the hump
-            — `:L` left of it, `:H` right of it, `:U` where D has no hump — so that one branch
-            can be followed across parameter points (`branch` in select_equilibrium).
-  start     which root the normal solve returned: `:L`, `:H`, `:U`, or `:M`, discarded.
-  moved     whether the normal solve's root was replaced: it was one of a tooth pair, or a
-            sub-cell root with D of one sign a step either side.  When false, the root is
-            the normal solve itself, model untouched, and so is its Q.
-  D_ext     D at the extremum that decided the count — the top seen from L, the dip seen
-            from H — at walk resolution, so its distance from 0 is the distance to the fold;
-            NaN without a hump, and from M, where no extremum is needed.
-  n_eval    evaluations of the free-entry map spent.
-  complete  false when an evaluation failed: the roots found by then are returned, and the
-            start root stands in for a lone root unless it was M.
+            one, or the pair `:L`, `:H`. A lone root is labelled by its side of the hump
+            (`:L`, `:H`), or `:U` where D has no hump.
+  start     which root the normal solve returned: `:L`, `:H`, `:U`, or `:M` (discarded).
+  moved     whether the normal solve's root was replaced (tooth pair or sub-cell root);
+            when false the root is `model` itself, untouched, and so is its Q.
+  D_ext     D at the extremum that decided the count (top from L, dip from H), at walk
+            resolution; NaN without a hump and from M.
+  n_eval    evaluations of the free-entry map.
+  complete  false when an evaluation failed; the roots found so far are returned, with the
+            start root standing in unless it was M.
 
-A solve that converged at a corner (`corner_limit`, a market holding no one) has no
-interior skilled market to be multiple in, and is returned as the lone root.
+A solve at a corner (`corner_limit`) is returned as the lone root `:U`. Selection among the
+roots is made by the caller (`select_equilibrium`, smm.jl).
 """
 function skilled_equilibria(model::Model)
     c  = _map_point(model)
@@ -710,10 +672,9 @@ function skilled_equilibria(model::Model)
     start = :U;  D_ext = NaN
     roots = []
     try
-        # The root at step resolution.  Left of the onset nobody switches and D falls, so the
-        # normal solve's root is resolved.  Otherwise a step either side: D of one sign on
-        # both means a sub-cell root (a tooth, see above), and the resolved root lies the way
-        # that sign points; it replaces the normal solve's.
+        # Resolve the root at step resolution. Left of the onset D falls, so the normal
+        # solve's root stands. Otherwise D of one sign a step either side is a sub-cell root,
+        # and the resolved root, located the way that sign points, replaces it.
         nudged(c) = c.searching ? (_nudge(fm, c, -1), _nudge(fm, c, +1)) : (c, c)
         lo, hi = nudged(c);  resolved = !c.searching
         while c.searching && sign(lo.D) == sign(hi.D)
@@ -724,8 +685,7 @@ function skilled_equilibria(model::Model)
         end
 
         if _rises(lo, hi)
-            # D < 0 a step left and > 0 a step right: three equilibria, by the intermediate
-            # value theorem alone.
+            # D < 0 a step left and > 0 a step right: the normal solve sits at M.
             start = :M
             push!(roots, (label = :L, _locate(fm, lo, -1)...), (label = :H, _locate(fm, hi, +1)...))
         else
@@ -740,8 +700,8 @@ function skilled_equilibria(model::Model)
             else
                 D_ext = s.ext
             end
-            # The start root, unless it is one of a tooth pair.  Without a hump D falls at a
-            # slope near −0.9, ten times what a tooth can reverse, so no pair forms there.
+            # The start root, unless it is one of a tooth pair (no pair forms without a hump:
+            # D then falls ten times faster than a tooth can reverse).
             if !resolved && start !== :U
                 further = _beyond(fm, c, start === :L ? -1 : +1)
                 further === nothing || (r0 = further)

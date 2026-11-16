@@ -1,23 +1,18 @@
 ############################################################
-# cf_common.jl — what every counterfactual exercise shares (RoySearch)
+# cf_common.jl — what the counterfactual exercises share (RoySearch)
 #
-# LIBRARY FILE — loaded by counterfactuals_main.jl.
+# Library file, loaded by counterfactuals_main.jl. The exercises read the transitions
+# transition_main.jl saved; a new path is solved by the transition's own outer fixed point,
+# warm-started from a stored one.
 #
-# A transition saved by transition_main.jl holds the whole path, both endpoint models, the
-# settings it was solved at and every type's date-0 values and masses.  The exercises read it and never solve it again; the
-# exercises that need a new path solve it with the repo's own outer fixed point
-# (`solve_transition_path`), warm-started from a stored one.
-#
-#   load_transition(crisis)               the saved transition, its path rebuilt
-#   self_path(model)                      a steady state as a one-step transition of itself
-#   with_training_cost(model, s)          the model with its training cost scaled by s
-#   stationary_at_costs!(model, kU, kS, θ0)  the stationary equilibrium at given vacancy
-#                                         costs, by Newton continuation from θ0
-#   unskilled_branch(model, θU, θS, kU)   the zeros of unskilled free entry on a θ_U scan,
-#                                         and which of them θU is
-#   solve_cf_transition(m0, m1, tp; guess) a new path at the exercise tolerances
-#   window_mean(series, tgrid, months)    the mean of a path series over the crisis window
-#   cf_log(dir, line) / cf_log_start(dir, title)  console line with flush, copied to log.txt
+#   load_transition        the saved transition, its path rebuilt
+#   self_path              a steady state as a one-step transition of itself
+#   with_training_cost     the model with its training cost scaled
+#   stationary_at_costs!   the steady state at given vacancy costs, by Newton continuation
+#   unskilled_branch       the zeros of unskilled free entry on a θ_U scan
+#   solve_cf_transition    a new path at the exercise tolerances
+#   window_mean            a path series averaged over the crisis window
+#   cf_log_start, cf_log   the exercise log
 ############################################################
 
 """
@@ -52,8 +47,8 @@ end
 """
     self_path(model) -> (path, tp)
 
-The one-step transition of a steady state to itself, `stationary_record`'s, keeping the
-path: its date 1 holds the steady state's values and masses to the stationary tolerance.
+The one-step transition of the steady state `model` to itself (as `stationary_record`),
+with its path: its first date holds the steady state's values and masses.
 """
 function self_path(model::Model)
     tp = TransitionParams(T_max = 0.5, N_steps = 1, maxit = 1, verbose = false)
@@ -64,9 +59,8 @@ end
 """
     with_training_cost(model, s) -> Model
 
-A copy of `model` whose training cost c(a_S) is `s` times its own.  The code stores ln c, so
-the change is ln c + ln s.  The copy keeps the caches of `model`, the warm start of the
-stationary solve that must follow.
+A copy of `model` whose training cost c(a_S) is `s` times its own (the code stores ln c, so
+ln c + ln s), keeping `model`'s caches as the warm start of the solve that must follow.
 """
 function with_training_cost(model::Model, s::Real)
     s > 0 || error("with_training_cost: the scale must be positive, got $s.")
@@ -76,9 +70,9 @@ function with_training_cost(model::Model, s::Real)
     return m
 end
 
-# The Newton continuation of `stationary_at_costs!`: residual tolerance in ln k, forward-
-# difference step and largest step in ln θ, iteration cap.  The stationary solve at given
-# tightness meets its own battery to about 1e-8, so the residual is not asked for less.
+# Newton continuation of `stationary_at_costs!`: tolerance on ln k (the solve at given
+# tightness meets its battery to about 1e-8), forward-difference step and largest step in
+# ln θ, iteration cap.
 const STAT_TOL     = 1e-7
 const STAT_FD      = 1e-4
 const STAT_MAXSTEP = 0.25
@@ -87,13 +81,11 @@ const STAT_MAXIT   = 25
 """
     stationary_at_costs!(model, kU, kS, θ0) -> NamedTuple
 
-The stationary equilibrium of `model` at the vacancy costs (kU, kS) (months of mean
-new-match output, the code's units), found from the tightnesses θ0 = (U, S) by Newton's
-method on ln θ: each evaluation is `solve_at_tightness!`, which returns the costs free entry
-implies at that tightness, and the residual is ln k(θ) − ln k.  Starting from a known
-equilibrium (the estimate's) it follows that equilibrium's branch rather than searching for
-one; `unskilled_branch` checks the branch.  On return the model holds the solution and
-exactly the costs (kU, kS).
+The stationary equilibrium of `model` at the vacancy costs (kU, kS) (the code's units),
+by Newton's method on ln θ from θ0 = (U, S) on the residual ln k(θ) − ln k, k(θ) the costs
+`solve_at_tightness!` implies. From a known equilibrium it follows that equilibrium's
+branch. On return the model holds the solution and exactly (kU, kS). Returns
+`(ok, θU, θS, resid, iters)`.
 """
 function stationary_at_costs!(model::Model, kU::Float64, kS::Float64, θ0)
     function F(l)
@@ -125,18 +117,17 @@ function stationary_at_costs!(model::Model, kU::Float64, kS::Float64, θ0)
             resid = maximum(abs, f), iters = it)
 end
 
-# The θ_U scan of `unskilled_branch`, in ln θ_U around the point checked, and its nodes.
+# The θ_U scan of `unskilled_branch`: its range in ln θ_U around the point, and its nodes.
 const BRANCH_SCAN_LOG = (-3.0, 1.5)
 const BRANCH_SCAN_N   = 31
 
 """
     unskilled_branch(model, θU, θS, kU) -> NamedTuple
 
-Every zero of unskilled free entry of `model` at θ_S = θS and unskilled vacancy cost kU, on a
-scan of θ_U (`BRANCH_SCAN_LOG`, `BRANCH_SCAN_N`): the sign changes of ln k_U(θ_U) − ln kU,
-with k_U(θ_U) the cost `solve_at_tightness!` implies.  `rank` numbers the zero nearest θU
-from the top (1 = the highest zero), so two equilibria are on the same branch when their
-scans find as many zeros and give them the same rank.
+Every zero of unskilled free entry of `model` at θ_S = θS and cost kU on a scan of θ_U
+(the sign changes of ln k_U(θ_U) − ln kU), with `rank` the position from the top of the
+zero nearest θU. Two equilibria are on the same branch when their scans find as many zeros
+and give them the same rank. Returns `(roots, rank, n_failed)`.
 """
 function unskilled_branch(model::Model, θU::Float64, θS::Float64, kU::Float64)
     m = deepcopy(model)
@@ -160,10 +151,9 @@ end
 """
     solve_cf_transition(m0, m1, tp; guess = nothing, label) -> (result, path, seconds)
 
-The perfect-foresight path from the steady state `m0` to the steady state `m1` on the time
-grid of `tp`, by the repo's outer fixed point at the exercise tolerances (`CF_TOL`,
-`CF_MAXIT`, `CF_DAMP`), from the tightness path `guess = (tgrid, θU, θS)`.  The horizon is
-the stored transition's: the horizon test is not repeated.
+The transition from the steady state `m0` to `m1` on the dates of `tp` (the stored
+horizon), at `CF_TOL`, `CF_MAXIT`, `CF_DAMP`, from the tightness path
+`guess = (tgrid, θU, θS)`, on copies of the models.
 """
 function solve_cf_transition(m0::Model, m1::Model, tp::TransitionParams; guess = nothing,
                              label::Symbol = :counterfactual)
@@ -176,16 +166,32 @@ function solve_cf_transition(m0::Model, m1::Model, tp::TransitionParams; guess =
     return (result = res, path = path, seconds = time() - t0)
 end
 
-# The mean of a path series over the dates of the crisis window, t < months.
+"""
+    window_mean(series, tgrid, months) -> Float64
+
+The unweighted mean of a path series over its dates t < `months` (the crisis window lies
+in the uniform fine grid).
+"""
 window_mean(series::AbstractVector, tgrid::AbstractVector, months::Real) =
     (k = findall(<(months), tgrid); sum(series[k]) / length(k))
 
+"""
+    cf_log(dir, line)
+
+Print `line` and append it to `dir/log.txt`.
+"""
 function cf_log(dir::AbstractString, line::AbstractString)
     println(line);  flush(stdout)
     open(io -> println(io, line), joinpath(dir, "log.txt"), "a")
     return nothing
 end
 
+"""
+    cf_log_start(dir, title) -> dir
+
+Start `dir/log.txt` afresh with `title` and the run's version, point, crises, date and
+threads, and print the title banner.
+"""
 function cf_log_start(dir::AbstractString, title::AbstractString)
     open(joinpath(dir, "log.txt"), "w") do io
         println(io, title)
