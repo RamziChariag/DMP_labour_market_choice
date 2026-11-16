@@ -170,6 +170,12 @@ println("="^65)
 @printf("  RUN_TABLES_AND_PLOTS: %s\n", RUN_TABLES_AND_PLOTS)
 @printf("  Threads available:    %d\n", Threads.nthreads())
 println("="^65, "\n")
+# The date steps thread over the ability grid, so one thread runs every transition
+# serially. VS Code's Julia REPL starts with one thread unless told otherwise.
+Threads.nthreads() == 1 &&
+    @warn "Julia is running on ONE thread: each transition will take several times longer. " *
+          "Start Julia with `--threads auto`, or in VS Code set `Julia: Num Threads` to `auto` " *
+          "and restart the REPL."
 flush(stdout)
 
 # ═══════════════════════════════════════════════════════════

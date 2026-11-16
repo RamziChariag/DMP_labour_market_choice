@@ -26,6 +26,8 @@
 #   │                           and neither writes the other's
 #   ├── chains/       ignored   transient MCMC draws
 #   ├── transition/   TRACKED   what plots_and_tables/transition.jl reads
+#   ├── counterfactuals/        <exercise>/ CSV tables, PNG figures and the log of each
+#   │                           exercise of code/counterfactuals/ (CF_EXERCISES below)
 #   ├── logs/         TRACKED   the record of what each run did
 #   ├── plots/        ignored   descriptives/ fit/<w>/ model/<w>/ transition/<pair>/
 #   │                           policy/<w>/ manual/
@@ -133,6 +135,22 @@ bundle nothing needs the draw arrays, and they are large.
 out_chains() = (d = joinpath(OUTPUT_DIR, "chains"); mkpath(d); d)
 
 out_transition() = (d = joinpath(OUTPUT_DIR, "transition"); mkpath(d); d)
+
+# The exercises of code/counterfactuals/, one output directory each.
+const CF_EXERCISES = (:welfare, :incidence, :held_margin, :training_cost)
+
+"""
+    out_counterfactuals(exercise) -> String
+
+Directory for one counterfactual exercise (`CF_EXERCISES`): its CSV tables, its figures and
+its log, together, because every one of them is read off the same transitions.
+"""
+function out_counterfactuals(exercise)
+    e = Symbol(exercise)
+    e in CF_EXERCISES ||
+        error("paths: unknown counterfactual exercise :$e — must be one of $(CF_EXERCISES)")
+    d = joinpath(OUTPUT_DIR, "counterfactuals", String(e));  mkpath(d);  return d
+end
 
 """
     out_logs() -> String

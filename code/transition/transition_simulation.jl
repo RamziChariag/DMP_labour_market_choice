@@ -200,8 +200,8 @@ function run_transition_simulation(scenario::Symbol, w_suffix::String;
                                    N_steps::Int = 240, tol::Real = 1e-4, maxit::Int = 200,
                                    damp::Real = TransitionParams().damp)
     wb, wc = _scenario_windows(scenario)
-    fb = estimate_path(wb, w_suffix; point = point)
-    fc = estimate_path(wc, w_suffix; point = point)
+    fb = estimate_path(estimation_window(wb), w_suffix; point = point)
+    fc = estimate_path(estimation_window(wc), w_suffix; point = point)
     println("\n" * "="^65)
     println("  Transition simulation — $scenario   (W = $w_suffix, point = $point)")
     println("="^65)
