@@ -3,13 +3,12 @@
 #
 # LIBRARY FILE — loaded by counterfactuals_main.jl.
 #
-# A transition saved by transition_main.jl holds the whole path, both endpoint models and
-# the settings it was solved at.  The exercises read it and never solve it again; the
+# A transition saved by transition_main.jl holds the whole path, both endpoint models, the
+# settings it was solved at and every type's date-0 values and masses.  The exercises read it and never solve it again; the
 # exercises that need a new path solve it with the repo's own outer fixed point
 # (`solve_transition_path`), warm-started from a stored one.
 #
 #   load_transition(crisis)               the saved transition, its path rebuilt
-#   backward_pass_keep!(path, model, tp)  the repo's backward pass, keeping its buffers
 #   self_path(model)                      a steady state as a one-step transition of itself
 #   with_training_cost(model, s)          the model with its training cost scaled by s
 #   stationary_at_costs!(model, kU, kS, θ0)  the stationary equilibrium at given vacancy
@@ -33,8 +32,11 @@ function load_transition(crisis::Symbol)
     tr === nothing && error(
         "No transition for :$crisis at point :$(POINT_ESTIMATE): " *
         "$(basename(transition_file(crisis, W_SUFFIX, POINT_ESTIMATE))) is not in " *
-        "$(TRANS_OUT_DIR). Run code/transition/transition_main.jl first, with :$crisis in " *
-        "SCENARIOS and POINT_ESTIMATE = :$(POINT_ESTIMATE).")
+        "$(TRANS_OUT_DIR). Run code/transition/transition_main.jl first, with " *
+        "POINT_ESTIMATE = :$(POINT_ESTIMATE).")
+    hasproperty(tr, :types) ||
+        error("$(basename(transition_file(crisis, W_SUFFIX, POINT_ESTIMATE))) predates v61.4.0 " *
+              "(no per-type date-0 values); run code/transition/transition_main.jl again.")
     tr.result.converged ||
         @warn "The stored :$crisis transition did not converge (free-entry gap $(tr.result.final_dist))."
     s  = tr.settings
@@ -45,36 +47,6 @@ function load_transition(crisis::Symbol)
         error("The stored :$crisis path does not lie on the time grid of its own settings.")
     return (tr = tr, path = path, tp = tp, m0 = tr.model_z0, m1 = tr.model_z1,
             months = tr.crisis_window.months)
-end
-
-"""
-    backward_pass_keep!(path, model, tp) -> buf
-
-`_backward_pass!` (transition_values.jl) step for step, returning its buffers: slot 1 then
-holds the per-type surfaces of date 1 — the searching slice `Ss`, the training slice `St`,
-the skilled branches `K0/K1` — wherever the date-1 flags `hasS/hasT/hasK` are set, and the
-path holds the one-dimensional ones elsewhere.  On a solved path, at its own tightness, it
-reproduces the stored values.
-"""
-function backward_pass_keep!(path::TransitionPath, model::Model, tp::TransitionParams)
-    Nt = length(path.tgrid);  Nx = length(model.grids.x)
-    NpU = length(model.unsk_grids.p);  NpS = length(model.skl_grids.p)
-    wG = build_unskilled_G_weights(model.unsk_grids.p, model.unsk_grids.wp, model.unsk_par.α_U)
-    buf = (Ss = zeros(Nx, Nx, NpU, 2), St = zeros(Nx, Nx, NpU, 2),
-           hasS = fill(false, Nx, Nx, 2), hasT = fill(false, Nx, Nx, 2),
-           K0 = zeros(Nx, Nx, NpS, 2), K1 = zeros(Nx, Nx, NpS, 2),
-           pK = zeros(Nx, Nx, 2), hasK = fill(false, Nx, Nx, 2))
-    _terminal_slices!(path, model, buf)
-    iters = zeros(Int, Nx);  resid = zeros(Float64, Nx)
-    for n in (Nt - 1):-1:1
-        inv_dt = 1.0 / (path.tgrid[n + 1] - path.tgrid[n])
-        _training_step!(path, model, n; inv_dt = inv_dt)
-        _unskilled_search_step!(path, model, n, wG, iters, resid; inv_dt = inv_dt)
-        _unskilled_slices_step!(path, model, n, wG, buf; inv_dt = inv_dt)
-        _skilled_value_step!(path, model, n, iters, resid; inv_dt = inv_dt)
-        _skilled_types_step!(path, model, n, buf; inv_dt = inv_dt)
-    end
-    return buf
 end
 
 """

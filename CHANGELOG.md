@@ -35,6 +35,65 @@ measurement was, not just the verdict.
 
 ---
 
+## v61.5.0 — 2026-11-16
+
+**MINOR: `code/counterfactuals/`, the counterfactual layer; `code/policy/` removed.** New
+code only. Every existing output is reproduced; the counterfactual outputs are new.
+
+**Comparability.** Full; nothing is superseded.
+
+### What changed
+- New `code/counterfactuals/`, one entry point and one file per exercise, reading the
+  transitions `transition_main.jl` saves (schema 3); outputs CSV and JLS, no figures, to
+  `output/counterfactuals/<exercise>/` with a `log.txt`:
+  - `counterfactuals_main.jl`: settings at the top (`CRISES`, `EXERCISES`,
+    `POINT_ESTIMATE = :mcmc`, `HELD_FREE_ENTRY = false`, `TRAINING_COST_GRID = [0.8, 0.9,
+    1.0, 1.1, 1.2]`, `CF_TOL`, `CF_MAXIT`, `CF_DAMP` = transition_main's 1e-4, 200, 0.3).
+  - `cf_common.jl`: `load_transition`, `self_path`, `with_training_cost` (ln c + ln s),
+    `stationary_at_costs!` (Newton on ln θ from a known equilibrium, residual ln k(θ) − ln k,
+    each evaluation `solve_at_tightness!`), `unskilled_branch` (zeros of unskilled free
+    entry on a 31-node θ_U scan, rank from the top), `solve_cf_transition` (the repo's
+    outer fixed point on the stored grid, warm-started).
+  - `welfare.jl`: `welfare_pv` replays the forward pass through the solver's own steps
+    (`_reallocate!`, `_advance!`) and books the social flow per sub-step: output of all
+    matches, b_U to the unskilled unemployed, b_S to every trained worker without a job
+    (crossers included), b_T in training, minus k_j v_j, σ_S per OJS searcher, and
+    c(a_S) per entry into training; tail at the end steady state's flow / r. By market
+    and component, in levels, months of A₀P_U E[a_U], and over the date's A.
+  - `incidence.jl`: (V_0/A_1)/(V_b/A_0) − 1 per type and state class from the saved
+    `types`, averaged over states with the date-0 masses.
+  - `held_margin.jl`: τ and d held at the baseline (`HeldChoices`, `Model.held`); tightness
+    on the estimated path by default (one backward and one forward pass), or re-solved by
+    free entry with the end state continued from the crisis tightness and its branch checked.
+  - `training_cost.jl`: c scaled from date 0 on the crisis and the no-crisis path, free
+    entry re-solved from the stored path; welfare with the scaled cost a transfer (resource
+    cost at the estimated c); s = 1 reuses the stored paths; a scale with no steady state
+    on the estimate's branch is logged and not solved.
+- `code/paths.jl`: `CF_EXERCISES`, `out_counterfactuals(exercise)`.
+- `code/policy/` deleted (`policy_main.jl`, `policy_params.jl`, `policy_solver.jl`): it did
+  not load (retired `RegimeParams`) and nothing outside it included it.
+  `plots_and_tables/policy.jl`, read only by `policy_main.jl`, is now orphaned.
+
+### Measured
+- Smoke, scratch copy, 8 threads, 4-step transitions at the chain means, grid [1.0, 1.1],
+  one outer iteration, 5-node branch scan: all four exercises run in 45 s; the held margin
+  under free entry in 26 s. Forward replay of the stored masses: largest cell gap 2.3e-13
+  and 1.4e-12 on the steady states; 2e-7 on the 2-iteration paths, whose stored tightness
+  was updated after their last forward pass.
+- Steady-state welfare, months of baseline mean unskilled new-match output: base_fc
+  243.3793, crisis_fc 238.9633, base_covid 238.8152, crisis_covid 245.5136.
+- COVID crisis, c × 1.1 and the held margin under free entry: Newton finds no steady state
+  on the estimate's branch (residual 7.7e-2 and 2.6e-2 in ln k). A 46-node scan at the SMM
+  estimate finds three unskilled zeros at c × 1 (0.519, 0.649, 0.833 = θ̂_U) and one at
+  c × 1.1 (0.490), c × 1.2 (0.469) and c × 0.8 (0.944): the selected high zero ends at a fold
+  just above the estimated c.
+
+### Known gaps
+- No exercise was run on a converged transition.
+- `unskilled_branch` scans θ_U at fixed θ_S.
+
+---
+
 ## v61.4.0 — 2026-11-16
 
 **MINOR: `transition_main.jl` solves and saves the two transitions and does nothing else.**

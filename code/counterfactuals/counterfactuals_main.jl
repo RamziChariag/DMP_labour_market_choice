@@ -1,8 +1,8 @@
 ############################################################
 # counterfactuals_main.jl — Single entry point of the counterfactual exercises (RoySearch)
 #
-# RUN code/transition/transition_main.jl FIRST, FOR BOTH CRISES (SCENARIOS = [:fc, :covid])
-# AND AT THE SAME POINT_ESTIMATE AS BELOW.  Every exercise reads the transitions it saves,
+# RUN code/transition/transition_main.jl FIRST, AT THE SAME POINT_ESTIMATE AS BELOW: it
+# solves and saves both crises.  Every exercise reads the transitions it saves,
 # output/transition/transition_<crisis><W>_<point>.jls, and stops with a message naming
 # the missing file otherwise.
 #
@@ -14,8 +14,8 @@
 #   :held_margin    held_margin.jl    each transition with τ and d held at the baseline
 #   :training_cost  training_cost.jl  the training cost scaled from date 0, with and
 #                                     without each crisis
-# Shared: cf_common.jl; figures: plots_and_tables/counterfactuals.jl.  Outputs (CSV tables,
-# PNG figures, log.txt) go to output/counterfactuals/<exercise>/.
+# Shared: cf_common.jl.  Outputs (CSV tables, JLS data for the figures, log.txt) go to
+# output/counterfactuals/<exercise>/; nothing is plotted here.
 #
 # Usage (from the repo root):
 #   julia --project=. --threads auto code/counterfactuals/counterfactuals_main.jl
@@ -35,8 +35,8 @@ const CRISES = [:fc, :covid]
 const EXERCISES = [:welfare, :incidence, :held_margin, :training_cost]
 
 # The point estimate the transitions were solved at (transition_main.jl, POINT_ESTIMATE):
-# :smm the SMM estimates, :mcmc the chains' posterior means.
-const POINT_ESTIMATE = :smm
+# :mcmc the chains' posterior means, the estimates the paper reports; :smm the SMM estimates.
+const POINT_ESTIMATE = :mcmc
 
 # Held margin: false holds tightness on the estimated transition's path (one backward and
 # one forward pass, no free-entry iteration); true re-solves it by free entry and reports
@@ -45,9 +45,6 @@ const HELD_FREE_ENTRY = false
 
 # Training cost: the scales of c applied from date 0.  Must contain 1.0, the estimate.
 const TRAINING_COST_GRID = [0.8, 0.9, 1.0, 1.1, 1.2]
-
-# Incidence: also serialise every type's values and masses (several hundred MB per crisis).
-const INCIDENCE_SAVE_VALUES = false
 
 # The outer fixed point of every path that is solved again (held margin under free entry,
 # training cost): transition_main.jl's tolerance, iteration cap and damping.
@@ -73,8 +70,6 @@ using Base.Threads
 using Serialization
 using CSV
 using DataFrames
-using Plots
-using LaTeXStrings
 using Dates
 using Optim
 using Clustering
@@ -93,7 +88,6 @@ const CODE_ROOT      = normpath(joinpath(CF_DIR, ".."))
 const SOLVER_DIR     = joinpath(CODE_ROOT, "solver")
 const SMM_DIR        = joinpath(CODE_ROOT, "smm")
 const TRANSITION_DIR = joinpath(CODE_ROOT, "transition")
-const PT_DIR         = joinpath(CODE_ROOT, "plots_and_tables")
 include(joinpath(CODE_ROOT, "paths.jl"))
 include(joinpath(SMM_DIR, "version.jl"))
 const TRANS_OUT_DIR  = out_transition()
@@ -110,18 +104,18 @@ for f in ("settings", "moments", "smm_params", "bundle", "smm")
 end
 const WEIGHTING = run_weighting()
 const W_SUFFIX  = weighting_suffix(WEIGHTING)
-for f in ("transition_params", "transition_values", "transition_solver", "transition_simulation")
+for f in ("transition_params", "transition_values", "transition_solver", "transition_types",
+          "transition_simulation")
     include(joinpath(TRANSITION_DIR, f * ".jl"))
 end
 println("done."); flush(stdout)
 
 # ═══════════════════════════════════════════════════════════
-# 5. EXERCISES AND FIGURES
+# 5. EXERCISES
 # ═══════════════════════════════════════════════════════════
 for f in ("cf_common", "welfare", "incidence", "held_margin", "training_cost")
     include(joinpath(CF_DIR, f * ".jl"))
 end
-include(joinpath(PT_DIR, "counterfactuals.jl"))
 
 all(e -> e in CF_EXERCISES, EXERCISES) ||
     error("EXERCISES = $(EXERCISES): each must be one of $(CF_EXERCISES).")

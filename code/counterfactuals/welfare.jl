@@ -47,18 +47,19 @@ function level_params(model::Model; resource_c::Float64 = model.common.c)
 end
 
 """
-    flow_components(st, θU, θS, part, poj, model, lp) -> Vector
+    flow_components(st, d, θU, θS, part, poj, model, lp) -> Vector
 
-The social flow at the state `st` (per-cell stocks as the forward pass holds them), by
-`COMPONENTS`, the training cost left at 0 (it is booked from the entries).  Every stock is
-read as the code reads it: unskilled matches from each slice's quality measure, the atom at
-p = 1 in the last slot; skilled matches from the per-a_S unit shape ê_S on the
+The social flow at the forward state `st` (`_forward_state`) with crossing fractions `d`,
+by `COMPONENTS`, the training cost left at 0 (it is booked from the entries).  Every stock
+is read as the code reads it: unskilled matches from each slice's quality measure, the atom
+at p = 1 in the last slot; skilled matches from the per-a_S unit shape ê_S on the
 non-draining column mass (`path_statistics`); the unskilled seekers u_U + d u_S
 (`_free_entry_tightness`); the skilled seekers the denominator of `compute_Jbar_skilled`,
 û m₀ plus the employed who search on the job, each of whom pays σ_S.
 """
-function flow_components(st, θU::Float64, θS::Float64, part::AbstractVector{Float64},
-                         poj::AbstractVector{Float64}, model::Model, lp)
+function flow_components(st, d::Matrix{Float64}, θU::Float64, θS::Float64,
+                         part::AbstractVector{Float64}, poj::AbstractVector{Float64},
+                         model::Model, lp)
     gp = model.grids;  ug = model.unsk_grids;  sg = model.skl_grids
     Nx = length(gp.x);  NpU = length(ug.p);  NpS = length(sg.p)
     yU = 0.0;  seekU = 0.0;  bu = 0.0;  bx = 0.0;  bs = 0.0;  bt = 0.0
@@ -66,13 +67,12 @@ function flow_components(st, θU::Float64, θS::Float64, part::AbstractVector{Fl
         for q in 1:(NpU + 1)
             yU += (st.Es[i, j, q] + st.Et[i, j, q]) * lp.PU * gp.x[i] * (q <= NpU ? ug.p[q] : 1.0)
         end
-        cross = st.d[i, j] * st.uS[i, j]
+        cross = d[i, j] * st.uS[i, j]
         seekU += st.uU[i, j] + cross
         bu += st.uU[i, j];  bx += cross;  bs += st.uS[i, j] - cross;  bt += st.tU[i, j]
     end
-    m0 = model.corner_limit ? skilled_stayer_columns(model, st.d, st.mS) :
-                              nondrain_column_mass(st.d, st.mS)
-    u0 = nondrain_column_mass(st.d, st.uS)
+    m0 = model.corner_limit ? skilled_stayer_columns(model, d, st.mS) : nondrain_column_mass(d, st.mS)
+    u0 = nondrain_column_mass(d, st.uS)
     yS = 0.0;  seekS = 0.0;  ojs = 0.0
     @inbounds for k in 1:Nx
         ufrac = m0[k] > 1e-14 ? clamp(u0[k] / m0[k], 0.0, 1.0) : 0.0
@@ -90,132 +90,74 @@ end
 
 disc_int(r, a, h) = (exp(-r * a) - exp(-r * (a + h))) / r      # ∫_a^{a+h} e^{−rt} dt
 
+# The largest gap between the forward state and the stocks the path stores at date n.
+function _stock_gap(st, path::TransitionPath, n::Int)
+    g = 0.0
+    @inbounds for j in axes(st.uU, 2), i in axes(st.uU, 1)
+        g = max(g, abs(st.uU[i, j] - path.uU[i, j, n]), abs(st.tU[i, j] - path.tU[i, j, n]),
+                abs(st.uS[i, j] - path.uS[i, j, n]), abs(st.mS[i, j] - path.mS[i, j, n]),
+                abs(sum(view(st.Es, i, j, :)) - path.eUs[i, j, n]),
+                abs(sum(view(st.Et, i, j, :)) - path.eUt[i, j, n]))
+    end
+    return g
+end
+
 """
     welfare_pv(path, model, tp; flow_end = nothing, resource_c = model.common.c) -> NamedTuple
 
 The present value at date 0 of the social flow along a solved `path` under `model`, its
-post-switch (z₁) model, by replaying the forward pass from the path's date-0⁻ masses with
-the path's own policies and tightness.  The replay is `_forward_pass!` (transition_solver.jl)
-step for step — its reallocations and its Euler sub-steps call the repo's own functions —
-with the accounts added: within each sub-step the flow at its starting stocks, held for the
-sub-step as the laws of motion hold their rates; training costs on every entry, the births
-and training-slice separations of each sub-step read off the training stock's own Euler
-step, and the unemployed swept and the training-slice matches ended at each reallocation
-as a lump at that date.  `flow_end` is the end steady state's flow, which values the tail
-(the last date's flow when not given).  Returns the PV by component (path, tail, total),
-the per-date flows at the post-reallocation stocks, the lumps, the largest gap between the
-replayed and the stored stocks, and the date-1 stocks per cell.
+post-switch (z₁) model.  The forward pass is replayed from the path's date-0⁻ masses with
+the path's own policies and tightness, through the same steps `_forward_pass!` takes
+(`_reallocate!`, `_advance!`), and the accounts are booked on the way: within each
+sub-step the flow at its starting stocks, held for the sub-step as the laws of motion hold
+their rates; training costs on every entry, the births and training-slice separations of
+each sub-step read off the training stock's own Euler step, and the mass each reallocation
+moves into training as a lump at its date.  `flow_end` is the end steady state's flow,
+which values the tail (the last date's flow when not given).  Returns the PV by component
+(path, tail, total), the per-date flows at the post-reallocation stocks, the lumps, and the
+largest gap between the replayed and the stored stocks.
 """
 function welfare_pv(path::TransitionPath, model::Model, tp::TransitionParams;
                     flow_end = nothing, resource_c::Float64 = model.common.c)
-    Nt  = length(path.tgrid)
-    Nx  = length(model.grids.x);  NpU = length(model.unsk_grids.p)
-    cp = model.common;  up = model.unsk_par;  ug = model.unsk_grids
-    φ = cp.φ;  ν = cp.ν
+    Nt = length(path.tgrid);  Nx = length(model.grids.x);  ug = model.unsk_grids
     χU = hire_fraction(model)
-    wG = build_unskilled_G_weights(ug.p, ug.wp, up.α_U)
+    wG = build_unskilled_G_weights(ug.p, ug.wp, model.unsk_par.α_U)
     lp = level_params(model; resource_c = resource_c);  r = lp.r
-
-    uU = copy(path.uU0);  tU = copy(path.tU0)
-    Es = copy(path.eU0p);  Et = copy(path.eUt0p)
-    uS = copy(path.uS[:, :, 1]);  mS = copy(path.mS[:, :, 1]);  eS = copy(path.eS[:, :, 1])
-    τprev = copy(path.τT0);  pUs_prev = repeat(path.pU0, 1, Nx);  pUt_prev = copy(path.pUt0)
-    χt_prev = copy(path.χUt0);  pS_prev = copy(path.pS0)
-    uS_n = similar(uS);  mS_n = similar(mS);  tU_n = similar(tU)
-    mv_s = zeros(Float64, NpU + 1);  mv_t = zeros(Float64, NpU + 1)
-
-    flows = zeros(Nt, NCOMP);  lump = zeros(Nt);  pv = zeros(NCOMP)
-    gap = 0.0;  date1 = nothing
+    φν = model.common.φ + model.common.ν
+    st = _forward_state(path)
+    flows = zeros(Nt, NCOMP);  lump = zeros(Nt);  pv = zeros(NCOMP);  gap = 0.0
     entry_cost(before, after, dt) =
-        sum(lp.cost[j] * (after[i, j] - before[i, j] + dt * (φ + ν) * before[i, j])
-            for i in 1:Nx, j in 1:Nx)
+        sum(lp.cost[j] * (after[i, j] - before[i, j] + dt * φν * before[i, j]) for i in 1:Nx, j in 1:Nx)
 
     for n in 1:Nt
         d  = _d_matrix(path, model, n)
         hX = _crosser_hire_shares(path, χU, d, n)
-
-        # ── Reallocation at date n (as _forward_pass!), every entry into training costed ──
-        tcost = 0.0
-        @inbounds for j in 1:Nx, i in 1:Nx
-            τ  = clamp(path.τT[i, j, n], 0.0, 1.0)
-            τ0 = clamp(τprev[i, j], 0.0, 1.0)
-            σ  = sweep_share(τ0, τ);  ς = return_share(τ0, τ)
-            ps = path.pUs[i, j, n];  pt = path.pUt[i, j, n]
-            es = view(Es, i, j, :);  et = view(Et, i, j, :)
-            ks = n == 1 && path.χU0[i] > 0.0 ? min(χU[i] / path.χU0[i], 1.0) : 1.0
-            kt = χt_prev[i, j] > 0.0 ? min(path.χUt[i, j, n] / χt_prev[i, j], 1.0) : 1.0
-            km = χU[i] > 0.0 ? min(path.χUt[i, j, n] / χU[i], 1.0) : 1.0
-            mv_u = 0.0
-            if σ == 0.0 && ς == 0.0
-                e_s = _end_below!(es, pUs_prev[i, j], ps, ug.p, ks)
-                e_t = _end_below!(et, pUt_prev[i, j], pt, ug.p, kt)
-            else
-                mv_u = σ * uU[i, j]
-                uU[i, j] -= mv_u;  tU[i, j] += mv_u
-                @. mv_s = σ * es;  @. mv_t = ς * et
-                es .-= mv_s;  et .-= mv_t
-                e_s = _end_below!(es, pUs_prev[i, j], ps, ug.p, ks) +
-                      _end_below!(mv_t, pUt_prev[i, j], ps, ug.p, ks)
-                e_t = _end_below!(et, pUt_prev[i, j], pt, ug.p, kt) +
-                      _end_below!(mv_s, pUs_prev[i, j], pt, ug.p, km)
-                es .+= mv_t;  et .+= mv_s
-            end
-            uU[i, j] += e_s;  tU[i, j] += e_t
-            tcost += lp.cost[j] * (mv_u + e_t)
-        end
-        _end_skilled_below!(eS, uS, mS, d, pS_prev, view(path.pstar_S, :, n), model.skl_grids)
-        lump[n] = tcost
-        pv[NCOMP] += exp(-r * path.tgrid[n]) * tcost
-
-        @inbounds for j in 1:Nx, i in 1:Nx
-            gap = max(gap, abs(uU[i, j] - path.uU[i, j, n]), abs(tU[i, j] - path.tU[i, j, n]),
-                      abs(uS[i, j] - path.uS[i, j, n]), abs(mS[i, j] - path.mS[i, j, n]),
-                      abs(sum(view(Es, i, j, :)) - path.eUs[i, j, n]),
-                      abs(sum(view(Et, i, j, :)) - path.eUt[i, j, n]))
-        end
-        st = (Es = Es, Et = Et, uU = uU, tU = tU, uS = uS, mS = mS, eS = eS, d = d)
-        n == 1 && (date1 = deepcopy(st))
-        flow() = flow_components(st, path.θU[n], path.θS[n], view(path.s_part, :, n),
+        _reallocate!(st, path, model, χU, d, n)
+        lump[n] = sum(lp.cost[j] * st.into_T[i, j] for i in 1:Nx, j in 1:Nx)
+        pv[NCOMP] += exp(-r * path.tgrid[n]) * lump[n]
+        gap = max(gap, _stock_gap(st, path, n))
+        flow() = flow_components(st, d, path.θU[n], path.θS[n], view(path.s_part, :, n),
                                  view(path.poj, :, n), model, lp)
-        κU = meeting_rate(path.θU[n], up.μ, up.η)
-        κS = meeting_rate(path.θS[n], model.skl_par.μ, model.skl_par.η)
-
         if n == Nt                     # the last date's flow, its training entries by one dry step
-            f = flow();  h = 1e-3
-            ta = copy(tU)
-            _advance_unskilled_cells!(copy(uU), ta, copy(Es), copy(Et), copy(uS), d, κU, χU, hX,
-                                      path, model, wG, n, h)
-            f[NCOMP] = entry_cost(tU, ta, h) / h
+            f = flow();  h = 1e-3;  dry = deepcopy(st)
+            _advance!(dry, path, model, χU, hX, d, wG, n, h)
+            f[NCOMP] = entry_cost(dry.tU_n, dry.tU, h) / h
             flows[n, :] .= f
             break
         end
-
-        # ── Laws of motion, date n → n+1 (as _forward_pass!), the flow booked per sub-step ──
-        Δ    = path.tgrid[n + 1] - path.tgrid[n]
-        nsub = max(ceil(Int, Δ / FORWARD_SUBSTEP - 1e-9), 1)
-        dt   = Δ / nsub
-        for k in 1:nsub
+        sub = _substeps(path, n)
+        for k in 1:sub.nsub
             f = flow()
-            copyto!(uS_n, uS);  copyto!(mS_n, mS);  copyto!(tU_n, tU)
-            _advance_unskilled_cells!(uU, tU, Es, Et, uS_n, d, κU, χU, hX, path, model, wG, n, dt)
-            _advance_skilled_masses!(uS, mS, tU_n, uS_n, mS_n, d, κU, κS, hX.h, model,
-                                     view(path.pstar_S, :, n), dt)
-            _advance_skilled_shape!(eS, uS_n, mS_n, mS, d, κS, model, view(path.pstar_S, :, n),
-                                    view(path.poj, :, n), view(path.s_part, :, n), dt)
-            f[NCOMP] = entry_cost(tU_n, tU, dt) / dt
+            _advance!(st, path, model, χU, hX, d, wG, n, sub.dt)
+            f[NCOMP] = entry_cost(st.tU_n, st.tU, sub.dt) / sub.dt
             k == 1 && (flows[n, :] .= f)
-            pv .+= disc_int(r, path.tgrid[n] + (k - 1) * dt, dt) .* f
+            pv .+= disc_int(r, path.tgrid[n] + (k - 1) * sub.dt, sub.dt) .* f
         end
-
-        copyto!(τprev, view(path.τT, :, :, n))
-        copyto!(pUs_prev, view(path.pUs, :, :, n));  copyto!(pUt_prev, view(path.pUt, :, :, n))
-        copyto!(χt_prev, view(path.χUt, :, :, n))
-        copyto!(pS_prev, view(path.pstar_S, :, n))
+        _carry_policies!(st, path, n)
     end
-    H = path.tgrid[end]
-    tail = exp(-r * H) / r .* (flow_end === nothing ? flows[Nt, :] : flow_end)
+    tail = exp(-r * path.tgrid[end]) / r .* (flow_end === nothing ? flows[Nt, :] : flow_end)
     return (pv_path = pv, pv_tail = tail, pv = pv .+ tail, flows = flows, lump = lump,
-            horizon = H, lp = lp, replay_gap = gap, date1 = date1)
+            lp = lp, replay_gap = gap)
 end
 
 """
@@ -253,8 +195,8 @@ end
 
 For each crisis: the present value of the social flow along the stored transition, and of
 the baseline and the crisis steady states held forever, by market and component, with the
-path's per-date stocks and flows.  Writes `welfare_<crisis>.csv`, `path_<crisis>.csv`,
-`flows_ss_<crisis>.csv` and the figure `welfare_flow_<crisis>.png`.
+path's per-date stocks and flows.  Writes `welfare_<crisis>.csv`, `path_<crisis>.csv` and
+`flows_ss_<crisis>.csv`.
 """
 function run_welfare(crises)
     dir = cf_log_start(out_counterfactuals(:welfare), "Welfare along the estimated transitions")
@@ -306,8 +248,6 @@ function run_welfare(crises)
                             baseline_ss = [F0..., net_flow(F0)], crisis_ss = [F1..., net_flow(F1)],
                             path_date0 = [w.flows[1, :]..., net_flow(w.flows[1, :])],
                             path_last_date = [w.flows[end, :]..., net_flow(w.flows[end, :])]))
-        plot_welfare_flow(df, net_flow(F0) / lp0.A, net_flow(F1) / lp1.A, L.months,
-                          joinpath(dir, "welfare_flow_$(crisis).png"), crisis)
 
         Wp = net_flow(w.pv);  W0 = net_flow(F0) / r;  W1 = net_flow(F1) / r
         cf_log(dir, @sprintf("[%s] W, months of baseline mean unskilled output: path %.4f, baseline SS %.4f, crisis SS %.4f",

@@ -43,8 +43,8 @@ end
 
 Writes `training_cost_<crisis>.csv` (one row per path and scale: welfare in the four units,
 unemployment by market over the crisis window and at the horizon, the end steady state's
-tightnesses and branch, the solve's convergence) and `training_cost_<crisis>.png`.  Prints
-the number of transition solves before starting.
+tightnesses and branch, the solve's convergence) and `training_cost_<crisis>.jls` (the
+TransitionResult of every solved path).  Prints the number of transition solves first.
 """
 function run_training_cost(crises)
     dir = cf_log_start(out_counterfactuals(:training_cost), "Training cost scaled from date 0")
@@ -60,7 +60,7 @@ function run_training_cost(crises)
         lp0 = level_params(m0);  πU0 = lp0.πU
         F0 = steady_state_flow(m0).flow;  F1 = steady_state_flow(m1).flow
         θ0 = (U = m0.unsk_cache.θ, S = m0.skl_cache.θ)
-        rows = NamedTuple[]
+        rows = NamedTuple[];  results = Dict{Tuple{Symbol,Float64},Any}()
         for kind in (:crisis, :no_crisis), s in grid
             t0 = time()
             mref = kind === :crisis ? m1 : m0
@@ -100,6 +100,7 @@ function run_training_cost(crises)
                 W = net_flow(w.pv);  res = sol.result
                 conv = res.converged;  gap = res.final_dist;  its = res.n_iter
             end
+            results[(kind, s)] = res
             win(s_) = kind === :no_crisis && s == 1.0 ? getfield(res, s_)[1] :
                                                         window_mean(getfield(res, s_), res.tgrid, L.months)
             push!(rows, (crisis = String(crisis), path = String(kind), scale = s,
@@ -118,6 +119,10 @@ function run_training_cost(crises)
         end
         df = DataFrame(rows)
         CSV.write(joinpath(dir, "training_cost_$(crisis).csv"), df)
+        open(joinpath(dir, "training_cost_$(crisis).jls"), "w") do io
+            serialize(io, (crisis = crisis, version = ROYSEARCH_VERSION, point = POINT_ESTIMATE,
+                           grid = grid, table = df, results = results, months = L.months))
+        end
         for kind in ("crisis", "no_crisis")
             sub = df[(df.path .== kind) .& isfinite.(df.W_level), :]
             b = argmax(sub.W_level)
@@ -125,7 +130,6 @@ function run_training_cost(crises)
                                  crisis, kind, sub.scale[b], sub.W_months_base_piU[b],
                                  sub.W_months_base_piU[findfirst(==(1.0), sub.scale)]))
         end
-        plot_training_cost(df, joinpath(dir, "training_cost_$(crisis).png"), crisis)
     end
     return nothing
 end

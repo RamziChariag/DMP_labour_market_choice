@@ -86,7 +86,8 @@ end
     run_held_margin(crises)
 
 Writes `held_margin_path_<crisis>.csv` (both paths, date by date), `held_margin_<crisis>.csv`
-(the unemployment rows per market and the welfare rows) and `held_margin_<crisis>.png`.
+(unemployment per market), `held_margin_welfare_<crisis>.csv` and `held_margin_<crisis>.jls`
+(both TransitionResults and the end steady state's tightnesses and branch).
 """
 function run_held_margin(crises)
     mode = HELD_FREE_ENTRY ? "tightness re-solved by free entry" : "tightness held on the estimated path"
@@ -149,7 +150,12 @@ function run_held_margin(crises)
                      welfare_rows(crisis, "held", wh.pv, lp0.πU, A1, lp1.πU),
                      welfare_rows(crisis, "held_minus_estimated", wh.pv .- we.pv, lp0.πU, A1, lp1.πU))
         CSV.write(joinpath(dir, "held_margin_welfare_$(crisis).csv"), DataFrame(wrows))
-        plot_held_margin(df, L.months, joinpath(dir, "held_margin_$(crisis).png"), crisis)
+        open(joinpath(dir, "held_margin_$(crisis).jls"), "w") do io
+            serialize(io, (crisis = crisis, version = ROYSEARCH_VERSION, point = POINT_ESTIMATE,
+                           free_entry = HELD_FREE_ENTRY, estimated = est, held = hld,
+                           end_state = ep.solve, branch = ep.branch, fe_gap = hp.fe_gap,
+                           months = L.months))
+        end
 
         for r in rows
             cf_log(dir, @sprintf("[%s] %-5s mean rise over the window: estimated %+.5f, held %+.5f; margin share %+.3f",
