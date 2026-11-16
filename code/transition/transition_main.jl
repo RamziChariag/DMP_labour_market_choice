@@ -69,11 +69,12 @@ assert_no_legacy_env()
 const POINT_ESTIMATE = :mcmc
 POINT_ESTIMATE in (:smm, :mcmc) || error("POINT_ESTIMATE must be :smm or :mcmc, got :$POINT_ESTIMATE.")
 
-# The fine grid (T_MAX months in N_STEPS steps; the horizon beyond it is chosen by the test
-# of transition_simulation.jl) and the outer fixed point: tolerance on the free-entry gap,
-# iteration cap, and DAMP, the weight on the free-entry tightness in the update.
-const T_MAX   = 120.0
-const N_STEPS = 240
+# The horizon is the crisis data window, set in transition_simulation.jl from
+# data/derived/windows.json: the path ends on the last month of the data the crisis estimate
+# uses (crisis_fc 2008-01 to 2010-12, crisis_covid 2020-01 to 2022-12). DT is the step in
+# months; TOL, MAXIT and DAMP the outer fixed point (tolerance on the free-entry gap,
+# iteration cap, weight on the free-entry tightness in the update).
+const DT      = 0.5
 const TOL     = 5e-4
 const MAXIT   = 200
 const DAMP    = 1.0
@@ -94,8 +95,8 @@ flush(stdout)
 # ============================================================
 for pair in Symbol.(PAIRS)
     t0 = time()
-    run_transition_simulation(pair, W_SUFFIX; point = POINT_ESTIMATE, T_max = T_MAX,
-                              N_steps = N_STEPS, tol = TOL, maxit = MAXIT, damp = DAMP)
+    run_transition_simulation(pair, W_SUFFIX; point = POINT_ESTIMATE, dt = DT, tol = TOL,
+                              maxit = MAXIT, damp = DAMP)
     @printf("[%s] finished in %.1f min\n", pair, (time() - t0) / 60);  flush(stdout)
 end
 

@@ -3,26 +3,13 @@
 #
 # Library file, loaded by transition_main.jl. `run_transition_simulation` reads both
 # windows of a pair at the same point estimate, checks they are one pair, solves each
-# window's selected steady state, chooses the horizon by an accuracy test, solves the path
-# there, adds the per-type date-0 values (`date0_types`) and serialises the bundle
+# window's selected steady state, solves the path to a horizon at the last month of the
+# crisis data window, adds the per-type date-0 values (`date0_types`) and serialises the bundle
 # (`transition_file`). Expects the solver, SMM and transition files, paths.jl and JSON3.
 ############################################################
 
 # Shape of the transition bundle; bumped only when its field set changes.
 const TRANSITION_SCHEMA = 3
-
-# The horizon test (`solve_with_horizon`): the horizon doubles until no reported series moves
-# on the first HORIZON_TEST_MONTHS by more than HORIZON_TOL relative to its scale, or in log
-# units for a series in logs (its change is relative already). HORIZON_TOL is ten times the
-# outer tolerance, above the iteration's own noise.
-const HORIZON_TEST_MONTHS = 36.0
-const HORIZON_TOL         = 1e-3
-const HORIZON_MAX         = 7680.0
-
-# The series the horizon test compares, every one a reported path, and those in logs.
-const REPORTED_SERIES = (:θU, :θS, :ur_U, :ur_S, :ur_total, :skilled_share,
-                         :training_share, :mean_wage_U, :mean_wage_S)
-const LOG_SERIES      = (:mean_wage_U, :mean_wage_S)
 
 """
     _scenario_windows(scenario) -> (base window, crisis window)
@@ -129,61 +116,18 @@ stationary_record(model) =
                      scenario = :steady_state)
 
 """
-    solve_with_horizon(sel0, sel1, scenario; T_max, N_steps, tol, maxit, damp)
-
-The transition at a horizon chosen by the accuracy test: the first trial ends at `T_max`,
-each next one doubles the horizon and starts from the previous tightness path, and a trial
-is accepted when no reported series moves by more than `HORIZON_TOL` on the first
-`HORIZON_TEST_MONTHS` against the previous one. Returns the accepted trial
-`(tp, path, res, model_z1)` and the record of every trial.
-"""
-function solve_with_horizon(sel0, sel1, scenario::Symbol; T_max, N_steps, tol, maxit, damp)
-    trials = NamedTuple[]
-    prev = nothing;  H = Float64(T_max)
-    while true
-        tp = TransitionParams(T_max = T_max, N_steps = N_steps, horizon = H, tol = tol,
-                              maxit = maxit, damp = damp, verbose = true)
-        m0 = deepcopy(sel0.model);  m1 = deepcopy(sel1.model)
-        @printf("── horizon %.0f months (%d dates) ──\n", H, length(time_grid(tp)));  flush(stdout)
-        guess = prev === nothing ? nothing :
-                (tgrid = prev.path.tgrid, θU = prev.path.θU, θS = prev.path.θS)
-        res, path = solve_transition_path(m0, m1, tp; scenario = scenario, guess = guess)
-        res.converged || @warn "transition at horizon $H did not converge (gap $(res.final_dist))"
-        cur = (tp = tp, path = path, res = res, model_z1 = m1)
-        change = NaN
-        if prev !== nothing
-            k = count(<=(HORIZON_TEST_MONTHS + 1e-9), prev.res.tgrid)
-            change = maximum(REPORTED_SERIES) do s
-                a = getfield(cur.res, s)[1:k];  b = getfield(prev.res, s)[1:k]
-                scale = s in LOG_SERIES ? 1.0 : max(maximum(abs, b), 1e-300)
-                maximum(abs, a .- b) / scale
-            end
-        end
-        push!(trials, (horizon = H, dates = length(path.tgrid), iterations = res.n_iter,
-                       converged = res.converged, gap = res.final_dist, change_first_months = change))
-        @printf("   horizon %.0f: %d iterations, gap %.2e, change on months 0-%.0f vs previous %.3e\n",
-                H, res.n_iter, res.final_dist, HORIZON_TEST_MONTHS, change);  flush(stdout)
-        (isfinite(change) && change < HORIZON_TOL) && return (accepted = cur, trials = trials)
-        2H > HORIZON_MAX && error("No horizon up to $(HORIZON_MAX) months passes the accuracy test " *
-                                  "(last change $change against $(HORIZON_TOL)).")
-        prev = cur;  H *= 2
-    end
-end
-
-"""
-    run_transition_simulation(scenario, w_suffix; point = :smm,
-                              T_max = 120.0, N_steps = 240, tol = 1e-4, maxit = 200,
-                              damp = 0.3) -> String
+    run_transition_simulation(scenario, w_suffix; point = :smm, dt = 0.5, tol = 5e-4,
+                              maxit = 200, damp = 1.0) -> String
 
 Solve the transition of the pair `scenario` with both windows read at `point` and
-serialise it to `transition_file(scenario, w_suffix, point)`. `T_max`, `N_steps` are the
-fine grid, `tol`, `maxit`, `damp` the outer fixed point; the horizon is chosen by
-`solve_with_horizon`. Returns the saved file's path.
+serialise it to `transition_file(scenario, w_suffix, point)`. The horizon is the length of
+the crisis data window (`crisis_window_months`): the path's last date is the last month of
+the data the crisis estimate was measured on. `dt` is the step in months; `tol`, `maxit`,
+`damp` the outer fixed point. Returns the saved file's path.
 """
 function run_transition_simulation(scenario::Symbol, w_suffix::String;
-                                   point::Symbol = :smm, T_max::Real = 120.0,
-                                   N_steps::Int = 240, tol::Real = 1e-4, maxit::Int = 200,
-                                   damp::Real = TransitionParams().damp)
+                                   point::Symbol = :smm, dt::Real = 0.5, tol::Real = 5e-4,
+                                   maxit::Int = 200, damp::Real = 1.0)
     wb, wc = _scenario_windows(scenario)
     fb = estimate_path(estimation_window(wb), w_suffix; point = point)
     fc = estimate_path(estimation_window(wc), w_suffix; point = point)
@@ -201,12 +145,17 @@ function run_transition_simulation(scenario::Symbol, w_suffix::String;
     eq_z0 = compute_equilibrium_objects(sel0.model)
     eq_z1 = compute_equilibrium_objects(sel1.model)
 
-    sol = solve_with_horizon(sel0, sel1, scenario; T_max = T_max, N_steps = N_steps,
-                             tol = tol, maxit = maxit, damp = damp)
-    path = sol.accepted.path;  result = sol.accepted.res;  tp = sol.accepted.tp
-    cw   = crisis_window_months(wc)
-    stats = path_statistics(path, sol.accepted.model_z1)
-    revs  = policy_reversals(path, sol.accepted.model_z1)
+    cw = crisis_window_months(wc)
+    H  = Float64(cw.months)
+    tp = TransitionParams(T_max = H, N_steps = round(Int, H / dt), horizon = H, tol = tol,
+                          maxit = maxit, damp = damp, verbose = true)
+    m0 = deepcopy(sel0.model);  m1 = deepcopy(sel1.model)
+    @printf("── horizon %.0f months, %s to %s (%d dates) ──\n", H, cw.ym_start, cw.ym_end,
+            length(time_grid(tp)));  flush(stdout)
+    result, path = solve_transition_path(m0, m1, tp; scenario = scenario)
+    result.converged || @warn "transition did not converge (gap $(result.final_dist))"
+    stats = path_statistics(path, m1)
+    revs  = policy_reversals(path, m1)
 
     println("="^65)
     @printf("  %s: converged %s (%d iterations, free-entry gap %.3e), horizon %.0f months\n",
@@ -241,9 +190,7 @@ function run_transition_simulation(scenario::Symbol, w_suffix::String;
                              horizon = tp.horizon, tail_growth = TAIL_GROWTH,
                              forward_substep = FORWARD_SUBSTEP, tol = tp.tol, maxit = tp.maxit,
                              damp = tp.damp, sim_base = pb.bundle.spec.sim,
-                             sim_crisis = pc.bundle.spec.sim,
-                             horizon_test = (months = HORIZON_TEST_MONTHS, tol = HORIZON_TOL,
-                                             trials = sol.trials)),
+                             sim_crisis = pc.bundle.spec.sim),
             crisis_window = (months = cw.months, ym_start = cw.ym_start, ym_end = cw.ym_end,
                              label = cw.label, in_window = path.tgrid .< cw.months),
             result        = result,

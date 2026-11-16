@@ -35,6 +35,20 @@ measurement was, not just the verdict.
 
 ---
 
+## v61.6.0 — 2026-11-16
+
+**MINOR: the transition horizon is the crisis data window (the author's decision).** The
+path ends on the last month of the data the crisis estimate uses: crisis_fc 2008-01 to
+2010-12, crisis_covid 2020-01 to 2022-12, so 36 months for both, read from
+`data/derived/windows.json` (`crisis_window_months`). The step is `DT = 0.5` month, so 73
+dates on a uniform grid. The automatic horizon test (`solve_with_horizon`, doubling the horizon
+until the first 36 months moved less than 1e-3) is removed with its constants
+(`HORIZON_TEST_MONTHS`, `HORIZON_TOL`, `HORIZON_MAX`, `REPORTED_SERIES`, `LOG_SERIES`);
+`T_MAX` and `N_STEPS` leave `transition_main.jl`. The saved bundle no longer has
+`settings.horizon_test`. Estimates, chains, moments and `Q` are untouched. Every transition
+path computed before this version is superseded: the end condition now sits at month 36.
+`DAMP = 1.0` and `TOL = 5e-4` as set by the author in v61.5.1.
+
 ## v61.5.1 — 2026-11-16
 
 **PATCH: codebase cleanup.** Comments cut to replication-package level, a concise docstring
