@@ -1,8 +1,9 @@
 ############################################################
-# welfare.jl — social flow and present value along a transition (RoySearch)
+# welfare.jl — the social flow of a steady state (RoySearch)
 #
-# Library file, loaded by counterfactuals_main.jl. `run_welfare` is the exercise;
-# `welfare_pv` and `steady_state_flow` are also used by held_margin.jl and training_cost.jl.
+# Library file, loaded by counterfactuals_main.jl; `steady_state_flow` is what
+# training_cost.jl reads. The flow is booked by replaying the forward pass of a path
+# (`welfare_pv`), here the one-step self-transition of the steady state.
 #
 # The social flow per month, in levels (`level_params` converts the code's units):
 #   + output of every match, A P_U a_U p and A P_S a_S p
@@ -11,20 +12,15 @@
 #   − vacancy costs k_U v_U + k_S v_S, v_j = θ_j × the seekers free entry counts
 #   − σ_S for every employed skilled worker searching on the job
 #   − c(a_S) = (1 − a_S) e^{c̃ − a_S} once per entry into training
-# booked by market: U (unskilled output, b_U, crossers' b_S, k_U v_U), S (skilled output,
-# b_S of the skilled-market seekers, k_S v_S, σ_S), T (b_T, training costs). The present
-# value is ∫ e^{−rt} flow dt over the path plus the end steady state's flow/r from the
-# horizon, reported in levels, in months of the baseline mean unskilled new-match output
-# A₀ P_U E[a_U], over the date's A, and in months of the model's own output.
+# in the components `COMPONENTS`: output by market, b_U (uinc_U), crossers' b_S (uinc_X),
+# skilled-market seekers' b_S (uinc_S), b_T (uinc_T), k_U v_U, k_S v_S, σ_S, training costs.
 ############################################################
 
 const COMPONENTS = (:output_U, :output_S, :uinc_U, :uinc_X, :uinc_S, :uinc_T,
                     :vac_U, :vac_S, :search_S, :train_cost)
 const NCOMP = length(COMPONENTS)
 const COST_COMPONENTS = (:vac_U, :vac_S, :search_S, :train_cost)
-const COMPONENT_MARKET = Dict(:output_U => :U, :uinc_U => :U, :uinc_X => :U, :vac_U => :U,
-                              :output_S => :S, :uinc_S => :S, :vac_S => :S, :search_S => :S,
-                              :uinc_T => :T, :train_cost => :T)
+
 """
     comp_sign(c) -> Float64
 
@@ -182,96 +178,4 @@ function steady_state_flow(model::Model; resource_c::Float64 = model.common.c)
     p, tp = self_path(model)
     w = welfare_pv(p, deepcopy(model), tp; resource_c = resource_c)
     return (flow = w.flows[1, :], replay = w)
-end
-
-"""
-    welfare_rows(crisis, object, pv, πU0, A, πU) -> Vector{NamedTuple}
-
-One row per component of `pv`, the net of each market and the total, in levels, months of
-the baseline mean unskilled new-match output `πU0`, over `A`, and months of `πU`.
-"""
-function welfare_rows(crisis::Symbol, object::AbstractString, pv::AbstractVector, πU0::Float64,
-                      A::Float64, πU::Float64)
-    rows = NamedTuple[]
-    add(market, comp, s, v) = push!(rows, (crisis = String(crisis), object = object,
-        market = String(market), component = String(comp), sign = s, W_level = v,
-        W_months_base_piU = v / πU0, W_over_A = v / A, W_months_own_piU = v / πU))
-    for (c, comp) in enumerate(COMPONENTS)
-        add(COMPONENT_MARKET[comp], comp, comp_sign(comp), pv[c])
-    end
-    for m in (:U, :S, :T)
-        add(m, :net, 1.0, sum(comp_sign(comp) * pv[c] for (c, comp) in enumerate(COMPONENTS)
-                              if COMPONENT_MARKET[comp] == m))
-    end
-    add(:all, :total, 1.0, net_flow(pv))
-    return rows
-end
-
-"""
-    run_welfare(crises)
-
-For each crisis, the present value of the social flow along the stored transition and of
-both steady states held forever, by market and component, and the path's stocks and flows
-by date. Writes `welfare_<crisis>.csv`, `path_<crisis>.csv` and `flows_ss_<crisis>.csv`.
-"""
-function run_welfare(crises)
-    dir = cf_log_start(out_counterfactuals(:welfare), "Welfare along the estimated transitions")
-    for crisis in crises
-        t0 = time()
-        L  = load_transition(crisis)
-        Nt = length(L.path.tgrid)
-        cf_log(dir, @sprintf("[%s] %s: %d dates, horizon %.0f months", crisis,
-                             basename(transition_file(crisis, W_SUFFIX, POINT_ESTIMATE)), Nt, L.tp.horizon))
-        ss0 = steady_state_flow(L.m0);  ss1 = steady_state_flow(L.m1)
-        F0 = ss0.flow;  F1 = ss1.flow
-        w  = welfare_pv(L.path, deepcopy(L.m1), L.tp; flow_end = F1)
-        lp0 = level_params(L.m0);  lp1 = level_params(L.m1);  r = lp1.r
-        cf_log(dir, @sprintf("[%s] replay of the stored masses: largest cell gap %.2e (steady states %.2e, %.2e)",
-                             crisis, w.replay_gap, ss0.replay.replay_gap, ss1.replay.replay_gap))
-
-        rows = vcat(welfare_rows(crisis, "path", w.pv, lp0.πU, lp1.A, lp1.πU),
-                    welfare_rows(crisis, "path_0_to_horizon", w.pv_path, lp0.πU, lp1.A, lp1.πU),
-                    welfare_rows(crisis, "path_tail_after_horizon", w.pv_tail, lp0.πU, lp1.A, lp1.πU),
-                    welfare_rows(crisis, "baseline_ss_forever", F0 ./ r, lp0.πU, lp0.A, lp0.πU),
-                    welfare_rows(crisis, "crisis_ss_forever", F1 ./ r, lp0.πU, lp1.A, lp1.πU))
-        CSV.write(joinpath(dir, "welfare_$(crisis).csv"), DataFrame(rows))
-
-        res = L.tr.result;  stt = L.tr.statistics;  p = L.path
-        θU_fe, θS_fe = _free_entry_tightness(p, deepcopy(L.m1))
-        crossers = [sum(_d_matrix(p, L.m1, n) .* view(p.uS, :, :, n)) for n in 1:Nt]
-        df = DataFrame(t = p.tgrid, theta_U = p.θU, theta_S = p.θS,
-                       fe_gap_U = abs.(log.(θU_fe) .- log.(p.θU)), fe_gap_S = abs.(log.(θS_fe) .- log.(p.θS)),
-                       uU = [sum(view(p.uU, :, :, n)) for n in 1:Nt],
-                       eU = [sum(view(p.eUs, :, :, n)) + sum(view(p.eUt, :, :, n)) for n in 1:Nt],
-                       in_training = [sum(view(p.tU, :, :, n)) for n in 1:Nt],
-                       uS = [sum(view(p.uS, :, :, n)) for n in 1:Nt],
-                       mS = [sum(view(p.mS, :, :, n)) for n in 1:Nt],
-                       ur_U = res.ur_U, ur_S = res.ur_S, ur_total = res.ur_total,
-                       skilled_share = res.skilled_share, training_share = res.training_share,
-                       crossers_d_uS = crossers, crossers_hired = res.d_flow,
-                       train_entry_births = stt.train_entry_births,
-                       swept_into_training = stt.swept_into_training,
-                       quit_into_training = stt.quit_into_training, training_cost_lump = w.lump)
-        for (c, comp) in enumerate(COMPONENTS)
-            df[!, Symbol("flow_", comp)] = w.flows[:, c]
-        end
-        df.flow_net = [net_flow(w.flows[n, :]) for n in 1:Nt]
-        df.flow_net_over_A = df.flow_net ./ lp1.A
-        CSV.write(joinpath(dir, "path_$(crisis).csv"), df)
-
-        CSV.write(joinpath(dir, "flows_ss_$(crisis).csv"),
-                  DataFrame(component = [String.(COMPONENTS)..., "net"],
-                            baseline_ss = [F0..., net_flow(F0)], crisis_ss = [F1..., net_flow(F1)],
-                            path_date0 = [w.flows[1, :]..., net_flow(w.flows[1, :])],
-                            path_last_date = [w.flows[end, :]..., net_flow(w.flows[end, :])]))
-
-        Wp = net_flow(w.pv);  W0 = net_flow(F0) / r;  W1 = net_flow(F1) / r
-        cf_log(dir, @sprintf("[%s] W, months of baseline mean unskilled output: path %.4f, baseline SS %.4f, crisis SS %.4f",
-                             crisis, Wp / lp0.πU, W0 / lp0.πU, W1 / lp0.πU))
-        cf_log(dir, @sprintf("[%s] W / A: path %.4f, baseline SS %.4f, crisis SS %.4f; last-date flow vs crisis SS %+.2e (relative)",
-                             crisis, Wp / lp1.A, W0 / lp0.A, W1 / lp1.A,
-                             net_flow(w.flows[end, :]) / net_flow(F1) - 1.0))
-        cf_log(dir, @sprintf("[%s] done in %.1f s", crisis, time() - t0))
-    end
-    return nothing
 end

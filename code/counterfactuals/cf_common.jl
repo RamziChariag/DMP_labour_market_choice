@@ -9,7 +9,6 @@
 #   self_path              a steady state as a one-step transition of itself
 #   with_training_cost     the model with its training cost scaled
 #   stationary_at_costs!   the steady state at given vacancy costs, by Newton continuation
-#   unskilled_branch       the zeros of unskilled free entry on a θ_U scan
 #   solve_cf_transition    a new path at the exercise tolerances
 #   window_mean            a path series averaged over the crisis window
 #   cf_log_start, cf_log   the exercise log
@@ -115,37 +114,6 @@ function stationary_at_costs!(model::Model, kU::Float64, kS::Float64, θ0)
     model.skl_par  = _with_k(model.skl_par, kS)
     return (ok = maximum(abs, f) < STAT_TOL, θU = exp(l[1]), θS = exp(l[2]),
             resid = maximum(abs, f), iters = it)
-end
-
-# The θ_U scan of `unskilled_branch`: its range in ln θ_U around the point, and its nodes.
-const BRANCH_SCAN_LOG = (-3.0, 1.5)
-const BRANCH_SCAN_N   = 31
-
-"""
-    unskilled_branch(model, θU, θS, kU) -> NamedTuple
-
-Every zero of unskilled free entry of `model` at θ_S = θS and cost kU on a scan of θ_U
-(the sign changes of ln k_U(θ_U) − ln kU), with `rank` the position from the top of the
-zero nearest θU. Two equilibria are on the same branch when their scans find as many zeros
-and give them the same rank. Returns `(roots, rank, n_failed)`.
-"""
-function unskilled_branch(model::Model, θU::Float64, θS::Float64, kU::Float64)
-    m = deepcopy(model)
-    grid = exp.(range(log(θU) + BRANCH_SCAN_LOG[1], log(θU) + BRANCH_SCAN_LOG[2];
-                      length = BRANCH_SCAN_N))
-    g = map(grid) do θ
-        r = solve_at_tightness!(m, θ, θS)
-        r.ok ? log(m.unsk_par.k / kU) : NaN
-    end
-    roots = Float64[]
-    for n in 1:(length(grid) - 1)
-        (isfinite(g[n]) && isfinite(g[n + 1]) && sign(g[n]) != sign(g[n + 1])) || continue
-        w = g[n] / (g[n] - g[n + 1])
-        push!(roots, exp((1.0 - w) * log(grid[n]) + w * log(grid[n + 1])))
-    end
-    sort!(roots, rev = true)
-    rank = isempty(roots) ? 0 : argmin(abs.(log.(roots) .- log(θU)))
-    return (roots = roots, rank = rank, n_failed = count(!isfinite, g))
 end
 
 """

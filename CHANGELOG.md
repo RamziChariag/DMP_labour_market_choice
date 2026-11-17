@@ -35,6 +35,85 @@ measurement was, not just the verdict.
 
 ---
 
+## v62.0.0 — 2026-11-17
+
+**MAJOR: the counterfactual exercises are redefined (the author's definitions of
+2026-11-17), so their outputs are not comparable with v61.x.** No estimate, moment,
+transition path or stored bundle changes; only `code/counterfactuals/` was edited.
+
+**Comparability.** Every file under `output/counterfactuals/` written by v61.x is
+superseded: `welfare/` is no longer produced; in `held_margin/` the `_free_entry` and
+`_tightness_held` files and `held_margin_welfare_*`; in `incidence/` both files (weights and
+the treatment of destroyed matches changed); in `training_cost/` both files (transitions
+replaced by stationary comparisons). The new runs write under new names where the object
+changed; stale v61.x files are not deleted by the scripts.
+
+**What changed.**
+- `counterfactuals_main.jl:31` `EXERCISES = [:held_margin, :incidence, :training_cost]`;
+  `HELD_MODES` and `TRAINING_COST_GRID` retired; `RUNNERS` (`:108`) is the list of valid
+  exercises. `CF_TOL/CF_MAXIT/CF_DAMP` (5e-4, 200, 1.0) now govern only the held paths.
+- Exercise 1, `held_margin.jl`. The held crisis economy (`L.m1` with `HeldChoices(L.m0)`)
+  at the estimated vacancy costs: `held_end_state` (`:121`) takes every equilibrium on the
+  scan `equilibrium_pairs` (`:96`), errors with the list unless there is exactly one, and
+  refines it by `stationary_at_costs!`. The rule that required the estimate's unskilled
+  branch, and the tightness-held mode, are removed. The held path re-solves free entry at
+  every date of the stored 36-month grid from the estimated path. Outputs are levels per
+  head of population (`unemployment_per_head`, `:143`; the trained unemployed, crossers
+  included, count in the skilled market): Δ_j(s) = held − open, share_j(s) = Δ_j(s)/(u^held(s)
+  − u⁰) by date, at the horizon, over the window and at the two end steady states, and
+  Δ_j(T)/Δ_j(∞). Welfare along the held path is dropped. New: the unskilled free-entry
+  curve of each crisis economy, open and held (`free_entry_curve`, `:65`; θ_U from 0.3 to
+  1.6 times the estimate, 81 nodes, continuation outward from the estimate, θ_S from
+  skilled free entry), which also supplies the equilibrium scan; one secant for skilled
+  free entry (`skilled_free_entry_root`, `:42`, tolerance 1e-7 on ln k_S).
+- Exercise 2, `incidence.jl` (definition 2A). Weights are the baseline masses before the
+  switch, not the date-0 masses; nothing is dropped. The unskilled destinations are the
+  solver's own date-0 reallocation applied to each baseline unskilled state alone
+  (`_date0_destinations`, `:53`); trained workers are valued at U_S = max{U_S⁰, U_S¹} and
+  E = U_S + βS⁺. Reported: V⁰/A_crisis − V_base/A_base and the level difference, by type and
+  baseline state, and by training status in the two steady states (`status_shares`,
+  `:115`). The ratio is no longer reported.
+- Exercise 3, `training_cost.jl`. Local and stationary: each window of each pair at
+  c × {0.95, 1, 1.05} (`TRAINING_COST_STEP`, `:18`), Newton continuation from the estimate,
+  erroring unless the estimate's equilibrium is kept (`unskilled_branch`, moved here from
+  `cf_common.jl`). Welfare is the steady-state flow with training costed at the estimated c;
+  every outcome indexed to 100 at c × 1 and its elasticity by central log difference;
+  headline gain of c × 0.95 per window and its crisis/baseline ratio. Training-cost
+  transitions removed.
+- `welfare.jl` keeps only the steady-state social flow (`steady_state_flow`, `welfare_pv`,
+  `level_params`, `net_flow`); `run_welfare`, `welfare_rows` and `COMPONENT_MARKET` removed.
+
+**Measured** (scratch copy, `-t 2`, both crises).
+- Exercise 3, full run (0.8 min): welfare gain of c × 0.95, base_fc +0.1271%, crisis_fc
+  +0.1367% (ratio 1.075); base_covid +0.0952%, crisis_covid +0.0777% (ratio 0.816). Every
+  window keeps its equilibrium at 0.95 and 1.05. Same numbers from the entry point run
+  as shipped (fc only).
+- Exercise 2, full run (0.1 min): the reallocation of the baseline masses reproduces the
+  stored date-0 unskilled masses to 9e-13 and conserves mass to 1e-16; baseline mass by
+  type equals the population to 9e-13. ΔV/A per head: fc −2.778, covid −2.370. By status,
+  fc: both 0.335 of the population (ΔV/A −0.694), neither 0.652 (−3.869), starts 0.0126
+  (−1.874), stops 0.0003 (+0.978); covid: both 0.413 (−0.007), neither 0.560 (−4.167),
+  starts 0.027 (−1.303), stops 0 (NaN: no mass).
+- Exercise 1, with `CF_MAXIT = 2` (smoke only; the path numbers are not converged): one
+  equilibrium on each scan; refined held equilibria fc (θ_U, θ_S) = (0.205484, 0.568527)
+  against the open (0.204244, 0.565724), covid (0.470693, 1.855430) against (0.832695,
+  1.711997). End steady states, unemployment per head: fc Δ_U +0.00104, Δ_S −0.00061, share
+  of the held rise 0.014; covid Δ_U −0.01825, Δ_S −0.00206 (the held covid economy has less
+  unemployment than the baseline, u^held − u⁰ = −0.0061, so its shares are not shares of a
+  rise). The open covid free-entry curve has no skilled root below θ_U ≈ 0.71 on the
+  continuation (51 of 81 nodes NaN), as in the scratch script it replaces.
+- `check_structure`: no counterfactual file flagged; `check_output_tree` passes.
+
+**Settings.** Retired: `HELD_MODES`, `TRAINING_COST_GRID` (constants in
+`counterfactuals_main.jl`, not environment settings). No environment setting changed.
+
+**Known gaps.** The held paths were not run to convergence here (the author runs
+`counterfactuals_main.jl`). `paths.jl` (`CF_EXERCISES`) and `README.md` (crosswalk row) still
+name the `welfare` exercise; both lie outside this change. Bundle audit skipped: no code
+that reads or writes an estimate or chain changed.
+
+**Tried and rejected.** None.
+
 ## v61.7.0 — 2026-11-16
 
 **MINOR: the counterfactual scripts produce what the exercises' definitions need.** No
