@@ -33,14 +33,28 @@ const CURVE_N    = 81
 const SKL_ROOT_TOL   = 1e-7
 const SKL_ROOT_MAXIT = 25
 
+# Where that secant fails (`skilled_free_entry_roots`): every root bracketed on θ_S from
+# SKL_BRACKET_SPAN[1] to SKL_BRACKET_SPAN[2] times the estimate, SKL_BRACKET_N nodes.
+const SKL_BRACKET_SPAN = (0.4, 2.5)
+const SKL_BRACKET_N    = 40
+
+"""
+    skilled_residual(m, θU, l, kS) -> Float64
+
+ln k_S(θU, e^l) − ln kS, k_S the cost skilled free entry implies with `m` solved at
+(θU, e^l); NaN if the solve fails.
+"""
+skilled_residual(m::Model, θU::Float64, l::Float64, kS::Float64) =
+    (r = solve_at_tightness!(m, θU, exp(l)); r.ok ? log(m.skl_par.k / kS) : NaN)
+
 """
     skilled_free_entry_root(m, θU, l0, kS) -> Float64
 
 ln θ_S at which skilled free entry holds at cost kS with θ_U = θU, by the secant method in
-ln θ_S from `l0`; NaN if none is found. `m` is left solved at the root.
+ln θ_S from `l0`; NaN if none is found.
 """
 function skilled_free_entry_root(m::Model, θU::Float64, l0::Float64, kS::Float64)
-    f(l) = (r = solve_at_tightness!(m, θU, exp(l)); r.ok ? log(m.skl_par.k / kS) : NaN)
+    f(l) = skilled_residual(m, θU, l, kS)
     a = l0;  fa = f(a)
     isfinite(fa) || return NaN
     b = a + 0.03 * sign(fa);  fb = f(b);  it = 0
@@ -53,35 +67,75 @@ function skilled_free_entry_root(m::Model, θU::Float64, l0::Float64, kS::Float6
 end
 
 """
+    skilled_free_entry_roots(m, θU, lref, kS) -> Vector{Float64}
+
+Every ln θ_S at which skilled free entry holds at cost kS with θ_U = θU: the sign changes
+of the residual on the grid `SKL_BRACKET_SPAN` around e^lref, each refined by the Illinois
+false-position method; highest first. A sign change that does not refine to a root (a jump
+of the residual) is not one.
+"""
+function skilled_free_entry_roots(m::Model, θU::Float64, lref::Float64, kS::Float64)
+    ls = range(lref + log(SKL_BRACKET_SPAN[1]), lref + log(SKL_BRACKET_SPAN[2]); length = SKL_BRACKET_N)
+    f  = [skilled_residual(m, θU, l, kS) for l in ls]
+    roots = Float64[]
+    for n in 1:(SKL_BRACKET_N - 1)
+        (isfinite(f[n]) && isfinite(f[n + 1]) && sign(f[n]) != sign(f[n + 1])) || continue
+        a, fa, b, fb = ls[n], f[n], ls[n + 1], f[n + 1]
+        for _ in 1:SKL_ROOT_MAXIT
+            abs(fb) <= SKL_ROOT_TOL && break
+            c = b - fb * (b - a) / (fb - fa);  fc = skilled_residual(m, θU, c, kS)
+            isfinite(fc) || break
+            sign(fc) != sign(fb) ? ((a, fa) = (b, fb)) : (fa /= 2)
+            b, fb = c, fc
+        end
+        isfinite(fb) && abs(fb) < 100 * SKL_ROOT_TOL && push!(roots, b)
+    end
+    return sort!(roots, rev = true)
+end
+
+"""
     free_entry_curve(model, kU, kS, θref, grid; objects = false) -> NamedTuple
 
 On the θ_U nodes `grid`: θ_S solving skilled free entry at cost kS, and the unskilled
 free-entry residual gU = ln k_U(θ_U, θ_S) − ln kU, k_U the cost free entry implies (an
 equilibrium is a zero). Continuation outward from the node nearest θref.U, each direction
-starting from θref.S; a node without a skilled root is NaN. With `objects`, also per head
-of population the unskilled unemployed, trainees and trained, and the mean a_U of the
-unskilled unemployed. Works on a copy of `model`.
+starting from θref.S: the secant from the previous node's root, and where it fails every
+root on the bracketing grid, continuing from the one nearest the previous root.
+Returns the continued branch by node (`θS`, `gU`; NaN where no root is found) and every
+root found as a row of `roots` (θU, θS, gU, `root_rank` from the highest θ_S among the
+roots found at the node; where the secant succeeds only its root is sought). With
+`objects`, each row also has, per head of population, the unskilled unemployed, trainees
+and trained, and the mean a_U of the unskilled unemployed. Works on a copy of `model`.
 """
 function free_entry_curve(model::Model, kU::Float64, kS::Float64, θref, grid::AbstractVector;
                           objects::Bool = false)
     m = deepcopy(model);  x = m.grids.x;  N = length(grid)
-    θS = fill(NaN, N);  gU = fill(NaN, N)
-    uU = fill(NaN, N);  aU = fill(NaN, N);  tr = fill(NaN, N);  mS = fill(NaN, N)
+    θS = fill(NaN, N);  gU = fill(NaN, N);  rows = NamedTuple[]
     n0 = argmin(abs.(log.(grid) .- log(θref.U)))
     for nodes in (n0:N, (n0 - 1):-1:1)
         lS = log(θref.S)
         for n in nodes
-            l = skilled_free_entry_root(m, Float64(grid[n]), lS, kS)
-            isfinite(l) || continue
-            lS = l;  θS[n] = exp(l);  gU[n] = log(m.unsk_par.k / kU)
-            objects || continue
-            o = compute_equilibrium_objects(m);  uw = vec(sum(o.uU, dims = 2))
-            uU[n] = o.agg_uU / o.total_pop;  aU[n] = sum(x .* uw) / sum(uw)
-            tr[n] = o.agg_t / o.total_pop;   mS[n] = o.agg_mS / o.total_pop
+            θU = Float64(grid[n])
+            l  = skilled_free_entry_root(m, θU, lS, kS)
+            ls = isfinite(l) ? [l] : skilled_free_entry_roots(m, θU, log(θref.S), kS)
+            isempty(ls) && continue
+            for (k, lk) in enumerate(ls)
+                isfinite(l) || solve_at_tightness!(m, θU, exp(lk))   # the secant leaves m at its root
+                g = log(m.unsk_par.k / kU)
+                obj = (uU = NaN, mean_aU = NaN, training = NaN, skilled = NaN)
+                if objects
+                    o = compute_equilibrium_objects(m);  uw = vec(sum(o.uU, dims = 2))
+                    obj = (uU = o.agg_uU / o.total_pop, mean_aU = sum(x .* uw) / sum(uw),
+                           training = o.agg_t / o.total_pop, skilled = o.agg_mS / o.total_pop)
+                end
+                push!(rows, merge((θU = θU, θS = exp(lk), gU = g, root_rank = k), obj))
+            end
+            c = argmin(abs.(ls .- lS))
+            lS = ls[c];  θS[n] = exp(lS);  gU[n] = rows[end - length(ls) + c].gU
         end
     end
-    return (θU = collect(Float64, grid), θS = θS, gU = gU, uU = uU, mean_aU = aU,
-            training = tr, skilled = mS)
+    sort!(rows, by = r -> (r.θU, r.root_rank))
+    return (θU = collect(Float64, grid), θS = θS, gU = gU, roots = rows)
 end
 
 """
@@ -232,10 +286,14 @@ function run_held_margin(crises)
         curves = [(economy = name, curve = free_entry_curve(m, kU, kS, θ1, grid; objects = true))
                   for (name, m) in (("open", m1), ("held", H.model))]
         CSV.write(joinpath(dir, "held_margin_fe_curve_$(crisis).csv"),
-                  vcat((DataFrame(economy = e.economy, theta_U = e.curve.θU, theta_S = e.curve.θS,
-                                  log_kU_ratio = e.curve.gU, uU = e.curve.uU,
-                                  mean_aU_unemployed = e.curve.mean_aU, training = e.curve.training,
-                                  skilled = e.curve.skilled) for e in curves)...))
+                  vcat((DataFrame(economy = e.economy, theta_U = [r.θU for r in e.curve.roots],
+                                  theta_S = [r.θS for r in e.curve.roots],
+                                  root_rank = [r.root_rank for r in e.curve.roots],
+                                  log_kU_ratio = [r.gU for r in e.curve.roots],
+                                  uU = [r.uU for r in e.curve.roots],
+                                  mean_aU_unemployed = [r.mean_aU for r in e.curve.roots],
+                                  training = [r.training for r in e.curve.roots],
+                                  skilled = [r.skilled for r in e.curve.roots]) for e in curves)...))
 
         open(joinpath(dir, "held_margin_$(crisis).jls"), "w") do io
             serialize(io, (crisis = crisis, version = ROYSEARCH_VERSION, point = POINT_ESTIMATE,

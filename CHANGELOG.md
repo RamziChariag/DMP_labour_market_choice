@@ -35,6 +35,37 @@ measurement was, not just the verdict.
 
 ---
 
+## v62.0.1 — 2026-11-17
+
+**PATCH (the author's rule for this change: outputs other than the free-entry curve are
+unchanged).** Only `held_margin_fe_curve_<crisis>.csv` changes: the rows the secant used to
+leave NaN now carry their skilled root, and the file gains the column `root_rank`.
+
+**What changed.** `held_margin.jl`: where the secant from the previous node's root fails,
+`free_entry_curve` brackets every skilled root on θ_S from 0.4 to 2.5 times the estimate
+(40 nodes, `SKL_BRACKET_SPAN`, `SKL_BRACKET_N`), refines each by Illinois false position
+(`skilled_free_entry_roots`), writes one row per root (`root_rank` from the highest θ_S
+among the roots found at the node) and continues from the root nearest the previous one.
+Where the secant succeeds, only its root is sought and the model is not re-solved, so the
+continued branch, the equilibrium scan and everything downstream are computed exactly as
+in v62.0.0. The shared residual is `skilled_residual`.
+
+**Measured** (scratch copy, `-t 2`, COVID only). Open crisis curve: 81 of 81 nodes now
+have a root (v62.0.0: 51 NaN below θ_U ≈ 0.71); the secant failed at θ_U 0.7112, 0.6965
+and 0.2498, and bracketing found exactly one root at each (θ_S 1.7032, 1.7021, 1.6605).
+The curve crosses unskilled free entry at θ_U 0.5127, 0.6416 and 0.8324 (θ_S 1.6879,
+1.6983, 1.7120). Held curve: unchanged, one root per node, one crossing at θ_U 0.4707
+(θ_S 1.8554). The held COVID equilibrium scan is bit-identical to v62.0.0's (θ_S and the
+residual, all 31 nodes). FC was not rerun: its v62.0.0 curves and scans had no secant
+failure, so they follow the unchanged code path.
+
+**Settings.** None.
+
+**Known gaps.** Additional skilled roots are sought only where the secant fails; on this
+smoke every node returned a single root, so `root_rank` is 1 throughout.
+
+**Tried and rejected.** None.
+
 ## v62.0.0 — 2026-11-17
 
 **MAJOR: the counterfactual exercises are redefined (the author's definitions of
