@@ -35,6 +35,82 @@ measurement was, not just the verdict.
 
 ---
 
+## v62.1.0 — 2026-11-20
+
+**MINOR: new outputs organised around who changes their training choice; every existing
+output reproduces bit for bit.** No estimate, moment, transition path or stored bundle
+changes; only `code/counterfactuals/`, `paths.jl:124` and the README entry-point row.
+
+**Comparability.** Every v62.0.x file under `output/counterfactuals/` is reproduced
+unchanged; `held_margin_fe_curve_<crisis>.csv` gains two columns at the end.
+
+**What changed.**
+- `cf_common.jl:150–241`, one implementation of the sets for all exercises. τ(a) is
+  `unsk_cache.τT` clamped to [0, 1]; between two steady states a cell's starters are
+  m·max(τ¹ − τ⁰, 0) and its stoppers m·max(τ⁰ − τ¹, 0) (`switch_fractions`, `switchers`,
+  m = `copula.W2`). `steady_state_pools` gives the reference pools by cell: the unskilled
+  unemployed u_U + d·m_S (everyone unemployed in the unskilled market, never-hired and
+  crossers included), (1 − τ)·m, the skilled unemployed u_S − d·m_S, the trained m_S, and the
+  part of the unskilled pool at the corner p* = 0. `path_pools`: the same two unemployed pools
+  at a path date, u_U + d·u_S and (1 − d)·u_S, as the transition's free entry counts them.
+  `set_summary`: mass (share of the population), mean a_U, mean a_S.
+- Exercise 1, `held_margin.jl`. `who_switched_<crisis>.csv` (`:355`): starters and stoppers
+  from the baseline to the open crisis steady state and the four reference pools of each;
+  the held economy has none (logged). `pool_composition_<crisis>.csv` (`:369`, `pool_composition`
+  `:237`): per market, the open and held unemployed pools and held − open split by cell into
+  its positive and negative parts (the negative part's mass is negative), at the open crisis
+  tightnesses (held economy solved there), at each economy's own equilibrium, and at month
+  36 of both paths (`month_36`; the held path is the one the run solves). The free-entry
+  curve (`free_entry_curve`, `:140`) adds, per root, `corner_share` (share of the unskilled
+  pool at p* = 0) and `mean_aU_corner`; `curve_grid` (`:40`) is the grid, same expression.
+- Exercise 2, `incidence.jl`. `status_shares` (`:119`) is `switch_fractions` over each side
+  of the cell; the τ⁰ = 0 convention (a massless training side all stops) is kept.
+  New `incidence_status_aptitudes_<crisis>.csv` (`:192`): mass, mean a_U, mean a_S per status
+  group and overall (a new file, so the existing one keeps its layout).
+- Exercise 3, `training_cost.jl`. `training_cost_point` returns `(point, model)` (`:87`).
+  New `subsidy_switchers_<crisis>.csv` (`:170`): per window, starters and stoppers from
+  c × 1 to c × (1 − h), the crisis starters (baseline → crisis at ĉ, `switchers` on the
+  stored endpoints), and the overlap min(subsidy, crisis) by cell with its share of each.
+  The log line repeats the welfare gain already computed.
+- New `free_entry_curves.jl`, exercise `:free_entry_curves` (`counterfactuals_main.jl:35`,
+  `paths.jl:124`), output `output/counterfactuals/free_entry_curves/`. At the COVID crisis
+  estimate with c scaled by 0.85, 1, 1.075: the unskilled curve ln(k_U/k̂_U) on Exercise 1's
+  grid with θ_S from skilled free entry at k̂_S, with the pool's mean a_U and corner share;
+  the skilled curve ln(k_S/k̂_S) at the estimated θ_U on the same span around θ̂_S; at c × 1
+  the interior local extrema of the unskilled curve, node and parabola vertex in ln θ_U.
+
+**Measured** (scratch copy, `-t 2`, every exercise at its shipped settings; 8.9, 0.1, 0.9
+and 1.7 min).
+- Against the 18 Nov run (v62.0.1, 8 threads): all 21 existing CSVs identical in every
+  value and column, the two extended fe-curve files included.
+- Starts and stops of Exercise 2 against `switchers`: fc 0.012643724002 (gap 1.7e-18),
+  0.000259496298 (1.3e-13); covid 0.027027850674 (3.5e-18), 0 (0).
+- Positive + negative parts against the difference of the pools: within 1.4e-17 in every
+  case and market. The own-equilibrium and month-36 differences equal the existing
+  `delta_inf` and `delta_horizon` of `held_margin_<crisis>.csv` (fc U +0.00104/+0.00132,
+  S −0.00061/−0.00071; covid U −0.01825/−0.01825, S −0.00206/−0.00149).
+- Starters (baseline → open crisis): fc 0.01264 of the population, mean (a_U, a_S)
+  (0.529, 0.725), stoppers 0.00026 (0.046, 0.408); covid 0.02703 (0.499, 0.595), no stoppers.
+- Unskilled curve at c × 1 (covid): local minimum θ_U 0.5649, ln(k_U/k̂_U) −0.04099; local
+  maximum θ_U 0.7274, +0.02267: three equilibria for k_U/k̂_U in (0.960, 1.023). Its rows equal
+  the open rows of `held_margin_fe_curve_covid.csv` exactly; 81 of 81 nodes have a root at
+  every scale, and every skilled-curve node solves.
+- Crossers d·m_S are zero at all four stored steady states, and the pool mean a_U differs
+  from the u_U mean along the covid curve by at most 2.2e-16.
+- `check_structure`: the same five files outside `counterfactuals/` as before;
+  `check_output_tree` passes.
+
+**Settings.** None. `EXERCISES` gains `:free_entry_curves` (on by default).
+
+**Known gaps.** Bundle audit skipped: no code that reads or writes an estimate or chain
+changed. Crossers on a path are counted as d·u_S (the transition's free entry) and in a
+steady state as d·m_S (equilibrium.jl, `duS_carry`); both are zero at the stored estimates.
+A pool difference at rounding level (e.g. covid same-tightness U negative part, −1.4e-13)
+still gets means, which carry no information. `paths.jl` still lists the retired `:welfare`
+exercise, and the v61 files in `output/counterfactuals/` are still on disk.
+
+**Tried and rejected.** None.
+
 ## v62.0.1 — 2026-11-17
 
 **PATCH (the author's rule for this change: outputs other than the free-entry curve are

@@ -11,7 +11,9 @@
 # steady-state social flow per month (welfare.jl) with training costed at the estimated c,
 # so the change in c is a transfer. Every outcome's elasticity to c is the central
 # difference in logs between 1 − h and 1 + h. Headline per crisis: the welfare gain of
-# 1 − h over 1 in the baseline and in the crisis window, and their ratio.
+# 1 − h over 1 in the baseline and in the crisis window, and their ratio. Also: who the
+# subsidy 1 − h moves into and out of training in each window (`switchers`), and how many
+# of its starters are among those the crisis moves into training.
 ############################################################
 
 # The training cost is scaled by 1 − h, 1 and 1 + h.
@@ -50,13 +52,14 @@ function unskilled_branch(model::Model, θU::Float64, θS::Float64, kU::Float64)
 end
 
 """
-    training_cost_point(model, s, ref) -> NamedTuple
+    training_cost_point(model, s, ref) -> (point, model)
 
 The steady state of the estimated window `model` with its training cost scaled by `s`, at
 its estimated vacancy costs, from its tightnesses; `ref` is the estimate's
-`unskilled_branch`, which the solve at s ≠ 1 must keep. Returns the tightnesses, unemployment per
-head and rates, the training and skilled shares and the wage premium (as the moments
-measure them), and the social flow with its components, training costed at `model`'s c.
+`unskilled_branch`, which the solve at s ≠ 1 must keep. `point` holds the tightnesses,
+unemployment per head and rates, the training and skilled shares and the wage premium (as
+the moments measure them), and the social flow with its components, training costed at
+`model`'s c; `model` is the solved steady state.
 """
 function training_cost_point(model::Model, s::Float64, ref)
     kU = model.unsk_par.k;  kS = model.skl_par.k
@@ -79,8 +82,9 @@ function training_cost_point(model::Model, s::Float64, ref)
            ur_U = mm.ur_U, ur_S = mm.ur_S, ur_total = mm.ur_total,
            training_share = mm.training_share, skilled_share = mm.skilled_share,
            wage_premium = mm.wage_premium, W = W, W_over_A = W / exp(mc.common.A))
-    return merge(out, NamedTuple{Tuple(Symbol("flow_", c) for c in COMPONENTS)}(Tuple(fl)),
-                 (newton_iterations = st.iters, newton_residual = st.resid))
+    point = merge(out, NamedTuple{Tuple(Symbol("flow_", c) for c in COMPONENTS)}(Tuple(fl)),
+                  (newton_iterations = st.iters, newton_residual = st.resid))
+    return (point = point, model = mc)
 end
 
 # The outcomes of `training_cost_point` that get an index and an elasticity.
@@ -106,6 +110,11 @@ For each crisis pair, writes
                                            indexed to 100 at the estimated c (`index_*`)
   training_cost_elasticities_<crisis>.csv  one row per window and outcome: its value at the
                                            three scales and its elasticity to c
+  subsidy_switchers_<crisis>.csv           per window, the starters and stoppers from the
+                                           steady state at c × 1 to the one at c × (1 − h),
+                                           and their starters' overlap with the crisis
+                                           starters (baseline → crisis at the estimated c),
+                                           the min of the two cell by cell, as a share of each
 and `training_cost_headline.csv`, one row per crisis: the welfare gain (%) of the scale
 1 − h over 1 in the baseline and in the crisis window, and their ratio.
 """
@@ -116,10 +125,16 @@ function run_training_cost(crises)
     for crisis in crises
         L = load_transition(crisis);  wb, wc = _scenario_windows(crisis)
         rows = NamedTuple[];  erows = NamedTuple[];  gain = Dict{String,Float64}()
+        # Who the subsidy moves into and out of training, against who the crisis moves in.
+        x = L.m0.grids.x;  pop = sum(L.m0.grids.copula.W2);  cs = switchers(L.m0, L.m1).starters
+        srows = NamedTuple[merge((crisis = String(crisis), role = "crisis", window = "$(wb)_to_$(wc)",
+                                  set = "crisis_starters"), set_summary(cs, x, pop),
+                                 (share_of_subsidy_starters = NaN, share_of_crisis_starters = NaN))]
         for (role, window, m) in (("baseline", wb, L.m0), ("crisis", wc, L.m1))
             t0  = time()
             ref = unskilled_branch(m, m.unsk_cache.θ, m.skl_cache.θ, m.unsk_par.k)
-            pts = Dict(s => training_cost_point(m, s, ref) for s in TRAINING_COST_SCALES)
+            sol = Dict(s => training_cost_point(m, s, ref) for s in TRAINING_COST_SCALES)
+            pts = Dict(s => sol[s].point for s in TRAINING_COST_SCALES)
             for s in TRAINING_COST_SCALES
                 idx = NamedTuple{Tuple(Symbol("index_", o) for o in TC_OUTCOMES)}(
                     Tuple(100 * getfield(pts[s], o) / getfield(pts[one], o) for o in TC_OUTCOMES))
@@ -135,9 +150,24 @@ function run_training_cost(crises)
             cf_log(dir, @sprintf("[%s] %-12s W ×%.2f %+.4f%%, ×%.2f %+.4f%% against c×1; elasticity of W %+.5f; %.0f s",
                                  crisis, window, lo, gain[role], hi, 100 * (pts[hi].W / pts[one].W - 1),
                                  tc_elasticity(pts[lo].W, pts[hi].W), time() - t0))
+
+            sw = switchers(sol[one].model, sol[lo].model);  ov = min.(sw.starters, cs)
+            for (set, w) in (("subsidy_starters", sw.starters), ("subsidy_stoppers", sw.stoppers),
+                             ("overlap_with_crisis_starters", ov))
+                share = set == "overlap_with_crisis_starters" ?
+                        (share_of_subsidy_starters = sum(ov) / sum(sw.starters), share_of_crisis_starters = sum(ov) / sum(cs)) :
+                        (share_of_subsidy_starters = NaN, share_of_crisis_starters = NaN)
+                push!(srows, merge((crisis = String(crisis), role = role, window = String(window), set = set),
+                                   set_summary(w, x, pop), share))
+            end
+            st, ov_row = srows[end - 2], srows[end]
+            cf_log(dir, @sprintf("[%s] %-12s c×%.2f: starters %.5f (mean a_U %.4f, a_S %.4f), stoppers %.5f; overlap with the crisis starters %.5f (%.3f of the subsidy's, %.3f of the crisis's); welfare gain %+.4f%%",
+                                 crisis, window, lo, st.mass, st.mean_aU, st.mean_aS, srows[end - 1].mass, ov_row.mass,
+                                 ov_row.share_of_subsidy_starters, ov_row.share_of_crisis_starters, gain[role]))
         end
         CSV.write(joinpath(dir, "training_cost_$(crisis).csv"), DataFrame(rows))
         CSV.write(joinpath(dir, "training_cost_elasticities_$(crisis).csv"), DataFrame(erows))
+        CSV.write(joinpath(dir, "subsidy_switchers_$(crisis).csv"), DataFrame(srows))
         push!(head, (crisis = String(crisis), window_baseline = String(wb), window_crisis = String(wc),
                      scale = lo, gain_baseline_pct = gain["baseline"], gain_crisis_pct = gain["crisis"],
                      ratio_crisis_to_baseline = gain["crisis"] / gain["baseline"]))

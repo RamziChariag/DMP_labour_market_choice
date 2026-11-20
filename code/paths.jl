@@ -121,7 +121,7 @@ Directory of the transition bundles.
 out_transition() = (d = joinpath(OUTPUT_DIR, "transition"); mkpath(d); d)
 
 # The exercises of code/counterfactuals/, one output directory each.
-const CF_EXERCISES = (:welfare, :incidence, :held_margin, :training_cost)
+const CF_EXERCISES = (:welfare, :incidence, :held_margin, :training_cost, :free_entry_curves)
 
 """
     out_counterfactuals(exercise) -> String

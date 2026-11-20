@@ -17,7 +17,7 @@ One named entry point per task; each prints a version banner before it loads any
 | standard errors (DE-MC) | `code/mcmc/MCMC_main.jl` |
 | single equilibrium solve and fit table | `code/solver/model_main.jl` |
 | transition paths of both crises | `code/transition/transition_main.jl` |
-| welfare, incidence, held margin, training cost | `code/counterfactuals/counterfactuals_main.jl` (after `transition_main.jl`) |
+| held margin, incidence, training cost, free-entry curves | `code/counterfactuals/counterfactuals_main.jl` (after `transition_main.jl`) |
 | figures and tables | `code/plots_and_tables/plots_and_tables_main.jl` (skeleton; no exhibit yet) |
 
 Run from the repository root with the pinned environment:

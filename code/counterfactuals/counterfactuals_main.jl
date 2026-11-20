@@ -11,6 +11,9 @@
 #                                     baseline value, by type, state and training status
 #   :training_cost  training_cost.jl  Exercise 3: the steady states of every window with the
 #                                     training cost scaled by 0.95 and 1.05; elasticities
+#   :free_entry_curves  free_entry_curves.jl
+#                                     the free-entry curves of the COVID crisis estimate at
+#                                     three training costs (the model notes' figure)
 # Shared: cf_common.jl, welfare.jl (the steady-state social flow). Each exercise writes data
 # only (CSV, JLS) and log.txt to output/counterfactuals/<exercise>/; nothing is plotted or
 # tabulated here.
@@ -27,8 +30,9 @@
 # Which crises, from the transition pairs of paths.jl (PAIRS).
 const CRISES = [:fc, :covid]
 
-# Which exercises, in this order; any subset of [:held_margin, :incidence, :training_cost].
-const EXERCISES = [:held_margin, :incidence, :training_cost]
+# Which exercises, in this order; any subset of
+# [:held_margin, :incidence, :training_cost, :free_entry_curves].
+const EXERCISES = [:held_margin, :incidence, :training_cost, :free_entry_curves]
 
 # The point estimate the transitions were solved at (transition_main.jl, POINT_ESTIMATE):
 # :mcmc the chains' posterior means, the estimates the paper reports; :smm the SMM estimates.
@@ -101,12 +105,12 @@ println("done."); flush(stdout)
 # ═══════════════════════════════════════════════════════════
 # 5. EXERCISES
 # ═══════════════════════════════════════════════════════════
-for f in ("cf_common", "welfare", "incidence", "held_margin", "training_cost")
+for f in ("cf_common", "welfare", "incidence", "held_margin", "training_cost", "free_entry_curves")
     include(joinpath(CF_DIR, f * ".jl"))
 end
 
 const RUNNERS = Dict(:held_margin => run_held_margin, :incidence => run_incidence,
-                     :training_cost => run_training_cost)
+                     :training_cost => run_training_cost, :free_entry_curves => run_free_entry_curves)
 all(e -> haskey(RUNNERS, e), EXERCISES) ||
     error("EXERCISES = $(EXERCISES): each must be one of $(collect(keys(RUNNERS))).")
 all(c -> String(c) in PAIRS, CRISES) || error("CRISES = $(CRISES): each must be one of $(PAIRS).")

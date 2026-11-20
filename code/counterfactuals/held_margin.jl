@@ -16,7 +16,11 @@
 # market included, as the data count them), u = u_U + u_S. With u⁰ the baseline's,
 #   Δ_j(s) = u_j^held(s) − u_j^open(s),   share_j(s) = Δ_j(s) / (u^held(s) − u⁰),
 # and s = ∞ compares the two end steady states. Also written: the unskilled free-entry
-# curve of each crisis economy, open and held.
+# curve of each crisis economy, open and held; who starts and who stops training in the
+# open crisis (`switchers`; in the held one nobody does); and the composition of each
+# market's unemployed pool, held against open. The pools are those of the market each
+# worker searches (`steady_state_pools`, `path_pools`), so a trained worker searching the
+# unskilled market counts there, unlike in u_S above.
 ############################################################
 
 # Equilibrium scan (`equilibrium_pairs`): range in ln θ_U around the estimate, and nodes.
@@ -26,6 +30,14 @@ const PAIR_SCAN_N   = 31
 # Free-entry curve: θ_U from CURVE_SPAN[1] to CURVE_SPAN[2] times the estimate, CURVE_N nodes.
 const CURVE_SPAN = (0.3, 1.6)
 const CURVE_N    = 81
+
+"""
+    curve_grid(θ) -> Vector{Float64}
+
+The nodes of a free-entry curve around the tightness θ: `CURVE_N` nodes uniform in ln θ from
+`CURVE_SPAN[1]`·θ to `CURVE_SPAN[2]`·θ.
+"""
+curve_grid(θ::Float64) = exp.(range(log(CURVE_SPAN[1] * θ), log(CURVE_SPAN[2] * θ); length = CURVE_N))
 
 # Skilled free entry at a given θ_U (`skilled_free_entry_root`): secant in ln θ_S to this
 # tolerance on ln k_S (the solve meets its battery to about 1e-8), at most this many steps;
@@ -104,8 +116,10 @@ root on the bracketing grid, continuing from the one nearest the previous root.
 Returns the continued branch by node (`θS`, `gU`; NaN where no root is found) and every
 root found as a row of `roots` (θU, θS, gU, `root_rank` from the highest θ_S among the
 roots found at the node; where the secant succeeds only its root is sought). With
-`objects`, each row also has, per head of population, the unskilled unemployed, trainees
-and trained, and the mean a_U of the unskilled unemployed. Works on a copy of `model`.
+`objects`, each row also has, per head of population, the untrained unemployed u_U,
+trainees and trained, and the mean a_U of u_U; and, of the unskilled unemployed pool of
+`steady_state_pools`, its mean a_U, the share of its mass whose reservation quality is at
+the corner p* = 0 and the mean a_U of that part. Works on a copy of `model`.
 """
 function free_entry_curve(model::Model, kU::Float64, kS::Float64, θref, grid::AbstractVector;
                           objects::Bool = false)
@@ -122,11 +136,16 @@ function free_entry_curve(model::Model, kU::Float64, kS::Float64, θref, grid::A
             for (k, lk) in enumerate(ls)
                 isfinite(l) || solve_at_tightness!(m, θU, exp(lk))   # the secant leaves m at its root
                 g = log(m.unsk_par.k / kU)
-                obj = (uU = NaN, mean_aU = NaN, training = NaN, skilled = NaN)
+                obj = (uU = NaN, mean_aU = NaN, training = NaN, skilled = NaN,
+                       mean_aU_pool = NaN, corner_share = NaN, mean_aU_corner = NaN)
                 if objects
                     o = compute_equilibrium_objects(m);  uw = vec(sum(o.uU, dims = 2))
+                    pl = steady_state_pools(m; o = o)
                     obj = (uU = o.agg_uU / o.total_pop, mean_aU = sum(x .* uw) / sum(uw),
-                           training = o.agg_t / o.total_pop, skilled = o.agg_mS / o.total_pop)
+                           training = o.agg_t / o.total_pop, skilled = o.agg_mS / o.total_pop,
+                           mean_aU_pool = set_summary(pl.unskilled_unemployed, x, 1.0).mean_aU,
+                           corner_share = sum(pl.unskilled_corner) / sum(pl.unskilled_unemployed),
+                           mean_aU_corner = set_summary(pl.unskilled_corner, x, 1.0).mean_aU)
                 end
                 push!(rows, merge((θU = θU, θS = exp(lk), gU = g, root_rank = k), obj))
             end
@@ -204,6 +223,28 @@ end
 # The markets of the tables: name and field of `unemployment_per_head`.
 const HELD_MARKETS = (("U", :uU), ("S", :uS), ("total", :u))
 
+# The unemployed pool of each market: name and field of `steady_state_pools`, `path_pools`.
+const POOL_MARKETS = (("U", :unskilled_unemployed), ("S", :skilled_unemployed))
+
+"""
+    pool_composition(case, open, held, x, pop) -> Vector{NamedTuple}
+
+For each market's unemployed pool (`POOL_MARKETS`), with cell masses in `open` and `held`:
+the pool of each economy, and the difference held − open split cell by cell into its
+positive part and its negative part, each a `set_summary` row labelled `case`. The negative
+part's mass is negative, so the two parts add up to the difference of the pools.
+"""
+function pool_composition(case::AbstractString, open, held, x::AbstractVector, pop::Real)
+    rows = NamedTuple[]
+    for (j, f) in POOL_MARKETS
+        a = getfield(open, f);  b = getfield(held, f);  Δ = b .- a
+        for (part, w) in (("open", a), ("held", b), ("positive", max.(Δ, 0.0)), ("negative", min.(Δ, 0.0)))
+            push!(rows, merge((case = case, market = j, part = part), set_summary(w, x, pop)))
+        end
+    end
+    return rows
+end
+
 """
     run_held_margin(crises)
 
@@ -214,6 +255,12 @@ For each crisis, writes
   held_margin_equilibria_<crisis>.csv   the equilibrium of the held crisis economy
   held_margin_equilibria_scan_<crisis>.csv   the scan that locates it
   held_margin_fe_curve_<crisis>.csv     the unskilled free-entry curve, open and held
+  who_switched_<crisis>.csv             the starters and stoppers from the baseline to the open
+                                        crisis steady state, and the reference pools of both
+  pool_composition_<crisis>.csv         each market's unemployed pool, open and held, and the
+                                        difference split into its positive and negative parts:
+                                        at the open crisis tightnesses, at each economy's own
+                                        equilibrium, and at the crisis window's last month
   held_margin_<crisis>.jls              the above with both TransitionResults
 """
 function run_held_margin(crises)
@@ -282,8 +329,7 @@ function run_held_margin(crises)
                   DataFrame(theta_U = H.eq.scan.θU, theta_S = H.eq.scan.θS,
                             log_kU_ratio = H.eq.scan.gU))
 
-        grid = exp.(range(log(CURVE_SPAN[1] * θ1.U), log(CURVE_SPAN[2] * θ1.U); length = CURVE_N))
-        curves = [(economy = name, curve = free_entry_curve(m, kU, kS, θ1, grid; objects = true))
+        curves = [(economy = name, curve = free_entry_curve(m, kU, kS, θ1, curve_grid(θ1.U); objects = true))
                   for (name, m) in (("open", m1), ("held", H.model))]
         CSV.write(joinpath(dir, "held_margin_fe_curve_$(crisis).csv"),
                   vcat((DataFrame(economy = e.economy, theta_U = [r.θU for r in e.curve.roots],
@@ -293,13 +339,41 @@ function run_held_margin(crises)
                                   uU = [r.uU for r in e.curve.roots],
                                   mean_aU_unemployed = [r.mean_aU for r in e.curve.roots],
                                   training = [r.training for r in e.curve.roots],
-                                  skilled = [r.skilled for r in e.curve.roots]) for e in curves)...))
+                                  skilled = [r.skilled for r in e.curve.roots],
+                                  corner_share = [r.corner_share for r in e.curve.roots],
+                                  mean_aU_corner = [r.mean_aU_corner for r in e.curve.roots]) for e in curves)...))
+
+        # Who switched: in the held economy τ and d are the baseline's, so nobody does; in the
+        # open one, the starters and stoppers against the reference pools of both steady states.
+        x  = m1.grids.x;  sw = switchers(L.m0, m1)
+        P0 = steady_state_pools(L.m0);  P1 = steady_state_pools(m1);  PH = steady_state_pools(H.model)
+        who = [merge((set = s, steady_state = "baseline_to_crisis_open"), set_summary(w, x, pop))
+               for (s, w) in (("starters", sw.starters), ("stoppers", sw.stoppers))]
+        for (name, P) in (("baseline", P0), ("crisis_open", P1)), p in REFERENCE_POOLS
+            push!(who, merge((set = String(p), steady_state = name), set_summary(getfield(P, p), x, pop)))
+        end
+        CSV.write(joinpath(dir, "who_switched_$(crisis).csv"), DataFrame(who))
+
+        # The unemployed pools, held − open: at the open crisis tightnesses (the held economy
+        # solved there: composition only), at each economy's own equilibrium, and at the
+        # crisis window's last month of the two paths.
+        mh = deepcopy(H.model)
+        solve_at_tightness!(mh, θ1.U, θ1.S).ok ||
+            error("The held crisis economy does not solve at the open crisis tightnesses.")
+        comp = vcat(pool_composition("same_tightness", P1, steady_state_pools(mh), x, pop),
+                    pool_composition("own_equilibrium", P1, PH, x, pop))
+        nT = findfirst(==(L.months), t)
+        nT === nothing ||
+            append!(comp, pool_composition("month_$(L.months)", path_pools(L.path, m1, nT),
+                                           path_pools(hp.path, H.model, nT), x, pop))
+        CSV.write(joinpath(dir, "pool_composition_$(crisis).csv"), DataFrame(comp))
 
         open(joinpath(dir, "held_margin_$(crisis).jls"), "w") do io
             serialize(io, (crisis = crisis, version = ROYSEARCH_VERSION, point = POINT_ESTIMATE,
                            months = L.months, estimated = L.tr.result, held = hp.result,
                            path = df, by_market = DataFrame(rows), end_states = ss,
-                           equilibrium = H.solve, scan = H.eq, curves = curves))
+                           equilibrium = H.solve, scan = H.eq, curves = curves,
+                           who_switched = DataFrame(who), pool_composition = DataFrame(comp)))
         end
 
         for r in rows
@@ -307,6 +381,21 @@ function run_held_margin(crises)
                                  crisis, r.market, r.delta_horizon, r.delta_inf, r.share_horizon,
                                  r.share_inf, r.delta_horizon_over_inf))
         end
+        cf_log(dir, @sprintf("[%s] switched, baseline → open crisis: starters %.5f (mean a_U %.4f, a_S %.4f), stoppers %.5f (%.4f, %.4f); held: τ and d are the baseline's, nobody switches",
+                             crisis, who[1].mass, who[1].mean_aU, who[1].mean_aS, who[2].mass, who[2].mean_aU, who[2].mean_aS))
+        cf_log(dir, "[$crisis] starters' mean a_U relative to the baseline pools: " *
+                    join((@sprintf("%s ×%.4f", r.set, who[1].mean_aU / r.mean_aU)
+                          for r in who if r.steady_state == "baseline"), ", "))
+        for case in unique(r.case for r in comp)
+            c = Dict((r.market, r.part) => r for r in comp if r.case == case)
+            gap = maximum(abs(c[(j, "positive")].mass + c[(j, "negative")].mass - (c[(j, "held")].mass - c[(j, "open")].mass))
+                          for (j, _) in POOL_MARKETS)
+            cf_log(dir, @sprintf("[%s] unemployed pools held − open, %s: U %+.5f (mean a_U open %.4f, held %.4f), S %+.5f (mean a_S open %.4f, held %.4f); parts add up within %.1e",
+                                 crisis, case, c[("U", "held")].mass - c[("U", "open")].mass, c[("U", "open")].mean_aU,
+                                 c[("U", "held")].mean_aU, c[("S", "held")].mass - c[("S", "open")].mass,
+                                 c[("S", "open")].mean_aS, c[("S", "held")].mean_aS, gap))
+        end
+        nT === nothing && cf_log(dir, "[$crisis] the paths have no date at month $(L.months): no pool composition there")
         cf_log(dir, @sprintf("[%s] done in %.1f min", crisis, (time() - t0) / 60))
     end
     return nothing

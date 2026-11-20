@@ -19,7 +19,8 @@
 # fractions τ⁰ (baseline) and τ¹ (crisis) the covered regions nest, so the baseline
 # training side (trainees, the training slice, the trained) splits into "trains in both"
 # min(τ¹/τ⁰, 1) and "stops", and the other side (searching slice) into "starts"
-# max(τ¹ − τ⁰, 0)/(1 − τ⁰) and "trains in neither".
+# max(τ¹ − τ⁰, 0)/(1 − τ⁰) and "trains in neither". The starts and stops are the starters
+# and stoppers of `switchers` (cf_common.jl), the sets Exercises 1 and 3 report.
 ############################################################
 
 # The baseline state classes, and those on the training side of the baseline frontier.
@@ -110,13 +111,16 @@ end
     status_shares(τ0, τ1) -> NamedTuple
 
 The shares of a cell's baseline training side that train in both steady states and that
-stop, and of its other side that start and that train in neither (see the file header).
+stop, and of its other side that start and that train in neither (see the file header):
+the cell fractions of `switch_fractions` over the side each comes from, so the starts and
+stops are the starters and stoppers of `switchers`. A side with no mass keeps the
+convention that it all stops (τ0 = 0) or all trains in neither (τ0 = 1).
 """
 function status_shares(τ0::Float64, τ1::Float64)
-    τ0 = clamp(τ0, 0.0, 1.0);  τ1 = clamp(τ1, 0.0, 1.0)
-    both   = τ0 > 0.0 ? min(τ1 / τ0, 1.0) : 0.0
-    starts = τ0 < 1.0 ? max(τ1 - τ0, 0.0) / (1.0 - τ0) : 0.0
-    return (trains_both = both, stops = 1.0 - both, starts = starts, trains_neither = 1.0 - starts)
+    f = switch_fractions(τ0, τ1);  τ0 = clamp(τ0, 0.0, 1.0)
+    stops  = τ0 > 0.0 ? f.stops / τ0 : 1.0
+    starts = τ0 < 1.0 ? f.starts / (1.0 - τ0) : 0.0
+    return (trains_both = 1.0 - stops, stops = stops, starts = starts, trains_neither = 1.0 - starts)
 end
 
 """
@@ -127,6 +131,8 @@ For each crisis, writes
                                     all states and by baseline state (per head of the state,
                                     over A and in levels), baseline masses, status shares
   incidence_by_status_<crisis>.csv  ΔV by training status in the two steady states, and overall
+  incidence_status_aptitudes_<crisis>.csv   by training status, and overall: the mass (share
+                                    of the population) and its mean a_U and mean a_S
   incidence_<crisis>.jls            the same as matrices on the ability grid
 """
 function run_incidence(crises)
@@ -179,13 +185,20 @@ function run_incidence(crises)
                       diff_over_A = sum(dA_all) / M, diff_level = sum(dL_all) / M))
         CSV.write(joinpath(dir, "incidence_by_status_$(crisis).csv"), DataFrame(srows))
 
+        # The aptitudes of each status group, weighted by its baseline masses.
+        arows = [merge((crisis = String(crisis), status = String(g)), set_summary(sm[g], gp.x, sum(pop)))
+                 for g in TRAINING_STATUS]
+        push!(arows, merge((crisis = String(crisis), status = "all"), set_summary(mtot, gp.x, sum(pop))))
+        CSV.write(joinpath(dir, "incidence_status_aptitudes_$(crisis).csv"), DataFrame(arows))
+
         open(joinpath(dir, "incidence_$(crisis).jls"), "w") do io
             serialize(io, (crisis = crisis, version = ROYSEARCH_VERSION, point = POINT_ESTIMATE,
                            x = gp.x, population = pop, A_base = A0, A_crisis = A1,
                            tau_base = ib.tau_base, tau_crisis = ib.tau_crisis,
                            mass_by_state = ib.mass, value_sum_base = ib.Vb, value_sum_date0 = ib.V0,
                            diff_over_A_all = per(dA_all, mtot), diff_level_all = per(dL_all, mtot),
-                           status_mass = sm, by_status = DataFrame(srows)))
+                           status_mass = sm, by_status = DataFrame(srows),
+                           status_aptitudes = DataFrame(arows)))
         end
         cf_log(dir, @sprintf("[%s] ΔV/A per head %+.5f (types %+.5f to %+.5f); baseline mass vs population, largest cell gap %.1e; %.1f s",
                              crisis, sum(dA_all) / M, minimum(filter(isfinite, per(dA_all, mtot))),
@@ -194,6 +207,12 @@ function run_incidence(crises)
             cf_log(dir, @sprintf("[%s] %-14s share %.4f, ΔV/A %+.5f, ΔV %+.4f", crisis, r.status,
                                  r.population_share, r.diff_over_A, r.diff_level))
         end
+        cf_log(dir, "[$crisis] mean (a_U, a_S): " *
+                    join((@sprintf("%s (%.4f, %.4f)", r.status, r.mean_aU, r.mean_aS) for r in arows), ", "))
+        sw = switchers(L.m0, L.m1)
+        cf_log(dir, @sprintf("[%s] starts and stops are Exercise 1's starters and stoppers: mass %.12f and %.12f against %.12f and %.12f (gaps %.1e, %.1e)",
+                             crisis, sum(sm[:starts]), sum(sm[:stops]), sum(sw.starters), sum(sw.stoppers),
+                             abs(sum(sm[:starts]) - sum(sw.starters)), abs(sum(sm[:stops]) - sum(sw.stoppers))))
     end
     return nothing
 end

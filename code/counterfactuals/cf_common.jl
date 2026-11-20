@@ -11,6 +11,10 @@
 #   stationary_at_costs!   the steady state at given vacancy costs, by Newton continuation
 #   solve_cf_transition    a new path at the exercise tolerances
 #   window_mean            a path series averaged over the crisis window
+#   switchers              who starts and who stops training between two steady states
+#   steady_state_pools     the reference pools of a steady state
+#   path_pools             the unemployed pools at a date of a path
+#   set_summary            a set's mass and mean aptitudes
 #   cf_log_start, cf_log   the exercise log
 ############################################################
 
@@ -142,6 +146,99 @@ in the uniform fine grid).
 """
 window_mean(series::AbstractVector, tgrid::AbstractVector, months::Real) =
     (k = findall(<(months), tgrid); sum(series[k]) / length(k))
+
+# ── Who trains, and the pools they are compared with ───────────────────────────
+# The one implementation every exercise uses. A cell is a node (a_U, a_S) of the ability
+# grid (rows a_U, columns a_S), with population mass m(a) (`grids.copula.W2`); τ(a) is the
+# covered fraction of the cell on the training side of the frontier (`unsk_cache.τT`).
+# Between two steady states the covered regions of a cell nest, so its starters are
+# m·max(τ¹ − τ⁰, 0) and its stoppers m·max(τ⁰ − τ¹, 0).
+
+# The reference pools of a steady state (`steady_state_pools`), in the order reported.
+const REFERENCE_POOLS = (:unskilled_unemployed, :not_training, :skilled_unemployed, :trained)
+
+"""
+    switch_fractions(τ0, τ1) -> (starts, stops)
+
+The fractions of a cell that start and that stop training between two steady states with
+training fractions τ0 and τ1, each clamped to [0, 1].
+"""
+function switch_fractions(τ0::Real, τ1::Real)
+    τ0 = clamp(τ0, 0.0, 1.0);  τ1 = clamp(τ1, 0.0, 1.0)
+    return (starts = max(τ1 - τ0, 0.0), stops = max(τ0 - τ1, 0.0))
+end
+
+"""
+    switchers(m0, m1) -> (starters, stoppers)
+
+Cell masses of the workers who start and who stop training from the steady state `m0` to
+the steady state `m1`: each cell's `switch_fractions` times its population. The two
+models must share the ability grid and its distribution.
+"""
+function switchers(m0::Model, m1::Model)
+    W2 = m0.grids.copula.W2
+    W2 == m1.grids.copula.W2 || error("switchers: the two steady states have different populations.")
+    f = switch_fractions.(m0.unsk_cache.τT, m1.unsk_cache.τT)
+    return (starters = W2 .* getfield.(f, :starts), stoppers = W2 .* getfield.(f, :stops))
+end
+
+"""
+    steady_state_pools(model; o = compute_equilibrium_objects(model)) -> NamedTuple
+
+Cell masses of the reference pools (`REFERENCE_POOLS`) of the steady state `model`:
+  unskilled_unemployed  every unemployed worker searching the unskilled market: the untrained
+                        unemployed u_U (the never-hired included) and the trained crossers
+                        d·m_S (all of the draining share is unemployed, as equilibrium.jl
+                        counts it)
+  not_training          the side of each cell away from the training frontier, (1 − τ)·m
+  skilled_unemployed    the trained unemployed searching the skilled market, u_S − d·m_S
+  trained               every trained worker, m_S
+and `unskilled_corner`, the part of the unskilled unemployed pool whose reservation quality
+is at the corner p* = 0: the untrained unemployed at their row's p*_U(a_U), the crossers at
+the reservation of the slice that hires them (the training slice's p*_t for the enclosed
+share ω, `enclosed_crossers`; the searching slice's otherwise).
+"""
+function steady_state_pools(model::Model; o = compute_equilibrium_objects(model))
+    uc = model.unsk_cache
+    cross  = o.d .* o.mS_mat
+    corner = similar(cross)
+    @inbounds for j in axes(cross, 2), i in axes(cross, 1)
+        ω   = enclosed_crossers(o.d[i, j], clamp(uc.τT[i, j], 0.0, 1.0))
+        atU = uc.pstar[i] <= 0.0;  atT = uc.pstar_t[i, j] <= 0.0
+        corner[i, j] = atU * o.uU[i, j] + cross[i, j] * ((1.0 - ω) * atU + ω * atT)
+    end
+    return (unskilled_unemployed = o.uU .+ cross,
+            not_training         = (1.0 .- clamp.(uc.τT, 0.0, 1.0)) .* model.grids.copula.W2,
+            skilled_unemployed   = max.(o.uS_mat .- cross, 0.0),
+            trained              = o.mS_mat,
+            unskilled_corner     = corner)
+end
+
+"""
+    path_pools(path, model, n) -> NamedTuple
+
+Cell masses of the two unemployed pools at date n of `path` under its z₁ `model`:
+`unskilled_unemployed` u_U + d·u_S and `skilled_unemployed` (1 − d)·u_S, d the date's
+crossing fraction (`_d_matrix`), the seekers the transition's free entry counts.
+"""
+function path_pools(path::TransitionPath, model::Model, n::Int)
+    d = _d_matrix(path, model, n);  uS = view(path.uS, :, :, n)
+    return (unskilled_unemployed = path.uU[:, :, n] .+ d .* uS, skilled_unemployed = (1.0 .- d) .* uS)
+end
+
+"""
+    set_summary(w, x, pop) -> (mass, mean_aU, mean_aS)
+
+A set of workers with cell masses `w` on the ability grid `x`: its mass as a share of the
+population `pop`, and its mean a_U and mean a_S weighted by the cell masses (NaN for an
+empty set). A non-positive `w` (the negative part of a difference) keeps its sign in `mass`
+and is weighted by |w|.
+"""
+function set_summary(w::AbstractMatrix, x::AbstractVector, pop::Real)
+    a = abs.(w);  tot = sum(a);  mass = sum(w) / pop
+    tot > 0.0 || return (mass = mass, mean_aU = NaN, mean_aS = NaN)
+    return (mass = mass, mean_aU = sum(a .* x) / tot, mean_aS = sum(a .* x') / tot)
+end
 
 """
     cf_log(dir, line)
