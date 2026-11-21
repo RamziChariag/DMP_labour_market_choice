@@ -35,6 +35,39 @@ measurement was, not just the verdict.
 
 ---
 
+## v62.1.2 — 2026-11-21
+
+**PATCH: the deleted outputs are recorded as deleted, and the documents stop naming
+measurement records that no longer exist; no code changes.**
+
+**What changed.**
+- Git: the 30 tracked files under `output/estimates/` that the author moved to the Trash
+  are committed as removed (the per-window base_fc/base_covid estimates and their CSVs, the
+  cf1/cf2 estimates, the untagged pre-v57 estimates and CSVs). Only removals are staged;
+  nothing under `output/` was added or modified.
+- `README.md`, the three measurement tables (drain continuity, OJS continuity, the annealing
+  proposal): the `file` column, which named eleven records under `output/logs/`, is removed,
+  with the two clauses on how a fresh probe run would name its files (`PROBE_TOL`).
+- `SETTINGS.md:318` (graveyard, `sa_subset_k`): the reference to
+  `output/smm/sa_proposal_arm_comparison_base_fc.csv` is removed.
+
+No current script writes any of these records: the probes that produced them are no
+longer in the repository, and the records themselves were deleted from it in v57.1.0
+(commit 54a2ee4). They are recoverable from that commit's parent, `git show 54a2ee4^:<path>`.
+
+**Measured.** `check_repo.sh`: threading bitwise equal to serial, hiring margin agrees with
+the closed form at every stored point, `check_forwarding` only the known
+`ROYSEARCH_MCMC_JAC_ALLOW_GAPS` row; `check_output_tree` passes.
+
+**Settings.** None.
+
+**Known gaps.** `code/scripts/` (a Finder `.DS_Store` only, under a read-only grant) still
+has to be moved to the Trash by hand. `MCMC_INIT = :widths` still reads
+`output/logs/width_audit_<window><W>.csv` (`MCMC_main.jl:331`), which no shipped tool writes
+(listed under known issues since v61.5.1). Bundle audit skipped: no code changed.
+
+**Tried and rejected.** None.
+
 ## v62.1.1 — 2026-11-21
 
 **PATCH: stale code-side references to deleted outputs removed; no output changes.** The

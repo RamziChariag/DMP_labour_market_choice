@@ -344,23 +344,23 @@ the entry wage), with the percentiles and overlaps evaluated exactly on the σ_w
 distribution (`smm/moments.jl`). No histogram lies in between; the 120-bin level histograms
 serve figures only.
 
-| object | file | what it establishes |
-|---|---|---|
-| drain step-ladder, before and after the `d` fix | `output/logs/drain_continuity_step_ladder_base_fc.csv` | `dQ/h` on `μ_S`, `λ_S`, `β_S`, `k_S` at six steps from 3e-8 to 1e-5; the surviving ΔQ = 0.359 jump on `λ_S` at h = 1e-6 and `k_S` at h = 3e-6 is unchanged by the fix |
-| fixed-step Jacobian viability | `output/logs/drain_continuity_jacobian_stability_base_fc.csv` | per-column step spread at a fixed h = 1e-6; 5 of 23 columns fail a 5% stability test before and after, the same five, so the Jacobian still needs a per-column step |
-| is the ΔQ jump solve precision or a threshold? | `output/logs/drain_jump_tolerance_invariance_base_fc.csv` | the jump measured at `tol_global` = 1e-4, 1e-6, 1e-8 with all other settings held fixed; it moves by < 1e-5 relative across four orders of magnitude, against the factor 1e-4 a precision artefact would give, so it is a property of the criterion. Produced under the pre-v40.0.0 global tolerance, which no longer exists; a fresh run sweeps the block tolerances instead (`PROBE_TOL`) and is not comparable rung-for-rung |
+| object | what it establishes |
+|---|---|
+| drain step-ladder, before and after the `d` fix | `dQ/h` on `μ_S`, `λ_S`, `β_S`, `k_S` at six steps from 3e-8 to 1e-5; the surviving ΔQ = 0.359 jump on `λ_S` at h = 1e-6 and `k_S` at h = 3e-6 is unchanged by the fix |
+| fixed-step Jacobian viability | per-column step spread at a fixed h = 1e-6; 5 of 23 columns fail a 5% stability test before and after, the same five, so the Jacobian still needs a per-column step |
+| is the ΔQ jump solve precision or a threshold? | the jump measured at `tol_global` = 1e-4, 1e-6, 1e-8 with all other settings held fixed; it moves by < 1e-5 relative across four orders of magnitude, against the factor 1e-4 a precision artefact would give, so it is a property of the criterion. Produced under the pre-v40.0.0 global tolerance, which no longer exists |
 
 Softening the moment layer's two `p^oj` reads in v27.0.0 cut that jump by 15.9× and the
 per-moment steps behind it by 31–2070×. Everything below was produced by an OJS-continuity
 probe (modes `moments`, `jump`, `crossing`, `jacobian`), no longer in the repository, run once
 against a pre-v27 copy of the tree and once against the v27 tree.
 
-| object | file | what it establishes |
-|---|---|---|
-| backward compatibility where no cell straddles | `output/logs/ojs_moments_base_fc_{before,after}.csv` | with `p^oj` snapped to p-grid nodes, `Q` = 963.90590480318895 and all 31 moments are bit-identical across the change — the covered fraction equals the indicator it replaced at `s ∈ {0,1}` |
-| ΔQ jump by solve tolerance, before and after | `output/logs/ojs_jump_tolerance_base_fc_{before,after}.csv` | the jump across a `p^oj` node crossing at four tolerances: +0.3600 → −0.0226, invariant in both, so what remains is a threshold and not solve precision |
-| what carries the residual step | `output/logs/ojs_crossing_base_fc_{before,after}.csv` | per-moment steps across the crossing; `ee_rate_S` 1.21e-2 → 3.91e-4 and the wage moments ~2000× smaller, with the residual traced to `Γ(p^oj)` stepping −10.15% as row 63's node index moves 8 → 7 |
-| fixed-step Jacobian viability, two tolerances | `output/logs/ojs_jacobian_tol1e-0{4,8}_base_fc_{before,after}.csv` | on the 16 stable columns the step spread falls from a median 1.06e-3 at `tol_global` = 1e-4 to 7.13e-8 at 1e-8 — a ratio of 1.0e-4, exactly the tolerance ratio — so a solve-precision noise floor sits underneath the threshold as a separate effect; `σ_max` 4.27e+04 → 4.47e+03 and `cond(J)` 3.53e+17 → 7.22e+16. The `tol1e-04`/`tol1e-08` filenames name the pre-v40.0.0 global tolerance; a fresh run tags the block tolerance it swept (`PROBE_TOL`, default `bundle`) |
+| object | what it establishes |
+|---|---|
+| backward compatibility where no cell straddles | with `p^oj` snapped to p-grid nodes, `Q` = 963.90590480318895 and all 31 moments are bit-identical across the change — the covered fraction equals the indicator it replaced at `s ∈ {0,1}` |
+| ΔQ jump by solve tolerance, before and after | the jump across a `p^oj` node crossing at four tolerances: +0.3600 → −0.0226, invariant in both, so what remains is a threshold and not solve precision |
+| what carries the residual step | per-moment steps across the crossing; `ee_rate_S` 1.21e-2 → 3.91e-4 and the wage moments ~2000× smaller, with the residual traced to `Γ(p^oj)` stepping −10.15% as row 63's node index moves 8 → 7 |
+| fixed-step Jacobian viability, two tolerances | on the 16 stable columns the step spread falls from a median 1.06e-3 at `tol_global` = 1e-4 to 7.13e-8 at 1e-8 — a ratio of 1.0e-4, exactly the tolerance ratio — so a solve-precision noise floor sits underneath the threshold as a separate effect; `σ_max` 4.27e+04 → 4.47e+03 and `cond(J)` 3.53e+17 → 7.22e+16. Both tolerances are the pre-v40.0.0 global tolerance |
 
 `Q` at the shipped `base_fc` estimate is 963.905904803 before and 969.804678028 after, so
 the stored optima are points on the old surface: see the comparability note under v27.0.0
@@ -382,12 +382,12 @@ rather than the nominal `p_move`.
 
 Measured at the stored `base_fc` optimum under the v19.0.0 solver, 23 free parameters:
 
-| object | file | what it establishes |
-|---|---|---|
-| per-coordinate ΔQ = 1 half-widths | `output/logs/sa_proposal_widths_base_fc.csv` | widths span 0.0022–0.20 (91x, median 0.021); 10 of 23 coordinates fall below the 0.01 the retired scalar step clamped at |
-| proposal comparison, 3 seeds at equal budget | `output/logs/sa_proposal_arm_comparison_base_fc.csv` | mean ΔQ 81.2 at the retired fixed k=3, 87.8 for a dense mask, 90.3 for the shipped mask, 91.5 for a single-coordinate move — reported with acceptance **and** distance moved |
-| joint vs component feasibility | `output/logs/sa_proposal_joint_feasibility_base_fc.csv` | 0 of 90 draws had a feasible joint move with all components infeasible — the retired justification for multi-coordinate moves does not replicate here |
-| matched-displacement sparsity scan | `output/logs/sa_proposal_sparsity_scan_base_fc.csv` | feasibility saturated (0.958–1.000 across k), so it cannot identify the count; this scan favoured k ≈ 11, which the chains above overruled |
+| object | what it establishes |
+|---|---|
+| per-coordinate ΔQ = 1 half-widths | widths span 0.0022–0.20 (91x, median 0.021); 10 of 23 coordinates fall below the 0.01 the retired scalar step clamped at |
+| proposal comparison, 3 seeds at equal budget | mean ΔQ 81.2 at the retired fixed k=3, 87.8 for a dense mask, 90.3 for the shipped mask, 91.5 for a single-coordinate move — reported with acceptance **and** distance moved |
+| joint vs component feasibility | 0 of 90 draws had a feasible joint move with all components infeasible — the retired justification for multi-coordinate moves does not replicate here |
+| matched-displacement sparsity scan | feasibility saturated (0.958–1.000 across k), so it cannot identify the count; this scan favoured k ≈ 11, which the chains above overruled |
 
 Two methodological points, both load-bearing and both recorded in `SETTINGS.md`'s
 graveyard entry for `sa_subset_k`. Acceptance and expected squared jump distance are

@@ -315,7 +315,7 @@ is not flat in `k`: `k = 1` sits **3.2–3.4 combined standard errors below the 
 at both displacement scales, and the gain-weighted mean sparsity is 10.4 (L = 0.33) and
 11.7 (L = 1.0), pooling to 11.1 of 23 → `p_move ≈ 0.48`. That was the first
 specification. Run as actual annealing chains at equal solve budget — 250 iterations,
-3 seeds, from the same point, `output/smm/sa_proposal_arm_comparison_base_fc.csv` — the
+3 seeds, from the same point — the
 ordering **reverses**:
 
 | proposal | mean ΔQ | mean acceptance | mean path (width-normalised) | moved/iter |

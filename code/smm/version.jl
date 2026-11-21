@@ -5,4 +5,4 @@
 # solver and SMM files.
 ############################################################
 
-const ROYSEARCH_VERSION = "62.1.1"
+const ROYSEARCH_VERSION = "62.1.2"
