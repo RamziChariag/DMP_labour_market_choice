@@ -35,6 +35,47 @@ measurement was, not just the verdict.
 
 ---
 
+## v62.1.1 — 2026-11-21
+
+**PATCH: stale code-side references to deleted outputs removed; no output changes.** The
+author moved the retired outputs to the Trash (the per-window base_fc/base_covid estimates
+and chains, the cf1/cf2 estimates, the v61 counterfactual outputs, `output/counterfactuals/welfare/`,
+the contents of `output/backups/`). This version removes what in the code and its documents
+still pointed at them.
+
+**What changed.**
+- `paths.jl:124`: `CF_EXERCISES` no longer lists the retired `:welfare` exercise, so no code
+  can create `output/counterfactuals/welfare/`; nothing called `out_counterfactuals(:welfare)`.
+  `welfare.jl` stays: it is the library of the steady-state social flow.
+- `README.md`, estimate files: the row for the untagged pre-v57 `estimate_<w>W.jls` (no code
+  reads it; every reader names a point) and the sentence on the pre-v57 leftovers in
+  `output/estimates/` are removed.
+- `SETTINGS.md`, graveyard entry `SCENARIO_BUNDLES`: the ξ_S backup it names is recorded as
+  deleted.
+
+**Checked, nothing to change.** No reference in `code/`, `README.md`, `SETTINGS.md`,
+`code/smoke/README.md` or `code/gates/` to `*_cf1*`, `*_cf2*`, `*_tightness_held*`,
+`*_free_entry*` files, `output/backups/` or `code/scripts/`. No code reads a base_fc or base_covid
+estimate or chain file: `estimate_path` and `chain_path` admit only the estimation windows of
+`WINDOWS` (base_fc, base_covid remain data periods, `BASELINE_PERIODS`).
+
+**Measured.** `check_repo.sh`: threading bitwise equal to serial at the baseline SMM estimate
+(Q = 8066.9308067459), hiring margin 0 disagreements at all ten stored points;
+`check_forwarding` reports only the known `ROYSEARCH_MCMC_JAC_ALLOW_GAPS` row.
+`check_output_tree` passes; `check_structure` flags the same five files as before.
+
+**Settings.** None.
+
+**Known gaps.** `code/scripts/` is not removed: it holds only a Finder `.DS_Store` (nothing
+tracked) and sits under a read-only grant, so it must be moved to the Trash by hand. The
+deletions of the tracked files under `output/estimates/` are not staged in this commit.
+The README's measurement-record tables and `SETTINGS.md:318` name files under `output/logs/`
+and `output/smm/` that are not on disk (`output/logs/` is empty, `output/smm/` absent); they
+were not among the deleted outputs and are left as written. Bundle audit skipped: no code
+that reads or writes an estimate or chain changed.
+
+**Tried and rejected.** None.
+
 ## v62.1.0 — 2026-11-20
 
 **MINOR: new outputs organised around who changes their training choice; every existing

@@ -63,14 +63,11 @@ default, `_equalW` under `:equal`; see `SETTINGS.md`):
 | `mcmc_results_<w>W_smm.csv` | the chain-free pass of `MCMC_main.jl` (`MCMC_JAC_ONLY = true`), which also adds its standard errors to `estimate_<w>W_smm.jls` and leaves its point, stage and `sim` unchanged | tables |
 | `estimate_<w>W_mcmcbest.jls` | a chain run with `MCMC_CHECKPOINT = true` only: the best point the chain visited, stage `:mcmc_checkpoint` | nothing; a record of where the chain went |
 | `candidates_<w>W_smm.jls`, `candidates_<w>W_smm_mcmcbase.jls` | `INIT_MODE = :clusters`, tagged like the run's bundle | the next `:clusters` run of the same configuration |
-| `estimate_<w>W.jls` (untagged) | versions before v57.0.0 | the warm start only |
 
 A reader of an estimate accepts a file written by another MAJOR version only if its stored
 point still scores its stored Q under this code (relative 1e-10, `require_current_estimate`):
 it re-evaluates the point, prints one line saying so, and rewrites nothing. Otherwise it stops
-in one line with both values of Q. The warm start reads any such file, and re-scores it. The other files versions before v57.0.0 left in `output/estimates/`
-(`estimate_<w>W_postmean.jls`, the `_backup_Q` copies and the untagged candidate banks) are
-read by nothing.
+in one line with both values of Q. The warm start reads any such file, and re-scores it.
 
 **The SMM path.**
 

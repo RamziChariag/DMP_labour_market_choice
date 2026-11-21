@@ -227,7 +227,7 @@ scenario, each a window (the live estimate) or a file path. Its one non-default 
 pointed the COVID baseline at an ξ_S backup under `output/backups/`, and `check_pair`
 rejected that pair: ρ_x = −0.4568189183164799 in the backup against −0.49412406238821294
 pinned in the crisis estimate. Replaced by `POINT_ESTIMATE`, which reads both windows of a
-pair through `estimate_path` at the same point. The backup stays on disk, untouched.
+pair through `estimate_path` at the same point. The backup was deleted in v62.1.1.
 
 ### `ROYSEARCH_WIDTH_BASE` — the base point of the width audit
 **Retired in v57.0.0.** An environment key read only by the width-audit tool (since removed
