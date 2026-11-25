@@ -399,7 +399,7 @@ end
 
 The skilled seekers' composition by aS: the non-draining column mass, or, when the market
 holds none, its limit as it empties (the admissible cells with the largest training gain,
-`marginal_training_cells`, carried through the model's own m_S(t)).
+`marginal_training_cells`, carried through the model's own m_S(n)).
 """
 function skilled_stayer_columns(model::Model, d::AbstractMatrix{Float64},
                                 mS::AbstractMatrix{Float64})
@@ -407,7 +407,7 @@ function skilled_stayer_columns(model::Model, d::AbstractMatrix{Float64},
     sum(mcol0) > EMPTY_MASS && return mcol0
     cp = model.common
     w  = marginal_training_cells(model; entering = true, admit = d .< 1.0)
-    return nondrain_column_mass(d, _mS_from_t(w, crossing_rate(model, d), cp.φ, cp.ν))
+    return nondrain_column_mass(d, _mS_from_n(w, crossing_rate(model, d), cp.φ, cp.ν))
 end
 
 

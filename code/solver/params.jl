@@ -153,7 +153,7 @@ Base.@kwdef mutable struct UnskilledCache
     τT        :: Matrix{Float64}    # training fraction of each cell
     u         :: Matrix{Float64}    # untrained unemployed
     uh        :: Matrix{Float64}    # hired branch of u
-    t         :: Matrix{Float64}    # in training
+    n         :: Matrix{Float64}    # in training
     et        :: Matrix{Float64}    # employment of the training slice
 
     # d·u_S from the skilled block; fixed within an unskilled solve, refreshed by the global loop
@@ -432,7 +432,7 @@ function build_model(cp::CommonParams, grids::CommonGrids,
         τT        = zeros(Nx, Nx),
         u         = 0.4 .* grids.copula.W2,
         uh        = zeros(Nx, Nx),
-        t         = (ν / (2ν + φ)) .* grids.copula.W2,
+        n         = (ν / (2ν + φ)) .* grids.copula.W2,
         et        = zeros(Nx, Nx),
         duS_carry = zeros(Nx, Nx),
         θ         = 0.5,

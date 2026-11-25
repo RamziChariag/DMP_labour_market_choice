@@ -142,7 +142,7 @@ function free_entry_curve(model::Model, kU::Float64, kS::Float64, θref, grid::A
                     o = compute_equilibrium_objects(m);  uw = vec(sum(o.uU, dims = 2))
                     pl = steady_state_pools(m; o = o)
                     obj = (uU = o.agg_uU / o.total_pop, mean_aU = sum(x .* uw) / sum(uw),
-                           training = o.agg_t / o.total_pop, skilled = o.agg_mS / o.total_pop,
+                           training = o.agg_n / o.total_pop, skilled = o.agg_mS / o.total_pop,
                            mean_aU_pool = set_summary(pl.unskilled_unemployed, x, 1.0).mean_aU,
                            corner_share = sum(pl.unskilled_corner) / sum(pl.unskilled_unemployed),
                            mean_aU_corner = set_summary(pl.unskilled_corner, x, 1.0).mean_aU)

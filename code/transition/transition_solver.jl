@@ -13,7 +13,7 @@
 #   4. Free entry at every date from its values and post-reallocation masses; damped update.
 #   5. Repeat 2–4 until max_n |ln θ^new − ln θ| < tol in both markets.
 #
-# Masses per type (aU,aS): u_U unskilled unemployed (searching slice), t in training,
+# Masses per type (aU,aS): u_U unskilled unemployed (searching slice), n in training,
 # e_U^s and e_U^τ the matches of the two slices (measures over p with an atom at p = 1),
 # u_S skilled unemployed, m_S skilled segment, ê_S the per-aS unit shape of skilled
 # employment over p. Reallocations (spec L6), in this order: (a) the frontier sweeps the
@@ -21,12 +21,12 @@
 # of the training slice's matches; (b) unskilled matches below their slice's cutoff end;
 # (c) skilled matches below the cutoff end into u_S. Laws of motion (spec L1–L5), explicit:
 #   ∂_t u_U = (1−τ)νℓ + D^s − κ_U u_U^h − ν u_U,       D^s = (ξ_U + λ_U G(p*^s)) e_U^s
-#   ∂_t t   = τνℓ + D^τ − (φ+ν) t
+#   ∂_t n   = τνℓ + D^τ − (φ+ν) n
 #   ∂_t e_U^s(dp) = κ_U (u_U^h + χ d u_S) δ₁ + λ_U e_U^s dG 1{p ≥ p*^s} − (λ_U+ξ_U+ν) e_U^s(dp)
-#   ∂_t u_S = φ t + (ξ_S + λ_S Γ_s(p*_S)) e_S − (ν + (1−d) κ_S (1−Γ_o(p*_S)) + d κ_U χ) u_S
-#   ∂_t m_S = φ t − ν m_S − d κ_U χ u_S
+#   ∂_t u_S = φ n + (ξ_S + λ_S Γ_s(p*_S)) e_S − (ν + (1−d) κ_S (1−Γ_o(p*_S)) + d κ_U χ) u_S
+#   ∂_t m_S = φ n − ν m_S − d κ_U χ u_S
 # u_U^h is the hired branch of u_U (`hired_unemployed`), χ the hired fraction (`hire_fraction`).
-# The laws are linear, so u_U + t + e_U^s + e_U^τ + m_S = ℓ holds at every date to rounding.
+# The laws are linear, so u_U + n + e_U^s + e_U^τ + m_S = ℓ holds at every date to rounding.
 ############################################################
 
 
@@ -83,7 +83,7 @@ function _init_path!(path::TransitionPath, model_z0::Model, model_z1::Model)
     @inbounds for j in 1:Nx, i in 1:Nx
         uS0[i, j] = d0[i, j] * mS0[i, j] + (1.0 - d0[i, j]) * sc0.u_frac[j] * mS0[i, j]
         et  = uc0.et[i, j]
-        e   = max(W2[i, j] - mS0[i, j] - uc0.u[i, j] - uc0.t[i, j] - et, 0.0)
+        e   = max(W2[i, j] - mS0[i, j] - uc0.u[i, j] - uc0.n[i, j] - et, 0.0)
         uh  = hired_unemployed(uc0.u[i, j], χ0[i], clamp(uc0.τT[i, j], 0.0, 1.0), W2[i, j])
         atom = min((κ_U0 * uh + k0.ks[i, j] * mS0[i, j]) / out, e)
         _unskilled_p_shape!(view(path.eU0p, i, j, :), atom, e - atom, clamp01(uc0.pstar[i]),
@@ -97,7 +97,7 @@ function _init_path!(path::TransitionPath, model_z0::Model, model_z1::Model)
     path.θS .= model_z1.skl_cache.θ
     @inbounds for n in 1:Nt
         path.uU[:, :, n]  .= uc0.u
-        path.tU[:, :, n]  .= uc0.t
+        path.nU[:, :, n]  .= uc0.n
         path.uS[:, :, n]  .= uS0
         path.mS[:, :, n]  .= mS0
         path.eUs[:, :, n] .= dropdims(sum(path.eU0p, dims = 3), dims = 3)
@@ -106,7 +106,7 @@ function _init_path!(path::TransitionPath, model_z0::Model, model_z1::Model)
     end
     path.τT0 .= uc0.τT
     path.uU0 .= uc0.u
-    path.tU0 .= uc0.t
+    path.nU0 .= uc0.n
     path.pU0 .= uc0.pstar
     path.pUt0 .= uc0.pstar_t
     path.χUt0 .= uc0.χ_t
@@ -219,11 +219,11 @@ against them), the mass each reallocation moves into training (`into_T`), and sc
 function _forward_state(path::TransitionPath)
     Nx = size(path.uU0, 1);  NpU1 = size(path.eU0p, 3)
     uS = copy(path.uS[:, :, 1])
-    return (uU = copy(path.uU0), tU = copy(path.tU0), Es = copy(path.eU0p), Et = copy(path.eUt0p),
+    return (uU = copy(path.uU0), nU = copy(path.nU0), Es = copy(path.eU0p), Et = copy(path.eUt0p),
             uS = uS, mS = copy(path.mS[:, :, 1]), eS = copy(path.eS[:, :, 1]),
             τprev = copy(path.τT0), pUs_prev = repeat(path.pU0, 1, Nx), pUt_prev = copy(path.pUt0),
             χt_prev = copy(path.χUt0), pS_prev = copy(path.pS0), into_T = zeros(Nx, Nx),
-            uS_n = similar(uS), mS_n = similar(uS), tU_n = similar(uS),
+            uS_n = similar(uS), mS_n = similar(uS), nU_n = similar(uS),
             mv_s = zeros(Float64, NpU1), mv_t = zeros(Float64, NpU1))
 end
 
@@ -239,7 +239,7 @@ cell's mass entering training to `st.into_T`.
 function _reallocate!(st, path::TransitionPath, model::Model, χU::Vector{Float64},
                       d::Matrix{Float64}, n::Int)
     Nx = length(model.grids.x);  ug = model.unsk_grids
-    uU = st.uU;  tU = st.tU;  Es = st.Es;  Et = st.Et;  mv_s = st.mv_s;  mv_t = st.mv_t
+    uU = st.uU;  nU = st.nU;  Es = st.Es;  Et = st.Et;  mv_s = st.mv_s;  mv_t = st.mv_t
     ended = 0.0;  quit = 0.0;  swept = 0.0
     @inbounds for j in 1:Nx, i in 1:Nx
         τ  = clamp(path.τT[i, j, n], 0.0, 1.0)
@@ -260,7 +260,7 @@ function _reallocate!(st, path::TransitionPath, model::Model, χU::Vector{Float6
             e_t = _end_below!(et, st.pUt_prev[i, j], pt, ug.p, kt)
         else
             mv_u = σ * uU[i, j]
-            uU[i, j] -= mv_u;  tU[i, j] += mv_u;  swept += mv_u
+            uU[i, j] -= mv_u;  nU[i, j] += mv_u;  swept += mv_u
             @. mv_s = σ * es;  @. mv_t = ς * et
             es .-= mv_s;  et .-= mv_t
             e_s = _end_below!(es, st.pUs_prev[i, j], ps, ug.p, ks) +
@@ -269,7 +269,7 @@ function _reallocate!(st, path::TransitionPath, model::Model, χU::Vector{Float6
                   _end_below!(mv_s, st.pUs_prev[i, j], pt, ug.p, km)
             es .+= mv_t;  et .+= mv_s
         end
-        uU[i, j] += e_s;  tU[i, j] += e_t
+        uU[i, j] += e_s;  nU[i, j] += e_t
         ended += e_s;  quit += e_t
         st.into_T[i, j] = mv_u + e_t
     end
@@ -282,7 +282,7 @@ end
     _advance!(st, path, model, χU, hX, d, wG, n, dt)
 
 One explicit sub-step of length `dt` of the laws of motion (spec L1–L5) at date n's rates
-and policies. u_S, m_S and t are snapshotted first, so every block reads start-of-step
+and policies. u_S, m_S and n are snapshotted first, so every block reads start-of-step
 stocks.
 """
 function _advance!(st, path::TransitionPath, model::Model, χU::Vector{Float64}, hX,
@@ -290,9 +290,9 @@ function _advance!(st, path::TransitionPath, model::Model, χU::Vector{Float64},
     up = model.unsk_par
     κU = meeting_rate(path.θU[n], up.μ, up.η)
     κS = meeting_rate(path.θS[n], model.skl_par.μ, model.skl_par.η)
-    copyto!(st.uS_n, st.uS);  copyto!(st.mS_n, st.mS);  copyto!(st.tU_n, st.tU)
-    _advance_unskilled_cells!(st.uU, st.tU, st.Es, st.Et, st.uS_n, d, κU, χU, hX, path, model, wG, n, dt)
-    _advance_skilled_masses!(st.uS, st.mS, st.tU_n, st.uS_n, st.mS_n, d, κU, κS, hX.h, model,
+    copyto!(st.uS_n, st.uS);  copyto!(st.mS_n, st.mS);  copyto!(st.nU_n, st.nU)
+    _advance_unskilled_cells!(st.uU, st.nU, st.Es, st.Et, st.uS_n, d, κU, χU, hX, path, model, wG, n, dt)
+    _advance_skilled_masses!(st.uS, st.mS, st.nU_n, st.uS_n, st.mS_n, d, κU, κS, hX.h, model,
                              view(path.pstar_S, :, n), dt)
     _advance_skilled_shape!(st.eS, st.uS_n, st.mS_n, st.mS, d, κS, model, view(path.pstar_S, :, n),
                             view(path.poj, :, n), view(path.s_part, :, n), dt)
@@ -350,7 +350,7 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
         wnum = 0.0;  wden = 0.0
         fill!(view(path.eUsp, :, :, n), 0.0);  fill!(view(path.eUtp, :, :, n), 0.0)
         @inbounds for j in 1:Nx, i in 1:Nx
-            path.uU[i, j, n] = st.uU[i, j];  path.tU[i, j, n] = st.tU[i, j]
+            path.uU[i, j, n] = st.uU[i, j];  path.nU[i, j, n] = st.nU[i, j]
             path.uS[i, j, n] = st.uS[i, j];  path.mS[i, j, n] = st.mS[i, j]
             es = view(st.Es, i, j, :);  et = view(st.Et, i, j, :)
             path.eUs[i, j, n] = sum(es);  path.eUt[i, j, n] = sum(et)
@@ -376,14 +376,14 @@ function _forward_pass!(path::TransitionPath, model::Model, tp::TransitionParams
 end
 
 """
-    _advance_unskilled_cells!(uU, tU, Es, Et, uS, d, κU, χU, hX, path, model, wG, n, dt)
+    _advance_unskilled_cells!(uU, nU, Es, Et, uS, d, κU, χU, hX, path, model, wG, n, dt)
 
 One explicit step of every cell's unskilled stocks at date n's rates: births split by τ,
 hires out of the hired branch of u_U and out of the crossers (each slice at its own hired
 share), each slice's quality measure, and each slice's separations, into u_U from the
 searching slice and into training from the training slice. Threaded over rows.
 """
-function _advance_unskilled_cells!(uU::Matrix{Float64}, tU::Matrix{Float64},
+function _advance_unskilled_cells!(uU::Matrix{Float64}, nU::Matrix{Float64},
                                    Es::Array{Float64,3}, Et::Array{Float64,3},
                                    uS::Matrix{Float64}, d::Matrix{Float64}, κU::Float64,
                                    χU::Vector{Float64}, hX, path::TransitionPath, model::Model,
@@ -413,7 +413,7 @@ function _advance_unskilled_cells!(uU::Matrix{Float64}, tU::Matrix{Float64},
                                      _redraw_weights!(wt, path.pUt[i, j, n], ug.p, wG, up.α_U),
                                      wG, up.λ, up.ξ, ν, dt)
             uU[i, j] += dt * ((1.0 - τ) * ν * W2[i, j] + Ds - hU - ν * uU[i, j])
-            tU[i, j] += dt * (τ * ν * W2[i, j] + Dt - (φ + ν) * tU[i, j])
+            nU[i, j] += dt * (τ * ν * W2[i, j] + Dt - (φ + ν) * nU[i, j])
         end
     end
     return nothing
@@ -446,14 +446,14 @@ function _end_skilled_below!(eS::Matrix{Float64}, uS::Matrix{Float64}, mS::Matri
 end
 
 """
-    _advance_skilled_masses!(uS, mS, tU, uS_n, mS_n, d, κU, κS, h, model, pstar, dt)
+    _advance_skilled_masses!(uS, mS, nU, uS_n, mS_n, d, κU, κS, h, model, pstar, dt)
 
 One step of `u_S` and `m_S` from the start-of-step stocks: training completions in,
 destruction (SHOCK mass below reservation) on the employed, hires (OFFER mass above it,
 `_skilled_margin_masses`) on the stayers, and crossers out at their cell's unskilled
 hiring rate κ_U h.
 """
-function _advance_skilled_masses!(uS::Matrix{Float64}, mS::Matrix{Float64}, tU::Matrix{Float64},
+function _advance_skilled_masses!(uS::Matrix{Float64}, mS::Matrix{Float64}, nU::Matrix{Float64},
                                   uS_n::Matrix{Float64}, mS_n::Matrix{Float64},
                                   d::Matrix{Float64}, κU::Float64, κS::Float64,
                                   h::Matrix{Float64}, model::Model,
@@ -465,9 +465,9 @@ function _advance_skilled_masses!(uS::Matrix{Float64}, mS::Matrix{Float64}, tU::
         δS_end = sp.ξ + sp.λ * below_s[j]
         for i in 1:Nx
             cross = d[i, j] * κU * h[i, j] * uS_n[i, j]
-            uS[i, j] = uS_n[i, j] + dt * (cp.φ * tU[i, j] + δS_end * (mS_n[i, j] - uS_n[i, j]) -
+            uS[i, j] = uS_n[i, j] + dt * (cp.φ * nU[i, j] + δS_end * (mS_n[i, j] - uS_n[i, j]) -
                                           (cp.ν + (1.0 - d[i, j]) * hire_S) * uS_n[i, j] - cross)
-            mS[i, j] = mS_n[i, j] + dt * (cp.φ * tU[i, j] - cp.ν * mS_n[i, j] - cross)
+            mS[i, j] = mS_n[i, j] + dt * (cp.φ * nU[i, j] - cp.ν * mS_n[i, j] - cross)
         end
     end
     return nothing
@@ -735,7 +735,7 @@ function _build_result(path::TransitionPath, model_z1::Model, tp::TransitionPara
     urU_p = zeros(Nt);  urS_p = zeros(Nt);  urT_p = zeros(Nt)
     skS_p = zeros(Nt);  trS_p = zeros(Nt);  wS_p = zeros(Nt)
     ffl_p = zeros(Nt);  drg_p = zeros(Nt);  dms_p = zeros(Nt);  dfl_p = zeros(Nt)
-    uU_prof = zeros(Nx, Nt);  tU_prof = zeros(Nx, Nt)
+    uU_prof = zeros(Nx, Nt);  nU_prof = zeros(Nx, Nt)
     uS_prof = zeros(Nx, Nt);  mS_prof = zeros(Nx, Nt)
     χU = hire_fraction(model_z1)
 
@@ -748,7 +748,7 @@ function _build_result(path::TransitionPath, model_z1::Model, tp::TransitionPara
         dms_p[n] = sum(dmat .* (@view path.mS[:, :, n]))
         dfl_p[n] = κU_p[n] * sum(dmat .* _crosser_hire_shares(path, χU, dmat, n).h .* (@view path.uS[:, :, n]))
 
-        agg_uU = sum(@view path.uU[:, :, n]);  agg_tU = sum(@view path.tU[:, :, n])
+        agg_uU = sum(@view path.uU[:, :, n]);  agg_nU = sum(@view path.nU[:, :, n])
         agg_uS = sum(@view path.uS[:, :, n]);  agg_mS = sum(@view path.mS[:, :, n])
         agg_eU = sum(@view path.eUs[:, :, n]) + sum(@view path.eUt[:, :, n])
         lf_U = agg_uU + agg_eU;  lf_total = lf_U + agg_mS;  pop = sum(W2)
@@ -756,10 +756,10 @@ function _build_result(path::TransitionPath, model_z1::Model, tp::TransitionPara
         urS_p[n] = agg_mS > 1e-14 ? agg_uS / agg_mS : 0.0
         urT_p[n] = lf_total > 1e-14 ? (agg_uU + agg_uS) / lf_total : 0.0
         skS_p[n] = lf_total > 1e-14 ? agg_mS / lf_total : 0.0
-        trS_p[n] = pop > 1e-14 ? agg_tU / pop : 0.0
+        trS_p[n] = pop > 1e-14 ? agg_nU / pop : 0.0
 
         @inbounds for i in 1:Nx
-            uU_prof[i, n] = sum(@view path.uU[i, :, n]);  tU_prof[i, n] = sum(@view path.tU[i, :, n])
+            uU_prof[i, n] = sum(@view path.uU[i, :, n]);  nU_prof[i, n] = sum(@view path.nU[i, :, n])
         end
         @inbounds for j in 1:Nx
             uS_prof[j, n] = sum(@view path.uS[:, j, n]);  mS_prof[j, n] = sum(@view path.mS[:, j, n])
@@ -790,7 +790,7 @@ function _build_result(path::TransitionPath, model_z1::Model, tp::TransitionPara
         scenario, converged, n_iter, final_dist,
         copy(path.tgrid), copy(path.θU), copy(path.θS), κU_p, κS_p,
         urU_p, urS_p, urT_p, skS_p, trS_p, copy(path.wU_mean), wS_p,
-        uU_prof, tU_prof, uS_prof, mS_prof,
+        uU_prof, nU_prof, uS_prof, mS_prof,
         copy(gp.wa_U), copy(gp.x), copy(sg.p), copy(wpS),
         ffl_p, drg_p, dms_p, dfl_p,
     )
@@ -870,7 +870,7 @@ function path_statistics(path::TransitionPath, model::Model)
                 rec[n] += δ * e;  pσU += -expm1(-δ) * e;  pωU += -expm1(-ω) * e;  mE += e
             end
             train_in[n]   += τ * cp.ν * W2[i, j]
-            train_done[n] += cp.φ * path.tU[i, j, n]
+            train_done[n] += cp.φ * path.nU[i, j, n]
             eS = path.mS[i, j, n] - uS
             δS = sp.ξ + sp.λ * below_s[j];  ωS = sp.λ * (1.0 - below_s[j])
             sep_S[n] += δS * eS;  pσS += -expm1(-δS) * eS;  pωS += -expm1(-ωS) * eS;  mES += eS

@@ -139,7 +139,7 @@ mutable struct TransitionPath
 
     # Masses per type on the (aU,aS) copula grid, after the date's reallocations
     uU  :: Array{Float64,3}           # (Nx,Nx,Nt) unskilled unemployed (searching slice)
-    tU  :: Array{Float64,3}           # (Nx,Nx,Nt) in training
+    nU  :: Array{Float64,3}           # (Nx,Nx,Nt) in training
     eUs :: Array{Float64,3}           # (Nx,Nx,Nt) unskilled employment, searching slice
     eUt :: Array{Float64,3}           # (Nx,Nx,Nt) unskilled employment, training slice
     uS  :: Array{Float64,3}           # (Nx,Nx,Nt) skilled unemployed
@@ -151,7 +151,7 @@ mutable struct TransitionPath
     # Pre-switch state (date 0⁻): the base steady state, per type.
     τT0  :: Matrix{Float64}           # (Nx,Nx)
     uU0  :: Matrix{Float64}           # (Nx,Nx)
-    tU0  :: Matrix{Float64}           # (Nx,Nx)
+    nU0  :: Matrix{Float64}           # (Nx,Nx)
     eU0p :: Array{Float64,3}          # (Nx,Nx,NpU+1) unskilled employment by p, atom at p = 1 last
     eUt0p :: Array{Float64,3}         # (Nx,Nx,NpU+1) the same, training slice
     pU0  :: Vector{Float64}           # (Nx) base unskilled reservation, the support of eU0p
@@ -207,7 +207,7 @@ end
     TransitionResult
 
 The summary of a solved transition (`_build_result`): length-`Nt` aggregate series, and the
-ability profiles `uU`, `tU` (cell masses summed over a_S, by a_U row) and `uS`, `mS`
+ability profiles `uU`, `nU` (cell masses summed over a_S, by a_U row) and `uS`, `mS`
 (summed over a_U, by a_S column), `Nx × Nt`. Serialised positionally: new fields go at the
 end.
 """
@@ -231,9 +231,9 @@ struct TransitionResult
     mean_wage_U    :: Vector{Float64}     # mean log wages, the data moments' units
     mean_wage_S    :: Vector{Float64}
 
-    # Ability profiles (Nx × Nt): cell masses by a_U row (uU, tU) or a_S column (uS, mS)
+    # Ability profiles (Nx × Nt): cell masses by a_U row (uU, nU) or a_S column (uS, mS)
     uU :: Matrix{Float64}
-    tU :: Matrix{Float64}
+    nU :: Matrix{Float64}
     uS :: Matrix{Float64}
     mS :: Matrix{Float64}
 

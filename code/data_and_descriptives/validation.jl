@@ -53,7 +53,7 @@ Print the validation report for `all_moments` (window → moment table from
 `make_moments`): (1) the moments side by side; (2) values outside published or
 data-implied ranges; (3) each crisis pair's change in ur_U, θ_U and θ_S,
 classified as a move along the Beveridge curve or an outward shift; (4) the
-stationary-identity gap skilled_share·(1 − t) vs (φ/ν)·t on the shipped t.
+stationary-identity gap skilled_share·(1 − n) vs (φ/ν)·n on the shipped n.
 """
 function run_validation(all_moments)
     @info "Stage 9: Validation diagnostics..."
@@ -152,7 +152,7 @@ function run_validation(all_moments)
     println("  them apart is what the model is for.")
 
     # ── 4. Stationary-identity gap ────────────────────────────────
-    # Stationarity implies skilled_share·(1 − t) = (φ/ν)·t. A positive gap means
+    # Stationarity implies skilled_share·(1 − n) = (φ/ν)·n. A positive gap means
     # a larger skilled stock than the training flow sustains, a negative one a
     # larger trainee stock than the skilled stock reflects. Computed on the
     # shipped training_share; each crisis window uses its baseline's ν.

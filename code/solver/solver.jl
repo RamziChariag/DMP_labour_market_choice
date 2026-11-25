@@ -75,16 +75,16 @@ end
 
 
 """
-    _mS_from_t(t, k, φ, ν) → mS
+    _mS_from_n(n, k, φ, ν) → mS
 
-Trained mass `m_S = φ t / (ν + k)`, `k` the crossing hire rate (`crossing_rates`); zero
+Trained mass `m_S = φ n / (ν + k)`, `k` the crossing hire rate (`crossing_rates`); zero
 where the denominator vanishes.
 """
-function _mS_from_t(t::Matrix{Float64}, k::Matrix{Float64}, φ::Float64, ν::Float64)
-    mS = similar(t)
-    @inbounds for c in eachindex(t)
+function _mS_from_n(n::Matrix{Float64}, k::Matrix{Float64}, φ::Float64, ν::Float64)
+    mS = similar(n)
+    @inbounds for c in eachindex(n)
         denom = ν + k[c]
-        mS[c] = denom > 1e-14 ? max(φ * t[c] / denom, 0.0) : 0.0
+        mS[c] = denom > 1e-14 ? max(φ * n[c] / denom, 0.0) : 0.0
     end
     return mS
 end
@@ -275,7 +275,7 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
     aa = Anderson1(Nx + Nx * Nx)
 
     # First-pass m_S: nobody crosses.
-    sc.m_S .= (φ / ν) .* uc.t
+    sc.m_S .= (φ / ν) .* uc.n
     mS_cur = copy(sc.m_S)
 
     s_U = 1.0;  s_M = 1.0
@@ -292,7 +292,7 @@ function _global_loop!(model::Model; θS_fixed::Union{Nothing,Float64} = nothing
         res_U = solve_unskilled_block!(model; US_in = skilled_unemployment_value(model))
         res_U.rejected && return SolveResult(false, false, false)
         last_conv_U = res_U.converged
-        if !isfinite(uc.θ) || any(!isfinite, uc.t) || any(!isfinite, uc.Usearch) || any(!isfinite, uc.pstar)
+        if !isfinite(uc.θ) || any(!isfinite, uc.n) || any(!isfinite, uc.Usearch) || any(!isfinite, uc.pstar)
             sim.verbose >= 1 && @printf("[global]  NaN/Inf in unskilled block at it=%d — aborting\n", it)
             return SolveResult(false, false, false)
         end

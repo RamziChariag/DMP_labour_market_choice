@@ -35,6 +35,59 @@ measurement was, not just the verdict.
 
 ---
 
+## v62.2.0 — 2026-11-24
+
+**MINOR: the training density is named n, as in the model notes; every number is bitwise
+unchanged.** The notes free t for the date, so the density of workers in training, written
+t, is now n wherever the code names it. No computation changed.
+
+**Comparability.** Full. Every estimate, chain and counterfactual output stays valid. The two
+stored transitions were rebuilt once under the new names (below); no other output file
+carries the old names.
+
+**What changed.**
+- Solver: `UnskilledCache` field `t` → `n` (`params.jl:156`, constructor `params.jl:435`);
+  `stationary_masses` returns `n` (`unskilled.jl:783`), `solve_stationary_unskilled!` writes
+  `n_out`; `_mS_from_t` → `_mS_from_n` (`solver.jl:83`, callers `skilled.jl:410`,
+  `equilibrium.jl:69,80`); `compute_equilibrium_objects` returns `nU` and `agg_n`
+  (`equilibrium.jl:450,473`), the console box prints `n`; `moments.jl:360` reads `agg_n`.
+- Transition: `TransitionPath` fields `tU`, `tU0` → `nU`, `nU0` and `TransitionResult` field
+  `tU` → `nU` (`transition_params.jl:142,154,236`); `type_density` returns `nU`
+  (`transition_types.jl:65`); the solver's state, scratch and profiles follow (`nU_n`,
+  `nU_prof`, `agg_nU`), and its header writes the laws of motion with n.
+- Counterfactuals: `incidence.jl`, `welfare.jl` (`nU`, `nU_n`, the accumulator `bn`) and
+  `held_margin.jl:145` (`agg_n`).
+- Comments: `unskilled.jl` (outer loop, stationary closed forms), `validation.jl:56,155`
+  (the stationary identity written in n).
+- Not renamed: the training slice's objects (`pstar_t`, `S1_t`, `χ_t`, `et`, `e_t`, `Et`,
+  `eUt`, `mv_t`), whose subscript names the slice, not the density; `ts` in `validation.jl`,
+  which abbreviates the data moment `training_share`; the date column `t` of
+  `held_margin_path_<crisis>.csv`.
+- Outputs: `output/transition/transition_{fc,covid}_diagonalW_mcmc.jls` rebuilt by a scratch
+  script outside the repo: the NamedTuple keys `path.tU`, `path.tU0`, `eq_z0/eq_z1.tU`,
+  `eq_z0/eq_z1.agg_t`, `types.density_date0/density_base.tU` renamed, every value carried
+  over. Structs inside (`Model`, `TransitionResult`) serialise by position and load under the
+  new field names unchanged. The originals are in
+  `output/backups/rename_t_to_n_2026-11-24/`.
+
+**Measured.** Q and the scored moments at the six stored estimates (baseline, crisis_fc,
+crisis_covid, each smm then mcmc) under v62.1.2 and v62.2.0: bitwise equal (Q, in that
+order: 8066.930806745946, 8067.0717859741699, 2877.2850975551819, 2879.9999778660231,
+2590.7048204070056, 2595.2731101024701). Rebuilt transitions: the counterfactuals'
+`TransitionPath` reconstruction (`cf_common.jl:43`) succeeds, every renamed array equals the
+original bitwise, and the original files fail that reconstruction under v62.2.0, so the
+rebuild was required. `check_repo.sh --verify-only`: threading bitwise equal to serial,
+hiring margin agrees at every stored point, `check_forwarding` only the known
+`ROYSEARCH_MCMC_JAC_ALLOW_GAPS` row; `check_structure`, `check_output_tree`,
+`check_dead_settings` identical to v62.1.2.
+
+**Settings.** None.
+
+**Known gaps.** The counterfactual entry points were not rerun; they read the rebuilt
+transitions through the reconstruction checked above.
+
+**Tried and rejected.** None.
+
 ## v62.1.2 — 2026-11-21
 
 **PATCH: the deleted outputs are recorded as deleted, and the documents stop naming

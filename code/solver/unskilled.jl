@@ -7,7 +7,7 @@
 # career choices), through the seeker pool ũ_U = ∬ (u_U + d u_S), and through the
 # stationary densities on the copula grid. Training is not gated by d.
 #
-# The outer loop iterates on (θ_U, p*_U, u_U, t); the inner loop settles
+# The outer loop iterates on (θ_U, p*_U, u_U, n); the inner loop settles
 # (U^search, E_U(·,1), J_U(·,1)) at fixed (θ_U, p*_U). d·u_S is carried from the skilled
 # block in uc.duS_carry and held fixed within one unskilled solve.
 #
@@ -710,13 +710,13 @@ crossing_rate(model::Model, d::AbstractMatrix{Float64} = model.skl_cache.d) = cr
 # ---------------------------------------------------------------------------
 
 """
-    solve_stationary_unskilled!(u_out, t_out, W2, τ, pstar, κ, model)
+    solve_stationary_unskilled!(u_out, n_out, W2, τ, pstar, κ, model)
 
 Stationary unemployed and training densities with no crossers: each cell's weight `W2`
-splits by its training fraction τ, `u_U = W2 usurv (1 − τ)` and `t = ν W2 τ / (φ + ν)`.
+splits by its training fraction τ, `u_U = W2 usurv (1 − τ)` and `n = ν W2 τ / (φ + ν)`.
 """
 function solve_stationary_unskilled!(
-    u_out::Matrix{Float64}, t_out::Matrix{Float64},
+    u_out::Matrix{Float64}, n_out::Matrix{Float64},
     W2::Matrix{Float64}, τ::Matrix{Float64},
     pstar::AbstractVector{Float64}, κ::Float64, model::Model,
 )
@@ -728,7 +728,7 @@ function solve_stationary_unskilled!(
         for j in 1:Nx                             # aS index
             τij = clamp(τ[i, j], 0.0, 1.0)
             u_out[i, j] = W2[i, j] * usurv[i] * (1.0 - τij)
-            t_out[i, j] = ν * W2[i, j] / (φ + ν) * τij
+            n_out[i, j] = ν * W2[i, j] / (φ + ν) * τij
         end
     end
     return nothing
@@ -736,14 +736,14 @@ end
 
 
 """
-    stationary_masses(model, κ) → (u, uh, t, et, mS)
+    stationary_masses(model, κ) → (u, uh, n, et, mS)
 
 Every stationary density on the copula grid at the installed policies: u_U and its hired
-branch, t, the training slice's employment and the trained mass m_S. A cell with no crossers
-has the closed forms of `solve_stationary_unskilled!` and m_S = φ t / ν. A cell whose trained
+branch, n, the training slice's employment and the trained mass m_S. A cell with no crossers
+has the closed forms of `solve_stationary_unskilled!` and m_S = φ n / ν. A cell whose trained
 cross at rate k = ks + kt balances, with δ = ξ_U + λ_U G(p*) on each slice's own p*,
-  (φ + ν) t      = ν τ ℓ + δ_t e_t
-  (ν + k) m_S    = φ t
+  (φ + ν) n      = ν τ ℓ + δ_t e_t
+  (ν + k) m_S    = φ n
   (δ_t + ν) e_t  = kt m_S,
 and the searching slice's separations, δ_s ks m_S υʰ / (ν (δ_s + ν)), join the row's hired
 unemployed.
@@ -753,8 +753,8 @@ function stationary_masses(model::Model, κ::Float64)
     W2 = model.grids.copula.W2;  ν = cp.ν;  φ = cp.φ
     Nx = length(model.grids.x)
     κU = meeting_rate(uc.θ, up.μ, up.η)
-    u = similar(W2);  t = similar(W2)
-    solve_stationary_unskilled!(u, t, W2, uc.τT, uc.pstar, κ, model)
+    u = similar(W2);  n = similar(W2)
+    solve_stationary_unskilled!(u, n, W2, uc.τT, uc.pstar, κ, model)
     split = unemployment_split_unskilled(uc.pstar, κ, model)
     uh = similar(W2);  et = zeros(Float64, size(W2));  mS = similar(W2)
     @inbounds for j in 1:Nx, i in 1:Nx
@@ -771,28 +771,28 @@ function stationary_masses(model::Model, κ::Float64)
         if k > 0.0
             δs = up.ξ + up.λ * G_cdf_unskilled(clamp01(uc.pstar[i]), up.α_U)
             δt = up.ξ + up.λ * G_cdf_unskilled(clamp01(uc.pstar_t[i, j]), up.α_U)
-            t[i, j]  = ν * τij * W2[i, j] / (φ + ν - φ * δt * kt / ((δt + ν) * (ν + k)))
-            mS[i, j] = φ * t[i, j] / (ν + k)
+            n[i, j]  = ν * τij * W2[i, j] / (φ + ν - φ * δt * kt / ((δt + ν) * (ν + k)))
+            mS[i, j] = φ * n[i, j] / (ν + k)
             et[i, j] = kt * mS[i, j] / (δt + ν)
             extra    = δs * ks * mS[i, j] / (ν * (κ + δs + ν))
             u[i, j]  += extra;  uh[i, j] += extra
         else
-            mS[i, j] = φ * t[i, j] / ν
+            mS[i, j] = φ * n[i, j] / ν
         end
     end
-    return (u = u, uh = uh, t = t, et = et, mS = mS)
+    return (u = u, uh = uh, n = n, et = et, mS = mS)
 end
 
 """
     install_unskilled_masses!(model, κ) → NamedTuple
 
-Install the unskilled block's own stationary densities (u, uh, t, et) in the cache and
+Install the unskilled block's own stationary densities (u, uh, n, et) in the cache and
 return `stationary_masses`; m_S and d·u_S stay as installed.
 """
 function install_unskilled_masses!(model::Model, κ::Float64)
     uc = model.unsk_cache
     ms = stationary_masses(model, κ)
-    copyto!(uc.u, ms.u);  copyto!(uc.uh, ms.uh);  copyto!(uc.t, ms.t);  copyto!(uc.et, ms.et)
+    copyto!(uc.u, ms.u);  copyto!(uc.uh, ms.uh);  copyto!(uc.n, ms.n);  copyto!(uc.et, ms.et)
     return ms
 end
 
@@ -924,7 +924,7 @@ end
 """
     solve_unskilled_block!(model; US_in, θU_fixed = nothing) → (converged, rejected)
 
-Outer loop on (θ_U, p*_U, u_U, t) given the skilled unemployment value `US_in`. Each pass:
+Outer loop on (θ_U, p*_U, u_U, n) given the skilled unemployment value `US_in`. Each pass:
 inner values, stationary masses, free-entry θ_U under-relaxed by `DAMP_THETA_U`, p*_U from
 S_U(aU,p*) = 0, then a joint Anderson(1) install on [θ_U; p*_U] (or damped Picard on p*_U).
 Converges on max(Δθ_U, Δp*_U, Δu_U) < `tol_outer_U` for `conv_streak` passes. `inner_K`

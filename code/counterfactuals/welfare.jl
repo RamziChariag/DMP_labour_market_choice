@@ -64,14 +64,14 @@ function flow_components(st, d::Matrix{Float64}, θU::Float64, θS::Float64,
                          model::Model, lp)
     gp = model.grids;  ug = model.unsk_grids;  sg = model.skl_grids
     Nx = length(gp.x);  NpU = length(ug.p);  NpS = length(sg.p)
-    yU = 0.0;  seekU = 0.0;  bu = 0.0;  bx = 0.0;  bs = 0.0;  bt = 0.0
+    yU = 0.0;  seekU = 0.0;  bu = 0.0;  bx = 0.0;  bs = 0.0;  bn = 0.0
     @inbounds for j in 1:Nx, i in 1:Nx
         for q in 1:(NpU + 1)
             yU += (st.Es[i, j, q] + st.Et[i, j, q]) * lp.PU * gp.x[i] * (q <= NpU ? ug.p[q] : 1.0)
         end
         cross = d[i, j] * st.uS[i, j]
         seekU += st.uU[i, j] + cross
-        bu += st.uU[i, j];  bx += cross;  bs += st.uS[i, j] - cross;  bt += st.tU[i, j]
+        bu += st.uU[i, j];  bx += cross;  bs += st.uS[i, j] - cross;  bn += st.nU[i, j]
     end
     m0 = model.corner_limit ? skilled_stayer_columns(model, d, st.mS) : nondrain_column_mass(d, st.mS)
     u0 = nondrain_column_mass(d, st.uS)
@@ -86,7 +86,7 @@ function flow_components(st, d::Matrix{Float64}, θU::Float64, θS::Float64,
         end
         seekS += m0[k] * (ufrac + se);  ojs += m0[k] * se
     end
-    return [yU, yS, lp.bU * bu, lp.bS * bx, lp.bS * bs, lp.bT * bt,
+    return [yU, yS, lp.bU * bu, lp.bS * bx, lp.bS * bs, lp.bT * bn,
             lp.kU * θU * seekU, lp.kS * θS * seekS, lp.σS * ojs, 0.0]
 end
 
@@ -105,7 +105,7 @@ The largest gap between the forward state `st` and the stocks `path` stores at d
 function _stock_gap(st, path::TransitionPath, n::Int)
     g = 0.0
     @inbounds for j in axes(st.uU, 2), i in axes(st.uU, 1)
-        g = max(g, abs(st.uU[i, j] - path.uU[i, j, n]), abs(st.tU[i, j] - path.tU[i, j, n]),
+        g = max(g, abs(st.uU[i, j] - path.uU[i, j, n]), abs(st.nU[i, j] - path.nU[i, j, n]),
                 abs(st.uS[i, j] - path.uS[i, j, n]), abs(st.mS[i, j] - path.mS[i, j, n]),
                 abs(sum(view(st.Es, i, j, :)) - path.eUs[i, j, n]),
                 abs(sum(view(st.Et, i, j, :)) - path.eUt[i, j, n]))
@@ -149,7 +149,7 @@ function welfare_pv(path::TransitionPath, model::Model, tp::TransitionParams;
         if n == Nt                     # the last date's flow, its training entries by one dry step
             f = flow();  h = 1e-3;  dry = deepcopy(st)
             _advance!(dry, path, model, χU, hX, d, wG, n, h)
-            f[NCOMP] = entry_cost(dry.tU_n, dry.tU, h) / h
+            f[NCOMP] = entry_cost(dry.nU_n, dry.nU, h) / h
             flows[n, :] .= f
             break
         end
@@ -157,7 +157,7 @@ function welfare_pv(path::TransitionPath, model::Model, tp::TransitionParams;
         for k in 1:sub.nsub
             f = flow()
             _advance!(st, path, model, χU, hX, d, wG, n, sub.dt)
-            f[NCOMP] = entry_cost(st.tU_n, st.tU, sub.dt) / sub.dt
+            f[NCOMP] = entry_cost(st.nU_n, st.nU, sub.dt) / sub.dt
             k == 1 && (flows[n, :] .= f)
             pv .+= disc_int(r, path.tgrid[n] + (k - 1) * sub.dt, sub.dt) .* f
         end

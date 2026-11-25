@@ -62,7 +62,7 @@ function type_density(st, d::Matrix{Float64}, model::Model)
     @inbounds for j in 1:Nx, i in 1:Nx, q in 1:NpS
         eSp[i, j, q] = (1.0 - d[i, j]) * st.mS[i, j] * st.eS[j, q] * sg.wp[q]
     end
-    return (uU = copy(st.uU), tU = copy(st.tU), uS_cross = d .* st.uS,
+    return (uU = copy(st.uU), nU = copy(st.nU), uS_cross = d .* st.uS,
             uS_skilled = (1.0 .- d) .* st.uS, eUs_p = Float32.(st.Es), eUt_p = Float32.(st.Et),
             eS_p = eSp, d = copy(d))
 end

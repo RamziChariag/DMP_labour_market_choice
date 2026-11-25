@@ -357,7 +357,7 @@ function model_moments(obj)
     ur_total       = obj.ur_total
     _model_lf      = obj.agg_uU + obj.agg_eU + obj.agg_mS
     skilled_share  = obj.agg_mS  / max(_model_lf, 1e-14)
-    training_share = obj.agg_t   / max(obj.total_pop, 1e-14)
+    training_share = obj.agg_n   / max(obj.total_pop, 1e-14)
 
     σ_wU = hasproperty(obj, :σ_wU) ? obj.σ_wU : 0.0
     σ_wS = hasproperty(obj, :σ_wS) ? obj.σ_wS : 0.0

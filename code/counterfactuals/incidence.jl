@@ -49,14 +49,14 @@ end
 
 The date-0 reallocation of the estimated transition `L` applied to the baseline mass of
 one unskilled state alone (`origin` ∈ :uU, :Es, :Et): the mass left in u_U, the entries into
-training (`tU`), and each slice's matches by p (`Es`, `Et`).
+training (`nU`), and each slice's matches by p (`Es`, `Et`).
 """
 function _date0_destinations(L, model::Model, origin::Symbol)
     st = _forward_state(L.path)
     origin === :uU || fill!(st.uU, 0.0)
     origin === :Es || fill!(st.Es, 0.0)
     origin === :Et || fill!(st.Et, 0.0)
-    fill!(st.tU, 0.0)
+    fill!(st.nU, 0.0)
     _reallocate!(st, L.path, model, hire_fraction(model), _d_matrix(L.path, model, 1), 1)
     return st
 end
@@ -79,7 +79,7 @@ function incidence_by_type(L)
     @inbounds for j in 1:Nx, i in 1:Nx
         # Date-0 value of an unskilled origin's destinations: u_U, training entries (−c + T),
         # the searching and the training slice's matches.
-        reached(st) = _valued(st.uU[i, j], v0.UC[i, j]) + _valued(st.tU[i, j], v0.Utr[i, j]) +
+        reached(st) = _valued(st.uU[i, j], v0.UC[i, j]) + _valued(st.nU[i, j], v0.Utr[i, j]) +
                       sum(_valued(st.Es[i, j, q], v0.EUs_p[i, j, q]) +
                           _valued(st.Et[i, j, q], v0.EUt_p[i, j, q]) for q in axes(st.Es, 3))
         ij = CartesianIndex(i, j)
@@ -92,9 +92,9 @@ function incidence_by_type(L)
             Vb[s][ij]   = sum(_valued(E[i, j, q], Ev[i, j, q]) for q in axes(E, 3))
             V0[s][ij]   = reached(dest[o])
         end
-        mass[:training][ij] = base.tU[i, j]
-        Vb[:training][ij]   = _valued(base.tU[i, j], vb.T[i, j])
-        V0[:training][ij]   = _valued(base.tU[i, j], v0.T[i, j])
+        mass[:training][ij] = base.nU[i, j]
+        Vb[:training][ij]   = _valued(base.nU[i, j], vb.T[i, j])
+        V0[:training][ij]   = _valued(base.nU[i, j], v0.T[i, j])
         mu = Float64(db.uS_skilled[i, j] + db.uS_cross[i, j])
         mass[:trained_unemployed][ij] = mu
         Vb[:trained_unemployed][ij]   = _valued(mu, vb.US[i, j])

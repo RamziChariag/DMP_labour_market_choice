@@ -63,12 +63,12 @@ function compute_equilibrium_objects(model::Model)
 
     # ── Stationary densities (2D on the copula grid) ─────────────────────
     uU     = copy(uc.u)                                # untrained unskilled unemployed
-    tU     = copy(uc.t)                                # in training
+    nU     = copy(uc.n)                                # in training
     d_mat  = clamp.(copy(sc.d), 0.0, 1.0)
     cross  = crossing_rates(model, d_mat)              # unskilled hires of the trained
-    mS_mat = _mS_from_t(tU, cross.k, φ, ν)             # trained mass
+    mS_mat = _mS_from_n(nU, cross.k, φ, ν)             # trained mass
     mU_mat = max.(W2 .- mS_mat, 0.0)                   # untrained-segment mass
-    eU_mat = max.(mU_mat .- uU .- tU, 0.0)             # unskilled employed mass, both slices
+    eU_mat = max.(mU_mat .- uU .- nU, 0.0)             # unskilled employed mass, both slices
     eUt    = copy(uc.et)                               # of which the training slice
 
     # ── Market compositions ──────────────────────────────────────────────
@@ -77,7 +77,7 @@ function compute_equilibrium_objects(model::Model)
     skl_open = sum(mS_mat) > EMPTY_MASS
     unk_open = sum(uU) + sum(eU_mat) > EMPTY_MASS
     mS_c = skl_open ? mS_mat :
-           _mS_from_t(marginal_training_cells(model; entering = true), cross.k, φ, ν)
+           _mS_from_n(marginal_training_cells(model; entering = true), cross.k, φ, ν)
     if unk_open
         uU_c = uU;  eU_c = eU_mat;  uh_c = copy(uc.uh);  eUt_c = eUt
     else
@@ -300,7 +300,7 @@ function compute_equilibrium_objects(model::Model)
     cmS = cuS + (stayers ? ceS : 0.0)
 
     agg_uU = unk_open ? cuU : 0.0;  agg_eU = unk_open ? ceU : 0.0
-    agg_t  = sum(tU);  agg_mU = sum(mU_mat)
+    agg_n  = sum(nU);  agg_mU = sum(mU_mat)
     agg_uS = skl_open ? cuS : 0.0;  agg_eS = (skl_open && stayers) ? ceS : 0.0
     agg_mS = agg_uS + agg_eS
 
@@ -447,7 +447,7 @@ function compute_equilibrium_objects(model::Model)
         xg = xg, Fell = Fell, pgU = pgU, pg = pg, waU = waU, waS = waS, W2 = W2,
         wpU = wpU, wpS = wpS, Nx = Nx, NpU = NpU, NpS = NpS,
 
-        uU = uU, tU = tU, eUt = unk_open ? eUt : zero(eUt),
+        uU = uU, nU = nU, eUt = unk_open ? eUt : zero(eUt),
         mU_mat = mU_mat, mS_mat = mS_mat,
         uS_mat = skl_open ? uS_mat : zero(uS_mat),
         eS_pS   = (skl_open && stayers) ? eS_pS   : zero(eS_pS),
@@ -470,7 +470,7 @@ function compute_equilibrium_objects(model::Model)
         wage_points = wage_points,
         wmid = wmid, dens_U = dens_U, dens_S = dens_S, dens_S0 = dens_S0, dens_S1 = dens_S1,
 
-        agg_uU = agg_uU, agg_t = agg_t, agg_eU = agg_eU, agg_mU = agg_mU,
+        agg_uU = agg_uU, agg_n = agg_n, agg_eU = agg_eU, agg_mU = agg_mU,
         agg_uS = agg_uS, agg_eS = agg_eS, agg_mS = agg_mS,
         total_pop = total_pop, ur_U = ur_U, ur_S = ur_S, ur_total = ur_total,
         thetaU = θU, thetaS = θS,
@@ -496,7 +496,7 @@ function print_accounting(obj)
     @printf("│  Equilibrium accounting                               │\n")
     @printf("├─────────────────────────────────────────────────────┤\n")
     @printf("│  UNSKILLED  (pop share %6.4f)                        │\n", obj.agg_mU)
-    @printf("│    u_U %6.4f   e_U %6.4f   t %6.4f   ur_U %5.1f%%  │\n", obj.agg_uU, obj.agg_eU, obj.agg_t, 100 * obj.ur_U)
+    @printf("│    u_U %6.4f   e_U %6.4f   n %6.4f   ur_U %5.1f%%  │\n", obj.agg_uU, obj.agg_eU, obj.agg_n, 100 * obj.ur_U)
     @printf("│  SKILLED    (pop share %6.4f)                        │\n", obj.agg_mS)
     @printf("│    u_S %6.4f   e_S %6.4f            ur_S %5.1f%%  │\n", obj.agg_uS, obj.agg_eS, 100 * obj.ur_S)
     @printf("│  TOTAL POP %6.4f   global u-rate %6.4f             │\n", obj.total_pop, obj.ur_total)
